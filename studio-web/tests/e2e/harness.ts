@@ -130,12 +130,13 @@ export async function startTestCluster(): Promise<TestCluster> {
     throw new Error(`Backend failed to start on port ${backendPort}: ${backendStderr}`);
   }
 
-  // 2. Start Vite server for frontend
+  // 2. Start Vite server for frontend. Bind 127.0.0.1 explicitly: Vite's default 'localhost'
+  // resolves to ::1 on some hosts (GitHub runners), where polling 127.0.0.1 never connects.
   const frontendUrl = `http://127.0.0.1:${frontendPort}`;
   const studioWebDir = path.resolve(__dirname, '../../');
   const frontendProc: ChildProcess = spawn(
     'npx',
-    ['vite', '--port', String(frontendPort), '--strictPort'],
+    ['vite', '--host', '127.0.0.1', '--port', String(frontendPort), '--strictPort'],
     {
       cwd: studioWebDir,
       env: {

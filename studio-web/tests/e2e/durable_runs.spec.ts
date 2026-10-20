@@ -83,7 +83,7 @@ async function startCluster(): Promise<Cluster> {
   });
   const backendUrl = `http://127.0.0.1:${backendPort}`;
   await waitFor(`${backendUrl}/readyz`, backend, 'backend');
-  const frontend = spawn('npx', ['vite', '--port', String(frontendPort), '--strictPort'], {
+  const frontend = spawn('npx', ['vite', '--host', '127.0.0.1', '--port', String(frontendPort), '--strictPort'], {
     cwd: path.resolve(__dirname, '../../'),
     env: { ...process.env, VITE_BACKEND_URL: backendUrl },
     stdio: 'pipe',
