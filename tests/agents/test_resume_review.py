@@ -114,13 +114,14 @@ def _handoff_agents(seen: dict) -> tuple[Agent, Agent]:
 async def test_handoff_pause_resume_agent_started_at_roundtrip() -> None:
     seen: dict = {}
     a, b = _handoff_agents(seen)
-    paused = await Runner().run_async(a, "go", tags=["x"], metadata={"k": "v"})
+    runner = Runner()
+    paused = await runner.run_async(a, "go", tags=["x"], metadata={"k": "v"})
     assert paused.status == "paused", paused.status
     it = paused.interruption
     assert it.agent_started_at > 0
     it2 = RunInterruption.from_json(it.to_json())
     assert it2.agent_started_at == it.agent_started_at
-    res = await Runner().resume_async(a, it2, approve=True)
+    res = await runner.resume_async(a, it2, approve=True)
     assert res.status == "completed"
     assert seen["meta"].get("k") == "v"
     assert res.tags == ["x"]

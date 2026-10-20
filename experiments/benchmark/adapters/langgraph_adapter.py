@@ -7,7 +7,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import importlib.metadata
-from typing import Any
+import operator
+from typing import Annotated, Any, TypedDict
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import ModelCallLimitMiddleware
@@ -15,10 +16,20 @@ from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededE
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.errors import GraphRecursionError
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode
+from langgraph.types import Send
 
 from .base import BaseAdapter, ScenarioResult
+from .spending import (
+    LIMIT_CALLS,
+    MODEL_LATENCY_S,
+    N_AGENTS,
+    Mode,
+    SpendingCase,
+    make_spending_result,
+)
 
 
 class _CrashError(BaseException):
@@ -40,6 +51,45 @@ class _CountingModel(GenericFakeChatModel):
     async def ainvoke(self, *args: Any, **kwargs: Any) -> Any:
         self.calls += 1
         return AIMessage(content="ok")
+
+
+class _LatencyCountingModel(GenericFakeChatModel):
+    """Fake chat model for the fair spending scenario: counts calls, waits like a network call."""
+
+    calls: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+    def __init__(self, case: SpendingCase) -> None:
+        super().__init__(
+            messages=iter([AIMessage(content="ok")]),
+            calls=0,
+            input_tokens=case.input_tokens,
+            output_tokens=case.output_tokens,
+        )
+
+    def _reply(self) -> AIMessage:
+        return AIMessage(
+            content="ok",
+            usage_metadata={
+                "input_tokens": self.input_tokens,
+                "output_tokens": self.output_tokens,
+                "total_tokens": self.input_tokens + self.output_tokens,
+            },
+        )
+
+    def invoke(self, *args: Any, **kwargs: Any) -> Any:
+        self.calls += 1
+        return self._reply()
+
+    async def ainvoke(self, *args: Any, **kwargs: Any) -> Any:
+        self.calls += 1
+        await asyncio.sleep(MODEL_LATENCY_S)  # keep every admitted call in flight together
+        return self._reply()
+
+
+class _FanOutState(TypedDict):
+    replies: Annotated[list[str], operator.add]
 
 
 class LangGraphAdapter(BaseAdapter):
@@ -334,8 +384,8 @@ class LangGraphAdapter(BaseAdapter):
         return ScenarioResult(
             framework=self.framework_name,
             version=f"{self.version} (langchain=={self.langchain_version})",
-            scenario_id="S3",
-            scenario_name="parallel spending",
+            scenario_id="S3-legacy",
+            scenario_name="parallel spending (legacy P33 setup, superseded by S3a-c)",
             supported="Partial (per-thread/run limit only)",
             measured_numbers={
                 "allowance_calls": allowance_calls,
@@ -361,3 +411,156 @@ class LangGraphAdapter(BaseAdapter):
                 "pre-admission reservation, admitting all 10 calls."
             ),
         )
+
+    async def _run_workers(
+        self, mode: Mode, run_one: Any, model: _LatencyCountingModel
+    ) -> list[str]:
+        async def worker(i: int) -> str:
+            calls_before = model.calls
+            try:
+                await run_one(i)
+                return "ok"
+            except ModelCallLimitExceededError:
+                return "refused" if model.calls == calls_before else "errored_after_call"
+
+        if mode == "parallel":
+            return list(await asyncio.gather(*(worker(i) for i in range(N_AGENTS))))
+        return [await worker(i) for i in range(N_AGENTS)]
+
+    async def run_spending(self, case: SpendingCase, mode: Mode) -> list[ScenarioResult]:
+        """Fair S3: LangChain v1 ModelCallLimitMiddleware and LangGraph recursion_limit."""
+        version = f"{self.version} (langchain=={self.langchain_version})"
+        results: list[ScenarioResult] = []
+        source_note = (
+            "Source: langchain/agents/middleware/model_call_limit.py in the benchmark venv. "
+            "before_model compares the counts in graph state with the limits; after_model "
+            "increments them. Counting is in calls, not money."
+        )
+
+        # 1. thread_limit=3 with every agent invocation on ONE shared thread: the only way the
+        #    middleware's counter is shared between invocations.
+        model = _LatencyCountingModel(case)
+        agent = create_agent(
+            model,
+            middleware=[ModelCallLimitMiddleware(thread_limit=LIMIT_CALLS, exit_behavior="error")],
+            checkpointer=MemorySaver(),
+        )
+        shared_config = {"configurable": {"thread_id": f"shared_{case.case_id}_{mode}"}}
+
+        async def run_shared_thread(i: int) -> None:
+            await agent.ainvoke({"messages": [HumanMessage(content="Query")]}, shared_config)
+
+        outcomes = await self._run_workers(mode, run_shared_thread, model)
+        results.append(
+            make_spending_result(
+                framework=self.framework_name,
+                version=version,
+                feature="ModelCallLimitMiddleware(thread_limit), one shared thread",
+                case=case,
+                mode=mode,
+                admitted_calls=model.calls,
+                refused_runs=outcomes.count("refused"),
+                errored_after_call_runs=outcomes.count("errored_after_call"),
+                supported="Partial (call count per thread; no cost limit)",
+                configuration=(
+                    f"create_agent(model, middleware=[ModelCallLimitMiddleware(thread_limit="
+                    f"{LIMIT_CALLS}, exit_behavior='error')], checkpointer=MemorySaver()); all "
+                    "invocations use the same thread_id"
+                ),
+                documentation_urls=[
+                    "https://docs.langchain.com/oss/python/langchain/middleware/built-in#model-call-limit",
+                ],
+                notes=(
+                    source_note + " Parallel invocations on one thread each read the "
+                    "checkpointed count before any of them writes it back, so the limit only "
+                    "holds when invocations run one after another."
+                ),
+            )
+        )
+
+        # 2. run_limit=3 with one thread per agent: the documented per-conversation use.
+        model = _LatencyCountingModel(case)
+        agent = create_agent(
+            model,
+            middleware=[ModelCallLimitMiddleware(run_limit=LIMIT_CALLS, exit_behavior="error")],
+            checkpointer=MemorySaver(),
+        )
+
+        async def run_own_thread(i: int) -> None:
+            config = {"configurable": {"thread_id": f"own_{case.case_id}_{mode}_{i}"}}
+            await agent.ainvoke({"messages": [HumanMessage(content="Query")]}, config)
+
+        outcomes = await self._run_workers(mode, run_own_thread, model)
+        results.append(
+            make_spending_result(
+                framework=self.framework_name,
+                version=version,
+                feature="ModelCallLimitMiddleware(run_limit), thread per agent",
+                case=case,
+                mode=mode,
+                admitted_calls=model.calls,
+                refused_runs=outcomes.count("refused"),
+                errored_after_call_runs=outcomes.count("errored_after_call"),
+                supported="No shared limit (limit is per run)",
+                configuration=(
+                    f"create_agent(model, middleware=[ModelCallLimitMiddleware(run_limit="
+                    f"{LIMIT_CALLS}, exit_behavior='error')], checkpointer=MemorySaver()); one "
+                    "thread_id per agent"
+                ),
+                documentation_urls=[
+                    "https://docs.langchain.com/oss/python/langchain/middleware/built-in#model-call-limit",
+                ],
+                notes=(
+                    source_note + " Each agent's run makes one call, far below its own limit; "
+                    "nothing counts across agents."
+                ),
+            )
+        )
+
+        # 3. recursion_limit on one graph that fans out to N parallel model calls via Send.
+        if mode == "parallel":
+            model = _LatencyCountingModel(case)
+
+            async def worker_node(state: dict[str, Any]) -> dict[str, Any]:
+                reply = await model.ainvoke([HumanMessage(content="Query")])
+                return {"replies": [str(reply.content)]}
+
+            def fan_out(state: _FanOutState) -> list[Send]:
+                return [Send("worker", {"i": i}) for i in range(N_AGENTS)]
+
+            builder = StateGraph(_FanOutState)
+            builder.add_node("worker", worker_node)
+            builder.add_conditional_edges(START, fan_out, ["worker"])
+            builder.add_edge("worker", END)
+            graph = builder.compile()
+            refused = 0
+            try:
+                await graph.ainvoke({"replies": []}, {"recursion_limit": LIMIT_CALLS})
+            except GraphRecursionError:
+                refused = N_AGENTS - model.calls
+            results.append(
+                make_spending_result(
+                    framework=self.framework_name,
+                    version=version,
+                    feature="recursion_limit on a fan-out graph",
+                    case=case,
+                    mode=mode,
+                    admitted_calls=model.calls,
+                    refused_runs=refused,
+                    errored_after_call_runs=0,
+                    supported="No (bounds graph steps, not calls or cost)",
+                    configuration=(
+                        "StateGraph with Send(...) to 10 worker nodes; "
+                        f"graph.ainvoke(..., {{'recursion_limit': {LIMIT_CALLS}}})"
+                    ),
+                    documentation_urls=[
+                        "https://docs.langchain.com/oss/python/langgraph/graph-api#recursion-limit",
+                    ],
+                    notes=(
+                        "recursion_limit caps the number of supersteps in one invocation. All "
+                        "parallel Send branches run in the same superstep, so it does not limit "
+                        "how many model calls run at once."
+                    ),
+                )
+            )
+        return results

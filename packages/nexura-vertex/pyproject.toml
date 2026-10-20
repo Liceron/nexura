@@ -27,8 +27,11 @@ dependencies = [
 ]
 
 [project.urls]
+Homepage = "https://github.com/Liceron/nexura"
+Documentation = "https://github.com/Liceron/nexura/blob/main/docs/README.md"
 Source = "https://github.com/Liceron/nexura"
 Issues = "https://github.com/Liceron/nexura/issues"
+Changelog = "https://github.com/Liceron/nexura/blob/main/CHANGELOG.md"
 
 [tool.uv.sources]
 # Development inside the monorepo uses the workspace copy.

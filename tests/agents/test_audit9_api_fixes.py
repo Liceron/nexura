@@ -143,6 +143,7 @@ async def test_stream_cancelled_team_ends_with_one_terminal_event():
 
 
 def test_typed_results_preserved_through_clone_override_retry(tmp_path):
+    pytest.importorskip("mypy")
     f = tmp_path / "t.py"
     f.write_text(
         textwrap.dedent(

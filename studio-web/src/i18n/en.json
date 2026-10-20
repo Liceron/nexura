@@ -541,6 +541,7 @@
     }
   },
   "knowledge": {
+    "testEmbeddingsNotice": "Search uses test embeddings: matches are by keyword, not meaning. Configure an embedding provider with NEXURA_EMBEDDINGS (provider:model), then reindex existing collections.",
     "chooseFiles": "Choose files",
     "chunk": "Chunk",
     "chunks": "chunks",

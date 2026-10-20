@@ -7,7 +7,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import copy
-import inspect
 import json
 import math
 import uuid
@@ -340,6 +339,9 @@ class AgentDefinition:
             )
 
             # 4. Execute child agent loop with isolated message history
+            from nexura_agents.usage import admission
+
+            budget_token = admission.active_budget.set(admission.effective_budget(child_ctx))
             token = current_agent_context.set(child_ctx)
             try:
                 system_text = self.get_instructions(child_ctx)
@@ -366,14 +368,12 @@ class AgentDefinition:
                     tools_schema = [t.to_schema() for t in self.tools] if self.tools else None
 
                     # Invoke model
-                    model_gen = self.model.generate(
+                    response = await admission.generate(
+                        self.model,
                         messages=copy.deepcopy(child_messages),
                         tools=tools_schema,
+                        context=child_ctx,
                     )
-                    if inspect.iscoroutine(model_gen):
-                        response = await model_gen
-                    else:
-                        response = model_gen
 
                     # Check model refusal and length bounds
                     if response.finish_reason in ("refusal", "content_filter"):
@@ -445,6 +445,7 @@ class AgentDefinition:
                 return child_messages[-1].content or ""
             finally:
                 current_agent_context.reset(token)
+                admission.active_budget.reset(budget_token)
 
         return Tool(
             name=tool_name,

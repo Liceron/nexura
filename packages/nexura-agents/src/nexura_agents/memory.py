@@ -212,9 +212,13 @@ class ProviderEmbedder:
     async def embed(self, texts: list[str]) -> list[list[float]]:
         """Embed ``texts`` with the wrapped provider."""
         if self.timeout is not None:
-            result = await self.model.embed(texts, timeout=self.timeout)
+            from nexura_agents.usage.admission import embed
+
+            result = await embed(self.model, texts, timeout=self.timeout)
         else:
-            result = await self.model.embed(texts)
+            from nexura_agents.usage.admission import embed
+
+            result = await embed(self.model, texts)
         vectors = getattr(result, "embeddings", result)
         usage = getattr(result, "usage", None)
         sink = _USAGE_SINK.get()
@@ -422,7 +426,9 @@ class InMemoryMemoryStore:
             )
 
     async def _embed(self, texts: Sequence[str]) -> _Vectors:
-        vectors = await self.embedder.embed(builtins.list(texts))
+        from nexura_agents.usage.admission import embed
+
+        vectors: _Vectors = await embed(self.embedder, builtins.list(texts))
         if len(vectors) != len(texts):
             raise SDKValidationError("Embedder must return one vector per input text.")
         return vectors

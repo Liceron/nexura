@@ -13,6 +13,7 @@ import base64
 import copy
 import dataclasses
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -68,8 +69,18 @@ def _error(exc: BaseException) -> dict[str, Any]:
     return data
 
 
-def _outcome(result: Any = None, exc: BaseException | None = None) -> dict[str, Any]:
-    return {
+def _portable(value: Any) -> Any:
+    """Canonical JSON form of a completed output, or a marker for values JSON cannot hold."""
+    try:
+        return _json(value)
+    except (TypeError, ValueError, RecursionError):
+        return {"$unserializable": type(value).__name__}
+
+
+def _outcome(
+    result: Any = None, exc: BaseException | None = None, kind: str = "agent"
+) -> dict[str, Any]:
+    outcome: dict[str, Any] = {
         "status": "failed" if exc else getattr(result, "status", "completed"),
         "error_type": type(exc).__name__ if exc else None,
         "error_message": str(exc) if exc else None,
@@ -77,6 +88,61 @@ def _outcome(result: Any = None, exc: BaseException | None = None) -> dict[str, 
         if exc
         else None,
     }
+    # The completed output is part of the outcome: a replay that finishes with a different
+    # answer (agents) or final state (workflows) did not reproduce the run.
+    # A run that raised has neither (recorded as null).
+    if kind == "workflow":
+        outcome["state"] = None if result is None else _portable(result.state)
+    else:
+        outcome["output"] = None if result is None else _portable(getattr(result, "output", None))
+    return outcome
+
+
+# Outcome fields compared beyond status/error/step, each stored with a canonical digest.
+_COMPARED_RESULTS = ("output", "state")
+
+
+def _seal_outcome(outcome: dict[str, Any]) -> None:
+    """Store the canonical-JSON digest of each recorded result (after redaction)."""
+    for key in _COMPARED_RESULTS:
+        if key in outcome:
+            outcome[f"{key}_digest"] = _digest(outcome[key])
+
+
+def _show(value: Any) -> str:
+    text = json.dumps(value, sort_keys=True, ensure_ascii=False)
+    return text if len(text) <= 80 else text[:77] + "..."
+
+
+def _first_difference(actual: Any, expected: Any, path: str = "$") -> str | None:
+    """Path and values (replayed != recorded) of the first difference, in key order."""
+    if isinstance(actual, dict) and isinstance(expected, dict):
+        for key in sorted(set(actual) | set(expected)):
+            step = (
+                f"{path}.{key}"
+                if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key)
+                else f"{path}[{json.dumps(key, ensure_ascii=False)}]"
+            )
+            if key not in actual:
+                return f"{step}: missing != {_show(expected[key])}"
+            if key not in expected:
+                return f"{step}: {_show(actual[key])} != missing"
+            found = _first_difference(actual[key], expected[key], step)
+            if found:
+                return found
+        return None
+    if isinstance(actual, list) and isinstance(expected, list):
+        for index, (left, right) in enumerate(zip(actual, expected, strict=False)):
+            found = _first_difference(left, right, f"{path}[{index}]")
+            if found:
+                return found
+        if len(actual) != len(expected):
+            return f"{path}: length {len(actual)} != {len(expected)}"
+        return None
+    # bool is an int in Python; true != 1 in JSON.
+    if actual != expected or type(actual) is not type(expected):
+        return f"{path}: {_show(actual)} != {_show(expected)}"
+    return None
 
 
 def _scrub(data: Any, credential_values: dict[str, str]) -> Any:
@@ -266,6 +332,7 @@ class ReproBundle:
         # Hash the portable arguments, never the pre-redaction secrets.
         for fixture in data["tool_fixtures"]:
             fixture["args_digest"] = _digest(fixture["arguments"])
+        _seal_outcome(data["expected_outcome"])
         Path(path).write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 
     @classmethod
@@ -276,11 +343,18 @@ class ReproBundle:
 
 @dataclasses.dataclass(frozen=True)
 class ReplayResult:
-    """Outcome comparison and the first observed divergence, if any."""
+    """Outcome comparison and the first observed divergence, if any.
+
+    A different completed output or workflow final state is reported as
+    ``"output differs at $.amount: 500 != 5000"`` (replayed value first, then the
+    recorded one). ``notes`` says what could not be compared, for example an older
+    bundle that did not record the output.
+    """
 
     reproduced: bool
     outcome: dict[str, Any]
     first_divergence: str | None = None
+    notes: tuple[str, ...] = ()
 
 
 class ReproRecorder:
@@ -329,100 +403,106 @@ class ReproRecorder:
     async def _finish(self, call: Any) -> Any:
         try:
             result = await call()
-            self.data["expected_outcome"] = _outcome(result)
+            self.data["expected_outcome"] = _outcome(result, kind=self.data["run_kind"])
             return result
         except BaseException as exc:
-            self.data["expected_outcome"] = _outcome(exc=exc)
+            self.data["expected_outcome"] = _outcome(exc=exc, kind=self.data["run_kind"])
+            raise
+
+    async def _observe_tagged(self, agent_name: str, name: str, arguments: Any, call: Any) -> Any:
+        fixture = {"agent": agent_name, "name": name, "arguments": _json(arguments)}
+        self.data["tool_fixtures"].append(fixture)
+        try:
+            result = call()
+            if inspect.isawaitable(result):
+                result = await result
+            fixture["output"] = _json(result)
+            return result
+        except BaseException as exc:
+            fixture["error"] = _error(exc)
             raise
 
     async def run_agent(self, runner: Any, agent: Any, prompt: str) -> Any:
-        """Record a Runner run; exceptions retain their normal behavior."""
-        if not isinstance(agent.instructions, str) or agent.handoffs:
-            raise ValueError("Repro recording needs static instructions and no handoffs")
-        output_schema: Any = agent.output_type
-        if isinstance(output_schema, type):
-            output_schema = cast(Any, output_schema).model_json_schema()
-        spec = {
-            "name": agent.name,
-            "instructions": agent.instructions,
-            "max_turns": agent.max_turns,
-            "max_tool_calls": agent.max_tool_calls,
-            "output_type": output_schema,
-            "output_retries": agent.output_retries,
-            "tool_use_behavior": agent.tool_use_behavior
-            if isinstance(agent.tool_use_behavior, str)
-            else {"stop_at_tools": sorted(agent.tool_use_behavior.tool_names)},
-            "tools": [
-                dict(
-                    schema=t.to_schema(),
-                    requires_approval=bool(t.requires_approval),
-                    max_retries=t.max_retries,
-                    timeout=t.timeout,
-                    on_timeout=t.on_timeout,
-                    cache=t.cache,
-                    idempotent=t.idempotent,
-                    is_async=t.is_async,
-                    retry=None
-                    if t.retry is None
-                    else dict(
-                        max_attempts=t.retry.max_attempts,
-                        initial_delay=t.retry.initial_delay,
-                        backoff=t.retry.backoff,
-                        max_delay=t.retry.max_delay,
-                        retry_on=[c.__name__ for c in t.retry.retry_on],
-                    ),
+        """Record a Runner run, including handoffs; exceptions keep their normal behavior.
+
+        Every agent reachable through handoffs is recorded: its spec, its model responses
+        and its tool fixtures are tagged with the agent's name, so replay gives each agent
+        its own scripted replies and fixtures. Agent names must be unique in the graph.
+        """
+        graph = _agent_graph(agent)
+        for item in graph:
+            if not isinstance(item.instructions, str):
+                raise ValueError(
+                    f"Repro recording needs static instructions; agent '{item.name}' "
+                    "has an instructions function"
                 )
-                for t in agent.tools
-            ],
-        }
+        specs = {item.name: _agent_spec(item) for item in graph}
+        spec = dict(specs[agent.name])
+        if len(graph) > 1:
+            spec["agents"] = {name: s for name, s in specs.items() if name != agent.name}
         self._start("agent", prompt, spec, runner.budget)
         self.data["usage_limits"] = _json(runner.usage_limits)
-        recorder = self
+        if getattr(runner, "max_handoffs", None) is not None:
+            self.data["runner_max_handoffs"] = runner.max_handoffs
+        clones: dict[str, Any] = {}
+        for item in graph:
+            tools = []
+            for original in item.tools:
 
-        class RecordingModel:
-            def __init__(self) -> None:
-                from nexura_agents.models.resilience import _accepts_run_context
+                async def execute(
+                    arguments: Any, ctx: Any = None, tool: Any = original, owner: Any = item
+                ) -> Any:
+                    return await self._observe_tagged(
+                        owner.name, tool.name, arguments, lambda: tool.execute(arguments, ctx)
+                    )
 
-                self.accepts_run_context = _accepts_run_context(agent.model)
-
-                @wraps(agent.model.generate)
-                async def generate(*args: Any, **kwargs: Any) -> Any:
-                    try:
-                        response = await agent.model.generate(*args, **kwargs)
-                    except BaseException as exc:
-                        recorder.data["model_responses"].append({"error": _error(exc)})
-                        raise
-                    recorder.data["model_responses"].append(_json(response))
-                    return response
-
-                self.generate = generate
-
-            def __getattr__(self, name: str) -> Any:
-                return getattr(agent.model, name)
-
-        tools = []
-        for original in agent.tools:
-
-            async def execute(arguments: Any, ctx: Any = None, tool: Any = original) -> Any:
-                return await self._observe(
-                    tool.name, arguments, lambda: tool.execute(arguments, ctx)
-                )
-
-            # Preserve the tool's validation/approval contract; execute records serialized output.
-            wrapped = copy.copy(original)
-            wrapped.execute = execute
-            tools.append(wrapped)
-        self._target = agent.clone(model=RecordingModel(), tools=tools)
+                # Preserve the tool's validation/approval contract; execute records output.
+                wrapped = copy.copy(original)
+                wrapped.execute = execute
+                tools.append(wrapped)
+            clones[item.name] = item.clone(
+                model=_RecordingModel(self, item), tools=tools, handoffs=()
+            )
+        for item in graph:
+            handoffs = []
+            for original_handoff in item.handoffs:
+                handoffs.append(self._recording_handoff(item, original_handoff, clones))
+            if handoffs:
+                clones[item.name].add_handoffs(*handoffs)
+        self._target = clones[agent.name]
         self._executor = runner
         return await self._finish(lambda: runner.run_async(self._target, prompt))
 
-    async def run_workflow(self, engine: Any, initial_state: dict[str, Any]) -> Any:
-        """Record node boundary results, including composite-node fixtures."""
-        self._start("workflow", initial_state, engine.spec.to_dict(), engine.budget)
-        self.data["max_steps"] = engine.max_steps
-        self.data["approval_required_handlers"] = sorted(engine.approval_required_handlers)
-        self.data["workflow_gates"] = []
-        self._executor = copy.copy(engine)
+    def _recording_handoff(self, source: Any, original: Any, clones: dict[str, Any]) -> Any:
+        from nexura_agents.handoffs import Handoff
+
+        callback = original.on_handoff
+        on_handoff = None
+        if callback is not None:
+
+            async def on_handoff(ctx: Any, value: Any) -> Any:
+                # Keyed by the tool call id, which the scripted replies reproduce exactly.
+                return await self._observe_tagged(
+                    source.name,
+                    f"on_handoff:{original.tool_name}",
+                    {"tool_call_id": ctx.tool_call_id},
+                    lambda: callback(ctx, value),
+                )
+
+        wrapped = Handoff(
+            clones[original.agent.name],
+            tool_name=original.tool_name,
+            description=original.description,
+            input_filter=original.input_filter,
+            on_handoff=on_handoff,
+            input_type=original.input_type,
+        )
+        wrapped.tool.enabled = original.tool.enabled
+        wrapped.enabled = original.enabled
+        return wrapped
+
+    def _wrap_engine(self, engine: Any) -> Any:
+        executor = copy.copy(engine)
         original = engine._run_step
 
         def gate(node: Any, state: Any) -> bool:
@@ -435,9 +515,23 @@ class ReproRecorder:
                 node.id, state, lambda: original(node, handler, state, *args)
             )
 
-        self._executor._run_step = step
-        self._executor._write_operation_gated = gate
-        return await self._finish(lambda: self._executor.run(initial_state))
+        executor._run_step = step
+        executor._write_operation_gated = gate
+        return executor
+
+    async def run_workflow(
+        self, engine: Any, initial_state: dict[str, Any], **run_kwargs: Any
+    ) -> Any:
+        """Record node boundary results, including composite-node fixtures.
+
+        ``run_kwargs`` (for example ``workflow_run_id``) pass through to ``engine.run``.
+        """
+        self._start("workflow", initial_state, engine.spec.to_dict(), engine.budget)
+        self.data["max_steps"] = engine.max_steps
+        self.data["approval_required_handlers"] = sorted(engine.approval_required_handlers)
+        self.data["workflow_gates"] = []
+        self._executor = self._wrap_engine(engine)
+        return await self._finish(lambda: self._executor.run(initial_state, **run_kwargs))
 
     async def resume_agent(
         self, interruption: Any, *, approve: bool = False, reject: dict[str, str] | None = None
@@ -452,14 +546,135 @@ class ReproRecorder:
         )
 
     async def resume_workflow(
-        self, run_id: str, approval_id: str, *, decision: str = "approve"
+        self,
+        run_id: str,
+        approval_id: str,
+        *,
+        decision: str = "approve",
+        state_update: dict[str, Any] | None = None,
+        engine: Any = None,
     ) -> Any:
-        """Record a workflow approval decision without retaining authority to act."""
+        """Record a workflow approval decision without retaining authority to act.
+
+        ``engine`` continues the recording on a fresh engine for the same run (a
+        service builds one per request); by default the recording engine is reused.
+        """
         self.data["operations"].append("resume")
-        self.data["approvals"].append({"decision": decision})
+        recorded: dict[str, Any] = {"decision": decision}
+        if state_update is not None:
+            recorded["state_update"] = _json(state_update)
+        self.data["approvals"].append(recorded)
+        if engine is not None:
+            self._executor = self._wrap_engine(engine)
+        extra = {"state_update": state_update} if state_update is not None else {}
         return await self._finish(
-            lambda: self._executor.resume(run_id, approval_id, decision=decision)
+            lambda: self._executor.resume(run_id, approval_id, decision=decision, **extra)
         )
+
+
+def _agent_graph(start: Any) -> list[Any]:
+    """Every agent reachable through handoffs, start first; names must be unique."""
+    graph = [start]
+    seen = {id(start): start}
+    names = {start.name: start}
+    index = 0
+    while index < len(graph):
+        for item in graph[index].handoffs:
+            target = item.agent
+            if id(target) in seen:
+                continue
+            if target.name in names:
+                raise ValueError(
+                    f"Repro recording needs unique agent names; two agents are named "
+                    f"'{target.name}'"
+                )
+            seen[id(target)] = target
+            names[target.name] = target
+            graph.append(target)
+        index += 1
+    return graph
+
+
+def _agent_spec(agent: Any) -> dict[str, Any]:
+    output_schema: Any = agent.output_type
+    if isinstance(output_schema, type):
+        output_schema = cast(Any, output_schema).model_json_schema()
+    spec: dict[str, Any] = {
+        "name": agent.name,
+        "instructions": agent.instructions,
+        "max_turns": agent.max_turns,
+        "max_tool_calls": agent.max_tool_calls,
+        "output_type": output_schema,
+        "output_retries": agent.output_retries,
+        "tool_use_behavior": agent.tool_use_behavior
+        if isinstance(agent.tool_use_behavior, str)
+        else {"stop_at_tools": sorted(agent.tool_use_behavior.tool_names)},
+        "tools": [
+            dict(
+                schema=t.to_schema(),
+                requires_approval=bool(t.requires_approval),
+                max_retries=t.max_retries,
+                timeout=t.timeout,
+                on_timeout=t.on_timeout,
+                cache=t.cache,
+                idempotent=t.idempotent,
+                is_async=t.is_async,
+                retry=None
+                if t.retry is None
+                else dict(
+                    max_attempts=t.retry.max_attempts,
+                    initial_delay=t.retry.initial_delay,
+                    backoff=t.retry.backoff,
+                    max_delay=t.retry.max_delay,
+                    retry_on=[c.__name__ for c in t.retry.retry_on],
+                ),
+            )
+            for t in agent.tools
+        ],
+    }
+    if agent.handoffs:
+        spec["max_handoffs"] = agent.max_handoffs
+        spec["handoffs"] = [
+            {
+                "agent": h.agent.name,
+                "tool_name": h.tool_name,
+                "description": h.description,
+                "input_schema": h.input_type.model_json_schema() if h.input_type else None,
+                "on_handoff": h.on_handoff is not None,
+                "input_filter": h.input_filter is not None,
+            }
+            for h in agent.handoffs
+        ]
+    return spec
+
+
+class _RecordingModel:
+    """Delegates to an agent's model and records each response, tagged with the agent."""
+
+    def __init__(self, recorder: ReproRecorder, agent: Any) -> None:
+        from nexura_agents.models.resilience import _accepts_run_context
+
+        self._model = agent.model
+        self.accepts_run_context = _accepts_run_context(agent.model)
+
+        @wraps(agent.model.generate)
+        async def generate(*args: Any, **kwargs: Any) -> Any:
+            try:
+                response = await agent.model.generate(*args, **kwargs)
+            except BaseException as exc:
+                recorder.data["model_responses"].append({"agent": agent.name, "error": _error(exc)})
+                raise
+            recorded = _json(response)
+            recorded["agent"] = agent.name
+            recorder.data["model_responses"].append(recorded)
+            return response
+
+        self.generate = generate
+
+    def __getattr__(self, name: str) -> Any:
+        if name == "_model":  # not yet set (copy/pickle): never recurse
+            raise AttributeError(name)
+        return getattr(self._model, name)
 
 
 def export_repro_bundle(
@@ -489,6 +704,7 @@ def export_repro_bundle(
     bundle = ReproBundle(data)
     for fixture in data["tool_fixtures"]:
         fixture["args_digest"] = _digest(fixture["arguments"])
+    _seal_outcome(data["expected_outcome"])
     # A separate fingerprint detects accidental fixture edits without trusting outcome alone.
     data["recording_digest"] = _digest({k: v for k, v in data.items() if k != "recording_digest"})
     return bundle
@@ -579,10 +795,117 @@ def _recorded_error(data: dict[str, Any], *, tool: bool = False, name: str = "")
     return cast(BaseException, cls(data["message"]))
 
 
+def _replay_agents(
+    data: dict[str, Any], consume: Callable[..., Any], next_response: Callable[[str], Any]
+) -> Any:
+    """Rebuild the recorded agent graph with scripted models and inert fixture tools."""
+    from pydantic import BaseModel, ConfigDict
+
+    from nexura_agents import Agent, FakeModel
+    from nexura_agents.handoffs import Handoff
+    from nexura_agents.tools import SchemaTool, ToolRetry
+
+    root = data["spec"]
+    specs = {root["name"]: root, **root.get("agents", {})}
+    agents: dict[str, Any] = {}
+    for agent_name, spec in specs.items():
+        tools = []
+        for item in spec["tools"]:
+            schema = item["schema"]["function"]
+            name = schema["name"]
+
+            async def execute(
+                arguments: Any,
+                ctx: Any = None,
+                tool_name: str = name,
+                timeout: float | None = item.get("timeout"),
+                owner: str = agent_name,
+            ) -> Any:
+                return consume(tool_name, arguments, tool=True, timeout=timeout, agent=owner)
+
+            async def inert(ctx: Any, args: Any) -> Any:
+                raise _Divergence("Fixture stub was bypassed")
+
+            retry = item.get("retry")
+            policy = (
+                None
+                if retry is None
+                else ToolRetry(
+                    **{k: v for k, v in retry.items() if k != "retry_on"},
+                    retry_on=tuple(_error_type(n) for n in retry["retry_on"]),
+                )
+            )
+            stub = SchemaTool(
+                name,
+                schema["parameters"],
+                inert,
+                description=schema["description"],
+                requires_approval=item["requires_approval"],
+                max_retries=item["max_retries"],
+                timeout=item.get("timeout"),
+                on_timeout=item.get("on_timeout", "tell_model"),
+                retry=policy,
+                cache=item.get("cache", False),
+                idempotent=item.get("idempotent", False),
+            )
+            stub.is_async = item.get("is_async", True)
+            stub.execute = execute  # type: ignore[method-assign]
+            tools.append(stub)
+        behavior = spec.get("tool_use_behavior", "run_llm_again")
+        if isinstance(behavior, dict):
+            behavior = StopAtTools(behavior["stop_at_tools"])
+
+        def handler(*args: Any, owner: str = agent_name) -> Any:
+            return next_response(owner)
+
+        agents[agent_name] = Agent(
+            spec["name"],
+            spec["instructions"],
+            FakeModel(handler=handler),
+            tools=tools,
+            max_turns=spec["max_turns"],
+            max_tool_calls=spec["max_tool_calls"],
+            output_type=spec.get("output_type"),
+            output_retries=spec.get("output_retries", 1),
+            tool_use_behavior=behavior,
+            max_handoffs=spec.get("max_handoffs", 10),
+        )
+
+    class RecordedHandoffInput(BaseModel):
+        # Structured handoff input is replayed as given; its validation is not recreated.
+        model_config = ConfigDict(extra="allow")
+
+    for agent_name, spec in specs.items():
+        handoffs = []
+        for item in spec.get("handoffs", []):
+            target = agents.get(item["agent"])
+            if target is None:
+                raise _Divergence(f"Handoff target '{item['agent']}' is not in the recording")
+            on_handoff = None
+            if item.get("on_handoff"):
+
+                def on_handoff(
+                    ctx: Any, value: Any, owner: str = agent_name, tool: str = item["tool_name"]
+                ) -> None:
+                    consume(f"on_handoff:{tool}", {"tool_call_id": ctx.tool_call_id}, agent=owner)
+
+            handoffs.append(
+                Handoff(
+                    target,
+                    tool_name=item["tool_name"],
+                    description=item.get("description"),
+                    on_handoff=on_handoff,
+                    input_type=RecordedHandoffInput if item.get("input_schema") else None,
+                )
+            )
+        if handoffs:
+            agents[agent_name].add_handoffs(*handoffs)
+    return agents[root["name"]]
+
+
 async def replay_repro_bundle(bundle: ReproBundle) -> ReplayResult:
     """Run a bundle offline through Runner/WorkflowEngine using only inert fixtures."""
-    from nexura_agents import Agent, FakeModel, Runner
-    from nexura_agents.tools import SchemaTool, ToolRetry
+    from nexura_agents import Runner
     from nexura_agents.types import Message, ModelResponse, ToolCall, Usage
 
     ReproBundle(bundle.data)
@@ -594,7 +917,12 @@ async def replay_repro_bundle(bundle: ReproBundle) -> ReplayResult:
     position = 0
 
     def consume(
-        name: str, arguments: Any, *, tool: bool = False, timeout: float | None = None
+        name: str,
+        arguments: Any,
+        *,
+        tool: bool = False,
+        timeout: float | None = None,
+        agent: str | None = None,
     ) -> Any:
         nonlocal position
         if position >= len(fixtures):
@@ -602,6 +930,11 @@ async def replay_repro_bundle(bundle: ReproBundle) -> ReplayResult:
         fixture = fixtures[position]
         if name != fixture["name"] or _digest(arguments) != fixture["args_digest"]:
             raise _Divergence(f"Fixture {position}: name or arguments diverged at {name}")
+        if agent is not None and fixture.get("agent", agent) != agent:
+            raise _Divergence(
+                f"Fixture {position}: recorded for agent '{fixture['agent']}', "
+                f"called by '{agent}' at {name}"
+            )
         position += 1
         if "error" in fixture:
             if fixture["error"]["type"] == "CancelledError":
@@ -611,7 +944,7 @@ async def replay_repro_bundle(bundle: ReproBundle) -> ReplayResult:
             if tool:
                 exc.tool_name = name  # type: ignore[attr-defined]
             raise exc
-        return copy.deepcopy(fixture["output"])
+        return copy.deepcopy(fixture.get("output"))
 
     result: Any = None
     executor: Any
@@ -639,12 +972,20 @@ async def replay_repro_bundle(bundle: ReproBundle) -> ReplayResult:
         with offline_guard() as network_attempts:
             if data["run_kind"] == "agent":
                 responses = data["model_responses"]
+                root_name = data["spec"]["name"]
 
-                def next_response(*args: Any) -> ModelResponse:
+                def next_response(agent_name: str) -> ModelResponse:
                     nonlocal model_position
                     if model_position >= len(responses):
                         raise _Divergence("Model script exhausted")
                     raw = responses[model_position]
+                    # Bundles without handoffs predate per-agent tags: the root answered.
+                    recorded_agent = raw.get("agent", root_name)
+                    if recorded_agent != agent_name:
+                        raise _Divergence(
+                            f"Model response {model_position}: recorded for agent "
+                            f"'{recorded_agent}', requested by '{agent_name}'"
+                        )
                     model_position += 1
                     if "error" in raw:
                         raise _recorded_error(raw["error"])
@@ -656,66 +997,15 @@ async def replay_repro_bundle(bundle: ReproBundle) -> ReplayResult:
                         finish_reason=raw.get("finish_reason"),
                     )
 
-                tools = []
-                for item in data["spec"]["tools"]:
-                    schema = item["schema"]["function"]
-                    name = schema["name"]
-
-                    async def execute(
-                        arguments: Any,
-                        ctx: Any = None,
-                        tool_name: str = name,
-                        timeout: float | None = item.get("timeout"),
-                    ) -> Any:
-                        return consume(tool_name, arguments, tool=True, timeout=timeout)
-
-                    async def inert(ctx: Any, args: Any) -> Any:
-                        raise _Divergence("Fixture stub was bypassed")
-
-                    retry = item.get("retry")
-                    policy = (
-                        None
-                        if retry is None
-                        else ToolRetry(
-                            **{k: v for k, v in retry.items() if k != "retry_on"},
-                            retry_on=tuple(_error_type(n) for n in retry["retry_on"]),
-                        )
-                    )
-                    stub = SchemaTool(
-                        name,
-                        schema["parameters"],
-                        inert,
-                        description=schema["description"],
-                        requires_approval=item["requires_approval"],
-                        max_retries=item["max_retries"],
-                        timeout=item.get("timeout"),
-                        on_timeout=item.get("on_timeout", "tell_model"),
-                        retry=policy,
-                        cache=item.get("cache", False),
-                        idempotent=item.get("idempotent", False),
-                    )
-                    stub.is_async = item.get("is_async", True)
-                    stub.execute = execute  # type: ignore[method-assign]
-                    tools.append(stub)
-                spec = data["spec"]
-                behavior = spec.get("tool_use_behavior", "run_llm_again")
-                if isinstance(behavior, dict):
-                    behavior = StopAtTools(behavior["stop_at_tools"])
-                agent = Agent(
-                    spec["name"],
-                    spec["instructions"],
-                    FakeModel(handler=next_response),
-                    tools=tools,
-                    max_turns=spec["max_turns"],
-                    max_tool_calls=spec["max_tool_calls"],
-                    output_type=spec.get("output_type"),
-                    output_retries=spec.get("output_retries", 1),
-                    tool_use_behavior=behavior,
-                )
+                agent = _replay_agents(data, consume, next_response)
                 from nexura_agents.limits import UsageLimits
 
                 limits = UsageLimits(**data["usage_limits"]) if data.get("usage_limits") else None
-                executor = Runner(budget=budget, usage_limits=limits)
+                executor = Runner(
+                    budget=budget,
+                    usage_limits=limits,
+                    max_handoffs=data.get("runner_max_handoffs"),
+                )
                 result = await executor.run_async(agent, data["inputs"])
                 for decision in data["approvals"]:
                     result = await executor.resume_async(agent, result.interruption, **decision)
@@ -727,7 +1017,7 @@ async def replay_repro_bundle(bundle: ReproBundle) -> ReplayResult:
         return ReplayResult(False, {}, str(exc))
     except BaseException as exc:
         failure = exc
-    actual = _scrub(_outcome(result, failure), {})
+    actual = _scrub(_outcome(result, failure, data["run_kind"]), {})
     if network_attempts:
         return ReplayResult(False, actual, "Network access attempted during repro replay")
     expected = _scrub(data["expected_outcome"], {})
@@ -736,10 +1026,27 @@ async def replay_repro_bundle(bundle: ReproBundle) -> ReplayResult:
             return ReplayResult(
                 False, actual, f"{key}: expected {expected[key]!r}, got {actual[key]!r}"
             )
+    compared = "state" if data["run_kind"] == "workflow" else "output"
+    notes: tuple[str, ...] = ()
+    if compared in expected:
+        stored = data["expected_outcome"]
+        if stored.get(f"{compared}_digest", _digest(stored[compared])) != _digest(stored[compared]):
+            return ReplayResult(False, actual, f"Recorded {compared} digest mismatch")
+        recorded = expected[compared]
+        replayed = actual.get(compared)
+        if _digest(replayed) != _digest(recorded):
+            where = _first_difference(replayed, recorded) or "$: digest differs"
+            return ReplayResult(False, actual, f"{compared} differs at {where}")
+    else:
+        label = "final state" if compared == "state" else "output"
+        notes = (
+            f"The bundle did not record the {label} (made by an older version); "
+            "only status, error and failing step were compared.",
+        )
     if gates:
-        return ReplayResult(False, actual, "Recording has unconsumed workflow gates")
+        return ReplayResult(False, actual, "Recording has unconsumed workflow gates", notes)
     if position != len(fixtures) or (
         data["run_kind"] == "agent" and model_position != len(data["model_responses"])
     ):
-        return ReplayResult(False, actual, "Recording has unconsumed responses or fixtures")
-    return ReplayResult(True, actual)
+        return ReplayResult(False, actual, "Recording has unconsumed responses or fixtures", notes)
+    return ReplayResult(True, actual, notes=notes)

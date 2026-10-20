@@ -145,6 +145,10 @@ async def test_runs_client_coverage() -> None:
     assert calls[-1].method == "POST"
     assert calls[-1].url.path == "/api/v1/runs/run-123/fork"
 
+    await client.runs.repro_bundle("run-123")
+    assert calls[-1].method == "GET"
+    assert calls[-1].url.path == "/api/v1/runs/run-123/repro"
+
 
 @pytest.mark.asyncio
 async def test_workspaces_client_coverage() -> None:
@@ -226,6 +230,15 @@ async def test_sessions_and_knowledge_coverage() -> None:
     await client.knowledge.limits()
     assert calls[-1].method == "GET"
     assert calls[-1].url.path == "/api/v1/knowledge/limits"
+
+    await client.knowledge.status(collection_id="col-1")
+    assert calls[-1].method == "GET"
+    assert calls[-1].url.path == "/api/v1/knowledge/status"
+    assert calls[-1].url.params["collection_id"] == "col-1"
+
+    await client.knowledge.reindex("col-1")
+    assert calls[-1].method == "POST"
+    assert calls[-1].url.path == "/api/v1/knowledge/collections/col-1/reindex"
 
     await client.knowledge.list_documents(collection_id="col-1", limit=10, offset=0)
     assert calls[-1].method == "GET"

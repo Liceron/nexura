@@ -25,6 +25,7 @@ from nexura_agents.errors import (
 from nexura_agents.models.base import ModelProtocol
 from nexura_agents.providers.errors import ProviderContextLengthError, ProviderServerError
 from nexura_agents.types import Message, ModelResponse
+from nexura_agents.usage import admission
 
 if TYPE_CHECKING:
     import asyncio
@@ -177,7 +178,9 @@ class RetryModel:
         while True:
             self.attempts_made += 1
             try:
-                return await self.model.generate(messages, tools, timeout=timeout, **kwargs)
+                return await admission.generate(
+                    self.model, messages, tools, timeout=timeout, **kwargs
+                )
             except ProviderAuthError:
                 raise
             except ProviderContextLengthError:
@@ -210,7 +213,7 @@ class RetryModel:
             yielded = False
             inner: Any = None
             try:
-                inner = stream_fn(*args, **kwargs)
+                inner = admission.stream(self.model, *args, **kwargs)
                 async for delta in inner:
                     yielded = True
                     yield delta
@@ -303,7 +306,9 @@ class FallbackModel:
         errors: list[BaseException] = []
         for model in self.models:
             try:
-                response = await model.generate(messages, tools, timeout=timeout, **kwargs)
+                response = await admission.generate(
+                    model, messages, tools, timeout=timeout, **kwargs
+                )
             except ProviderAuthError:
                 raise
             except self.fallback_on as exc:
@@ -331,7 +336,9 @@ class FallbackModel:
             yielded = False
             inner: Any = None
             try:
-                inner = stream_fn(*args, **_stream_kwargs(stream_fn, model_settings, kwargs))
+                inner = admission.stream(
+                    model, *args, **_stream_kwargs(stream_fn, model_settings, kwargs)
+                )
                 async for delta in inner:
                     yielded = True
                     yield delta

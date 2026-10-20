@@ -17,6 +17,7 @@ from __future__ import annotations
 import abc
 import asyncio
 import contextlib
+import copy
 import dataclasses
 import inspect
 import json
@@ -30,6 +31,8 @@ from pydantic import BaseModel
 
 from nexura_agents import tracing
 from nexura_agents.agent import Agent
+from nexura_agents.approvals import payload as approval_payload
+from nexura_agents.approvals import signature as approval_signature
 from nexura_agents.attachments import Attachment
 from nexura_agents.cancel import CancelToken
 from nexura_agents.errors import (
@@ -253,6 +256,12 @@ class TeamInterruption:
     Persist it with ``to_json()`` and rebuild it, even in another process, with
     ``TeamInterruption.from_json``. Outputs of finished members come back as plain JSON
     values (a Pydantic model becomes a dict).
+
+    The whole envelope is authenticated, including prompts and completed usage.
+    Fresh processes must share the issuing Runner's signing key or approval store;
+    reviewed action digests alone do not authenticate team state. ``expires_at``
+    is the earliest pending member deadline. Without an approval/checkpoint store,
+    single use is the caller's responsibility, including for signed envelopes.
     """
 
     team: str
@@ -261,6 +270,18 @@ class TeamInterruption:
     pending: dict[str, RunInterruption] = field(default_factory=dict)
     # Prompts of paused nested teams, by path, so they continue with their own input.
     nested_prompts: dict[str, Prompt] = field(default_factory=dict)
+    interruption_id: str = field(default_factory=lambda: f"team:{uuid.uuid4()}")
+    expires_at: float = 0.0
+    signature: str | None = None
+
+    @property
+    def _approval_snapshot(self) -> str | None:
+        value = self.__dict__.get("_trusted_approval_payload")
+        return value if isinstance(value, str) else None
+
+    @_approval_snapshot.setter
+    def _approval_snapshot(self, value: str) -> None:
+        self.__dict__["_trusted_approval_payload"] = value
 
     def pending_calls(self) -> list[tuple[str, ToolCall]]:
         """Every tool call waiting for a decision as ``(key, call)``; key is ``path:call_id``."""
@@ -284,6 +305,9 @@ class TeamInterruption:
             {
                 "schema_version": 1,
                 "team": self.team,
+                "interruption_id": self.interruption_id,
+                "expires_at": self.expires_at,
+                "signature": self.signature,
                 "prompt": _encode_prompt(self.prompt),
                 "nested_prompts": {p: _encode_prompt(v) for p, v in self.nested_prompts.items()},
                 "completed": {
@@ -308,6 +332,9 @@ class TeamInterruption:
             raise ValueError(f"Unsupported team interruption schema {raw.get('schema_version')!r}.")
         return cls(
             team=raw["team"],
+            interruption_id=raw.get("interruption_id", ""),
+            expires_at=raw.get("expires_at", 0.0),
+            signature=raw.get("signature"),
             prompt=_decode_prompt(raw["prompt"]),
             nested_prompts={p: _decode_prompt(v) for p, v in raw["nested_prompts"].items()},
             completed={
@@ -452,24 +479,33 @@ class Team(abc.ABC):
         cancel: CancelToken | None = None,
     ) -> AsyncGenerator[RunEvent, None]:
         """Event-stream form of :meth:`resume_async`; see :meth:`stream_async`."""
-        _validate_timeout(timeout)
-        ctx = _Ctx(
-            deps=deps,
-            timeout=timeout,
-            cancel=cancel,
-            done=dict(interruption.completed),
-            prompts=dict(interruption.nested_prompts),
-            resumes=self._plan_resume(interruption, approve, reject or {}),
-        )
-        for finished in ctx.done.values():
-            ctx.usage = ctx.usage.add(finished.usage)
-        return self._stream(
-            lambda sink_runner: self._traced_drive(
-                interruption.prompt, ctx, "", self._effective(sink_runner), True
-            ),
-            ctx,
-            runner or self.runner,
-        )
+
+        async def resume_stream() -> AsyncGenerator[RunEvent, None]:
+            _validate_timeout(timeout)
+            effective = self._effective(runner or self.runner)
+            interruption_copy = copy.deepcopy(interruption)
+            ctx = _Ctx(
+                deps=deps,
+                timeout=timeout,
+                cancel=cancel,
+                done=dict(interruption_copy.completed),
+                prompts=dict(interruption_copy.nested_prompts),
+                resumes=await self._plan_resume(
+                    interruption_copy, approve, reject or {}, effective
+                ),
+            )
+            for finished in ctx.done.values():
+                ctx.usage = ctx.usage.add(finished.usage)
+            async for event in self._stream(
+                lambda sink_runner: self._traced_drive(
+                    interruption_copy.prompt, ctx, "", self._effective(sink_runner), True
+                ),
+                ctx,
+                runner or self.runner,
+            ):
+                yield event
+
+        return resume_stream()
 
     async def _stream(
         self, start: Callable[[Runner], Any], ctx: _Ctx, runner: Runner
@@ -547,13 +583,15 @@ class Team(abc.ABC):
         cancel: CancelToken | None = None,
     ) -> TeamResult:
         _validate_timeout(timeout)
+        interruption = copy.deepcopy(interruption)
+        runner = self._effective(runner)
         ctx = _Ctx(
             deps=deps,
             timeout=timeout,
             cancel=cancel,
             done=dict(interruption.completed),
             prompts=dict(interruption.nested_prompts),
-            resumes=self._plan_resume(interruption, approve, reject or {}),
+            resumes=await self._plan_resume(interruption, approve, reject or {}, runner),
         )
         for finished in ctx.done.values():
             ctx.usage = ctx.usage.add(finished.usage)
@@ -562,15 +600,22 @@ class Team(abc.ABC):
     def _effective(self, inherited: Runner) -> Runner:
         return self.runner if self._own_runner else inherited
 
-    def _plan_resume(
+    async def _plan_resume(
         self,
         interruption: TeamInterruption,
         approve: bool | Iterable[str] | Mapping[str, str],
         reject: Mapping[str, str],
+        runner: Runner,
     ) -> dict[str, _Decision]:
         if interruption.team != self.name:
             raise ApprovalDecisionError(
                 f"Interruption belongs to team '{interruption.team}', not '{self.name}'."
+            )
+        envelope, authenticated = await runner._verify_approval(interruption)
+        if not authenticated:
+            raise ApprovalDecisionError(
+                "Team interruption requires a signed/stored full envelope; "
+                "reviewed action digests alone do not authenticate team state."
             )
         digests = interruption.pending_digests()
         keys = set(digests)
@@ -610,6 +655,10 @@ class Team(abc.ABC):
                 raise ApprovalDecisionError(
                     f"Interruption path '{path}' does not match an agent of team '{self.name}'."
                 )
+            if runner.approval_store is None:
+                # The verified whole-team envelope authenticates these exact member
+                # payloads, including after bounded per-run cache entries were evicted.
+                inner._approval_snapshot = approval_payload(inner)
             # Paths may contain ":" (GroupChat "turn-2:Writer"), so match by prefix.
             head = path + ":"
             mine = {k[len(head) :]: v for k, v in approved.items() if k.startswith(head)}
@@ -621,6 +670,7 @@ class Team(abc.ABC):
                 decided,
                 {k[len(head) :]: v for k, v in reject.items() if k.startswith(head)},
             )
+        await runner._consume_approval(interruption, envelope)
         return plan
 
     def _resolve(self, path: str) -> Agent | Team | None:
@@ -642,11 +692,14 @@ class Team(abc.ABC):
     ) -> TeamResult:
         """``_drive_in_span`` that also reports team events when streaming."""
         if ctx.sink is None:
-            return await self._drive_in_span(prompt, ctx, prefix, runner, resumed)
+            result = await self._drive_in_span(prompt, ctx, prefix, runner, resumed)
+            await self._seal_team(result, runner)
+            return result
         tags = {"team": self.name, "member_path": _segments(prefix)}
         ctx.emit(RunEventType.TEAM_STARTED, **tags)
         try:
             result = await self._drive_in_span(prompt, ctx, prefix, runner, resumed)
+            await self._seal_team(result, runner)
         except Exception as exc:
             ctx.emit(
                 RunEventType.TEAM_FAILED, error=str(exc), error_type=type(exc).__name__, **tags
@@ -657,6 +710,16 @@ class Team(abc.ABC):
         )
         ctx.emit(kind, result=result, **tags)
         return result
+
+    @staticmethod
+    async def _seal_team(result: TeamResult, runner: Runner) -> None:
+        interruption = result.interruption
+        if interruption is None:
+            return
+        interruption.expires_at = min(i.expires_at for i in interruption.pending.values())
+        if runner._approval_secret is not None:
+            interruption.signature = approval_signature(interruption, runner._approval_secret)
+        await runner._remember_interruption(interruption)
 
     async def _drive_in_span(
         self, prompt: Prompt, ctx: _Ctx, prefix: str, runner: Runner, resumed: bool

@@ -57,12 +57,17 @@ async def test_stdio_accepts_json_line_over_asyncio_default_limit() -> None:
 
 
 async def test_stdio_line_over_configured_limit_is_a_transport_error() -> None:
-    session = McpClientSession(stdio(LARGE_REPLY_SERVER, max_line_bytes=1024))
+    transport = stdio(LARGE_REPLY_SERVER, max_line_bytes=1024)
+    session = McpClientSession(transport)
     try:
         with pytest.raises(McpTransportError, match="exceeded"):
             await asyncio.wait_for(session.call_tool("t", {}), 20)
+        proc = transport._process
     finally:
         await session.close()
+    # The unread stdout pipe never reaches EOF, so close() must close the subprocess
+    # transport itself; left to its finalizer it fails with "Event loop is closed".
+    assert proc is not None and proc._transport.is_closing()  # type: ignore[attr-defined]
 
 
 async def test_chatty_stderr_does_not_deadlock_and_is_kept_bounded() -> None:

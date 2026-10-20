@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
+import os
+import socket
 import sqlite3
 import threading
 import time
@@ -31,6 +34,105 @@ from nexura_runtime.workflow import (
     SQLiteWorkflowStore,
     WorkflowSpec,
 )
+
+# ---------------------------------------------------------------------------
+# Run ownership (B46)
+#
+# A run in status 'running' records the process executing it as
+# "<host id>:<pid>:<start marker>". Opening a store marks such a run interrupted only
+# when that process is on this host and gone, so a second process on the same database
+# (``nexura-runtime worker`` next to ``serve``) leaves live runs alone. The start marker
+# is the boot id plus the process start time from /proc, so a reused pid (or a pid from
+# before a reboot) does not count as the original process. Without /proc only pid
+# liveness is checked (POSIX) or the owner is assumed alive (Windows). Runs owned by
+# another host are never swept: SQLite is single-host.
+# A full lease-based design replaces this sweep later (P35 A6 step S9).
+# ---------------------------------------------------------------------------
+
+_PROC = Path("/proc")
+
+
+def _host_id() -> str:
+    """This machine's name; stable across reboots so a rebooted host still sweeps its runs."""
+    return (socket.gethostname() or "localhost").replace(":", "_")
+
+
+@functools.lru_cache(maxsize=1)
+def _boot_id() -> str:
+    try:
+        return (_PROC / "sys/kernel/random/boot_id").read_text().strip()
+    except OSError:
+        return ""
+
+
+def _process_start_marker(pid: int) -> str | None:
+    """Start marker of a live process, ``""`` if unknowable here, None if the process is gone."""
+    stat_path = _PROC / str(pid) / "stat"
+    if _PROC.is_dir() and (_PROC / "self").exists():
+        try:
+            raw = stat_path.read_text()
+        except OSError:
+            return None
+        # The command name (field 2) may contain spaces or parentheses; fields after the
+        # last ')' start at field 3 (state). Field 22 (starttime) is index 19 there.
+        fields = raw[raw.rfind(")") + 2 :].split()
+        if len(fields) < 20 or fields[0] in ("Z", "X", "x"):
+            return None  # zombie or dead: the process no longer runs
+        return f"{_boot_id()}-{fields[19]}"
+    if os.name == "nt":
+        # os.kill(pid, 0) terminates the process on Windows; assume it is alive.
+        return ""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return None
+    except PermissionError:
+        return ""  # alive, owned by another user
+    except OSError:
+        return None
+    return ""
+
+
+@functools.lru_cache(maxsize=1)
+def _own_marker() -> tuple[int, str]:
+    pid = os.getpid()
+    return pid, _process_start_marker(pid) or ""
+
+
+def _process_owner() -> str:
+    """Owner string for runs started by this process."""
+    pid, marker = _own_marker()
+    if pid != os.getpid():  # forked child: recompute for the new process
+        _own_marker.cache_clear()
+        pid, marker = _own_marker()
+    return f"{_host_id()}:{pid}:{marker}"
+
+
+def _owner_is_gone(owner: str | None) -> bool:
+    """True when the run's owning process is known to be dead (or the row predates owners).
+
+    Rows without an owner (databases from before B46) keep the old behaviour and are
+    swept. Owners on another host are never treated as gone.
+    """
+    if not owner:
+        return True
+    parts = owner.rsplit(":", 2)
+    if len(parts) != 3:
+        return True  # unreadable owner: same as a legacy row
+    host, pid_text, marker = parts
+    if host != _host_id():
+        return False
+    try:
+        pid = int(pid_text)
+    except ValueError:
+        return True
+    if pid <= 0:
+        return True
+    current = _process_start_marker(pid)
+    if current is None:
+        return True
+    # A different start marker means the pid now belongs to a different process.
+    return bool(marker and current and marker != current)
 
 
 class StudioStore:
@@ -90,6 +192,8 @@ class StudioStore:
                 "forked_from_json",
                 "cancel_reason",
                 "started_by_json",
+                # owner_process: "<host>:<pid>:<start marker>" of the process running it (B46).
+                "owner_process",
             ):
                 with contextlib.suppress(sqlite3.OperationalError):
                     self._conn.execute(f"ALTER TABLE nexura_studio_runs ADD COLUMN {column} TEXT;")
@@ -113,23 +217,31 @@ class StudioStore:
                 """
             )
 
-            # Startup recovery: any run left in 'running' was interrupted by process restart
+            # Startup recovery: a run left in 'running' by a process that is gone was
+            # interrupted by a restart. Runs of live processes (another `serve` or
+            # `worker` on this database) and of other hosts are left alone (B46).
             now = time.time()
             cursor = self._conn.execute(
-                "SELECT run_id FROM nexura_studio_runs WHERE status = 'running'"
+                "SELECT run_id, owner_process FROM nexura_studio_runs WHERE status = 'running'"
             )
-            interrupted_ids = [row[0] for row in cursor.fetchall()]
-            if interrupted_ids:
-                self._conn.execute(
+            interrupted_ids: list[str] = []
+            for r_id, owner in cursor.fetchall():
+                if not _owner_is_gone(owner):
+                    continue
+                # Compare-and-set: skip a run whose owner changed since it was read.
+                swept = self._conn.execute(
                     """
                     UPDATE nexura_studio_runs
                     SET status = 'interrupted',
                         error = 'Run was interrupted by server restart or shutdown.',
                         updated_at = ?
-                    WHERE status = 'running'
+                    WHERE run_id = ? AND status = 'running' AND owner_process IS ?
                     """,
-                    (now,),
+                    (now, r_id, owner),
                 )
+                if swept.rowcount > 0:
+                    interrupted_ids.append(r_id)
+            if interrupted_ids:
                 for r_id in interrupted_ids:
                     # Get max seq
                     seq_cursor = self._conn.execute(
@@ -365,8 +477,9 @@ class StudioStore:
                     INSERT INTO nexura_studio_runs (
                         run_id, workflow_id, spec_hash, spec_json, status,
                         current_node_id, input_state_json, current_state_json,
-                        step_count, created_at, updated_at, forked_from_json, started_by_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        step_count, created_at, updated_at, forked_from_json, started_by_json,
+                        owner_process
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         run_id,
@@ -382,6 +495,7 @@ class StudioStore:
                         now,
                         forked_json,
                         started_json,
+                        _process_owner(),
                     ),
                 )
                 conn.execute(
@@ -467,7 +581,8 @@ class StudioStore:
                     SET status = ?, current_node_id = ?, current_state_json = ?,
                         step_count = ?, approval_id = ?, approval_json = ?,
                         error = ?, updated_at = ?, pending_input_json = ?,
-                        cancel_reason = COALESCE(?, cancel_reason)
+                        cancel_reason = COALESCE(?, cancel_reason),
+                        owner_process = COALESCE(?, owner_process)
                     WHERE run_id = ?{guard_sql}
                     """,
                     (
@@ -481,6 +596,8 @@ class StudioStore:
                         now,
                         input_json,
                         cancel_reason,
+                        # The process setting a run (back) to running now executes it.
+                        _process_owner() if status == "running" else None,
                         run_id,
                         *guarded,
                     ),

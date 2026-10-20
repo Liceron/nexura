@@ -1,0 +1,175 @@
+# Release: build, check and upload the eight Python packages to PyPI and the TypeScript client
+# to npm. Tokenless: PyPI Trusted Publishing and npm trusted publishing both use this job's
+# short-lived GitHub OIDC identity, and npm attaches a provenance statement. No repository
+# credentials are read. Runs only on a v* tag push or when started by hand.
+#
+# One-time setup (see the publish runbook): on pypi.org (and test.pypi.org) add a trusted
+# publisher for each project with owner Liceron, repository nexura, workflow release.yml and
+# environment pypi (testpypi); on npmjs.com add a trusted publisher for @liceron/nexura-sdk
+# with the same repository and workflow; create the GitHub environments pypi and testpypi.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: "Python package index"
+        type: choice
+        options: [testpypi, pypi]
+        default: testpypi
+      npm:
+        description: "Also publish @liceron/nexura-sdk to npm (ignored for testpypi)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    # Never from a fork or a private mirror.
+    if: github.repository == 'Liceron/nexura'
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - name: Check that every package has the same version (and the tag's version)
+        id: version
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys, tomllib
+          from pathlib import Path
+          files = [Path("pyproject.toml"), *sorted(Path("packages").glob("*/pyproject.toml"))]
+          versions = {}
+          for f in files:
+              project = tomllib.loads(f.read_text(encoding="utf-8"))["project"]
+              assert project["name"] != "nexura", "the name nexura belongs to another product"
+              versions[project["name"]] = project["version"]
+          npm = json.loads(Path("clients/typescript/package.json").read_text(encoding="utf-8"))
+          versions[npm["name"]] = npm["version"]
+          found = set(versions.values())
+          if len(found) != 1:
+              sys.exit(f"package versions differ: {versions}")
+          version = found.pop()
+          if os.environ["REF_TYPE"] == "tag" and os.environ["REF_NAME"] != f"v{version}":
+              sys.exit(f"tag {os.environ['REF_NAME']} does not match version {version}")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"version={version}\n")
+          PY
+      - name: Build the Python distributions
+        run: uv build --all-packages --no-sources --out-dir dist
+      - name: Check the distributions
+        run: uv tool run --from 'twine>=7' twine check --strict dist/*
+      - name: Sort the distributions into upload stages (dependency order)
+        run: |
+          set -euo pipefail
+          v="${{ steps.version.outputs.version }}"
+          mkdir -p stage/1 stage/2 stage/3 stage/4
+          mv dist/nexura_agents-"$v"* dist/nexura_vertex-"$v"* stage/1/
+          mv dist/nexura_runtime-"$v"* stage/2/
+          mv dist/nexura_postgres-"$v"* dist/nexura_qdrant-"$v"* dist/nexura_sandbox-"$v"* \
+             dist/nexura_connectors-"$v"* stage/3/
+          mv dist/nexura_studio-"$v"* stage/4/
+          leftover="$(find dist -type f ! -name .gitignore)"
+          if [ -n "$leftover" ]; then echo "unexpected artifacts: $leftover"; exit 1; fi
+          find stage -type f | sort
+      - name: Build and test the npm client
+        working-directory: clients/typescript
+        run: |
+          npm ci --no-audit --no-fund
+          npm test
+          npm pack --dry-run
+      - uses: actions/upload-artifact@v7
+        with:
+          name: python-dist
+          path: stage/
+          if-no-files-found: error
+
+  pypi:
+    needs: build
+    runs-on: ubuntu-24.04
+    environment:
+      name: ${{ github.event_name == 'workflow_dispatch' && inputs.repository || 'pypi' }}
+    permissions:
+      id-token: write
+    env:
+      REPOSITORY_URL: ${{ (github.event_name == 'workflow_dispatch' && inputs.repository == 'testpypi') && 'https://test.pypi.org/legacy/' || 'https://upload.pypi.org/legacy/' }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: python-dist
+          path: stage
+      # pypi-publish v1.14.2 or later accepts the Metadata-Version 2.5 that hatchling writes.
+      - name: Upload nexura-agents and nexura-vertex
+        uses: pypa/gh-action-pypi-publish@v1.14.2
+        with:
+          packages-dir: stage/1/
+          repository-url: ${{ env.REPOSITORY_URL }}
+          skip-existing: true
+      - name: Upload nexura-runtime
+        uses: pypa/gh-action-pypi-publish@v1.14.2
+        with:
+          packages-dir: stage/2/
+          repository-url: ${{ env.REPOSITORY_URL }}
+          skip-existing: true
+      - name: Upload nexura-postgres, nexura-qdrant, nexura-sandbox and nexura-connectors
+        uses: pypa/gh-action-pypi-publish@v1.14.2
+        with:
+          packages-dir: stage/3/
+          repository-url: ${{ env.REPOSITORY_URL }}
+          skip-existing: true
+      - name: Upload nexura-studio
+        uses: pypa/gh-action-pypi-publish@v1.14.2
+        with:
+          packages-dir: stage/4/
+          repository-url: ${{ env.REPOSITORY_URL }}
+          skip-existing: true
+
+  npm:
+    needs: [build, pypi]
+    # On a tag, or by hand with npm ticked against the real PyPI. Never during a TestPyPI run.
+    if: >-
+      github.event_name == 'push' ||
+      (inputs.npm && inputs.repository == 'pypi')
+    runs-on: ubuntu-24.04
+    environment:
+      name: npm
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          # npm trusted publishing needs npm 11.5.1 or later (Node 24 ships npm 11).
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+      - name: Publish @liceron/nexura-sdk with provenance
+        working-directory: clients/typescript
+        run: |
+          npm ci --no-audit --no-fund
+          if npm view "@liceron/nexura-sdk@${{ needs.build.outputs.version }}" version >/dev/null 2>&1; then
+            echo "@liceron/nexura-sdk@${{ needs.build.outputs.version }} is already published"
+          else
+            npm publish --provenance --access public
+          fi

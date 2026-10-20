@@ -354,9 +354,11 @@ async def test_json_round_trip_resumes_in_a_new_process() -> None:
     team = SequentialAgent(
         "Pipe",
         [say("First", "prepared"), approving_agent("Gated", "A1", shop), say("Last", "fin")],
+        runner=Runner(approval_signing_secret=b"offline-team-roundtrip"),
     )
     paused = await team.run_async(["go", "now"])
     saved = paused.interruption.to_json()  # type: ignore[union-attr]
+    reviewed = paused.interruption.pending_digests()  # type: ignore[union-attr]
     assert json.loads(saved)["schema_version"] == 1
 
     shop2 = Shop()
@@ -364,10 +366,11 @@ async def test_json_round_trip_resumes_in_a_new_process() -> None:
     fresh = SequentialAgent(
         "Pipe",
         [fresh_first, approving_agent("Gated", "A1", shop2, resumed=True), say("Last", "fin")],
+        runner=Runner(approval_signing_secret=b"offline-team-roundtrip"),
     )
     restored = TeamInterruption.from_json(saved)
     assert restored.prompt == ["go", "now"]
-    final = await fresh.resume_async(restored, approve=True)
+    final = await fresh.resume_async(restored, approve=reviewed)
     assert final.output == "fin" and shop2.refunds == [("A1", 10)]
     assert fresh_first.model.calls == []  # type: ignore[attr-defined]
     assert final.usage.total_tokens == 20

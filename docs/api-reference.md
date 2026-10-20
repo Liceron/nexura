@@ -22,10 +22,15 @@ One versioned JSON document. Loading never imports or executes bundle code.
 
 ### `ReplayResult`
 
-class `ReplayResult(reproduced: 'bool', outcome: 'dict[str, Any]', first_divergence: 'str | None' = None) -> None`
+class `ReplayResult(reproduced: 'bool', outcome: 'dict[str, Any]', first_divergence: 'str | None' = None, notes: 'tuple[str, ...]' = ()) -> None`
 
 ~~~text
 Outcome comparison and the first observed divergence, if any.
+
+A different completed output or workflow final state is reported as
+``"output differs at $.amount: 500 != 5000"`` (replayed value first, then the
+recorded one). ``notes`` says what could not be compared, for example an older
+bundle that did not record the output.
 ~~~
 
 
@@ -43,11 +48,11 @@ to make it available to the runtime CLI's stored-run lookup.
 
 - `resume_agent(self, interruption: 'Any', *, approve: 'bool' = False, reject: 'dict[str, str] | None' = None) -> 'Any'`
   Record an approval or rejection; normal Runner approval checks still apply.
-- `resume_workflow(self, run_id: 'str', approval_id: 'str', *, decision: 'str' = 'approve') -> 'Any'`
+- `resume_workflow(self, run_id: 'str', approval_id: 'str', *, decision: 'str' = 'approve', state_update: 'dict[str, Any] | None' = None, engine: 'Any' = None) -> 'Any'`
   Record a workflow approval decision without retaining authority to act.
 - `run_agent(self, runner: 'Any', agent: 'Any', prompt: 'str') -> 'Any'`
-  Record a Runner run; exceptions retain their normal behavior.
-- `run_workflow(self, engine: 'Any', initial_state: 'dict[str, Any]') -> 'Any'`
+  Record a Runner run, including handoffs; exceptions keep their normal behavior.
+- `run_workflow(self, engine: 'Any', initial_state: 'dict[str, Any]', **run_kwargs: 'Any') -> 'Any'`
   Record node boundary results, including composite-node fixtures.
 
 ### `export_repro_bundle`
@@ -135,7 +140,7 @@ state collisions or leaking conversation history between callers.
 
 ### `Runner`
 
-class `Runner(session_store: 'SessionStore | None' = None, *, hooks: 'AgentHooks | None' = None, usage_limits: 'UsageLimits | None' = None, model_settings: 'ModelSettings | None' = None, budget: 'Any | None' = None, max_handoffs: 'int | None' = None, checkpoint_store: 'RunCheckpointStore | None' = None) -> 'None'`
+class `Runner(session_store: 'SessionStore | None' = None, *, hooks: 'AgentHooks | None' = None, usage_limits: 'UsageLimits | None' = None, model_settings: 'ModelSettings | None' = None, budget: 'Any | None' = None, max_handoffs: 'int | None' = None, checkpoint_store: 'RunCheckpointStore | None' = None, approval_ttl: 'float' = 3600.0, approval_signing_secret: 'str | bytes | None' = None, approval_store: 'ApprovalStore | None' = None) -> 'None'`
 
 ~~~text
 Orchestrates agent execution against models and registered tools.
@@ -304,7 +309,7 @@ saved output and usage only (no transcript or events).
 
 ### `TeamInterruption`
 
-class `TeamInterruption(team: 'str', prompt: 'Prompt', completed: 'dict[str, _Done]' = <factory>, pending: 'dict[str, RunInterruption]' = <factory>, nested_prompts: 'dict[str, Prompt]' = <factory>) -> None`
+class `TeamInterruption(team: 'str', prompt: 'Prompt', completed: 'dict[str, _Done]' = <factory>, pending: 'dict[str, RunInterruption]' = <factory>, nested_prompts: 'dict[str, Prompt]' = <factory>, interruption_id: 'str' = <factory>, expires_at: 'float' = 0.0, signature: 'str | None' = None) -> None`
 
 ~~~text
 A team paused because one or more members need human approval.
@@ -315,6 +320,12 @@ usage of finished members so ``team.resume_async`` continues without re-running 
 Persist it with ``to_json()`` and rebuild it, even in another process, with
 ``TeamInterruption.from_json``. Outputs of finished members come back as plain JSON
 values (a Pydantic model becomes a dict).
+
+The whole envelope is authenticated, including prompts and completed usage.
+Fresh processes must share the issuing Runner's signing key or approval store;
+reviewed action digests alone do not authenticate team state. ``expires_at``
+is the earliest pending member deadline. Without an approval/checkpoint store,
+single use is the caller's responsibility, including for signed envelopes.
 ~~~
 
 - `from_json(cls, data: 'str') -> 'TeamInterruption'`
@@ -534,13 +545,15 @@ Final result of an agent run.
 
 ### `RunInterruption`
 
-class `RunInterruption(run_id: 'str', agent_name: 'str', messages: 'list[Message]', pending: 'list[ToolCall]', usage: 'Usage' = <factory>, turn: 'int' = 0, tool_calls_count: 'int' = 0, session_id: 'str | None' = None, expected_revision: 'int' = 0, requests: 'int' = 0, memory_block: 'str' = '', active_agent: 'str | None' = None, agent_path: 'list[str]' = <factory>, handoffs_count: 'int' = 0, root_system: 'Message | None' = None, reason: 'str | None' = None, pending_handoff: 'dict[str, str] | None' = None, state: 'dict[str, Any]' = <factory>, question_ids: 'list[str]' = <factory>, usage_by_agent: 'dict[str, Usage]' = <factory>, usage_by_model: 'dict[str, Usage]' = <factory>, tags: 'list[str]' = <factory>, metadata: 'dict[str, Any]' = <factory>, output_attempts: 'int' = 0, agent_started_at: 'int' = 0) -> None`
+class `RunInterruption(run_id: 'str', agent_name: 'str', messages: 'list[Message]', pending: 'list[ToolCall]', usage: 'Usage' = <factory>, turn: 'int' = 0, tool_calls_count: 'int' = 0, session_id: 'str | None' = None, expected_revision: 'int' = 0, requests: 'int' = 0, memory_block: 'str' = '', active_agent: 'str | None' = None, agent_path: 'list[str]' = <factory>, handoffs_count: 'int' = 0, root_system: 'Message | None' = None, reason: 'str | None' = None, pending_handoff: 'dict[str, str] | None' = None, state: 'dict[str, Any]' = <factory>, question_ids: 'list[str]' = <factory>, usage_by_agent: 'dict[str, Usage]' = <factory>, usage_by_model: 'dict[str, Usage]' = <factory>, tags: 'list[str]' = <factory>, metadata: 'dict[str, Any]' = <factory>, output_attempts: 'int' = 0, agent_started_at: 'int' = 0, interruption_id: 'str' = <factory>, expires_at: 'float' = <factory>, signature: 'str | None' = None, action_digests: 'dict[str, str]' = <factory>) -> None`
 
 ~~~text
 A run paused before tool calls that need approval.
 
 Persist it with ``to_json()`` and continue later, even in another process, with
-``Runner.resume_async(agent, interruption, approve=[...], reject={...})``.
+``Runner.resume_async(agent, interruption, approve={id: reviewed_digest})``.
+Unsigned JSON belongs in trusted server-side storage. Expiry is enforced by
+Runner; single use requires a configured approval/checkpoint store.
 ~~~
 
 - `action_digest(call: 'ToolCall') -> 'str'`
@@ -1712,16 +1725,22 @@ In-process store for tests and demos; checkpoints do not survive the process.
 
 - `claim(self, run_id: 'str', owner: 'str', lease_seconds: 'float' = 3600.0) -> 'bool'`
   Take the exclusive recovery lease of ``run_id``; False when another owner holds it.
+- `consume_approval(self, approval_id: 'str', payload: 'str') -> 'bool'`
+  Atomically consume a matching, unexpired approval once.
 - `delete(self, run_id: 'str', owner: 'str | None' = None, *, fenced: 'bool' = False) -> 'None'`
   Remove the checkpoint of ``run_id`` if present (``fenced``: only if not stale).
 - `list_incomplete(self, limit: 'int' = 100) -> 'list[str]'`
   Run ids with a checkpoint, oldest update first.
 - `load(self, run_id: 'str') -> 'str | None'`
   Return the checkpoint of ``run_id`` or None.
+- `load_approval(self, approval_id: 'str') -> 'str | None'`
+  Return the immutable approval payload, including after consumption.
 - `release(self, run_id: 'str', owner: 'str') -> 'None'`
   Give the lease back (no-op when ``owner`` does not hold it).
 - `save(self, run_id: 'str', checkpoint_json: 'str', owner: 'str | None' = None) -> 'None'`
   Store the checkpoint of ``run_id``; fenced by the recovery lease.
+- `save_approval(self, approval_id: 'str', payload: 'str', expires_at: 'float') -> 'None'`
+  Keep immutable approval identity independently of checkpoint cleanup.
 
 ### `SQLiteCheckpointStore`
 
@@ -1739,16 +1758,22 @@ Saves are fenced by the recovery lease in the same transaction, across processes
   Take the exclusive recovery lease of ``run_id`` (atomic across processes).
 - `close(self) -> 'None'`
   Close the database connection.
+- `consume_approval(self, approval_id: 'str', payload: 'str') -> 'bool'`
+  Consume a matching unexpired approval once, atomically across processes.
 - `delete(self, run_id: 'str', owner: 'str | None' = None, *, fenced: 'bool' = False) -> 'None'`
   Remove the checkpoint of ``run_id`` if present (``fenced``: only if not stale).
 - `list_incomplete(self, limit: 'int' = 100) -> 'list[str]'`
   Run ids with a checkpoint, oldest update first.
 - `load(self, run_id: 'str') -> 'str | None'`
   Return the checkpoint of ``run_id`` or None.
+- `load_approval(self, approval_id: 'str') -> 'str | None'`
+  Load the original approval payload, including after consumption.
 - `release(self, run_id: 'str', owner: 'str') -> 'None'`
   Give the lease back (no-op when ``owner`` does not hold it).
 - `save(self, run_id: 'str', checkpoint_json: 'str', owner: 'str | None' = None) -> 'None'`
   Atomically store the checkpoint of ``run_id``; fenced by the recovery lease.
+- `save_approval(self, approval_id: 'str', payload: 'str', expires_at: 'float') -> 'None'`
+  Persist an immutable approval independently of run checkpoint cleanup.
 
 ### `RunRecoveryError`
 
@@ -1771,7 +1796,7 @@ Approve a pending tool call, but run it with ``arguments`` instead.
 edit is checked against the tool's schema, and the call in the transcript is rewritten,
 so the history shows what actually ran. ``digest`` (from
 ``interruption.pending_digests()``) binds the approval to the original action the
-reviewer saw; leave it out to approve by call id only.
+reviewer saw. Omitting it requires a verified signed or server-stored interruption.
 ~~~
 
 
@@ -2426,6 +2451,376 @@ class `DestinationPolicyDeniedError(url: 'str', reason: 'str', details: 'dict[st
 Raised when an outbound URL violates security destination policy.
 ~~~
 
+
+## Execution stores (`nexura_agents.execution_store`, not yet wired to executors)
+
+### `ExecutionStore`
+
+class `ExecutionStore(*args, **kwargs)`
+
+~~~text
+Atomic asynchronous journal API; implementations never dispatch external effects.
+
+Create requires an owner so the original run is leased from its first write.
+Busy claims return None. Missing runs raise KeyError. Conflicting journal
+changes raise ExecutionConflictError. Every mutation after create requires
+an unexpired owner/token pair, including operator effect resolution.
+~~~
+
+- `claim(self, execution_id: 'ExecutionId', owner: 'str', ttl: 'float', *, definition_digest: 'str') -> 'ExecutionLease | None'`
+  Claim a free/expired/own lease; every acquisition after expiry increments token.
+- `close(self) -> 'None'`
+  Release owned backend resources.
+- `commit(self, lease: 'ExecutionLease', *, state: 'dict[str, Any]', cursor: 'str | None' = None, status: 'str' = 'running', steps: 'Sequence[StepIntent | StepOutcome]' = (), effects: 'Sequence[EffectRecord]' = (), events: 'Sequence[dict[str, Any]]' = (), state_version: 'int' = 2) -> 'ExecutionRun'`
+  Commit state/cursor/steps/effects/events together; failures roll everything back.
+- `create(self, execution_id: 'ExecutionId', *, owner: 'str', definition_digest: 'str', state: 'dict[str, Any] | None' = None, ttl: 'float' = 30.0, kind: 'str' = 'agent', parent_run_id: 'str | None' = None, origin: 'dict[str, Any] | None' = None) -> 'ExecutionRun'`
+  Atomically create a leased run; duplicate identity is an error.
+- `get(self, execution_id: 'ExecutionId') -> 'ExecutionSnapshot'`
+  Read a consistent detached snapshot; accept current and previous versions.
+- `init_db(self) -> 'None'`
+  Apply versioned migrations; reject databases from a newer release.
+- `list_recoverable(self, workspace_id: 'str | None' = None) -> 'list[ExecutionRun]'`
+  List running/interrupted runs with free or expired leases, using store time.
+- `release(self, lease: 'ExecutionLease') -> 'None'`
+  Release current ownership without reducing its fencing token.
+- `renew(self, lease: 'ExecutionLease', ttl: 'float') -> 'ExecutionLease'`
+  Renew active ownership; stale handles raise LeaseLostError.
+- `resolve_effect(self, lease: 'ExecutionLease', effect_id: 'str', resolution: 'EffectResolution', *, actor: 'str', result: 'Any' = None) -> 'EffectRecord'`
+  Resolve an indeterminate effect once and audit the actor in the same transaction.
+
+### `MemoryExecutionStore`
+
+class `MemoryExecutionStore(*, clock: 'Callable[[], float]' = <built-in function time>) -> 'None'`
+
+~~~text
+Process-local journal; a locked snapshot is published only on successful commit.
+
+The optional clock is the store's clock, useful for deterministic tests. This
+backend is ephemeral and cannot coordinate processes or survive a restart.
+~~~
+
+- `close(self) -> 'None'`
+  No external resources are held; existing snapshots remain available.
+- `init_db(self) -> 'None'`
+  No schema initialization is needed for memory storage.
+- `list_recoverable(self, workspace_id: 'str | None' = None) -> 'list[ExecutionRun]'`
+  Return expired/free running runs according to the memory store clock.
+
+### `SQLiteExecutionStore`
+
+class `SQLiteExecutionStore(path: 'str | Path', *, busy_timeout: 'float' = 10.0) -> 'None'`
+
+~~~text
+Durable single-host execution journal; never use a shared file across hosts.
+
+SQLite supplies lease time using julianday('now'), rather than caller clocks.
+WAL, FULL synchronous writes and BEGIN IMMEDIATE serialize competing writers.
+Methods use short synchronous sqlite3 transactions inside the async API; they
+can block the event loop up to busy_timeout under contention. Use Postgres for
+multi-host coordination. Call init_db() before using a new database.
+~~~
+
+- `close(self) -> 'None'`
+  Close this store's SQLite connection; other store instances are unaffected.
+
+### `ExecutionLease`
+
+class `ExecutionLease(execution_id: 'ExecutionId', owner: 'str', fencing_token: 'int', expires_at: 'float') -> None`
+
+~~~text
+Fenced authority for one run; expiry is always checked using the store clock.
+~~~
+
+
+### `ExecutionRun`
+
+class `ExecutionRun(execution_id: 'ExecutionId', definition_digest: 'str', state: 'dict[str, Any]', kind: "Literal['agent', 'workflow', 'durable_graph']" = 'agent', parent_run_id: 'str | None' = None, origin: 'dict[str, Any]' = <factory>, status: "Literal['running', 'interrupted', 'paused', 'completed', 'failed']" = 'running', cursor: 'str | None' = None, journal_schema_version: 'int' = 1, state_version: 'int' = 2, lease_owner: 'str | None' = None, lease_expires_at: 'float | None' = None, fencing_token: 'int' = 0, revision: 'int' = 0, created_at: 'float' = 0.0, updated_at: 'float' = 0.0) -> None`
+
+~~~text
+Detached run snapshot, including versions, cursor, identity and lease metadata.
+~~~
+
+
+### `ExecutionSnapshot`
+
+class `ExecutionSnapshot(run: 'ExecutionRun', steps: 'dict[str, ExecutionStep]' = <factory>, effects: 'dict[str, EffectRecord]' = <factory>, events: 'list[ExecutionEvent]' = <factory>) -> None`
+
+~~~text
+Consistent detached snapshot of run, steps, effects and ordered events.
+~~~
+
+
+### `ExecutionStep`
+
+class `ExecutionStep(intent: 'StepIntent | None' = None, outcome: 'StepOutcome | None' = None) -> None`
+
+~~~text
+At most one immutable intent and one immutable outcome per step key.
+~~~
+
+
+### `ExecutionEvent`
+
+class `ExecutionEvent(sequence: 'int', event_type: 'str', payload: 'dict[str, Any]', timestamp: 'float') -> None`
+
+~~~text
+Append-only event, sequenced within a run by its fenced transaction.
+~~~
+
+
+### `ExecutionConflictError`
+
+class `ExecutionConflictError(message: str, *, original_error: BaseException | None = None) -> None`
+
+~~~text
+Creation, immutable journal data or an idempotency key conflicts with stored data.
+~~~
+
+
+### `EffectAlreadyResolvedError`
+
+class `EffectAlreadyResolvedError(message: str, *, original_error: BaseException | None = None) -> None`
+
+~~~text
+An operator tried to resolve an effect more than once.
+~~~
+
+
+### `ExecutionVersionError`
+
+class `ExecutionVersionError(message: str, *, original_error: BaseException | None = None) -> None`
+
+~~~text
+A journal, migration or engine state version cannot be read or written safely.
+~~~
+
+
+## Postgres execution store (`nexura_postgres.execution_store`)
+
+### `PostgresExecutionStore`
+
+class `PostgresExecutionStore(dsn: 'str | None' = None, *, pool: 'Any' = None) -> 'None'`
+
+~~~text
+Optional durable multi-host journal, with database-clock leases and fenced writes.
+
+Uses FOR UPDATE plus a token/owner/revision guarded UPDATE, following
+PostgresRepository's CAS pattern. Expiry uses the server's clock_timestamp()
+after locking; transaction-start now() could be stale after a row-lock wait.
+Call init_db() to apply versioned migrations before first use. Supplied pools
+remain caller-owned. DSNs must name an explicitly configured database.
+~~~
+
+- `close(self) -> 'None'`
+  Close only a pool created by this store; supplied pools remain caller-owned.
+
+## Execution Contract v1 (`nexura_agents.contracts`, being implemented)
+
+### `EffectClass`
+
+class `EffectClass(*values)`
+
+~~~text
+Recovery promise for an effect; undeclared effects default to non_idempotent.
+
+Pure effects may repeat freely. Idempotent effects must reuse their key.
+Non-idempotent effects must never silently repeat after an uncertain dispatch.
+Reconcilable effects first probe for Applied, NotApplied or Unknown.
+~~~
+
+
+### `ExecutionId`
+
+class `ExecutionId(workspace_id: 'str', run_id: 'str') -> None`
+
+~~~text
+Workspace-scoped execution identity; run_id is an opaque, nonempty string.
+
+Kind, origin, parent_run_id and definition_digest belong to the run record,
+not this identity pair. Trigger reclaim preserves this pair.
+~~~
+
+
+### `StepKey`
+
+class `StepKey(value: 'str') -> 'StepKey'`
+
+~~~text
+Validated string identity for an agent turn or workflow graph visit.
+
+Agent keys are turn:<n>/call:<id> or turn:<n>/model. Workflow keys are
+<node>#<step>[.<attempt>][[<item>]], where the item uses one literal bracket
+pair, for example charge#3.2[0]. Attempts start at 1; attempt 1 is omitted
+by the workflow helper to preserve existing child run id conventions.
+As a str subclass this type serializes directly with stdlib json.
+~~~
+
+- `agent_model(cls, turn: 'int') -> 'StepKey'`
+  Build turn:<turn>/model for a model call (pure for execution).
+- `agent_tool(cls, turn: 'int', tool_call_id: 'str') -> 'StepKey'`
+  Build turn:<turn>/call:<tool_call_id> for one tool dispatch.
+- `parse(cls, value: 'str') -> 'StepKey'`
+  Validate a persisted key without changing its spelling.
+- `workflow(cls, node_id: 'str', step_count: 'int', attempt: 'int' = 1, item: 'int | None' = None) -> 'StepKey'`
+  Build a workflow visit key, with optional retry and map-item suffixes.
+
+### `StepIntent`
+
+class `StepIntent(step_key: 'StepKey', payload_digest: 'str', idempotency_key: 'str', effect_class: 'EffectClass' = <EffectClass.NON_IDEMPOTENT: 'non_idempotent'>, approval_id: 'str | None' = None, reservation_ids: 'list[str]' = <factory>, status: "Literal['dispatched']" = 'dispatched') -> None`
+
+~~~text
+Pre-dispatch record for one non-pure effect, committed with state and cursor.
+
+The key is persisted and reused across takeover. A pure step needs no intent.
+approval_id and reservation_ids link exact approval and budget records.
+JSON objects decoded from dataclasses.asdict can be passed to the constructor.
+~~~
+
+
+### `StepOutcome`
+
+class `StepOutcome(step_key: 'StepKey', status: "Literal['completed', 'failed']", output: 'Any' = None) -> None`
+
+~~~text
+Completed or failed step output, to be committed atomically with cursor advance.
+
+Output must be JSON-compatible when persisted; no lossy string conversion is
+performed here. This value type does not execute or commit the step.
+~~~
+
+
+### `EffectRecord`
+
+class `EffectRecord(execution_id: 'ExecutionId', intent: 'StepIntent', effect_index: 'int' = 0, status: 'EffectStatus' = <EffectStatus.PENDING: 'pending'>, resolution: 'EffectResolution | None' = None, result: 'Any' = None, resolved_by: 'str | None' = None) -> None`
+
+~~~text
+One journaled effect with its identity, intent and explicit resolution.
+
+Allowed states are pending, confirmed, indeterminate and resolved. Only a
+resolved record carries a resolution. Store code will enforce transitions,
+fencing and uniqueness of (workspace_id, intent.idempotency_key).
+effect_id is derived from identity, intent.step_key and effect_index.
+~~~
+
+
+### `EffectStatus`
+
+class `EffectStatus(*values)`
+
+~~~text
+Journal effect state: pending, confirmed, indeterminate or resolved.
+~~~
+
+
+### `EffectResolution`
+
+class `EffectResolution(*values)`
+
+~~~text
+Machine-readable resolution: confirmed, not_applied or failed (operator fail).
+~~~
+
+
+### `ReconcileResult`
+
+class `ReconcileResult()`
+
+~~~text
+Result of probing an uncertain effect: Applied(result), NotApplied or Unknown.
+
+Instantiate one of the three dataclass variants. Unknown means the run stays
+paused with pause_reason='effect_unknown'; it never authorizes re-dispatch.
+~~~
+
+- `from_dict(data: 'dict[str, Any]') -> 'ReconcileResult'`
+  Restore the concrete variant from its status discriminator.
+- `to_dict(self) -> 'dict[str, Any]'`
+  Serialize a concrete variant, including its JSON discriminator.
+
+### `Applied`
+
+class `Applied(result: 'Any', status: "Literal['applied']" = 'applied') -> None`
+
+~~~text
+The effect happened; record result as the step outcome and continue.
+~~~
+
+
+### `NotApplied`
+
+class `NotApplied(status: "Literal['not_applied']" = 'not_applied') -> None`
+
+~~~text
+The effect did not happen; retry with the same key and a fresh gated approval.
+~~~
+
+
+### `Unknown`
+
+class `Unknown(status: "Literal['unknown']" = 'unknown') -> None`
+
+~~~text
+The effect cannot be determined; pause with pause_reason='effect_unknown'.
+~~~
+
+
+### `LeaseLostError`
+
+class `LeaseLostError(message: str, *, original_error: BaseException | None = None) -> None`
+
+~~~text
+A stale owner cannot write or delete after losing the run's fenced lease.
+~~~
+
+
+### `DefinitionMismatchError`
+
+class `DefinitionMismatchError(message: str, *, original_error: BaseException | None = None) -> None`
+
+~~~text
+Takeover found a different definition_digest and requires explicit migration.
+~~~
+
+
+### `derive_effect_id`
+
+function `derive_effect_id(execution_id: 'ExecutionId', step_key: 'StepKey | str', effect_index: 'int' = 0) -> 'str'`
+
+~~~text
+SHA-256 of [workspace_id, run_id, step_key, effect_index] as compact JSON.
+
+Hash bytes are UTF-8, with ensure_ascii=False and separators=(',', ':').
+Tuple encoding preserves boundaries even for opaque ids containing delimiters.
+Only these four identity inputs participate, so takeover preserves the digest.
+~~~
+
+### `default_idempotency_key`
+
+function `default_idempotency_key(execution_id: 'ExecutionId', step_key: 'StepKey | str', effect_index: 'int' = 0) -> 'str'`
+
+~~~text
+Return 'nx-' plus the first 32 hex characters of the deterministic effect id.
+~~~
+
+### `effect_class_from_policy`
+
+function `effect_class_from_policy(policy: 'str | None' = None) -> 'EffectClass'`
+
+~~~text
+Map manifest/runtime EffectPolicy strings without importing the runtime.
+
+pure/read map to pure, idempotent_write to idempotent, and
+non_idempotent_write (or an absent declaration) to non_idempotent.
+Unknown spellings raise ValueError rather than weakening the recovery promise.
+~~~
+
+### `effect_class_from_idempotent`
+
+function `effect_class_from_idempotent(idempotent: 'bool' = False) -> 'EffectClass'`
+
+~~~text
+Map @tool(idempotent=True) to idempotent; plain @tool is non_idempotent.
+~~~
 
 ## Provider errors (`nexura_agents.providers.errors`)
 

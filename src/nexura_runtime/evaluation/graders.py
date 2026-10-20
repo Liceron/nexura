@@ -439,10 +439,27 @@ class ModelJudgeGrader:
 
         try:
             # Model judges must NEVER execute tool calls
+            from nexura_agents.usage import admission
+            from nexura_agents.usage.errors import UsageError
+
+            if admission.active_budget.get() is not None and (
+                hasattr(self.judge_model, "invoke_async")
+                or not hasattr(self.judge_model, "generate")
+            ):
+                raise UsageError("Budget admission refused: judge has no estimable model protocol.")
             if hasattr(self.judge_model, "invoke_async"):
                 response = await self.judge_model.invoke_async(prompt)
             elif hasattr(self.judge_model, "generate"):
-                response = self.judge_model.generate(prompt)
+                if admission.active_budget.get() is not None:
+                    from nexura_agents.types import Message
+
+                    response = await admission.generate(
+                        self.judge_model, [Message(role="user", content=prompt)]
+                    )
+                else:
+                    response = self.judge_model.generate(prompt)
+                    if hasattr(response, "__await__"):
+                        response = await response
             elif callable(self.judge_model):
                 res = self.judge_model(prompt)
                 response = await res if hasattr(res, "__await__") else res

@@ -217,9 +217,46 @@ admissions are refused. Provider pricing changes, unobserved billing and retries
 hidden inside a custom transport cannot be bounded by the ledger. Every billable
 attempt must use the admission boundary; disable hidden retries or explicitly admit
 each attempt. Custom models/tools that bypass that boundary have no shared-budget
-guarantee. In particular, `FakeModel` does not automatically check a budget.
-For `Agent.as_tool()`, pass a `Runner(budget=shared_or_child_budget)` explicitly;
-its default independent runner does not inherit the caller's budget.
+guarantee. Runner now admits all model types, including `OpenAIChatModel`,
+`LiteLLMModel`, `FakeModel` and custom legacy models. Retry, fallback and rate-limit
+wrappers admit each underlying attempt exactly once. A budget without reservation
+and settlement methods, a missing model identifier, an unestimable request or a
+refused reservation raises an error before dispatch; there is no bypass flag.
+Custom legacy models must expose a nonempty `model_id`, `model` or `model_name`.
+`FakeModel` uses `fake-model`; monetary caps require explicit operator pricing for
+that fixture, just as for other unknown models.
+
+Admission uses a conservative UTF-8 byte estimate including tool schemas and
+arguments, plus `max_tokens` or a 4096-token output buffer. Providers and legacy
+models share an attachment surcharge: 1600 tokens per image, and for documents
+4000 tokens when size is unknown or `max(1000, size_bytes // 4)` otherwise.
+Provider subclasses can override the estimator. Set an output limit for a tighter
+estimate. Estimates are
+not a hard upper bound on bills. Unknown usage and failures after dispatch settle
+conservatively and close the reservation, rather than refunding potentially billed
+work. Calls refused before dispatch create no charge.
+
+During a run, a task-local scope propagates budgets through nested runners,
+teams, handoffs, `Agent.as_tool()`, SDK history summarizers, LLM judges and provider
+embeddings (including `ProviderEmbedder`). A configured child budget is enforced
+directly: its ledger also checks ancestor caps. Independent budgets, including an
+explicit `ExecutionContext.budget` for another tenant, must all admit the call;
+refusal rolls back earlier reservations before dispatch. `Runner.budget` returns
+its configured budget when present. A refusal of a separate `Agent.as_tool()`
+child allowance becomes model-visible delegation feedback; exhaustion of an
+enclosing allowance still aborts the run. Separate top-level teams need
+`Team(..., runner=Runner(budget=...))`.
+Runtime `AgentCoordinator` and `AgentDefinition.as_tool()` also admit model calls
+and carry the context's budget into child execution. A wrapper exposing the inner
+provider's model identity shares one admission with that provider; a second
+provider call made by the wrapper needs another reservation.
+SDK judge adapters without an estimable model protocol refuse dispatch under a cap.
+Standalone calls outside a run need an explicit `ExecutionContext` at the provider
+or shared admission boundary.
+Arbitrary HTTP inside tools, third-party embedding implementations outside SDK
+memory/provider boundaries, detached jobs and hidden transport retries are outside this
+scope. Runtime knowledge indexing has its own embedding interface and is not part
+of SDK Runner admission.
 
 Run `uv run --frozen python examples/budget_parallel_demo.py` for ten offline
 FakeModel agents sharing an explicitly reserved allowance. It prints spent,
@@ -306,12 +343,18 @@ print(budget.get_status().total_spent_usd)
 
 The runner passes the budget to the model inside an `ExecutionContext`, the per-call object defined in `nexura_agents.contracts` (also exported from `nexura_runtime`). It carries `workspace_id`, `run_id`, `node_id`, an optional `deadline`, cancellation, and the `budget`. The runner builds one for each model call; you create one yourself only when you call a provider model directly or write your own module.
 
-`FakeModel` does not read the budget, so a `Runner(budget=...)` with `FakeModel` records nothing. To test budget behaviour offline, call `admit_provider_call` and `settle_provider_call` directly as above.
+`Runner(budget=...)` also admits `FakeModel` calls. Use a token cap with explicit
+fixture pricing, or register `fake-model` in your pricing table for monetary tests.
 
 Two caveats from the source:
 
 - The conversion from `Usage` to the budget's own `TokenUsage` model does not carry `reasoning_tokens`. Reasoning tokens are already part of `completion_tokens`, so cost is unaffected.
-- `RunBudget` keeps its turn and tool-call counters in memory. A `RunInterruption` saves usage and the request count ([Human approval](approvals.md)), not the budget object. Recreate the budget when you resume.
+- With `UsageLedger(db_path=...)`, named workspace/run policies, hierarchy, model
+  identity, reservations and spend survive a manager restart. Retrieve the restored
+  handle with `manager.get_run_budget(run_id)` and attach it to the resumed Runner.
+  The service uses its durable SQLite store to restore this handle automatically.
+  In-memory ledgers do not survive restart. `RunBudget` turn/tool-call counters
+  remain in memory; persistent admission covers tokens and monetary estimates.
 
 ## See also
 

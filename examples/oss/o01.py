@@ -130,9 +130,15 @@ async def main() -> None:
         budget=parent_budget,
     )
 
+    # Admission reserves the worst case before dispatch: the prompt plus max_tokens of
+    # output (4096 when unset, which at these prices is more than the $0.01 cap). Settlement
+    # then charges the usage the provider reports.
     print("\n1. Dispatching initial generation call...")
     response = await provider.generate(
-        [Message(role="user", content="Analyze the telemetry and system status.")],
+        GenerationRequest(
+            messages=[Message(role="user", content="Analyze the telemetry and system status.")],
+            max_tokens=256,
+        ),
         context=ctx,
     )
     print(f"   Response: {response.message.content}")
@@ -153,7 +159,10 @@ async def main() -> None:
     )
 
     child_response = await provider.generate(
-        [Message(role="user", content="Fetch diagnostics sub-task.")],
+        GenerationRequest(
+            messages=[Message(role="user", content="Fetch diagnostics sub-task.")],
+            max_tokens=256,
+        ),
         context=child_ctx,
     )
     print(f"   Child response: {child_response.message.content}")

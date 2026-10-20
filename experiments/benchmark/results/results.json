@@ -1,12 +1,63 @@
 {
   "metadata": {
-    "timestamp": "2026-10-18T20:28:31.158919+00:00",
+    "timestamp": "2026-10-20T12:22:45.469948+00:00",
+    "date": "2026-10-20",
+    "command": "uv --directory experiments/benchmark run python run.py",
     "python_version": "3.12.14",
     "platform": "Linux-7.0.0-1014-gcp-x86_64-with-glibc2.43",
     "frameworks": {
       "nexura": "0.4.0",
       "pydantic-ai": "2.57.0",
       "langgraph": "1.2.16"
+    },
+    "packages": {
+      "nexura-agents": "0.4.0",
+      "pydantic-ai": "2.57.0",
+      "pydantic-ai-harness": "0.57.0",
+      "langgraph": "1.2.16",
+      "langchain": "1.4.6",
+      "langchain-core": "1.6.12"
+    },
+    "sdk_source": {
+      "nexura_agents_path": "/tmp/a5-nexura-head/packages/nexura-agents/src/nexura_agents/__init__.py",
+      "uses_repo_working_tree": false,
+      "repo_commit": "522ea21",
+      "repo_sdk_dirty": "yes"
+    },
+    "spending_parameters": {
+      "parallel_agents": 10,
+      "limit_usd": "0.03",
+      "limit_calls": 3,
+      "estimated_tokens_per_call": 5000,
+      "estimated_cost_per_call_usd": "0.01",
+      "price_per_million_tokens_usd": "2.00",
+      "fake_model_latency_seconds": 0.02,
+      "cases": [
+        {
+          "case": "a",
+          "label": "estimate equals actual cost",
+          "input_tokens": 2500,
+          "output_tokens": 2500,
+          "actual_cost_per_call_usd": "0.01",
+          "calls_that_fit_at_actual_cost": 3
+        },
+        {
+          "case": "b",
+          "label": "estimate lower than actual (reply 2x the estimated cost)",
+          "input_tokens": 2500,
+          "output_tokens": 7500,
+          "actual_cost_per_call_usd": "0.02",
+          "calls_that_fit_at_actual_cost": 1
+        },
+        {
+          "case": "c",
+          "label": "estimate higher than actual (reply 0.5x the estimated cost)",
+          "input_tokens": 1250,
+          "output_tokens": 1250,
+          "actual_cost_per_call_usd": "0.005",
+          "calls_that_fit_at_actual_cost": 6
+        }
+      ]
     }
   },
   "results": [
@@ -67,8 +118,8 @@
     {
       "framework": "nexura",
       "version": "0.4.0",
-      "scenario_id": "S3",
-      "scenario_name": "parallel spending",
+      "scenario_id": "S3-legacy",
+      "scenario_name": "parallel spending (legacy P33 setup, superseded by S3a-c)",
       "supported": "Yes (shared allowance)",
       "measured_numbers": {
         "allowance_calls": 3,
@@ -135,8 +186,8 @@
     {
       "framework": "pydantic-ai",
       "version": "2.57.0",
-      "scenario_id": "S3",
-      "scenario_name": "parallel spending",
+      "scenario_id": "S3-legacy",
+      "scenario_name": "parallel spending (legacy P33 setup, superseded by S3a-c)",
       "supported": "Partial (shared counter, not concurrent admission)",
       "measured_numbers": {
         "allowance_calls": 3,
@@ -206,8 +257,8 @@
     {
       "framework": "langgraph",
       "version": "1.2.16 (langchain==1.4.6)",
-      "scenario_id": "S3",
-      "scenario_name": "parallel spending",
+      "scenario_id": "S3-legacy",
+      "scenario_name": "parallel spending (legacy P33 setup, superseded by S3a-c)",
       "supported": "Partial (per-thread/run limit only)",
       "measured_numbers": {
         "allowance_calls": 3,
@@ -221,6 +272,1043 @@
         "https://langchain-ai.github.io/langgraph/"
       ],
       "notes": "Tested LangChain v1 ModelCallLimitMiddleware (source: experiments/benchmark/.venv/lib/python3.12/site-packages/langchain/agents/middleware/model_call_limit.py). It stores call counts in ModelCallLimitState channels thread_model_call_count and run_model_call_count, which are scoped per thread/run. It cannot share an allowance across parallel agent threads. Additionally, after_model increments counts only post-hoc without atomic pre-admission reservation, admitting all 10 calls."
+    }
+  ],
+  "spending_results": [
+    {
+      "framework": "nexura",
+      "version": "0.4.0",
+      "scenario_id": "S3a",
+      "scenario_name": "parallel spending, estimate equals actual cost",
+      "supported": "Yes (reserves the estimate before each call)",
+      "measured_numbers": {
+        "feature": "shared run budget (USD)",
+        "case": "a",
+        "case_label": "estimate equals actual cost",
+        "mode": "parallel",
+        "parallel_agents": 10,
+        "limit_usd": "0.0300",
+        "limit_calls_at_estimate": 3,
+        "estimated_cost_per_call_usd": "0.0100",
+        "actual_cost_per_call_usd": "0.0100",
+        "calls_that_fit_at_actual_cost": 3,
+        "admitted_calls": 3,
+        "refused_before_call": 7,
+        "runs_that_errored_after_their_call": 0,
+        "total_spend_usd": "0.0300",
+        "overspend_usd": "0.0000",
+        "overspend_percent_of_limit": 0,
+        "framework_recorded_spend_usd": "0.0300",
+        "framework_reserved_after_run_usd": "0.0000"
+      },
+      "configuration": "BudgetManager(pricing_table=...).create_run_budget(config=BudgetConfig(max_cost_usd=Decimal('0.03'))); root.create_child_budget(...) per agent; Runner(budget=child)",
+      "documentation_urls": [
+        "docs/budgets-and-usage.md"
+      ],
+      "notes": "Admission reserves the estimated cost atomically before dispatch and settles the reported cost afterwards. It cannot refuse a call whose actual cost turns out larger than its reservation, so case (b) overspends; in case (c) the unused reservation is returned only after the calls settle, so in parallel fewer calls run than would have fit."
+    },
+    {
+      "framework": "nexura",
+      "version": "0.4.0",
+      "scenario_id": "S3b",
+      "scenario_name": "parallel spending, estimate lower than actual (reply 2x the estimated cost)",
+      "supported": "Yes (reserves the estimate before each call)",
+      "measured_numbers": {
+        "feature": "shared run budget (USD)",
+        "case": "b",
+        "case_label": "estimate lower than actual (reply 2x the estimated cost)",
+        "mode": "parallel",
+        "parallel_agents": 10,
+        "limit_usd": "0.0300",
+        "limit_calls_at_estimate": 3,
+        "estimated_cost_per_call_usd": "0.0100",
+        "actual_cost_per_call_usd": "0.0200",
+        "calls_that_fit_at_actual_cost": 1,
+        "admitted_calls": 3,
+        "refused_before_call": 7,
+        "runs_that_errored_after_their_call": 0,
+        "total_spend_usd": "0.0600",
+        "overspend_usd": "0.0300",
+        "overspend_percent_of_limit": 100,
+        "framework_recorded_spend_usd": "0.0600",
+        "framework_reserved_after_run_usd": "0.0000"
+      },
+      "configuration": "BudgetManager(pricing_table=...).create_run_budget(config=BudgetConfig(max_cost_usd=Decimal('0.03'))); root.create_child_budget(...) per agent; Runner(budget=child)",
+      "documentation_urls": [
+        "docs/budgets-and-usage.md"
+      ],
+      "notes": "Admission reserves the estimated cost atomically before dispatch and settles the reported cost afterwards. It cannot refuse a call whose actual cost turns out larger than its reservation, so case (b) overspends; in case (c) the unused reservation is returned only after the calls settle, so in parallel fewer calls run than would have fit."
+    },
+    {
+      "framework": "nexura",
+      "version": "0.4.0",
+      "scenario_id": "S3c",
+      "scenario_name": "parallel spending, estimate higher than actual (reply 0.5x the estimated cost)",
+      "supported": "Yes (reserves the estimate before each call)",
+      "measured_numbers": {
+        "feature": "shared run budget (USD)",
+        "case": "c",
+        "case_label": "estimate higher than actual (reply 0.5x the estimated cost)",
+        "mode": "parallel",
+        "parallel_agents": 10,
+        "limit_usd": "0.0300",
+        "limit_calls_at_estimate": 3,
+        "estimated_cost_per_call_usd": "0.0100",
+        "actual_cost_per_call_usd": "0.0050",
+        "calls_that_fit_at_actual_cost": 6,
+        "admitted_calls": 3,
+        "refused_before_call": 7,
+        "runs_that_errored_after_their_call": 0,
+        "total_spend_usd": "0.0150",
+        "overspend_usd": "0.0000",
+        "overspend_percent_of_limit": 0,
+        "framework_recorded_spend_usd": "0.0150",
+        "framework_reserved_after_run_usd": "0.0000"
+      },
+      "configuration": "BudgetManager(pricing_table=...).create_run_budget(config=BudgetConfig(max_cost_usd=Decimal('0.03'))); root.create_child_budget(...) per agent; Runner(budget=child)",
+      "documentation_urls": [
+        "docs/budgets-and-usage.md"
+      ],
+      "notes": "Admission reserves the estimated cost atomically before dispatch and settles the reported cost afterwards. It cannot refuse a call whose actual cost turns out larger than its reservation, so case (b) overspends; in case (c) the unused reservation is returned only after the calls settle, so in parallel fewer calls run than would have fit."
+    },
+    {
+      "framework": "nexura",
+      "version": "0.4.0",
+      "scenario_id": "S3a-seq",
+      "scenario_name": "sequential control, estimate equals actual cost",
+      "supported": "Yes (reserves the estimate before each call)",
+      "measured_numbers": {
+        "feature": "shared run budget (USD)",
+        "case": "a",
+        "case_label": "estimate equals actual cost",
+        "mode": "sequential",
+        "parallel_agents": 10,
+        "limit_usd": "0.0300",
+        "limit_calls_at_estimate": 3,
+        "estimated_cost_per_call_usd": "0.0100",
+        "actual_cost_per_call_usd": "0.0100",
+        "calls_that_fit_at_actual_cost": 3,
+        "admitted_calls": 3,
+        "refused_before_call": 7,
+        "runs_that_errored_after_their_call": 0,
+        "total_spend_usd": "0.0300",
+        "overspend_usd": "0.0000",
+        "overspend_percent_of_limit": 0,
+        "framework_recorded_spend_usd": "0.0300",
+        "framework_reserved_after_run_usd": "0.0000"
+      },
+      "configuration": "BudgetManager(pricing_table=...).create_run_budget(config=BudgetConfig(max_cost_usd=Decimal('0.03'))); root.create_child_budget(...) per agent; Runner(budget=child)",
+      "documentation_urls": [
+        "docs/budgets-and-usage.md"
+      ],
+      "notes": "Admission reserves the estimated cost atomically before dispatch and settles the reported cost afterwards. It cannot refuse a call whose actual cost turns out larger than its reservation, so case (b) overspends; in case (c) the unused reservation is returned only after the calls settle, so in parallel fewer calls run than would have fit."
+    },
+    {
+      "framework": "nexura",
+      "version": "0.4.0",
+      "scenario_id": "S3b-seq",
+      "scenario_name": "sequential control, estimate lower than actual (reply 2x the estimated cost)",
+      "supported": "Yes (reserves the estimate before each call)",
+      "measured_numbers": {
+        "feature": "shared run budget (USD)",
+        "case": "b",
+        "case_label": "estimate lower than actual (reply 2x the estimated cost)",
+        "mode": "sequential",
+        "parallel_agents": 10,
+        "limit_usd": "0.0300",
+        "limit_calls_at_estimate": 3,
+        "estimated_cost_per_call_usd": "0.0100",
+        "actual_cost_per_call_usd": "0.0200",
+        "calls_that_fit_at_actual_cost": 1,
+        "admitted_calls": 2,
+        "refused_before_call": 8,
+        "runs_that_errored_after_their_call": 0,
+        "total_spend_usd": "0.0400",
+        "overspend_usd": "0.0100",
+        "overspend_percent_of_limit": 33,
+        "framework_recorded_spend_usd": "0.0400",
+        "framework_reserved_after_run_usd": "0.0000"
+      },
+      "configuration": "BudgetManager(pricing_table=...).create_run_budget(config=BudgetConfig(max_cost_usd=Decimal('0.03'))); root.create_child_budget(...) per agent; Runner(budget=child)",
+      "documentation_urls": [
+        "docs/budgets-and-usage.md"
+      ],
+      "notes": "Admission reserves the estimated cost atomically before dispatch and settles the reported cost afterwards. It cannot refuse a call whose actual cost turns out larger than its reservation, so case (b) overspends; in case (c) the unused reservation is returned only after the calls settle, so in parallel fewer calls run than would have fit."
+    },
+    {
+      "framework": "nexura",
+      "version": "0.4.0",
+      "scenario_id": "S3c-seq",
+      "scenario_name": "sequential control, estimate higher than actual (reply 0.5x the estimated cost)",
+      "supported": "Yes (reserves the estimate before each call)",
+      "measured_numbers": {
+        "feature": "shared run budget (USD)",
+        "case": "c",
+        "case_label": "estimate higher than actual (reply 0.5x the estimated cost)",
+        "mode": "sequential",
+        "parallel_agents": 10,
+        "limit_usd": "0.0300",
+        "limit_calls_at_estimate": 3,
+        "estimated_cost_per_call_usd": "0.0100",
+        "actual_cost_per_call_usd": "0.0050",
+        "calls_that_fit_at_actual_cost": 6,
+        "admitted_calls": 5,
+        "refused_before_call": 5,
+        "runs_that_errored_after_their_call": 0,
+        "total_spend_usd": "0.0250",
+        "overspend_usd": "0.0000",
+        "overspend_percent_of_limit": 0,
+        "framework_recorded_spend_usd": "0.0250",
+        "framework_reserved_after_run_usd": "0.0000"
+      },
+      "configuration": "BudgetManager(pricing_table=...).create_run_budget(config=BudgetConfig(max_cost_usd=Decimal('0.03'))); root.create_child_budget(...) per agent; Runner(budget=child)",
+      "documentation_urls": [
+        "docs/budgets-and-usage.md"
+      ],
+      "notes": "Admission reserves the estimated cost atomically before dispatch and settles the reported cost afterwards. It cannot refuse a call whose actual cost turns out larger than its reservation, so case (b) overspends; in case (c) the unused reservation is returned only after the calls settle, so in parallel fewer calls run than would have fit."
+    },
+    {
+      "framework": "pydantic-ai",
+      "version": "2.57.0",
+      "scenario_id": "S3a",
+      "scenario_name": "parallel spending, estimate equals actual cost",
+      "supported": "Partial (per-run limit; sharing is the delegation pattern)",
+      "measured_numbers": {
+        "feature": "UsageLimits + shared RunUsage",
+        "case": "a",
+        "case_label": "estimate equals actual cost",
+        "mode": "parallel",
+        "parallel_agents": 10,
+        "limit_usd": "0.0300",
+        "limit_calls_at_estimate": 3,
+        "estimated_cost_per_call_usd": "0.0100",
+        "actual_cost_per_call_usd": "0.0100",
+        "calls_that_fit_at_actual_cost": 3,
+        "admitted_calls": 10,
+        "refused_before_call": 0,
+        "runs_that_errored_after_their_call": 8,
+        "total_spend_usd": "0.1000",
+        "overspend_usd": "0.0700",
+        "overspend_percent_of_limit": 233,
+        "framework_recorded_spend_usd": "0.1000"
+      },
+      "configuration": "agent.run(usage_limits=UsageLimits(request_limit=3, cost_limit=Decimal('0.03')), usage=shared_run_usage)",
+      "documentation_urls": [
+        "https://pydantic.dev/docs/ai/core-concepts/agent/#usage-limits",
+        "https://pydantic.dev/docs/ai/guides/multi-agent-applications/#agent-delegation"
+      ],
+      "notes": "UsageLimits checks the request count and cost before each request and the cost again after each response. It reserves nothing, so parallel runs all pass the pre-check while the shared counter is still zero. A run whose response pushes the shared cost over the limit raises UsageLimitExceeded after the call was already made and paid for. The docs say: 'Don't rely on cost_limit as a hard billing guarantee.'"
+    },
+    {
+      "framework": "pydantic-ai",
+      "version": "2.57.0 (pydantic-ai-harness==0.57.0)",
+      "scenario_id": "S3a",
+      "scenario_name": "parallel spending, estimate equals actual cost",
+      "supported": "Partial (documented as a brake, not a reservation)",
+      "measured_numbers": {
+        "feature": "SpendLimits (harness)",
+        "case": "a",
+        "case_label": "estimate equals actual cost",
+        "mode": "parallel",
+        "parallel_agents": 10,
+        "limit_usd": "0.0300",
+        "limit_calls_at_estimate": 3,
+        "estimated_cost_per_call_usd": "0.0100",
+        "actual_cost_per_call_usd": "0.0100",
+        "calls_that_fit_at_actual_cost": 3,
+        "admitted_calls": 10,
+        "refused_before_call": 0,
+        "runs_that_errored_after_their_call": 0,
+        "total_spend_usd": "0.1000",
+        "overspend_usd": "0.0700",
+        "overspend_percent_of_limit": 233,
+        "framework_recorded_spend_usd": "0.1000"
+      },
+      "configuration": "Agent(..., capabilities=[SpendLimits(budgets=[Budget(usd=Decimal('0.03'), window='total')], price=..., on_unpriced='raise')])",
+      "documentation_urls": [
+        "https://pydantic.dev/docs/ai/harness/spend/"
+      ],
+      "notes": "SpendLimits records each priced response and refuses the next request once a window is spent. Its docs say: 'The request that crosses the line completes, and concurrent runs can each pass the check before any of them records anything' and 'Admission is all that call does: it reserves nothing.'"
+    },
+    {
+      "framework": "pydantic-ai",
+      "version": "2.57.0",
+      "scenario_id": "S3b",
+      "scenario_name": "parallel spending, estimate lower than actual (reply 2x the estimated cost)",
+      "supported": "Partial (per-run limit; sharing is the delegation pattern)",
+      "measured_numbers": {
+        "feature": "UsageLimits + shared RunUsage",
+        "case": "b",
+        "case_label": "estimate lower than actual (reply 2x the estimated cost)",
+        "mode": "parallel",
+        "parallel_agents": 10,
+        "limit_usd": "0.0300",
+        "limit_calls_at_estimate": 3,
+        "estimated_cost_per_call_usd": "0.0100",
+        "actual_cost_per_call_usd": "0.0200",
+        "calls_that_fit_at_actual_cost": 1,
+        "admitted_calls": 10,
+        "refused_before_call": 0,
+        "runs_that_errored_after_their_call": 10,
+        "total_spend_usd": "0.2000",
+        "overspend_usd": "0.1700",
+        "overspend_percent_of_limit": 567,
+        "framework_recorded_spend_usd": "0.2000"
+      },
+      "configuration": "agent.run(usage_limits=UsageLimits(request_limit=3, cost_limit=Decimal('0.03')), usage=shared_run_usage)",
+      "documentation_urls": [
+        "https://pydantic.dev/docs/ai/core-concepts/agent/#usage-limits",
+        "https://pydantic.dev/docs/ai/guides/multi-agent-applications/#agent-delegation"
+      ],
+      "notes": "UsageLimits checks the request count and cost before each request and the cost again after each response. It reserves nothing, so parallel runs all pass the pre-check while the shared counter is still zero. A run whose response pushes the shared cost over the limit raises UsageLimitExceeded after the call was already made and paid for. The docs say: 'Don't rely on cost_limit as a hard billing guarantee.'"
+    },
+    {
+      "framework": "pydantic-ai",
+      "version": "2.57.0 (pydantic-ai-harness==0.57.0)",
+      "scenario_id": "S3b",
+      "scenario_name": "parallel spending, estimate lower than actual (reply 2x the estimated cost)",
+      "supported": "Partial (documented as a brake, not a reservation)",
+      "measured_numbers": {
+        "feature": "SpendLimits (harness)",
+        "case": "b",
+        "case_label": "estimate lower than actual (reply 2x the estimated cost)",
+        "mode": "parallel",
+        "parallel_agents": 10,
+        "limit_usd": "0.0300",
+        "limit_calls_at_estimate": 3,
+        "estimated_cost_per_call_usd": "0.0100",
+        "actual_cost_per_call_usd": "0.0200",
+        "calls_that_fit_at_actual_cost": 1,
+        "admitted_calls": 10,
+        "refused_before_call": 0,
+        "runs_that_errored_after_their_call": 0,
+        "total_spend_usd": "0.2000",
+        "overspend_usd": "0.1700",
+        "overspend_percent_of_limit": 567,
+        "framework_recorded_spend_usd": "0.2000"
+      },
+      "configuration": "Agent(..., capabilities=[SpendLimits(budgets=[Budget(usd=Decimal('0.03'), window='total')], price=..., on_unpriced='raise')])",
+      "documentation_urls": [
+        "https://pydantic.dev/docs/ai/harness/spend/"
+      ],
+      "notes": "SpendLimits records each priced response and refuses the next request once a window is spent. Its docs say: 'The request that crosses the line completes, and concurrent runs can each pass the check before any of them records anything' and 'Admission is all that call does: it reserves nothing.'"
+    },
+    {
+      "framework": "pydantic-ai",
+      "version": "2.57.0",
+      "scenario_id": "S3c",
+      "scenario_name": "parallel spending, estimate higher than actual (reply 0.5x the estimated cost)",
+      "supported": "Partial (per-run limit; sharing is the delegation pattern)",
+      "measured_numbers": {
+        "feature": "UsageLimits + shared RunUsage",
+        "case": "c",
+        "case_label": "estimate higher than actual (reply 0.5x the estimated cost)",
+        "mode": "parallel",
+        "parallel_agents": 10,
+        "limit_usd": "0.0300",
+        "limit_calls_at_estimate": 3,
+        "estimated_cost_per_call_usd": "0.0100",
+        "actual_cost_per_call_usd": "0.0050",
+        "calls_that_fit_at_actual_cost": 6,
+        "admitted_calls": 10,
+        "refused_before_call": 0,
+        "runs_that_errored_after_their_call": 9,
+        "total_spend_usd": "0.0500",
+        "overspend_usd": "0.0200",
+        "overspend_percent_of_limit": 67,
+        "framework_recorded_spend_usd": "0.0500"
+      },
+      "configuration": "agent.run(usage_limits=UsageLimits(request_limit=3, cost_limit=Decimal('0.03')), usage=shared_run_usage)",
+      "documentation_urls": [
+        "https://pydantic.dev/docs/ai/core-concepts/agent/#usage-limits",
+        "https://pydantic.dev/docs/ai/guides/multi-agent-applications/#agent-delegation"
+      ],
+      "notes": "UsageLimits checks the request count and cost before each request and the cost again after each response. It reserves nothing, so parallel runs all pass the pre-check while the shared counter is still zero. A run whose response pushes the shared cost over the limit raises UsageLimitExceeded after the call was already made and paid for. The docs say: 'Don't rely on cost_limit as a hard billing guarantee.'"
+    },
+    {
+      "framework": "pydantic-ai",
+      "version": "2.57.0 (pydantic-ai-harness==0.57.0)",
+      "scenario_id": "S3c",
+      "scenario_name": "parallel spending, estimate higher than actual (reply 0.5x the estimated cost)",
+      "supported": "Partial (documented as a brake, not a reservation)",
+      "measured_numbers": {
+        "feature": "SpendLimits (harness)",
+        "case": "c",
+        "case_label": "estimate higher than actual (reply 0.5x the estimated cost)",
+        "mode": "parallel",
+        "parallel_agents": 10,
+        "limit_usd": "0.0300",
+        "limit_calls_at_estimate": 3,
+        "estimated_cost_per_call_usd": "0.0100",
+        "actual_cost_per_call_usd": "0.0050",
+        "calls_that_fit_at_actual_cost": 6,
+        "admitted_calls": 10,
+        "refused_before_call": 0,
+        "runs_that_errored_after_their_call": 0,
+        "total_spend_usd": "0.0500",
+        "overspend_usd": "0.0200",
+        "overspend_percent_of_limit": 67,
+        "framework_recorded_spend_usd": "0.0500"
+      },
+      "configuration": "Agent(..., capabilities=[SpendLimits(budgets=[Budget(usd=Decimal('0.03'), window='total')], price=..., on_unpriced='raise')])",
+      "documentation_urls": [
+        "https://pydantic.dev/docs/ai/harness/spend/"
+      ],
+      "notes": "SpendLimits records each priced response and refuses the next request once a window is spent. Its docs say: 'The request that crosses the line completes, and concurrent runs can each pass the check before any of them records anything' and 'Admission is all that call does: it reserves nothing.'"
+    },
+    {
+      "framework": "pydantic-ai",
+      "version": "2.57.0",
+      "scenario_id": "S3a-seq",
+      "scenario_name": "sequential control, estimate equals actual cost",
+      "supported": "Partial (per-run limit; sharing is the delegation pattern)",
+      "measured_numbers": {
+        "feature": "UsageLimits + shared RunUsage",
+        "case": "a",
+        "case_label": "estimate equals actual cost",
+        "mode": "sequential",
+        "parallel_agents": 10,
+        "limit_usd": "0.0300",
+        "limit_calls_at_estimate": 3,
+        "estimated_cost_per_call_usd": "0.0100",
+        "actual_cost_per_call_usd": "0.0100",
+        "calls_that_fit_at_actual_cost": 3,
+        "admitted_calls": 3,
+        "refused_before_call": 7,
+        "runs_that_errored_after_their_call": 0,
+        "total_spend_usd": "0.0300",
+        "overspend_usd": "0.0000",
+        "overspend_percent_of_limit": 0,
+        "framework_recorded_spend_usd": "0.0300"
+      },
+      "configuration": "agent.run(usage_limits=UsageLimits(request_limit=3, cost_limit=Decimal('0.03')), usage=shared_run_usage)",
+      "documentation_urls": [
+        "https://pydantic.dev/docs/ai/core-concepts/agent/#usage-limits",
+        "https://pydantic.dev/docs/ai/guides/multi-agent-applications/#agent-delegation"
+      ],
+      "notes": "UsageLimits checks the request count and cost before each request and the cost again after each response. It reserves nothing, so parallel runs all pass the pre-check while the shared counter is still zero. A run whose response pushes the shared cost over the limit raises UsageLimitExceeded after the call was already made and paid for. The docs say: 'Don't rely on cost_limit as a hard billing guarantee.'"
+    },
+    {
+      "framework": "pydantic-ai",
+      "version": "2.57.0 (pydantic-ai-harness==0.57.0)",
+      "scenario_id": "S3a-seq",
+      "scenario_name": "sequential control, estimate equals actual cost",
+      "supported": "Partial (documented as a brake, not a reservation)",
+      "measured_numbers": {
+        "feature": "SpendLimits (harness)",
+        "case": "a",
+        "case_label": "estimate equals actual cost",
+        "mode": "sequential",
+        "parallel_agents": 10,
+        "limit_usd": "0.0300",
+        "limit_calls_at_estimate": 3,
+        "estimated_cost_per_call_usd": "0.0100",
+        "actual_cost_per_call_usd": "0.0100",
+        "calls_that_fit_at_actual_cost": 3,
+        "admitted_calls": 3,
+        "refused_before_call": 7,
+        "runs_that_errored_after_their_call": 0,
+        "total_spend_usd": "0.0300",
+        "overspend_usd": "0.0000",
+        "overspend_percent_of_limit": 0,
+        "framework_recorded_spend_usd": "0.0300"
+      },
+      "configuration": "Agent(..., capabilities=[SpendLimits(budgets=[Budget(usd=Decimal('0.03'), window='total')], price=..., on_unpriced='raise')])",
+      "documentation_urls": [
+        "https://pydantic.dev/docs/ai/harness/spend/"
+      ],
+      "notes": "SpendLimits records each priced response and refuses the next request once a window is spent. Its docs say: 'The request that crosses the line completes, and concurrent runs can each pass the check before any of them records anything' and 'Admission is all that call does: it reserves nothing.'"
+    },
+    {
+      "framework": "pydantic-ai",
+      "version": "2.57.0",
+      "scenario_id": "S3b-seq",
+      "scenario_name": "sequential control, estimate lower than actual (reply 2x the estimated cost)",
+      "supported": "Partial (per-run limit; sharing is the delegation pattern)",
+      "measured_numbers": {
+        "feature": "UsageLimits + shared RunUsage",
+        "case": "b",
+        "case_label": "estimate lower than actual (reply 2x the estimated cost)",
+        "mode": "sequential",
+        "parallel_agents": 10,
+        "limit_usd": "0.0300",
+        "limit_calls_at_estimate": 3,
+        "estimated_cost_per_call_usd": "0.0100",
+        "actual_cost_per_call_usd": "0.0200",
+        "calls_that_fit_at_actual_cost": 1,
+        "admitted_calls": 2,
+        "refused_before_call": 8,
+        "runs_that_errored_after_their_call": 1,
+        "total_spend_usd": "0.0400",
+        "overspend_usd": "0.0100",
+        "overspend_percent_of_limit": 33,
+        "framework_recorded_spend_usd": "0.0400"
+      },
+      "configuration": "agent.run(usage_limits=UsageLimits(request_limit=3, cost_limit=Decimal('0.03')), usage=shared_run_usage)",
+      "documentation_urls": [
+        "https://pydantic.dev/docs/ai/core-concepts/agent/#usage-limits",
+        "https://pydantic.dev/docs/ai/guides/multi-agent-applications/#agent-delegation"
+      ],
+      "notes": "UsageLimits checks the request count and cost before each request and the cost again after each response. It reserves nothing, so parallel runs all pass the pre-check while the shared counter is still zero. A run whose response pushes the shared cost over the limit raises UsageLimitExceeded after the call was already made and paid for. The docs say: 'Don't rely on cost_limit as a hard billing guarantee.'"
+    },
+    {
+      "framework": "pydantic-ai",
+      "version": "2.57.0 (pydantic-ai-harness==0.57.0)",
+      "scenario_id": "S3b-seq",
+      "scenario_name": "sequential control, estimate lower than actual (reply 2x the estimated cost)",
+      "supported": "Partial (documented as a brake, not a reservation)",
+      "measured_numbers": {
+        "feature": "SpendLimits (harness)",
+        "case": "b",
+        "case_label": "estimate lower than actual (reply 2x the estimated cost)",
+        "mode": "sequential",
+        "parallel_agents": 10,
+        "limit_usd": "0.0300",
+        "limit_calls_at_estimate": 3,
+        "estimated_cost_per_call_usd": "0.0100",
+        "actual_cost_per_call_usd": "0.0200",
+        "calls_that_fit_at_actual_cost": 1,
+        "admitted_calls": 2,
+        "refused_before_call": 8,
+        "runs_that_errored_after_their_call": 0,
+        "total_spend_usd": "0.0400",
+        "overspend_usd": "0.0100",
+        "overspend_percent_of_limit": 33,
+        "framework_recorded_spend_usd": "0.0400"
+      },
+      "configuration": "Agent(..., capabilities=[SpendLimits(budgets=[Budget(usd=Decimal('0.03'), window='total')], price=..., on_unpriced='raise')])",
+      "documentation_urls": [
+        "https://pydantic.dev/docs/ai/harness/spend/"
+      ],
+      "notes": "SpendLimits records each priced response and refuses the next request once a window is spent. Its docs say: 'The request that crosses the line completes, and concurrent runs can each pass the check before any of them records anything' and 'Admission is all that call does: it reserves nothing.'"
+    },
+    {
+      "framework": "pydantic-ai",
+      "version": "2.57.0",
+      "scenario_id": "S3c-seq",
+      "scenario_name": "sequential control, estimate higher than actual (reply 0.5x the estimated cost)",
+      "supported": "Partial (per-run limit; sharing is the delegation pattern)",
+      "measured_numbers": {
+        "feature": "UsageLimits + shared RunUsage",
+        "case": "c",
+        "case_label": "estimate higher than actual (reply 0.5x the estimated cost)",
+        "mode": "sequential",
+        "parallel_agents": 10,
+        "limit_usd": "0.0300",
+        "limit_calls_at_estimate": 3,
+        "estimated_cost_per_call_usd": "0.0100",
+        "actual_cost_per_call_usd": "0.0050",
+        "calls_that_fit_at_actual_cost": 6,
+        "admitted_calls": 3,
+        "refused_before_call": 7,
+        "runs_that_errored_after_their_call": 0,
+        "total_spend_usd": "0.0150",
+        "overspend_usd": "0.0000",
+        "overspend_percent_of_limit": 0,
+        "framework_recorded_spend_usd": "0.0150"
+      },
+      "configuration": "agent.run(usage_limits=UsageLimits(request_limit=3, cost_limit=Decimal('0.03')), usage=shared_run_usage)",
+      "documentation_urls": [
+        "https://pydantic.dev/docs/ai/core-concepts/agent/#usage-limits",
+        "https://pydantic.dev/docs/ai/guides/multi-agent-applications/#agent-delegation"
+      ],
+      "notes": "UsageLimits checks the request count and cost before each request and the cost again after each response. It reserves nothing, so parallel runs all pass the pre-check while the shared counter is still zero. A run whose response pushes the shared cost over the limit raises UsageLimitExceeded after the call was already made and paid for. The docs say: 'Don't rely on cost_limit as a hard billing guarantee.'"
+    },
+    {
+      "framework": "pydantic-ai",
+      "version": "2.57.0 (pydantic-ai-harness==0.57.0)",
+      "scenario_id": "S3c-seq",
+      "scenario_name": "sequential control, estimate higher than actual (reply 0.5x the estimated cost)",
+      "supported": "Partial (documented as a brake, not a reservation)",
+      "measured_numbers": {
+        "feature": "SpendLimits (harness)",
+        "case": "c",
+        "case_label": "estimate higher than actual (reply 0.5x the estimated cost)",
+        "mode": "sequential",
+        "parallel_agents": 10,
+        "limit_usd": "0.0300",
+        "limit_calls_at_estimate": 3,
+        "estimated_cost_per_call_usd": "0.0100",
+        "actual_cost_per_call_usd": "0.0050",
+        "calls_that_fit_at_actual_cost": 6,
+        "admitted_calls": 6,
+        "refused_before_call": 4,
+        "runs_that_errored_after_their_call": 0,
+        "total_spend_usd": "0.0300",
+        "overspend_usd": "0.0000",
+        "overspend_percent_of_limit": 0,
+        "framework_recorded_spend_usd": "0.0300"
+      },
+      "configuration": "Agent(..., capabilities=[SpendLimits(budgets=[Budget(usd=Decimal('0.03'), window='total')], price=..., on_unpriced='raise')])",
+      "documentation_urls": [
+        "https://pydantic.dev/docs/ai/harness/spend/"
+      ],
+      "notes": "SpendLimits records each priced response and refuses the next request once a window is spent. Its docs say: 'The request that crosses the line completes, and concurrent runs can each pass the check before any of them records anything' and 'Admission is all that call does: it reserves nothing.'"
+    },
+    {
+      "framework": "langgraph",
+      "version": "1.2.16 (langchain==1.4.6)",
+      "scenario_id": "S3a",
+      "scenario_name": "parallel spending, estimate equals actual cost",
+      "supported": "Partial (call count per thread; no cost limit)",
+      "measured_numbers": {
+        "feature": "ModelCallLimitMiddleware(thread_limit), one shared thread",
+        "case": "a",
+        "case_label": "estimate equals actual cost",
+        "mode": "parallel",
+        "parallel_agents": 10,
+        "limit_usd": "0.0300",
+        "limit_calls_at_estimate": 3,
+        "estimated_cost_per_call_usd": "0.0100",
+        "actual_cost_per_call_usd": "0.0100",
+        "calls_that_fit_at_actual_cost": 3,
+        "admitted_calls": 10,
+        "refused_before_call": 0,
+        "runs_that_errored_after_their_call": 0,
+        "total_spend_usd": "0.1000",
+        "overspend_usd": "0.0700",
+        "overspend_percent_of_limit": 233,
+        "framework_recorded_spend_usd": null
+      },
+      "configuration": "create_agent(model, middleware=[ModelCallLimitMiddleware(thread_limit=3, exit_behavior='error')], checkpointer=MemorySaver()); all invocations use the same thread_id",
+      "documentation_urls": [
+        "https://docs.langchain.com/oss/python/langchain/middleware/built-in#model-call-limit"
+      ],
+      "notes": "Source: langchain/agents/middleware/model_call_limit.py in the benchmark venv. before_model compares the counts in graph state with the limits; after_model increments them. Counting is in calls, not money. Parallel invocations on one thread each read the checkpointed count before any of them writes it back, so the limit only holds when invocations run one after another."
+    },
+    {
+      "framework": "langgraph",
+      "version": "1.2.16 (langchain==1.4.6)",
+      "scenario_id": "S3a",
+      "scenario_name": "parallel spending, estimate equals actual cost",
+      "supported": "No shared limit (limit is per run)",
+      "measured_numbers": {
+        "feature": "ModelCallLimitMiddleware(run_limit), thread per agent",
+        "case": "a",
+        "case_label": "estimate equals actual cost",
+        "mode": "parallel",
+        "parallel_agents": 10,
+        "limit_usd": "0.0300",
+        "limit_calls_at_estimate": 3,
+        "estimated_cost_per_call_usd": "0.0100",
+        "actual_cost_per_call_usd": "0.0100",
+        "calls_that_fit_at_actual_cost": 3,
+        "admitted_calls": 10,
+        "refused_before_call": 0,
+        "runs_that_errored_after_their_call": 0,
+        "total_spend_usd": "0.1000",
+        "overspend_usd": "0.0700",
+        "overspend_percent_of_limit": 233,
+        "framework_recorded_spend_usd": null
+      },
+      "configuration": "create_agent(model, middleware=[ModelCallLimitMiddleware(run_limit=3, exit_behavior='error')], checkpointer=MemorySaver()); one thread_id per agent",
+      "documentation_urls": [
+        "https://docs.langchain.com/oss/python/langchain/middleware/built-in#model-call-limit"
+      ],
+      "notes": "Source: langchain/agents/middleware/model_call_limit.py in the benchmark venv. before_model compares the counts in graph state with the limits; after_model increments them. Counting is in calls, not money. Each agent's run makes one call, far below its own limit; nothing counts across agents."
+    },
+    {
+      "framework": "langgraph",
+      "version": "1.2.16 (langchain==1.4.6)",
+      "scenario_id": "S3a",
+      "scenario_name": "parallel spending, estimate equals actual cost",
+      "supported": "No (bounds graph steps, not calls or cost)",
+      "measured_numbers": {
+        "feature": "recursion_limit on a fan-out graph",
+        "case": "a",
+        "case_label": "estimate equals actual cost",
+        "mode": "parallel",
+        "parallel_agents": 10,
+        "limit_usd": "0.0300",
+        "limit_calls_at_estimate": 3,
+        "estimated_cost_per_call_usd": "0.0100",
+        "actual_cost_per_call_usd": "0.0100",
+        "calls_that_fit_at_actual_cost": 3,
+        "admitted_calls": 10,
+        "refused_before_call": 0,
+        "runs_that_errored_after_their_call": 0,
+        "total_spend_usd": "0.1000",
+        "overspend_usd": "0.0700",
+        "overspend_percent_of_limit": 233,
+        "framework_recorded_spend_usd": null
+      },
+      "configuration": "StateGraph with Send(...) to 10 worker nodes; graph.ainvoke(..., {'recursion_limit': 3})",
+      "documentation_urls": [
+        "https://docs.langchain.com/oss/python/langgraph/graph-api#recursion-limit"
+      ],
+      "notes": "recursion_limit caps the number of supersteps in one invocation. All parallel Send branches run in the same superstep, so it does not limit how many model calls run at once."
+    },
+    {
+      "framework": "langgraph",
+      "version": "1.2.16 (langchain==1.4.6)",
+      "scenario_id": "S3b",
+      "scenario_name": "parallel spending, estimate lower than actual (reply 2x the estimated cost)",
+      "supported": "Partial (call count per thread; no cost limit)",
+      "measured_numbers": {
+        "feature": "ModelCallLimitMiddleware(thread_limit), one shared thread",
+        "case": "b",
+        "case_label": "estimate lower than actual (reply 2x the estimated cost)",
+        "mode": "parallel",
+        "parallel_agents": 10,
+        "limit_usd": "0.0300",
+        "limit_calls_at_estimate": 3,
+        "estimated_cost_per_call_usd": "0.0100",
+        "actual_cost_per_call_usd": "0.0200",
+        "calls_that_fit_at_actual_cost": 1,
+        "admitted_calls": 10,
+        "refused_before_call": 0,
+        "runs_that_errored_after_their_call": 0,
+        "total_spend_usd": "0.2000",
+        "overspend_usd": "0.1700",
+        "overspend_percent_of_limit": 567,
+        "framework_recorded_spend_usd": null
+      },
+      "configuration": "create_agent(model, middleware=[ModelCallLimitMiddleware(thread_limit=3, exit_behavior='error')], checkpointer=MemorySaver()); all invocations use the same thread_id",
+      "documentation_urls": [
+        "https://docs.langchain.com/oss/python/langchain/middleware/built-in#model-call-limit"
+      ],
+      "notes": "Source: langchain/agents/middleware/model_call_limit.py in the benchmark venv. before_model compares the counts in graph state with the limits; after_model increments them. Counting is in calls, not money. Parallel invocations on one thread each read the checkpointed count before any of them writes it back, so the limit only holds when invocations run one after another."
+    },
+    {
+      "framework": "langgraph",
+      "version": "1.2.16 (langchain==1.4.6)",
+      "scenario_id": "S3b",
+      "scenario_name": "parallel spending, estimate lower than actual (reply 2x the estimated cost)",
+      "supported": "No shared limit (limit is per run)",
+      "measured_numbers": {
+        "feature": "ModelCallLimitMiddleware(run_limit), thread per agent",
+        "case": "b",
+        "case_label": "estimate lower than actual (reply 2x the estimated cost)",
+        "mode": "parallel",
+        "parallel_agents": 10,
+        "limit_usd": "0.0300",
+        "limit_calls_at_estimate": 3,
+        "estimated_cost_per_call_usd": "0.0100",
+        "actual_cost_per_call_usd": "0.0200",
+        "calls_that_fit_at_actual_cost": 1,
+        "admitted_calls": 10,
+        "refused_before_call": 0,
+        "runs_that_errored_after_their_call": 0,
+        "total_spend_usd": "0.2000",
+        "overspend_usd": "0.1700",
+        "overspend_percent_of_limit": 567,
+        "framework_recorded_spend_usd": null
+      },
+      "configuration": "create_agent(model, middleware=[ModelCallLimitMiddleware(run_limit=3, exit_behavior='error')], checkpointer=MemorySaver()); one thread_id per agent",
+      "documentation_urls": [
+        "https://docs.langchain.com/oss/python/langchain/middleware/built-in#model-call-limit"
+      ],
+      "notes": "Source: langchain/agents/middleware/model_call_limit.py in the benchmark venv. before_model compares the counts in graph state with the limits; after_model increments them. Counting is in calls, not money. Each agent's run makes one call, far below its own limit; nothing counts across agents."
+    },
+    {
+      "framework": "langgraph",
+      "version": "1.2.16 (langchain==1.4.6)",
+      "scenario_id": "S3b",
+      "scenario_name": "parallel spending, estimate lower than actual (reply 2x the estimated cost)",
+      "supported": "No (bounds graph steps, not calls or cost)",
+      "measured_numbers": {
+        "feature": "recursion_limit on a fan-out graph",
+        "case": "b",
+        "case_label": "estimate lower than actual (reply 2x the estimated cost)",
+        "mode": "parallel",
+        "parallel_agents": 10,
+        "limit_usd": "0.0300",
+        "limit_calls_at_estimate": 3,
+        "estimated_cost_per_call_usd": "0.0100",
+        "actual_cost_per_call_usd": "0.0200",
+        "calls_that_fit_at_actual_cost": 1,
+        "admitted_calls": 10,
+        "refused_before_call": 0,
+        "runs_that_errored_after_their_call": 0,
+        "total_spend_usd": "0.2000",
+        "overspend_usd": "0.1700",
+        "overspend_percent_of_limit": 567,
+        "framework_recorded_spend_usd": null
+      },
+      "configuration": "StateGraph with Send(...) to 10 worker nodes; graph.ainvoke(..., {'recursion_limit': 3})",
+      "documentation_urls": [
+        "https://docs.langchain.com/oss/python/langgraph/graph-api#recursion-limit"
+      ],
+      "notes": "recursion_limit caps the number of supersteps in one invocation. All parallel Send branches run in the same superstep, so it does not limit how many model calls run at once."
+    },
+    {
+      "framework": "langgraph",
+      "version": "1.2.16 (langchain==1.4.6)",
+      "scenario_id": "S3c",
+      "scenario_name": "parallel spending, estimate higher than actual (reply 0.5x the estimated cost)",
+      "supported": "Partial (call count per thread; no cost limit)",
+      "measured_numbers": {
+        "feature": "ModelCallLimitMiddleware(thread_limit), one shared thread",
+        "case": "c",
+        "case_label": "estimate higher than actual (reply 0.5x the estimated cost)",
+        "mode": "parallel",
+        "parallel_agents": 10,
+        "limit_usd": "0.0300",
+        "limit_calls_at_estimate": 3,
+        "estimated_cost_per_call_usd": "0.0100",
+        "actual_cost_per_call_usd": "0.0050",
+        "calls_that_fit_at_actual_cost": 6,
+        "admitted_calls": 10,
+        "refused_before_call": 0,
+        "runs_that_errored_after_their_call": 0,
+        "total_spend_usd": "0.0500",
+        "overspend_usd": "0.0200",
+        "overspend_percent_of_limit": 67,
+        "framework_recorded_spend_usd": null
+      },
+      "configuration": "create_agent(model, middleware=[ModelCallLimitMiddleware(thread_limit=3, exit_behavior='error')], checkpointer=MemorySaver()); all invocations use the same thread_id",
+      "documentation_urls": [
+        "https://docs.langchain.com/oss/python/langchain/middleware/built-in#model-call-limit"
+      ],
+      "notes": "Source: langchain/agents/middleware/model_call_limit.py in the benchmark venv. before_model compares the counts in graph state with the limits; after_model increments them. Counting is in calls, not money. Parallel invocations on one thread each read the checkpointed count before any of them writes it back, so the limit only holds when invocations run one after another."
+    },
+    {
+      "framework": "langgraph",
+      "version": "1.2.16 (langchain==1.4.6)",
+      "scenario_id": "S3c",
+      "scenario_name": "parallel spending, estimate higher than actual (reply 0.5x the estimated cost)",
+      "supported": "No shared limit (limit is per run)",
+      "measured_numbers": {
+        "feature": "ModelCallLimitMiddleware(run_limit), thread per agent",
+        "case": "c",
+        "case_label": "estimate higher than actual (reply 0.5x the estimated cost)",
+        "mode": "parallel",
+        "parallel_agents": 10,
+        "limit_usd": "0.0300",
+        "limit_calls_at_estimate": 3,
+        "estimated_cost_per_call_usd": "0.0100",
+        "actual_cost_per_call_usd": "0.0050",
+        "calls_that_fit_at_actual_cost": 6,
+        "admitted_calls": 10,
+        "refused_before_call": 0,
+        "runs_that_errored_after_their_call": 0,
+        "total_spend_usd": "0.0500",
+        "overspend_usd": "0.0200",
+        "overspend_percent_of_limit": 67,
+        "framework_recorded_spend_usd": null
+      },
+      "configuration": "create_agent(model, middleware=[ModelCallLimitMiddleware(run_limit=3, exit_behavior='error')], checkpointer=MemorySaver()); one thread_id per agent",
+      "documentation_urls": [
+        "https://docs.langchain.com/oss/python/langchain/middleware/built-in#model-call-limit"
+      ],
+      "notes": "Source: langchain/agents/middleware/model_call_limit.py in the benchmark venv. before_model compares the counts in graph state with the limits; after_model increments them. Counting is in calls, not money. Each agent's run makes one call, far below its own limit; nothing counts across agents."
+    },
+    {
+      "framework": "langgraph",
+      "version": "1.2.16 (langchain==1.4.6)",
+      "scenario_id": "S3c",
+      "scenario_name": "parallel spending, estimate higher than actual (reply 0.5x the estimated cost)",
+      "supported": "No (bounds graph steps, not calls or cost)",
+      "measured_numbers": {
+        "feature": "recursion_limit on a fan-out graph",
+        "case": "c",
+        "case_label": "estimate higher than actual (reply 0.5x the estimated cost)",
+        "mode": "parallel",
+        "parallel_agents": 10,
+        "limit_usd": "0.0300",
+        "limit_calls_at_estimate": 3,
+        "estimated_cost_per_call_usd": "0.0100",
+        "actual_cost_per_call_usd": "0.0050",
+        "calls_that_fit_at_actual_cost": 6,
+        "admitted_calls": 10,
+        "refused_before_call": 0,
+        "runs_that_errored_after_their_call": 0,
+        "total_spend_usd": "0.0500",
+        "overspend_usd": "0.0200",
+        "overspend_percent_of_limit": 67,
+        "framework_recorded_spend_usd": null
+      },
+      "configuration": "StateGraph with Send(...) to 10 worker nodes; graph.ainvoke(..., {'recursion_limit': 3})",
+      "documentation_urls": [
+        "https://docs.langchain.com/oss/python/langgraph/graph-api#recursion-limit"
+      ],
+      "notes": "recursion_limit caps the number of supersteps in one invocation. All parallel Send branches run in the same superstep, so it does not limit how many model calls run at once."
+    },
+    {
+      "framework": "langgraph",
+      "version": "1.2.16 (langchain==1.4.6)",
+      "scenario_id": "S3a-seq",
+      "scenario_name": "sequential control, estimate equals actual cost",
+      "supported": "Partial (call count per thread; no cost limit)",
+      "measured_numbers": {
+        "feature": "ModelCallLimitMiddleware(thread_limit), one shared thread",
+        "case": "a",
+        "case_label": "estimate equals actual cost",
+        "mode": "sequential",
+        "parallel_agents": 10,
+        "limit_usd": "0.0300",
+        "limit_calls_at_estimate": 3,
+        "estimated_cost_per_call_usd": "0.0100",
+        "actual_cost_per_call_usd": "0.0100",
+        "calls_that_fit_at_actual_cost": 3,
+        "admitted_calls": 3,
+        "refused_before_call": 7,
+        "runs_that_errored_after_their_call": 0,
+        "total_spend_usd": "0.0300",
+        "overspend_usd": "0.0000",
+        "overspend_percent_of_limit": 0,
+        "framework_recorded_spend_usd": null
+      },
+      "configuration": "create_agent(model, middleware=[ModelCallLimitMiddleware(thread_limit=3, exit_behavior='error')], checkpointer=MemorySaver()); all invocations use the same thread_id",
+      "documentation_urls": [
+        "https://docs.langchain.com/oss/python/langchain/middleware/built-in#model-call-limit"
+      ],
+      "notes": "Source: langchain/agents/middleware/model_call_limit.py in the benchmark venv. before_model compares the counts in graph state with the limits; after_model increments them. Counting is in calls, not money. Parallel invocations on one thread each read the checkpointed count before any of them writes it back, so the limit only holds when invocations run one after another."
+    },
+    {
+      "framework": "langgraph",
+      "version": "1.2.16 (langchain==1.4.6)",
+      "scenario_id": "S3a-seq",
+      "scenario_name": "sequential control, estimate equals actual cost",
+      "supported": "No shared limit (limit is per run)",
+      "measured_numbers": {
+        "feature": "ModelCallLimitMiddleware(run_limit), thread per agent",
+        "case": "a",
+        "case_label": "estimate equals actual cost",
+        "mode": "sequential",
+        "parallel_agents": 10,
+        "limit_usd": "0.0300",
+        "limit_calls_at_estimate": 3,
+        "estimated_cost_per_call_usd": "0.0100",
+        "actual_cost_per_call_usd": "0.0100",
+        "calls_that_fit_at_actual_cost": 3,
+        "admitted_calls": 10,
+        "refused_before_call": 0,
+        "runs_that_errored_after_their_call": 0,
+        "total_spend_usd": "0.1000",
+        "overspend_usd": "0.0700",
+        "overspend_percent_of_limit": 233,
+        "framework_recorded_spend_usd": null
+      },
+      "configuration": "create_agent(model, middleware=[ModelCallLimitMiddleware(run_limit=3, exit_behavior='error')], checkpointer=MemorySaver()); one thread_id per agent",
+      "documentation_urls": [
+        "https://docs.langchain.com/oss/python/langchain/middleware/built-in#model-call-limit"
+      ],
+      "notes": "Source: langchain/agents/middleware/model_call_limit.py in the benchmark venv. before_model compares the counts in graph state with the limits; after_model increments them. Counting is in calls, not money. Each agent's run makes one call, far below its own limit; nothing counts across agents."
+    },
+    {
+      "framework": "langgraph",
+      "version": "1.2.16 (langchain==1.4.6)",
+      "scenario_id": "S3b-seq",
+      "scenario_name": "sequential control, estimate lower than actual (reply 2x the estimated cost)",
+      "supported": "Partial (call count per thread; no cost limit)",
+      "measured_numbers": {
+        "feature": "ModelCallLimitMiddleware(thread_limit), one shared thread",
+        "case": "b",
+        "case_label": "estimate lower than actual (reply 2x the estimated cost)",
+        "mode": "sequential",
+        "parallel_agents": 10,
+        "limit_usd": "0.0300",
+        "limit_calls_at_estimate": 3,
+        "estimated_cost_per_call_usd": "0.0100",
+        "actual_cost_per_call_usd": "0.0200",
+        "calls_that_fit_at_actual_cost": 1,
+        "admitted_calls": 3,
+        "refused_before_call": 7,
+        "runs_that_errored_after_their_call": 0,
+        "total_spend_usd": "0.0600",
+        "overspend_usd": "0.0300",
+        "overspend_percent_of_limit": 100,
+        "framework_recorded_spend_usd": null
+      },
+      "configuration": "create_agent(model, middleware=[ModelCallLimitMiddleware(thread_limit=3, exit_behavior='error')], checkpointer=MemorySaver()); all invocations use the same thread_id",
+      "documentation_urls": [
+        "https://docs.langchain.com/oss/python/langchain/middleware/built-in#model-call-limit"
+      ],
+      "notes": "Source: langchain/agents/middleware/model_call_limit.py in the benchmark venv. before_model compares the counts in graph state with the limits; after_model increments them. Counting is in calls, not money. Parallel invocations on one thread each read the checkpointed count before any of them writes it back, so the limit only holds when invocations run one after another."
+    },
+    {
+      "framework": "langgraph",
+      "version": "1.2.16 (langchain==1.4.6)",
+      "scenario_id": "S3b-seq",
+      "scenario_name": "sequential control, estimate lower than actual (reply 2x the estimated cost)",
+      "supported": "No shared limit (limit is per run)",
+      "measured_numbers": {
+        "feature": "ModelCallLimitMiddleware(run_limit), thread per agent",
+        "case": "b",
+        "case_label": "estimate lower than actual (reply 2x the estimated cost)",
+        "mode": "sequential",
+        "parallel_agents": 10,
+        "limit_usd": "0.0300",
+        "limit_calls_at_estimate": 3,
+        "estimated_cost_per_call_usd": "0.0100",
+        "actual_cost_per_call_usd": "0.0200",
+        "calls_that_fit_at_actual_cost": 1,
+        "admitted_calls": 10,
+        "refused_before_call": 0,
+        "runs_that_errored_after_their_call": 0,
+        "total_spend_usd": "0.2000",
+        "overspend_usd": "0.1700",
+        "overspend_percent_of_limit": 567,
+        "framework_recorded_spend_usd": null
+      },
+      "configuration": "create_agent(model, middleware=[ModelCallLimitMiddleware(run_limit=3, exit_behavior='error')], checkpointer=MemorySaver()); one thread_id per agent",
+      "documentation_urls": [
+        "https://docs.langchain.com/oss/python/langchain/middleware/built-in#model-call-limit"
+      ],
+      "notes": "Source: langchain/agents/middleware/model_call_limit.py in the benchmark venv. before_model compares the counts in graph state with the limits; after_model increments them. Counting is in calls, not money. Each agent's run makes one call, far below its own limit; nothing counts across agents."
+    },
+    {
+      "framework": "langgraph",
+      "version": "1.2.16 (langchain==1.4.6)",
+      "scenario_id": "S3c-seq",
+      "scenario_name": "sequential control, estimate higher than actual (reply 0.5x the estimated cost)",
+      "supported": "Partial (call count per thread; no cost limit)",
+      "measured_numbers": {
+        "feature": "ModelCallLimitMiddleware(thread_limit), one shared thread",
+        "case": "c",
+        "case_label": "estimate higher than actual (reply 0.5x the estimated cost)",
+        "mode": "sequential",
+        "parallel_agents": 10,
+        "limit_usd": "0.0300",
+        "limit_calls_at_estimate": 3,
+        "estimated_cost_per_call_usd": "0.0100",
+        "actual_cost_per_call_usd": "0.0050",
+        "calls_that_fit_at_actual_cost": 6,
+        "admitted_calls": 3,
+        "refused_before_call": 7,
+        "runs_that_errored_after_their_call": 0,
+        "total_spend_usd": "0.0150",
+        "overspend_usd": "0.0000",
+        "overspend_percent_of_limit": 0,
+        "framework_recorded_spend_usd": null
+      },
+      "configuration": "create_agent(model, middleware=[ModelCallLimitMiddleware(thread_limit=3, exit_behavior='error')], checkpointer=MemorySaver()); all invocations use the same thread_id",
+      "documentation_urls": [
+        "https://docs.langchain.com/oss/python/langchain/middleware/built-in#model-call-limit"
+      ],
+      "notes": "Source: langchain/agents/middleware/model_call_limit.py in the benchmark venv. before_model compares the counts in graph state with the limits; after_model increments them. Counting is in calls, not money. Parallel invocations on one thread each read the checkpointed count before any of them writes it back, so the limit only holds when invocations run one after another."
+    },
+    {
+      "framework": "langgraph",
+      "version": "1.2.16 (langchain==1.4.6)",
+      "scenario_id": "S3c-seq",
+      "scenario_name": "sequential control, estimate higher than actual (reply 0.5x the estimated cost)",
+      "supported": "No shared limit (limit is per run)",
+      "measured_numbers": {
+        "feature": "ModelCallLimitMiddleware(run_limit), thread per agent",
+        "case": "c",
+        "case_label": "estimate higher than actual (reply 0.5x the estimated cost)",
+        "mode": "sequential",
+        "parallel_agents": 10,
+        "limit_usd": "0.0300",
+        "limit_calls_at_estimate": 3,
+        "estimated_cost_per_call_usd": "0.0100",
+        "actual_cost_per_call_usd": "0.0050",
+        "calls_that_fit_at_actual_cost": 6,
+        "admitted_calls": 10,
+        "refused_before_call": 0,
+        "runs_that_errored_after_their_call": 0,
+        "total_spend_usd": "0.0500",
+        "overspend_usd": "0.0200",
+        "overspend_percent_of_limit": 67,
+        "framework_recorded_spend_usd": null
+      },
+      "configuration": "create_agent(model, middleware=[ModelCallLimitMiddleware(run_limit=3, exit_behavior='error')], checkpointer=MemorySaver()); one thread_id per agent",
+      "documentation_urls": [
+        "https://docs.langchain.com/oss/python/langchain/middleware/built-in#model-call-limit"
+      ],
+      "notes": "Source: langchain/agents/middleware/model_call_limit.py in the benchmark venv. before_model compares the counts in graph state with the limits; after_model increments them. Counting is in calls, not money. Each agent's run makes one call, far below its own limit; nothing counts across agents."
     }
   ]
 }

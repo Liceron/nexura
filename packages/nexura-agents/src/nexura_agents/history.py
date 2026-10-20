@@ -24,6 +24,7 @@ from nexura_agents.errors import SDKValidationError
 from nexura_agents.run_context import RunContext
 from nexura_agents.tokenizers import TokenEstimator, default_token_estimator
 from nexura_agents.types import Message
+from nexura_agents.usage import admission
 
 # The runner's output-retry feedback is a user message, but it continues the current turn.
 OUTPUT_RETRY_PREFIX = "Your response did not match the required JSON schema: "
@@ -338,7 +339,8 @@ def summarize_older_turns(
                 f"New conversation excerpt:\n<excerpt>\n{transcript}\n</excerpt>\n\n"
                 "Write one updated summary covering both."
             )
-        response = await model.generate(
+        response = await admission.generate(
+            model,
             [Message(role="system", content=system_text), Message(role="user", content=body)],
             None,
             timeout=timeout,

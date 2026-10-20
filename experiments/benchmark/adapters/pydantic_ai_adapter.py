@@ -5,15 +5,30 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.metadata
 import os
+from decimal import Decimal
 from typing import Any
 
 from pydantic_ai import Agent, ApprovalRequired, RunContext, RunUsage, UsageLimits
+from pydantic_ai.exceptions import UsageLimitExceeded
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.tools import DeferredToolRequests, DeferredToolResults, ToolApproved
+from pydantic_ai.usage import RequestUsage
+from pydantic_ai_harness.spend import Budget, SpendLimits
 
 from .base import BaseAdapter, ScenarioResult
+from .spending import (
+    LIMIT_CALLS,
+    LIMIT_USD,
+    MODEL_LATENCY_S,
+    N_AGENTS,
+    Mode,
+    SpendingCase,
+    make_spending_result,
+    tokens_cost_usd,
+)
 
 # Suppress ASCII banner for clean headless benchmark runs
 os.environ["PYDANTIC_AI_NO_BANNER"] = "1"
@@ -23,7 +38,10 @@ class PydanticAIAdapter(BaseAdapter):
     """Adapter benchmarking Pydantic AI."""
 
     framework_name = "pydantic-ai"
-    version = "2.57.0"
+
+    def __init__(self) -> None:
+        self.version = importlib.metadata.version("pydantic-ai")
+        self.harness_version = importlib.metadata.version("pydantic-ai-harness")
 
     async def run_scenario_s1_unauthorized_side_effect(self) -> ScenarioResult:
         """S1: Write tool needing human approval; count unauthorized executions."""
@@ -178,8 +196,8 @@ class PydanticAIAdapter(BaseAdapter):
         return ScenarioResult(
             framework=self.framework_name,
             version=self.version,
-            scenario_id="S3",
-            scenario_name="parallel spending",
+            scenario_id="S3-legacy",
+            scenario_name="parallel spending (legacy P33 setup, superseded by S3a-c)",
             supported="Partial (shared counter, not concurrent admission)",
             measured_numbers={
                 "allowance_calls": allowance_calls,
@@ -203,3 +221,139 @@ class PydanticAIAdapter(BaseAdapter):
                 "when requests==0, admitting all 10 calls."
             ),
         )
+
+    @staticmethod
+    def _priced_model(case: SpendingCase, counter: list[int], *, with_cost: bool) -> FunctionModel:
+        """Fake model reporting the case's usage; optionally with the response cost set.
+
+        ``FunctionModel`` names are unknown to genai-prices, so ``UsageLimits.cost_limit`` can
+        only see a cost the response carries (``fill_response_cost`` never overwrites one).
+        ``SpendLimits`` prices through its documented ``price=`` hook instead.
+        """
+
+        async def model_fn(messages: Any, info: Any) -> ModelResponse:
+            counter[0] += 1
+            await asyncio.sleep(MODEL_LATENCY_S)  # keep every admitted call in flight together
+            usage = RequestUsage(input_tokens=case.input_tokens, output_tokens=case.output_tokens)
+            if with_cost:
+                usage.cost = case.actual_cost_usd
+            return ModelResponse(parts=[TextPart("Response")], usage=usage)
+
+        return FunctionModel(model_fn, model_name="bench-fake-model")
+
+    async def _run_workers(self, mode: Mode, run_one: Any, counter: list[int]) -> list[str]:
+        async def worker(i: int) -> str:
+            calls_before = counter[0]
+            try:
+                await run_one(i)
+                return "ok"
+            except UsageLimitExceeded:  # SpendLimitExceeded subclasses UsageLimitExceeded
+                return "refused" if counter[0] == calls_before else "errored_after_call"
+
+        if mode == "parallel":
+            return list(await asyncio.gather(*(worker(i) for i in range(N_AGENTS))))
+        return [await worker(i) for i in range(N_AGENTS)]
+
+    async def run_spending(self, case: SpendingCase, mode: Mode) -> list[ScenarioResult]:
+        """Fair S3: UsageLimits with a shared RunUsage, and harness SpendLimits."""
+        results: list[ScenarioResult] = []
+
+        # 1. Core UsageLimits. A limit applies to one run; the documented way to make several
+        #    agents count against one allowance is to pass the same `usage` object
+        #    (agent delegation). Request and USD caps are both set.
+        counter = [0]
+        limits = UsageLimits(request_limit=LIMIT_CALLS, cost_limit=LIMIT_USD)
+        shared_usage = RunUsage()
+        agent = Agent(self._priced_model(case, counter, with_cost=True))
+
+        async def run_usage_limits(i: int) -> None:
+            await agent.run("Query", usage_limits=limits, usage=shared_usage)
+
+        outcomes = await self._run_workers(mode, run_usage_limits, counter)
+        results.append(
+            make_spending_result(
+                framework=self.framework_name,
+                version=self.version,
+                feature="UsageLimits + shared RunUsage",
+                case=case,
+                mode=mode,
+                admitted_calls=counter[0],
+                refused_runs=outcomes.count("refused"),
+                errored_after_call_runs=outcomes.count("errored_after_call"),
+                supported="Partial (per-run limit; sharing is the delegation pattern)",
+                configuration=(
+                    f"agent.run(usage_limits=UsageLimits(request_limit={LIMIT_CALLS}, "
+                    f"cost_limit=Decimal('{LIMIT_USD}')), usage=shared_run_usage)"
+                ),
+                documentation_urls=[
+                    "https://pydantic.dev/docs/ai/core-concepts/agent/#usage-limits",
+                    "https://pydantic.dev/docs/ai/guides/multi-agent-applications/#agent-delegation",
+                ],
+                notes=(
+                    "UsageLimits checks the request count and cost before each request and the "
+                    "cost again after each response. It reserves nothing, so parallel runs all "
+                    "pass the pre-check while the shared counter is still zero. A run whose "
+                    "response pushes the shared cost over the limit raises UsageLimitExceeded "
+                    "after the call was already made and paid for. The docs say: 'Don't rely on "
+                    "cost_limit as a hard billing guarantee.'"
+                ),
+                framework_recorded_spend_usd=(
+                    Decimal(str(shared_usage.cost)) if shared_usage.cost is not None else None
+                ),
+            )
+        )
+
+        # 2. pydantic-ai-harness SpendLimits: a USD budget on a store shared by every run of the
+        #    agent (the default InMemorySpendStore belongs to the capability instance).
+        counter = [0]
+
+        def price(response: ModelResponse) -> Decimal:
+            return tokens_cost_usd(response.usage.input_tokens + response.usage.output_tokens)
+
+        spend_limits: SpendLimits[None] = SpendLimits(
+            budgets=[Budget(usd=LIMIT_USD, window="total")],
+            price=price,
+            on_unpriced="raise",
+        )
+        spend_agent = Agent(
+            self._priced_model(case, counter, with_cost=False), capabilities=[spend_limits]
+        )
+
+        async def run_spend_limits(i: int) -> None:
+            await spend_agent.run("Query")
+
+        outcomes = await self._run_workers(mode, run_spend_limits, counter)
+        statuses = await spend_limits.status()
+        recorded = statuses[0].spent.usd if statuses else None
+        results.append(
+            make_spending_result(
+                framework=self.framework_name,
+                version=f"{self.version} (pydantic-ai-harness=={self.harness_version})",
+                feature="SpendLimits (harness)",
+                case=case,
+                mode=mode,
+                admitted_calls=counter[0],
+                refused_runs=outcomes.count("refused"),
+                errored_after_call_runs=outcomes.count("errored_after_call"),
+                supported="Partial (documented as a brake, not a reservation)",
+                configuration=(
+                    "Agent(..., capabilities=[SpendLimits(budgets=[Budget("
+                    f"usd=Decimal('{LIMIT_USD}'), window='total')], price=..., "
+                    "on_unpriced='raise')])"
+                ),
+                documentation_urls=[
+                    "https://pydantic.dev/docs/ai/harness/spend/",
+                ],
+                notes=(
+                    "SpendLimits records each priced response and refuses the next request once "
+                    "a window is spent. Its docs say: 'The request that crosses the line "
+                    "completes, and concurrent runs can each pass the check before any of them "
+                    "records anything' and 'Admission is all that call does: it reserves "
+                    "nothing.'"
+                ),
+                framework_recorded_spend_usd=Decimal(str(recorded))
+                if recorded is not None
+                else None,
+            )
+        )
+        return results

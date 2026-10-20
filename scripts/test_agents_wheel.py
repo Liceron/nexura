@@ -2,10 +2,11 @@
 
     uv run python scripts/test_agents_wheel.py --python 3.11
 
-Builds the wheel, installs it (with the ``otel`` extra and the OpenTelemetry SDK used by
-the tracing tests) into a fresh virtual environment for the given Python, copies the
-agent test suite to a temporary directory and runs it there. Test files that need the
-platform package (``nexura_runtime``) are skipped, since the wheel does not contain it.
+Builds the wheel, installs it (with the ``otel`` extra, the OpenTelemetry SDK used by the
+tracing tests and mypy for the static typing tests) into a fresh virtual environment for
+the given Python, copies the agent test suite to a temporary directory and runs it there.
+Test files that need the platform package (``nexura_runtime``) are skipped, since the
+wheel does not contain it.
 Exit status is pytest's. Used by CI for Python 3.11, 3.12 and 3.13.
 """
 
@@ -21,6 +22,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 TESTS = ROOT / "tests" / "agents"
 OTEL_SDK = "opentelemetry-sdk==1.45.0"  # matches the version locked in uv.lock
+MYPY = "mypy==1.20.2"  # matches uv.lock; the typed-result tests run mypy on snippets
 
 
 def _is_alias(dotted: str) -> bool:
@@ -62,6 +64,7 @@ def main() -> int:
                 py,
                 f"{wheel}[otel]",
                 OTEL_SDK,
+                MYPY,
                 "pytest<9",
                 "pytest-asyncio<1",
             ]

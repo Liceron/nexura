@@ -6,7 +6,10 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .spending import Mode, SpendingCase
 
 
 @dataclass
@@ -58,4 +61,11 @@ class BaseAdapter(ABC):
 
     @abstractmethod
     async def run_scenario_s3_parallel_spending(self) -> ScenarioResult:
-        """S3: N=10 parallel agents share allowance K; count admitted calls above allowance."""
+        """Legacy P33 S3 setup, kept for its tests; superseded by ``run_spending``."""
+
+    @abstractmethod
+    async def run_spending(self, case: SpendingCase, mode: Mode) -> list[ScenarioResult]:
+        """Fair S3 (P35 A5): each documented budget feature against one spending case.
+
+        ``mode="parallel"`` runs all agents at once; ``"sequential"`` is the control run.
+        """

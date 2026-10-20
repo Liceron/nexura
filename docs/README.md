@@ -49,6 +49,8 @@ one owner's projects. They do not add accounts or tenant isolation.
   regression checks, all offline.
 - [Human approval](approvals.md): pause before risky tools and resume later.
 - [Durable runs](durable-runs.md): checkpoint runs and recover them after a crash.
+- [Durable execution contract](durable-execution.md): Contract v1 types and target
+  recovery rules (being implemented; current behavior is linked from the guide).
 - [Reproducing failures](reproducing-failures.md): portable recordings and offline
   replay with model and tool fixtures. Uses best-effort redaction of known secret
   shapes; review a bundle before sharing it.

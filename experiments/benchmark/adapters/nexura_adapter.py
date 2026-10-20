@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib.metadata
+from decimal import Decimal
 from typing import Any
 
 from nexura_agents import (
@@ -20,11 +22,24 @@ from nexura_agents import (
 from nexura_agents.contracts.context import ExecutionContext
 from nexura_agents.providers.base import BaseProvider
 from nexura_agents.providers.types import GenerationRequest, ProviderCapabilities
-from nexura_agents.types import ModelResponse
+from nexura_agents.types import Message, ModelResponse
 from nexura_agents.usage import BudgetConfig, BudgetManager
 from nexura_agents.usage.errors import BudgetExceededError
+from nexura_agents.usage.models import ModelPricing
+from nexura_agents.usage.pricing import PricingTable
 
 from .base import BaseAdapter, ScenarioResult
+from .spending import (
+    ESTIMATED_TOKENS_PER_CALL,
+    FAKE_MODEL_ID,
+    LIMIT_USD,
+    MODEL_LATENCY_S,
+    N_AGENTS,
+    PRICE_PER_MILLION_USD,
+    Mode,
+    SpendingCase,
+    make_spending_result,
+)
 
 
 class _CrashError(BaseException):
@@ -65,11 +80,68 @@ class _ScriptedFakeProvider(BaseProvider):
         raise NotImplementedError
 
 
+class _PricedFakeProvider(BaseProvider):
+    """Fake priced model for the fair spending scenario.
+
+    The admission estimate is fixed (``ESTIMATED_TOKENS_PER_CALL``) so the estimate-versus-actual
+    relation is controlled by the case, not by the SDK's heuristic. The reported usage is the
+    case's actual usage, which may be lower or higher than the estimate.
+    """
+
+    def __init__(self, case: SpendingCase, counter: list[int]) -> None:
+        super().__init__(FAKE_MODEL_ID, ProviderCapabilities(can_generate=True, can_tools=True))
+        self.counter = counter
+        self.case = case
+
+    def _estimate_tokens(self, request: GenerationRequest) -> int:
+        return ESTIMATED_TOKENS_PER_CALL
+
+    async def _generate_internal(
+        self, request: GenerationRequest, context: ExecutionContext | None
+    ) -> ModelResponse:
+        self.counter[0] += 1
+        await asyncio.sleep(MODEL_LATENCY_S)  # keep every admitted call in flight together
+        return ModelResponse(
+            message=Message(role="assistant", content="done"),
+            usage=Usage(
+                prompt_tokens=self.case.input_tokens,
+                completion_tokens=self.case.output_tokens,
+                total_tokens=self.case.actual_tokens,
+            ),
+        )
+
+    async def _stream_internal(
+        self, request: GenerationRequest, context: ExecutionContext | None
+    ) -> Any:
+        raise NotImplementedError
+
+    async def _embed_internal(self, texts: list[str], context: ExecutionContext | None) -> Any:
+        raise NotImplementedError
+
+
+def _bench_pricing_table() -> PricingTable:
+    return PricingTable(
+        version="benchmark-fake-2026-10-20",
+        date="2026-10-20",
+        source="benchmark fake price",
+        models={
+            FAKE_MODEL_ID: ModelPricing(
+                model_id=FAKE_MODEL_ID,
+                input_cost_per_million=PRICE_PER_MILLION_USD,
+                output_cost_per_million=PRICE_PER_MILLION_USD,
+                source="benchmark fake price",
+            )
+        },
+    )
+
+
 class NexuraAdapter(BaseAdapter):
     """Adapter benchmarking Nexura standalone SDK."""
 
     framework_name = "nexura"
-    version = "0.4.0"
+
+    def __init__(self) -> None:
+        self.version = importlib.metadata.version("nexura-agents")
 
     async def run_scenario_s1_unauthorized_side_effect(self) -> ScenarioResult:
         """S1: Write tool needing human approval; count unauthorized executions."""
@@ -323,8 +395,8 @@ class NexuraAdapter(BaseAdapter):
         return ScenarioResult(
             framework=self.framework_name,
             version=self.version,
-            scenario_id="S3",
-            scenario_name="parallel spending",
+            scenario_id="S3-legacy",
+            scenario_name="parallel spending (legacy P33 setup, superseded by S3a-c)",
             supported="Yes (shared allowance)",
             measured_numbers={
                 "allowance_calls": allowance_calls,
@@ -342,3 +414,65 @@ class NexuraAdapter(BaseAdapter):
                 "dispatched to provider models."
             ),
         )
+
+    async def run_spending(self, case: SpendingCase, mode: Mode) -> list[ScenarioResult]:
+        """Fair S3: shared USD run budget; each agent runs under a child budget."""
+        manager = BudgetManager(pricing_table=_bench_pricing_table())
+        root = manager.create_run_budget(
+            workspace_id="ws_benchmark",
+            run_id=f"shared_{case.case_id}_{mode}",
+            config=BudgetConfig(max_cost_usd=LIMIT_USD),
+            default_model=FAKE_MODEL_ID,
+        )
+        counter = [0]
+
+        async def worker(i: int) -> str:
+            child = root.create_child_budget(f"worker_{case.case_id}_{mode}_{i}")
+            agent = Agent(
+                name=f"agent_{i}",
+                instructions="Answer briefly.",
+                model=_PricedFakeProvider(case, counter),
+            )
+            calls_before = counter[0]
+            try:
+                await Runner(budget=child).run_async(agent, "Run query")
+                return "ok"
+            except BudgetExceededError:
+                return "refused" if counter[0] == calls_before else "errored_after_call"
+
+        if mode == "parallel":
+            outcomes = await asyncio.gather(*(worker(i) for i in range(N_AGENTS)))
+        else:
+            outcomes = [await worker(i) for i in range(N_AGENTS)]
+
+        status = root.get_status()
+        return [
+            make_spending_result(
+                framework=self.framework_name,
+                version=self.version,
+                feature="shared run budget (USD)",
+                case=case,
+                mode=mode,
+                admitted_calls=counter[0],
+                refused_runs=outcomes.count("refused"),
+                errored_after_call_runs=outcomes.count("errored_after_call"),
+                supported="Yes (reserves the estimate before each call)",
+                configuration=(
+                    "BudgetManager(pricing_table=...).create_run_budget("
+                    f"config=BudgetConfig(max_cost_usd=Decimal('{LIMIT_USD}'))); "
+                    "root.create_child_budget(...) per agent; Runner(budget=child)"
+                ),
+                documentation_urls=["docs/budgets-and-usage.md"],
+                notes=(
+                    "Admission reserves the estimated cost atomically before dispatch and settles "
+                    "the reported cost afterwards. It cannot refuse a call whose actual cost turns "
+                    "out larger than its reservation, so case (b) overspends; in case (c) the "
+                    "unused reservation is returned only after the calls settle, so in parallel "
+                    "fewer calls run than would have fit."
+                ),
+                framework_recorded_spend_usd=Decimal(status.total_spent_usd),
+                extra={
+                    "framework_reserved_after_run_usd": f"{Decimal(status.total_reserved_usd):.4f}",
+                },
+            )
+        ]

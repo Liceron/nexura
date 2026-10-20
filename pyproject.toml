@@ -13,6 +13,7 @@ classifiers = [
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3.12",
     "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
 ]
 dependencies = [
     "nexura-agents==0.4.0",
@@ -24,8 +25,11 @@ dependencies = [
 ]
 
 [project.urls]
+Homepage = "https://github.com/Liceron/nexura"
+Documentation = "https://github.com/Liceron/nexura/blob/main/docs/README.md"
 Source = "https://github.com/Liceron/nexura"
 Issues = "https://github.com/Liceron/nexura/issues"
+Changelog = "https://github.com/Liceron/nexura/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 # The REST service (`nexura-runtime serve`, `worker`, `create_api_app`) that Studio web and the
@@ -125,6 +129,9 @@ dev = [
 asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "-v --strict-markers"
+markers = [
+    "durability: real-process kill/takeover tests of the A6 execution contract (tests/durability)",
+]
 # pytest defaults plus the closed edition, which runs its own suite.
 norecursedirs = [
     "*.egg", ".*", "_darcs", "build", "CVS", "dist", "node_modules", "venv", "{arch}",

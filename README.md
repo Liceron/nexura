@@ -4,15 +4,15 @@ Nexura is a typed Python SDK for operational agents and approval-gated workflows
 
 ## Review the exact action
 
-Pause before a risky tool or workflow step and review its resolved inputs. Approval is bound to the action digest and expiry; editing the inputs requires a fresh approval, and a decision cannot be used twice. See [Human approval](docs/approvals.md) for the supported paths and limits.
+Pause before a risky tool or workflow step and review its resolved inputs. Approval is bound to the action digest and expiry; editing the inputs requires a fresh approval, and a decision cannot be used twice. See [Human approval](https://github.com/Liceron/nexura/blob/main/docs/approvals.md) for the supported paths and limits.
 
 ## Reproduce a failure offline
 
-Export a recorded run and replay it with scripted models and tool fixtures, without provider keys. Recordings use best-effort redaction of known secret shapes; review every bundle before sharing it. See [Reproducing failures](docs/reproducing-failures.md).
+Export a recorded run and replay it with scripted models and tool fixtures, without provider keys. Recordings use best-effort redaction of known secret shapes; review every bundle before sharing it. See [Reproducing failures](https://github.com/Liceron/nexura/blob/main/docs/reproducing-failures.md).
 
 ## Control shared spending
 
-Agents and workflow steps can share a budget that reserves estimated cost before dispatch. Unknown usage and prices stay unknown; this is admission control, not a provider-invoice ceiling, and actual billed usage can exceed an estimate before later calls are refused. See [Budgets and usage](docs/budgets-and-usage.md).
+Agents and workflow steps can share a budget that reserves estimated cost before dispatch. Unknown usage and prices stay unknown; this is admission control, not a provider-invoice ceiling, and actual billed usage can exceed an estimate before later calls are refused. See [Budgets and usage](https://github.com/Liceron/nexura/blob/main/docs/budgets-and-usage.md).
 
 ## Install
 
@@ -39,7 +39,7 @@ Install locally built wheels with the commands below, from the checkout. Each Py
 | `nexura-studio` | Older built-in Studio and launcher | `pip install --no-index --find-links dist nexura-studio` |
 | `@liceron/nexura-sdk` | TypeScript REST API client | `npm install ./clients/typescript/liceron-nexura-sdk-0.4.0.tgz` |
 
-The wheel commands assume dependencies are already installed or available in `dist/`; `uv build` does not collect dependency wheels. For the TypeScript artifact, first run `npm ci && npm run build && npm pack` in `clients/typescript`. See [Packages and installation](docs/packages.md) for dependencies, source installs and backend requirements.
+The wheel commands assume dependencies are already installed or available in `dist/`; `uv build` does not collect dependency wheels. For the TypeScript artifact, first run `npm ci && npm run build && npm pack` in `clients/typescript`. See [Packages and installation](https://github.com/Liceron/nexura/blob/main/docs/packages.md) for dependencies, source installs and backend requirements.
 
 Core runtime dependencies are `httpx`, `pydantic`, `packaging` and `cryptography`. Optional extras:
 
@@ -115,7 +115,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-Output is `paused`, then `completed REF-9901`. The full [approval workflow tutorial](docs/workflows.md#tutorial-an-approval-gated-workflow) adds SQLite persistence and resumes through a new engine after a restart. [Getting started](docs/getting-started.md) covers async use and further keyless examples.
+Output is `paused`, then `completed REF-9901`. The full [approval workflow tutorial](https://github.com/Liceron/nexura/blob/main/docs/workflows.md#tutorial-an-approval-gated-workflow) adds SQLite persistence and resumes through a new engine after a restart. [Getting started](https://github.com/Liceron/nexura/blob/main/docs/getting-started.md) covers async use and further keyless examples.
 
 ## Running Studio
 
@@ -123,7 +123,7 @@ Short recordings of the local Studio, offline with fake models (click a picture 
 
 | Build and run a workflow, no API key | Review the exact action before approving | Agents, knowledge, traces, evaluations |
 |---|---|---|
-| [![Build and run a workflow](docs/media/demo-build-and-run.png)](docs/media/demo-build-and-run.mp4) | [![Exact-action approval](docs/media/demo-exact-action-approval.png)](docs/media/demo-exact-action-approval.mp4) | [![Studio tour](docs/media/demo-studio-tour.png)](docs/media/demo-studio-tour.mp4) |
+| [![Build and run a workflow](https://raw.githubusercontent.com/Liceron/nexura/main/docs/media/demo-build-and-run.png)](https://github.com/Liceron/nexura/blob/main/docs/media/demo-build-and-run.mp4) | [![Exact-action approval](https://raw.githubusercontent.com/Liceron/nexura/main/docs/media/demo-exact-action-approval.png)](https://github.com/Liceron/nexura/blob/main/docs/media/demo-exact-action-approval.mp4) | [![Studio tour](https://raw.githubusercontent.com/Liceron/nexura/main/docs/media/demo-studio-tour.png)](https://github.com/Liceron/nexura/blob/main/docs/media/demo-studio-tour.mp4) |
 
 From the source checkout, start the API and Studio in separate terminals:
 
@@ -140,7 +140,7 @@ npm run dev
 
 Open the Vite URL printed in the second terminal. Studio proxies `/api` to `http://127.0.0.1:8765`; override with `VITE_BACKEND_URL`. Chat uses an offline fixture by default. The service uses the single-owner `local-owner` profile and loopback binding; do not expose it on a network as is.
 
-For schedules, workers, model allowlists, streaming chat, exports, pending input and the older built-in Studio, see [Service and Studio](docs/studio-and-service.md).
+For schedules, workers, model allowlists, streaming chat, exports, pending input and the older built-in Studio, see [Service and Studio](https://github.com/Liceron/nexura/blob/main/docs/studio-and-service.md).
 
 ## Two editions
 
@@ -167,28 +167,28 @@ Provider adapters are mock-verified except for owner-run **Vertex AI (Gemini 2.5
 
 CI is defined (including the SDK's Python matrix) but **remote CI has not yet run**. There has been **no external security audit/review**, including of the closed edition's shared-service path. Public MCP servers, live image calls and a real external MCP client app remain unverified. A2A supports JSON-RPC 1.0, with no push notifications, OAuth or gRPC.
 
-Workflow JSON never contains code: only trusted registered handlers run. Approvals cover supported connector writes and gated nodes, bind resolved inputs (low-level gates also bind run/node/spec/action/payload, including positional tool arguments), enforce expiry on claim and before execution, refuse non-string mapping keys in canonical digests and return 409 for duplicate decisions. Plain `@tool` functions need `requires_approval=True`; Python setting `ExecutionContext.approval_granted` itself is trusted. Side-effecting handlers/tools are never retried automatically; a crash can leave their outcome uncertain, recorded rather than replayed. See [SECURITY_MODEL.md](SECURITY_MODEL.md) for controls and open gaps.
+Workflow JSON never contains code: only trusted registered handlers run. Approvals cover supported connector writes and gated nodes, bind resolved inputs (low-level gates also bind run/node/spec/action/payload, including positional tool arguments), enforce expiry on claim and before execution, refuse non-string mapping keys in canonical digests and return 409 for duplicate decisions. Plain `@tool` functions need `requires_approval=True`; Python setting `ExecutionContext.approval_granted` itself is trusted. Side-effecting handlers/tools are never retried automatically; a crash can leave their outcome uncertain, recorded rather than replayed. See [SECURITY_MODEL.md](https://github.com/Liceron/nexura/blob/main/SECURITY_MODEL.md) for controls and open gaps.
 
-Historical fake-model measurements establish neither real-model quality, provider bills/cache savings, production scale, customer demand nor superiority over other frameworks. The older gate that skipped a required browser check remains documented separately. The approximately 135 ms SDK import on 2026-10-09 (Python 3.12, warm cache, lazy provider loading) is a single local measurement, not a benchmark. See the [verification record](docs/testing.md#verification-record) for the complete chronology and limitations.
+Historical fake-model measurements establish neither real-model quality, provider bills/cache savings, production scale, customer demand nor superiority over other frameworks. The older gate that skipped a required browser check remains documented separately. The approximately 135 ms SDK import on 2026-10-09 (Python 3.12, warm cache, lazy provider loading) is a single local measurement, not a benchmark. See the [verification record](https://github.com/Liceron/nexura/blob/main/docs/testing.md#verification-record) for the complete chronology and limitations.
 
-Nothing has been published. Final package names still need registration and npm scope ownership needs confirmation; the [historical naming check](docs/testing.md#publication-and-naming) establishes no current availability. Copyright holder and security contact are set: Liceron, info@liceron.in.
+Nothing has been published. Final package names still need registration and npm scope ownership needs confirmation; the [historical naming check](https://github.com/Liceron/nexura/blob/main/docs/testing.md#publication-and-naming) establishes no current availability. Copyright holder and security contact are set: Liceron, info@liceron.in.
 
 ## Documentation map
 
-[Documentation index](docs/README.md): **34 guides** plus the generated [API reference](docs/api-reference.md). Offline Python examples are executed by tests; blocks needing a real model or running service are marked and skipped.
+[Documentation index](https://github.com/Liceron/nexura/blob/main/docs/README.md): **35 guides** plus the generated [API reference](https://github.com/Liceron/nexura/blob/main/docs/api-reference.md). Offline Python examples are executed by tests; blocks needing a real model or running service are marked and skipped.
 
 | Start with | Continue to |
 |---|---|
-| [Getting started](docs/getting-started.md) | [Agents](docs/agents.md), [tools](docs/tools.md), [teams](docs/teams.md), [structured output](docs/structured-output.md) |
-| [Human approval](docs/approvals.md) | [Durable runs](docs/durable-runs.md), [reproducing failures](docs/reproducing-failures.md), [workflows](docs/workflows.md) (retries, input, forks, sub-workflows, parallel steps) |
-| [Models and providers](docs/providers.md) | Vertex AI, LiteLLM, settings, retry/fallback; [budgets and usage](docs/budgets-and-usage.md) |
-| [Service and Studio](docs/studio-and-service.md) | [Extending](docs/extensions.md), [local secrets](docs/local-secrets.md), [troubleshooting](docs/troubleshooting.md) |
-| [Packages and installation](docs/packages.md) | Add-on backends and their caveats; [historical comparisons](docs/comparisons.md) |
-| [Testing](docs/testing.md) | Verification history and public backend catalog |
+| [Getting started](https://github.com/Liceron/nexura/blob/main/docs/getting-started.md) | [Agents](https://github.com/Liceron/nexura/blob/main/docs/agents.md), [tools](https://github.com/Liceron/nexura/blob/main/docs/tools.md), [teams](https://github.com/Liceron/nexura/blob/main/docs/teams.md), [structured output](https://github.com/Liceron/nexura/blob/main/docs/structured-output.md) |
+| [Human approval](https://github.com/Liceron/nexura/blob/main/docs/approvals.md) | [Durable runs](https://github.com/Liceron/nexura/blob/main/docs/durable-runs.md), [reproducing failures](https://github.com/Liceron/nexura/blob/main/docs/reproducing-failures.md), [workflows](https://github.com/Liceron/nexura/blob/main/docs/workflows.md) (retries, input, forks, sub-workflows, parallel steps) |
+| [Models and providers](https://github.com/Liceron/nexura/blob/main/docs/providers.md) | Vertex AI, LiteLLM, settings, retry/fallback; [budgets and usage](https://github.com/Liceron/nexura/blob/main/docs/budgets-and-usage.md) |
+| [Service and Studio](https://github.com/Liceron/nexura/blob/main/docs/studio-and-service.md) | [Extending](https://github.com/Liceron/nexura/blob/main/docs/extensions.md), [local secrets](https://github.com/Liceron/nexura/blob/main/docs/local-secrets.md), [troubleshooting](https://github.com/Liceron/nexura/blob/main/docs/troubleshooting.md) |
+| [Packages and installation](https://github.com/Liceron/nexura/blob/main/docs/packages.md) | Add-on backends and their caveats; [historical comparisons](https://github.com/Liceron/nexura/blob/main/docs/comparisons.md) |
+| [Testing](https://github.com/Liceron/nexura/blob/main/docs/testing.md) | Verification history and public backend catalog |
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, test profiles and support/deprecation policy. Contributions require the [CLA](CLA.md): it is a draft awaiting lawyer review, and outside pull requests cannot be merged until the reviewed version is published. The automated CLA check is planned; current signing instructions are in the contributing guide.
+See [CONTRIBUTING.md](https://github.com/Liceron/nexura/blob/main/CONTRIBUTING.md) for setup, test profiles and support/deprecation policy. Contributions require the [CLA](https://github.com/Liceron/nexura/blob/main/CLA.md): it is a draft awaiting lawyer review, and outside pull requests cannot be merged until the reviewed version is published. The automated CLA check is planned; current signing instructions are in the contributing guide.
 
 ```bash
 uv run pytest
@@ -198,8 +198,8 @@ uv run mypy src packages/*/src
 
 ## Security policy
 
-Report vulnerabilities privately using [SECURITY.md](SECURITY.md) (info@liceron.in). Read the [security model](SECURITY_MODEL.md) before enabling tools, connectors or code execution.
+Report vulnerabilities privately using [SECURITY.md](https://github.com/Liceron/nexura/blob/main/SECURITY.md) (info@liceron.in). Read the [security model](https://github.com/Liceron/nexura/blob/main/SECURITY_MODEL.md) before enabling tools, connectors or code execution.
 
 ## Licence
 
-MIT. **Copyright (c) 2026 Liceron.** See [LICENSE](LICENSE) and [third-party notices](THIRD_PARTY.md).
+MIT. **Copyright (c) 2026 Liceron.** See [LICENSE](https://github.com/Liceron/nexura/blob/main/LICENSE) and [third-party notices](https://github.com/Liceron/nexura/blob/main/THIRD_PARTY.md).

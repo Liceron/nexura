@@ -9,7 +9,7 @@ pip install nexura-sandbox
 pip install "nexura-sandbox[wasi]"  # WASI extra
 ```
 
-Alpha and unpublished: install from the [source checkout](https://github.com/Liceron/nexura) or local wheels until publication. See [package installation](../../docs/packages.md).
+Alpha and unpublished: install from the [source checkout](https://github.com/Liceron/nexura) or local wheels until publication. See [package installation](https://github.com/Liceron/nexura/blob/main/docs/packages.md).
 
 ## Minimal example
 
@@ -55,11 +55,11 @@ In the legacy privileged gVisor test profile, the configured command prefix also
 invokes the fixed supervisor script with the current Python interpreter, so the
 operator's test command permissions must cover that invocation.
 gVisor startup sweeps only attributable stale task directories for absent containers;
-unmarked older directories need operator inspection. See [sandbox details](../../docs/tools.md#code-execution-sandbox-nexuratoolssandboxexecute) and
-[SECURITY_MODEL.md](../../SECURITY_MODEL.md) for resource and isolation limitations.
+unmarked older directories need operator inspection. See [sandbox details](https://github.com/Liceron/nexura/blob/main/docs/tools.md#code-execution-sandbox-nexuratoolssandboxexecute) and
+[SECURITY_MODEL.md](https://github.com/Liceron/nexura/blob/main/SECURITY_MODEL.md) for resource and isolation limitations.
 
 The shared-service startup guard refuses registered sandbox modules below `gvisor`; it is a startup check, not a continuous guard over later registry changes.
 
 ## Documentation and licence
 
-[Main documentation](../../docs/README.md) · [Full guide](../../docs/tools.md#code-execution-sandbox-nexuratoolssandboxexecute). MIT, Copyright (c) 2026 Liceron. See [LICENSE](LICENSE).
+[Main documentation](https://github.com/Liceron/nexura/blob/main/docs/README.md) · [Full guide](https://github.com/Liceron/nexura/blob/main/docs/tools.md#code-execution-sandbox-nexuratoolssandboxexecute). MIT, Copyright (c) 2026 Liceron. See [LICENSE](https://github.com/Liceron/nexura/blob/main/packages/nexura-sandbox/LICENSE).

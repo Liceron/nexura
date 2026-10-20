@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 from decimal import ROUND_CEILING, Decimal
 from threading import Lock
 from typing import Any
@@ -566,10 +567,14 @@ class BudgetManager:
 
     def set_workspace_budget(self, workspace_id: str, config: BudgetConfig) -> None:
         """Configure budget envelopes for a workspace."""
+        self.ledger.budget_policy("workspace", workspace_id, config.model_dump_json(), replace=True)
         self._workspace_configs[workspace_id] = config
 
     def get_workspace_config(self, workspace_id: str) -> BudgetConfig | None:
         """Get configured workspace budget."""
+        raw = self.ledger.budget_policy("workspace", workspace_id)
+        if raw is not None:
+            return BudgetConfig.model_validate_json(raw)
         return self._workspace_configs.get(workspace_id)
 
     def create_run_budget(
@@ -587,6 +592,27 @@ class BudgetManager:
         """
         with self._registry_lock:
             existing = self._run_budgets.get(run_id)
+            if existing is None:
+                raw = self.ledger.budget_policy(
+                    "run",
+                    run_id,
+                    json.dumps(
+                        {
+                            "workspace_id": workspace_id,
+                            "parent_run_id": parent_run_id,
+                            "config": (config or BudgetConfig()).model_dump(mode="json"),
+                            "default_model": default_model,
+                        }
+                    ),
+                )
+                if raw is not None:
+                    saved = json.loads(raw)
+                    existing = RunBudget(
+                        self,
+                        run_id=run_id,
+                        **{**saved, "config": BudgetConfig.model_validate(saved["config"])},
+                    )
+                    self._run_budgets[run_id] = existing
             if existing is not None:
                 if existing.workspace_id != workspace_id or (
                     parent_run_id is not None and existing.parent_run_id != parent_run_id
@@ -606,6 +632,10 @@ class BudgetManager:
 
     def get_run_budget(self, run_id: str) -> RunBudget | None:
         """Retrieve existing run budget by run_id."""
+        raw = self.ledger.budget_policy("run", run_id)
+        if run_id not in self._run_budgets and raw is not None:
+            saved = json.loads(raw)
+            return self.create_run_budget(saved["workspace_id"], run_id)
         return self._run_budgets.get(run_id)
 
     def get_workspace_status(self, workspace_id: str) -> BudgetStatus:

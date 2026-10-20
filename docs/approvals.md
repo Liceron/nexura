@@ -50,6 +50,9 @@ If one model response contains several tool calls and any of them needs approval
 
 - `pending`: the `ToolCall`s waiting for a decision (`id`, `name`, `arguments`).
 - `run_id`, `agent_name`: which run and agent it belongs to.
+- `interruption_id`, `expires_at`: unique approval identity and Unix expiry time.
+  `Runner(approval_ttl=3600)` sets the TTL in seconds (one hour by default).
+- `action_digests`, `signature`: original action hashes and optional HMAC-SHA256.
 - `messages`: the transcript so far, ending with the assistant message that asked for the tools.
 - `usage`, `turn`, `tool_calls_count`: counters at the time of the pause.
 - `requests`: how many model requests the run has made so far.
@@ -88,6 +91,7 @@ def build_agent() -> Agent:
 
 paused = Runner().run(build_agent(), "Delete user u9")
 saved = paused.interruption.to_json()  # a str; write it anywhere
+reviewed = paused.interruption.pending_digests()  # retain what the reviewer actually saw
 
 # ... later, possibly in another process ...
 restored = RunInterruption.from_json(saved)
@@ -101,12 +105,15 @@ agent = Agent(
     model=FakeModel(responses=["Done."]),
     tools=[delete_user],
 )
-final = Runner().resume(agent, restored, approve=True)
+final = Runner().resume(agent, restored, approve=reviewed)
 assert final.output == "Done."
 assert "deleted u9" in [m.content for m in final.messages if m.role == "tool"]
 ```
 
-The JSON stores the transcript, the pending calls, the counters and `requests`. Only the token counts (`prompt_tokens`, `completion_tokens`, `total_tokens`) and `is_complete` of `usage` are saved; the optional cache and `reasoning_tokens` fields are not.
+The JSON stores the transcript, pending calls, counters, usage (including cache and
+reasoning counts), expiry and signature. Keep unsigned JSON in trusted server-side
+storage. Keep reviewed digests separately from any client-submitted interruption;
+recomputing them from that submission does not prove what was reviewed.
 
 `from_json` raises `ValueError` if the document has an unsupported `schema_version`.
 
@@ -114,8 +121,10 @@ The JSON stores the transcript, the pending calls, the counters and `requests`. 
 
 `approve` accepts three forms:
 
-- `True`: approve every pending call that is not in `reject`.
-- A list of call IDs.
+- `True`: approve every pending call that is not in `reject`, after verifying a
+  signed or stored copy. SDK-issued in-memory interruptions carry a trusted snapshot
+  through agents, teams and streams, even when another Runner continues them.
+- A list of call IDs, with the same signed/stored-copy requirement.
 - A mapping of call ID to digest (next section).
 
 `reject` is a mapping of call ID to a reason. Rejected calls do not run; the model receives a tool message saying the call was rejected and why, and can answer accordingly.
@@ -160,7 +169,10 @@ else:
     raise AssertionError("expected ApprovalDecisionError")
 assert ran == []
 
-final = Runner().resume(agent, interruption, approve=["p1"], reject={"p2": "duplicate invoice"})
+reviewed = interruption.pending_digests()  # captured when showing the actions
+final = Runner().resume(
+    agent, interruption, approve={"p1": reviewed["p1"]}, reject={"p2": "duplicate invoice"}
+)
 assert ran == ["INV-1"]
 tool_messages = [m.content for m in final.messages if m.role == "tool"]
 assert any("duplicate invoice" in text for text in tool_messages)
@@ -207,9 +219,79 @@ final = Runner().resume(agent, interruption, approve=digests)
 assert final.output == "ok"
 ```
 
-On resume the runner also checks that the pending calls match the assistant message at the end of the transcript. If someone edited the saved JSON so the arguments in `pending` no longer match the transcript, resume raises `ApprovalDecisionError` and nothing runs. The digests are not signed, so protect the stored JSON the same way you protect any other record that grants authority.
+On resume the runner also checks that pending calls match the transcript and stored
+action digests. With a trusted stored copy, the entire submitted envelope must
+match it. With a signing secret, any change to the envelope invalidates its HMAC.
+Unsigned JSON must remain in trusted server-side storage even when the caller
+provides reviewed action digests: those bind tool arguments, not arbitrary history
+or run state.
 
-`approve=True` is the shortcut for "approve all of what is pending, as stored". Use the digest form when a person reviews the arguments.
+Serialization drops the private in-memory snapshot. The originating Runner can
+still verify a JSON roundtrip against its own retained copy. A fresh Runner given
+unsigned JSON without a configured store cannot use `approve=True`: return
+`approve={call_id: reviewed_digest}` instead, or configure a store/signing secret.
+This digest-only option applies to individual run interruptions. Teams require an
+authenticated **whole team envelope** for every resume, including rejection-only
+decisions: tool digests alone cannot authenticate completed outputs, usage or the
+next member's prompt. A fresh runner loading team JSON must share the signing key
+or approval store. The originating runner can also verify its retained copy.
+
+## Expiry, authenticity and single use
+
+```python
+import secrets
+from nexura_agents import Runner
+from nexura_agents.durable import SQLiteCheckpointStore
+
+# Keep the same secret securely across processes/restarts; do not send it to clients.
+secret = secrets.token_bytes(32)
+store = SQLiteCheckpointStore("approvals.sqlite")
+runner = Runner(
+    checkpoint_store=store,
+    approval_ttl=900,
+    approval_signing_secret=secret,
+)
+```
+
+`expires_at` is checked before resume and again before consumption. Expired
+interruptions raise `ApprovalDecisionError`; JSON from before expiry was recorded
+loads with expiry zero and cannot resume. Obtain a fresh approval rather than
+extending a client-submitted deadline.
+
+HMAC-SHA256 authenticates canonical interruption JSON containing run id, starting
+and active agent, pending call ids, tool names, argument digests and expiry. It also
+covers the full transcript, state and counters so a client cannot change the next
+model's inputs. Every resume with a configured secret requires a valid signature,
+including when a store is also present. This authenticates the issued envelope; it
+does not authenticate the human reviewer, encrypt the contents or prevent replay.
+The application owns reviewer authorization and must display the same envelope it
+submits for approval. Anyone holding the secret can issue envelopes.
+
+With built-in `MemoryCheckpointStore` or `SQLiteCheckpointStore`, resume atomically
+marks the matching, unexpired interruption consumed **before** dispatch. Racing
+resumes have one winner. SQLite tombstones survive process restart and checkpoint
+cleanup; the memory store lasts only for the life of that shared store object.
+Invalid decisions/edits do not consume the approval. A failure after consumption
+does not refund it: investigate the durable checkpoint/uncertain outcome instead
+of replaying the grant.
+
+For single use without run checkpointing, pass `approval_store=store`. Custom
+checkpoint stores must implement `nexura_agents.approvals.ApprovalStore` or provide
+a separate approval store; missing atomic methods fail closed. Consumption records
+must be retained for the lifetime of their grants, independently of run cleanup.
+Without a configured approval/checkpoint store, **single use is the caller's
+responsibility**, including for signed interruptions. A Runner's convenience
+snapshot is neither persistent storage nor a cross-process replay ledger.
+The convenience cache removes expired entries and retains at most 256 envelopes
+in least-recently-used order. SDK-issued objects also carry their private trusted
+snapshot; serialization discards it.
+
+`TeamInterruption` has its own identity, expiry and signature. Its canonical payload
+covers the team name, original prompt, nested prompts, every completed output and
+text, completed usage, and the full member interruptions. The team's expiry is
+the earliest pending member expiry. The same approval store atomically consumes
+the team grant and each member grant; a member signature alone cannot authorize
+altered team state.
 
 ## Approve with changes
 
@@ -249,10 +331,10 @@ assert [m.content for m in done.messages if m.role == "tool"] == ["refunded 100 
 - The edited arguments are checked against the tool's schema before anything runs. If
   they do not fit, or the call is not pending, the resume raises `ApprovalDecisionError`.
 - `digest` binds the approval to the original action the reviewer saw, like a plain
-  digest approval. Leave it out to approve by call id only.
+  digest approval. Leave it out only when Runner verifies a signed/stored copy.
 - The call in the transcript is rewritten with the edited arguments, so the history (and
   the saved session) shows what actually ran. The model sees that call and its result.
-- Edits and plain approvals (`{"c2": digest}` or call ids) can be mixed in one `approve`
+- Edits and plain digest approvals (`{"c2": digest}`) can be mixed in one `approve`
   mapping. Questions from `ask_user` are answered with `answers=`, not edited.
 
 ## Asking the user a question
@@ -371,8 +453,16 @@ Approvals protect the actions you mark or that declare writes, not every line of
   calls a module directly with it, is part of your trusted code and is not gated. Keep such
   calls out of reach of model output and flow input.
 
-The digests are not signatures: whoever can edit your stored runs or approval database can
-change what is pending. Protect that storage like any other record that grants authority.
+Action digests are not signatures. Optional SDK HMAC envelopes protect client-carried
+state; runtime gate/workflow approvals rely on trusted storage. Protect approval
+databases and signing secrets like any other record that grants authority.
+
+Saved-agent workflow nodes accept the workflow's validated, single-use grant for
+the stored tool calls even when the SDK's default one-hour snapshot window has
+elapsed. After the workflow checks its own TTL and claims the grant, the adapter
+opens a new SDK dispatch window bounded by the node timeout and remaining execution
+time. This does not extend the workflow grant's lifetime. Direct SDK interruptions
+still require their original unexpired approval.
 
 The REST run detail (`GET /api/v1/runs/{run_id}`) returns the pending approval's
 complete `input_state` and `canonical_payload_json`. Approval views have no key-count,
@@ -484,10 +574,11 @@ shop = Shop(orders={"A1": 250.0})
 result = runner.run(agent, "Refund order A1 in full", deps=shop)
 assert result.status == "paused" and shop.refunds == []  # nothing happened yet
 saved = result.interruption.to_json()  # store it anywhere
+reviewed = result.interruption.pending_digests()  # retained from the human review
 
 # ...later, maybe in another process, after a human reviews paused.pending:
 paused = RunInterruption.from_json(saved)
-result = runner.resume(agent, paused, approve=True, deps=shop)  # or reject={id: "reason"}
+result = runner.resume(agent, paused, approve=reviewed, deps=shop)  # or reject={id: "reason"}
 print(result.output)  # order_id='A1' refunded=250.0
 print(shop.refunds)  # ['A1:250.0']
 ```

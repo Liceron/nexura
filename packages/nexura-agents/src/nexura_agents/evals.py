@@ -34,6 +34,7 @@ from nexura_agents.models.base import ModelProtocol
 from nexura_agents.runner import Prompt, Runner
 from nexura_agents.teams import Team, TeamInterruption, TeamResult
 from nexura_agents.types import Message, RunInterruption, RunResult, ToolCall, Usage
+from nexura_agents.usage import admission
 
 if TYPE_CHECKING:
     from nexura_agents.models.base import ModelProtocol as _ModelProtocol  # noqa: F401
@@ -1067,7 +1068,7 @@ def llm_judge(
             Message(role="user", content=body),
         ]
         try:
-            response = await model.generate(messages, None, timeout=timeout)
+            response = await admission.generate(model, messages, None, timeout=timeout)
         except Exception as exc:
             return Score(name, 0.0, False, f"judge call failed: {type(exc).__name__}: {exc}")
         usage = response.usage

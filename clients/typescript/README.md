@@ -41,6 +41,6 @@ You can also provide `sessionToken` explicitly.
 
 ## Documentation and licence
 
-See the [main docs](../../docs/README.md), [Service and Studio](../../docs/studio-and-service.md)
-and [API reference](../../docs/api-reference.md). MIT, Copyright (c) 2026 Liceron;
-see [LICENSE](LICENSE).
+See the [main docs](https://github.com/Liceron/nexura/blob/main/docs/README.md), [Service and Studio](https://github.com/Liceron/nexura/blob/main/docs/studio-and-service.md)
+and [API reference](https://github.com/Liceron/nexura/blob/main/docs/api-reference.md). MIT, Copyright (c) 2026 Liceron;
+see [LICENSE](https://github.com/Liceron/nexura/blob/main/clients/typescript/LICENSE).

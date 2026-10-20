@@ -15,7 +15,7 @@ from typing import Any, Literal, TypeVar
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi import status as http_status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from nexura_agents.errors import (
     ApprovalAlreadyClaimedError,
     ApprovalError,
@@ -47,6 +47,11 @@ from nexura_runtime.service.auth.errors import (
 from nexura_runtime.service.auth.models import Principal, WorkspaceRole
 from nexura_runtime.service.auth.permissions import check_permission
 from nexura_runtime.service.auth.resources import require_resource
+from nexura_runtime.service.repro_capture import (
+    capture_recorder,
+    load_captured_bundle,
+    settle_failed_run_capture,
+)
 from nexura_runtime.service.workspaces.repository import UNOWNED_WORKSPACE, WorkspaceRepository
 from nexura_runtime.service.workspaces.scoping import ResourceScopeEnforcer
 from nexura_runtime.studio.store import StudioStore
@@ -745,7 +750,7 @@ async def start_workflow_run(
     event_sink = RunStoreEventSink(store, run_id)
 
     run_budget = None
-    budget_mgr = getattr(app_state, "budget_manager", None)
+    budget_mgr = _budget_manager(app_state)
     if cfg is not None:
         from nexura_agents.usage.manager import BudgetManager
 
@@ -775,7 +780,12 @@ async def start_workflow_run(
             if await _settled_status(app_state, run_id) == "cancelled":
                 # Cancelled (revoked) between the run record and this task (B40).
                 return
-            res = await engine.run(initial_state, workflow_run_id=run_id)
+            # Opt-in failed-run capture records the run as a portable repro bundle.
+            recorder = capture_recorder(app_state, run_id, start=True)
+            if recorder is not None:
+                res = await recorder.run_workflow(engine, initial_state, workflow_run_id=run_id)
+            else:
+                res = await engine.run(initial_state, workflow_run_id=run_id)
             await event_sink.flush()
             await _persist_result(store, run_id, res)
         except asyncio.CancelledError:
@@ -815,6 +825,7 @@ async def start_workflow_run(
             await _record_execution_failure(store, run_id, exc)
         finally:
             await event_sink.flush()
+            await settle_failed_run_capture(app_state, run_id, workspace_id)
             active_tasks = getattr(app_state, "active_run_tasks", None)
             if active_tasks is not None and active_tasks.get(run_id) is asyncio.current_task():
                 active_tasks.pop(run_id, None)
@@ -861,7 +872,7 @@ async def get_run(request: Request, run_id: str) -> dict[str, Any]:
     run = dict(run)
     run["has_subworkflows"] = _spec_has_subworkflows(run.get("spec"))
     run.pop("spec", None)
-    budget_mgr = getattr(request.app.state, "budget_manager", None)
+    budget_mgr = _budget_manager(request.app.state)
     if budget_mgr is not None:
         rb = budget_mgr.get_run_budget(run_id)
         if rb is not None:
@@ -1229,12 +1240,27 @@ async def decide_run(request: Request, run_id: str, payload: DecisionRequest) ->
         nonlocal engine_finished
         # Re-check after the decision event and any revocation it triggered have settled.
         _refuse_if_pending_lost(await _settled_run(request.app.state, run_id), "pending_approval")
-        res = await engine.resume(
-            workflow_run_id=run_id,
-            approval_id=payload.approval_id,
-            decision=payload.decision,
-            state_update=payload.state_update if payload.decision == "approve" else None,
-        )
+        recorder = capture_recorder(request.app.state, run_id)
+        if recorder is not None:
+            try:
+                res = await recorder.resume_workflow(
+                    run_id,
+                    payload.approval_id,
+                    decision=payload.decision,
+                    state_update=payload.state_update if payload.decision == "approve" else None,
+                    engine=engine,
+                )
+            except (ApprovalAlreadyClaimedError, WorkflowTerminalError):
+                # Another request decided first: this recording no longer describes the run.
+                request.app.state.repro_capture.discard(run_id)
+                raise
+        else:
+            res = await engine.resume(
+                workflow_run_id=run_id,
+                approval_id=payload.approval_id,
+                decision=payload.decision,
+                state_update=payload.state_update if payload.decision == "approve" else None,
+            )
         engine_finished = True
         await event_sink.flush()
         await _persist_result(store, run_id, res)
@@ -1257,6 +1283,7 @@ async def decide_run(request: Request, run_id: str, payload: DecisionRequest) ->
     except Exception as exc:
         await event_sink.flush()
         await _record_execution_failure(store, run_id, exc)
+    await settle_failed_run_capture(request.app.state, run_id, caller_ws)
 
     updated = await store.get_run(run_id)
     assert updated is not None
@@ -1293,6 +1320,19 @@ async def _get_owned_run(request: Request, run_id: str) -> dict[str, Any]:
     return run  # type: ignore[no-any-return]
 
 
+def _budget_manager(app_state: Any) -> Any:
+    """Restore named run policies and spend from the service's durable SQLite store."""
+    from nexura_agents.usage.ledger import UsageLedger
+    from nexura_agents.usage.manager import BudgetManager
+
+    manager = getattr(app_state, "budget_manager", None)
+    if manager is None:
+        path = getattr(app_state.store, "db_path", None)
+        manager = BudgetManager(ledger=UsageLedger(str(path) if path else None))
+        app_state.budget_manager = manager
+    return manager
+
+
 def _build_engine(
     request: Request, spec: WorkflowSpec, run_id: str, workspace_id: str
 ) -> tuple[WorkflowEngine, RunStoreEventSink]:
@@ -1301,7 +1341,7 @@ def _build_engine(
         request.app.state, "approval_required_handlers", frozenset()
     )
     event_sink = RunStoreEventSink(store, run_id)
-    budget_mgr = getattr(request.app.state, "budget_manager", None)
+    budget_mgr = _budget_manager(request.app.state)
     run_budget = budget_mgr.get_run_budget(run_id) if budget_mgr is not None else None
     engine = WorkflowEngine(
         spec=spec,
@@ -1427,6 +1467,41 @@ async def provide_run_input(
     updated = await store.get_run(run_id)
     assert updated is not None
     return _redact_events(updated, request.app.state)
+
+
+@router.get("/{run_id}/repro")
+async def download_repro_bundle(request: Request, run_id: str) -> JSONResponse:
+    """Download the repro bundle captured when this run failed (opt-in capture).
+
+    Replay it offline with ``nexura-runtime repro run FILE``. The bundle was redacted
+    when it was written; review it before sharing.
+    """
+    caller_ws, _, _ = _get_caller_context(request)
+    run = await _get_owned_run(request, run_id)
+    _assert_run_resource(request, run)
+    capture = getattr(request.app.state, "repro_capture", None)
+    path = getattr(request.app.state.store, "db_path", None)
+    found = (
+        capture.load(run_id)
+        if capture is not None
+        else (load_captured_bundle(path, run_id) if path else None)
+    )
+    if found is None or found[0] != caller_ws:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": "REPRO_BUNDLE_NOT_FOUND",
+                "message": (
+                    f"No repro bundle was captured for run '{run_id}'. Bundles are written "
+                    "only for runs that fail while failed-run capture is on."
+                ),
+            },
+        )
+    filename = "".join(c if c.isalnum() or c in "-_." else "_" for c in run_id)
+    return JSONResponse(
+        content=found[1],
+        headers={"Content-Disposition": f'attachment; filename="{filename}.repro.json"'},
+    )
 
 
 @router.get("/{run_id}/history")

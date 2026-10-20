@@ -23,6 +23,7 @@ from nexura_agents.session import SQLiteSessionStore
 
 from nexura_runtime import __version__
 from nexura_runtime.integrations.channels.outbox import ChannelStore
+from nexura_runtime.knowledge.embeddings.config import configured_embedder
 from nexura_runtime.knowledge.ingest.pipeline import IngestionPipeline
 from nexura_runtime.knowledge.retrieval.pipeline import RagPipeline
 from nexura_runtime.knowledge.vector.sqlite import SqliteVectorStore
@@ -84,6 +85,7 @@ from nexura_runtime.service.extensions import (
     check_extensions,
     load_entry_point_extensions,
 )
+from nexura_runtime.service.repro_capture import FailedRunCapture, capture_failed_runs_enabled
 from nexura_runtime.service.triggers.store import TriggerStore
 from nexura_runtime.service.workspaces.repository import WorkspaceRepository, ensure_private_file
 from nexura_runtime.studio.api.traces import router as traces_router
@@ -182,8 +184,18 @@ def create_api_app(
     extensions: Iterable[ServiceExtension] = (),
     enabled_extensions: Iterable[str] = (),
     session_token: str | None = None,
+    embeddings: str | None = None,
+    embeddings_dimensions: int | None = None,
+    capture_failed_runs: bool | None = None,
 ) -> FastAPI:
     """Create a configured FastAPI application exposing the Nexura REST API.
+
+    Knowledge options:
+        embeddings: operator-owned ``provider:model`` spec, overriding ``NEXURA_EMBEDDINGS``.
+            Unconfigured services use the labelled non-semantic fixture. Invalid configuration
+            fails explicitly. Existing collections require explicit reindex after a change.
+        embeddings_dimensions: expected native output dimension, overriding
+            ``NEXURA_EMBEDDINGS_DIMENSIONS`` (needed for models without a known default).
 
     Security options:
         allowed_hosts: extra ``Host`` names accepted (loopback names and ``bound_host`` are
@@ -236,6 +248,12 @@ def create_api_app(
         enabled_extensions: names of ``nexura.extensions`` entry points to load and configure
             after ``extensions``. Entry points are never loaded unless named here; an unknown or
             broken one raises ``ExtensionLoadError`` before anything else is created.
+
+    Diagnostics:
+        capture_failed_runs: record service workflow runs and keep a redacted repro bundle for
+            each run that ends ``failed`` (download: ``GET /api/v1/runs/{run_id}/repro``).
+            Off by default; ``None`` reads ``NEXURA_CAPTURE_FAILED_RUNS`` (``1``/``true``).
+            See ``docs/reproducing-failures.md``.
     """
     requested_extensions = check_extensions(
         [*extensions, *load_entry_point_extensions(enabled_extensions)],
@@ -454,6 +472,11 @@ def create_api_app(
             with suppress(Exception):
                 app.state.vector_store._conn.close()
 
+        with suppress(Exception):
+            close_embedder = getattr(app.state.knowledge_embedder.provider, "close", None)
+            if close_embedder is not None:
+                await close_embedder()
+
         if store is None:
             await effective_store.close()
 
@@ -479,6 +502,12 @@ def create_api_app(
     app.state.store = effective_store
     app.state.session_store = SQLiteSessionStore(effective_store.db_path)
     app.state.chat_models = ChatModelRegistry(chat_models)
+    app.state.repro_capture = (
+        FailedRunCapture(effective_store.db_path)
+        if capture_failed_runs_enabled(capture_failed_runs)
+        else None
+    )
+    app.state.knowledge_embedder = configured_embedder(embeddings, dimensions=embeddings_dimensions)
     app.state.chat_usage_limits = (
         chat_usage_limits if chat_usage_limits is not None else DEFAULT_CHAT_USAGE_LIMITS
     )

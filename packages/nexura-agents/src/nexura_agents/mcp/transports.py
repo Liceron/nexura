@@ -269,6 +269,16 @@ class McpStdioTransport(McpTransport):
                         with contextlib.suppress(Exception):
                             await proc.wait()
 
+                # Close the pipe transport while the loop is running. A pipe whose reader
+                # was paused (an over-limit line left unread data) never sees EOF, so the
+                # transport stays open after the process exits; it would otherwise be closed
+                # by its finalizer after the loop has closed ("Event loop is closed").
+                # asyncio.subprocess.Process has no public close().
+                transport = getattr(proc, "_transport", None)
+                if transport is not None:
+                    with contextlib.suppress(Exception):
+                        transport.close()
+
 
 _PYTHON_RE = re.compile(r"^python(\d+(\.\d+)*)?(\.exe)?$")
 _NODE_RE = re.compile(r"^node(\.exe)?$")

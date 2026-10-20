@@ -22,7 +22,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from nexura_agents._lazy import LazyModule
-from nexura_agents.errors import CheckpointLeaseLostError, RunRecoveryError, StorageError
+from nexura_agents.errors import (
+    ApprovalDecisionError,
+    CheckpointLeaseLostError,
+    RunRecoveryError,
+    StorageError,
+)
 
 if TYPE_CHECKING:
     import asyncio
@@ -93,6 +98,32 @@ class MemoryCheckpointStore:
     def __init__(self) -> None:
         self._data: dict[str, tuple[float, str]] = {}
         self._claims: dict[str, tuple[str, float, float]] = {}  # owner, expires_at, lease
+        self._approvals: dict[str, tuple[str, float, bool]] = {}
+        self._approval_lock = threading.Lock()
+
+    async def save_approval(self, approval_id: str, payload: str, expires_at: float) -> None:
+        """Keep immutable approval identity independently of checkpoint cleanup."""
+        with self._approval_lock:
+            old = self._approvals.get(approval_id)
+            if old is not None and old[:2] != (payload, expires_at):
+                raise ApprovalDecisionError("Stored interruption differs from approval envelope.")
+            if old is None:
+                self._approvals[approval_id] = (payload, expires_at, False)
+
+    async def load_approval(self, approval_id: str) -> str | None:
+        """Return the immutable approval payload, including after consumption."""
+        with self._approval_lock:
+            entry = self._approvals.get(approval_id)
+            return entry[0] if entry is not None else None
+
+    async def consume_approval(self, approval_id: str, payload: str) -> bool:
+        """Atomically consume a matching, unexpired approval once."""
+        with self._approval_lock:
+            entry = self._approvals.get(approval_id)
+            if entry is None or entry[0] != payload or entry[1] <= time.time() or entry[2]:
+                return False
+            self._approvals[approval_id] = (entry[0], entry[1], True)
+            return True
 
     async def claim(
         self, run_id: str, owner: str, lease_seconds: float = DEFAULT_CLAIM_LEASE_SECONDS
@@ -186,6 +217,11 @@ class SQLiteCheckpointStore:
                 "run_id TEXT PRIMARY KEY, data TEXT NOT NULL, updated_at REAL NOT NULL)"
             )
             self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS nexura_sdk_approvals ("
+                "approval_id TEXT PRIMARY KEY, payload TEXT NOT NULL, expires_at REAL NOT NULL, "
+                "consumed_at REAL)"
+            )
+            self._conn.execute(
                 "CREATE TABLE IF NOT EXISTS nexura_run_claims ("
                 "run_id TEXT PRIMARY KEY, owner TEXT NOT NULL, expires_at REAL NOT NULL, "
                 "lease_seconds REAL)"
@@ -228,6 +264,45 @@ class SQLiteCheckpointStore:
                     "UPDATE nexura_run_claims SET expires_at = ? WHERE run_id = ? AND owner = ?",
                     (now + lease, run_id, owner),
                 )
+
+    def _approval_sync(
+        self, operation: str, approval_id: str, payload: str = "", expires_at: float = 0.0
+    ) -> str | bool | None:
+        with self._lock, self._open() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if operation == "consume":
+                cursor = conn.execute(
+                    "UPDATE nexura_sdk_approvals SET consumed_at=? WHERE approval_id=? "
+                    "AND payload=? AND consumed_at IS NULL AND expires_at>?",
+                    (time.time(), approval_id, payload, time.time()),
+                )
+                return cursor.rowcount == 1
+            if operation == "save":
+                conn.execute(
+                    "INSERT OR IGNORE INTO nexura_sdk_approvals "
+                    "(approval_id, payload, expires_at) VALUES (?, ?, ?)",
+                    (approval_id, payload, expires_at),
+                )
+            row = conn.execute(
+                "SELECT payload, expires_at FROM nexura_sdk_approvals WHERE approval_id=?",
+                (approval_id,),
+            ).fetchone()
+            if operation == "save" and row is not None and row != (payload, expires_at):
+                raise ApprovalDecisionError("Stored interruption differs from approval envelope.")
+            return str(row[0]) if row is not None else None
+
+    async def save_approval(self, approval_id: str, payload: str, expires_at: float) -> None:
+        """Persist an immutable approval independently of run checkpoint cleanup."""
+        await asyncio.to_thread(self._approval_sync, "save", approval_id, payload, expires_at)
+
+    async def load_approval(self, approval_id: str) -> str | None:
+        """Load the original approval payload, including after consumption."""
+        result = await asyncio.to_thread(self._approval_sync, "load", approval_id)
+        return result if isinstance(result, str) else None
+
+    async def consume_approval(self, approval_id: str, payload: str) -> bool:
+        """Consume a matching unexpired approval once, atomically across processes."""
+        return await asyncio.to_thread(self._approval_sync, "consume", approval_id, payload) is True
 
     def _load_sync(self, run_id: str) -> str | None:
         with self._lock:

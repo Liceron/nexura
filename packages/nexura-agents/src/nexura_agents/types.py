@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import time
+import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, Literal
 
@@ -32,7 +34,7 @@ class ApproveWith:
     edit is checked against the tool's schema, and the call in the transcript is rewritten,
     so the history shows what actually ran. ``digest`` (from
     ``interruption.pending_digests()``) binds the approval to the original action the
-    reviewer saw; leave it out to approve by call id only.
+    reviewer saw. Omitting it requires a verified signed or server-stored interruption.
     """
 
     arguments: dict[str, Any]
@@ -259,7 +261,9 @@ class RunInterruption:
     """A run paused before tool calls that need approval.
 
     Persist it with ``to_json()`` and continue later, even in another process, with
-    ``Runner.resume_async(agent, interruption, approve=[...], reject={...})``.
+    ``Runner.resume_async(agent, interruption, approve={id: reviewed_digest})``.
+    Unsigned JSON belongs in trusted server-side storage. Expiry is enforced by
+    Runner; single use requires a configured approval/checkpoint store.
     """
 
     run_id: str
@@ -294,13 +298,36 @@ class RunInterruption:
     metadata: dict[str, Any] = field(default_factory=dict)
     output_attempts: int = 0
     agent_started_at: int = 0
+    interruption_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    expires_at: float = field(default_factory=lambda: time.time() + 3600.0)
+    signature: str | None = None
+    action_digests: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def _approval_snapshot(self) -> str | None:
+        # Process-local provenance, deliberately absent from JSON and dataclasses.asdict.
+        # Team/member streams pass the interruption object through unchanged; a new
+        # Runner can verify that object without manufacturing trust from client JSON.
+        value = self.__dict__.get("_trusted_approval_payload")
+        return value if isinstance(value, str) else None
+
+    @_approval_snapshot.setter
+    def _approval_snapshot(self, value: str) -> None:
+        self.__dict__["_trusted_approval_payload"] = value
 
     @staticmethod
     def action_digest(call: ToolCall) -> str:
         """SHA-256 of the exact action (tool name + canonical arguments)."""
         from nexura_agents.contracts.canonical import canonical_digest
 
-        return canonical_digest({"tool": call.name, "arguments": call.arguments})
+        try:
+            return canonical_digest({"tool": call.name, "arguments": call.arguments})
+        except UnicodeError as exc:
+            from nexura_agents.errors import ApprovalDecisionError
+
+            raise ApprovalDecisionError(
+                "Tool arguments are not valid UTF-8 approval data."
+            ) from exc
 
     @property
     def questions(self) -> list[dict[str, str]]:
@@ -328,6 +355,10 @@ class RunInterruption:
         return json.dumps(
             {
                 "schema_version": 1,
+                "interruption_id": self.interruption_id,
+                "expires_at": self.expires_at,
+                "signature": self.signature,
+                "action_digests": dict(self.action_digests),
                 "run_id": self.run_id,
                 "agent_name": self.agent_name,
                 "transcript": serialize_session(self.run_id, 0, self.messages),
@@ -385,6 +416,10 @@ class RunInterruption:
         _, _, messages = deserialize_session(raw["transcript"])
         return cls(
             run_id=raw["run_id"],
+            interruption_id=raw.get("interruption_id", ""),
+            expires_at=raw.get("expires_at", 0.0),
+            signature=raw.get("signature"),
+            action_digests=raw.get("action_digests", {}),
             agent_name=raw["agent_name"],
             messages=messages,
             pending=[

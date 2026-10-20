@@ -44,13 +44,24 @@ describe('P34 portable Studio presentation', () => {
     expect(container.textContent).toBe('');
   });
 
-  it('keeps document titles free of the old product name in both editions', () => {
-    for (const file of ['studio-web/index.html', 'enterprise/studio-web/index.html']) {
-      const html = fs.readFileSync(path.resolve(__dirname, '../../..', file), 'utf8');
-      expect(html).toContain('<title>Nexura Studio');
-      expect(html).not.toContain('AgentKit');
-    }
+  const expectNexuraTitle = (file: string) => {
+    const html = fs.readFileSync(path.resolve(__dirname, '../../..', file), 'utf8');
+    expect(html).toContain('<title>Nexura Studio');
+    expect(html).not.toContain('AgentKit');
+  };
+
+  it('keeps the document title free of the old product name in the open edition', () => {
+    expectNexuraTitle('studio-web/index.html');
   });
+
+  // The closed edition's Studio is not part of the public export, so this only runs in the
+  // internal tree, where the file exists.
+  it.skipIf(!fs.existsSync(path.resolve(__dirname, '../../..', 'enterprise/studio-web/index.html')))(
+    'keeps the document title free of the old product name in the closed edition',
+    () => {
+      expectNexuraTitle('enterprise/studio-web/index.html');
+    },
+  );
 
   it('bundles the unchanged OFL font and configures Hindi fallback for prose and JSON', () => {
     const root = path.resolve(__dirname, '../../..');

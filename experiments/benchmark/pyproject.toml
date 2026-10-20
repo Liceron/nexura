@@ -12,6 +12,7 @@ dependencies = [
     "langchain==1.4.6",
     "pytest>=8.0.0",
     "pytest-asyncio>=0.24.0",
+    "pydantic-ai-harness==0.57.0",
 ]
 
 [project.urls]

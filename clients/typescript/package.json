@@ -5,22 +5,53 @@
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "exports": {".": {"types": "./dist/index.d.ts", "import": "./dist/index.js"}},
-  "files": ["dist", "LICENSE"],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
     "build": "tsc -p tsconfig.json",
-    "prepack": "npm run build",
+    "prepack": "npm run clean && npm run build",
+    "prepublishOnly": "npm test",
     "test": "npm run build && node --test tests/*.test.mjs"
   },
-  "devDependencies": {"typescript": "^5.9.0"},
+  "devDependencies": {
+    "typescript": "^5.9.0"
+  },
   "keywords": [
     "nexura",
     "agentkit",
     "ai",
     "sdk",
-    "client"
+    "client",
+    "agents",
+    "workflows",
+    "approvals",
+    "typescript"
   ],
   "author": "Liceron <info@liceron.in>",
   "license": "MIT",
-  "repository": {"type": "git", "url": "https://github.com/Liceron/nexura"}
+  "homepage": "https://github.com/Liceron/nexura/tree/main/clients/typescript#readme",
+  "bugs": {
+    "url": "https://github.com/Liceron/nexura/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Liceron/nexura.git",
+    "directory": "clients/typescript"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
 }

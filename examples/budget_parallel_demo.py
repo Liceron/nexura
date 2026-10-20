@@ -35,7 +35,7 @@ async def main() -> None:
             refused += 1
             return
         try:
-            # FakeModel does not perform automatic admission: this example does it explicitly.
+            # Manual admission demo: the Runner below has no budget, avoiding double admission.
             await asyncio.sleep(0)
             agent = Agent(
                 name=f"Agent {index}",

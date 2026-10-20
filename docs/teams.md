@@ -213,12 +213,14 @@ A nested team that was not given its own `runner` uses its parent's, so hooks an
 
 If a member pauses for approval (a tool with `requires_approval`), the team stops scheduling new work, lets members that are already running finish, and returns `status == "paused"` with a `TeamInterruption`. Finished steps are kept. Decisions are keyed by `"<path>:<call id>"`; list them with `interruption.pending_calls()` and the digests to show a reviewer with `interruption.pending_digests()`.
 
-`to_json()` saves the interruption (the paused runs, plus the output and usage of finished members) and `TeamInterruption.from_json()` rebuilds it, so you can resume from a new process with freshly built team objects. Finished members are never run again, and usage from before and after the pause is counted once. Outputs of finished members come back as plain JSON values after a round trip (a Pydantic model becomes a dict).
+`to_json()` saves the interruption (the paused runs, prompts, plus the output and usage of finished members) and `TeamInterruption.from_json()` rebuilds it. A new process must share the signing key or approval store that authenticates this whole envelope; action digests alone do not authenticate team state. Finished members are never run again, and usage from before and after the pause is counted once. Outputs of finished members come back as plain JSON values after a round trip (a Pydantic model becomes a dict).
 
 ```python
-from nexura_agents import Agent, FakeModel, SequentialAgent, TeamInterruption, ToolCall, tool
+from nexura_agents import Agent, FakeModel, Runner, SequentialAgent, TeamInterruption, ToolCall, tool
 
 refunds = []
+# Offline example key. In an application, provision and securely retain a random secret.
+signing_key = b"offline-team-example-key"
 
 
 @tool(requires_approval=True)
@@ -237,7 +239,9 @@ def build_team(resumed: bool = False) -> SequentialAgent:
     notify = Agent(
         name="Notify", instructions="", model=FakeModel(responses=["Customer notified."])
     )
-    return SequentialAgent("Refunds", [clerk, notify])
+    return SequentialAgent(
+        "Refunds", [clerk, notify], runner=Runner(approval_signing_secret=signing_key)
+    )
 
 
 paused = build_team().run("Refund order A1")
@@ -248,7 +252,7 @@ saved = interruption.to_json()  # store it anywhere
 
 # ... later, in another process, with newly built objects ...
 restored = TeamInterruption.from_json(saved)
-final = build_team(resumed=True).resume(restored, approve=restored.pending_digests())
+final = build_team(resumed=True).resume(restored, approve=True)
 assert final.status == "completed" and final.output == "Customer notified."
 assert refunds == ["A1"]
 ```

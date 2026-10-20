@@ -15,6 +15,7 @@ running them.
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -179,10 +180,18 @@ class SavedAgentModule(BaseModule):
         remaining = context.remaining_seconds()
         if remaining is not None:
             timeout = max(0.001, min(timeout, remaining))
-        runner = Runner()
+        runner = Runner(
+            budget=context.budget,
+            approval_ttl=float(context.attributes.get("approval_ttl", 3600.0)),
+        )
         try:
             if resuming and grant is not None:
                 interruption = RunInterruption.from_json(str(grant["resume"]))
+                # approved_request is supplied only by the workflow after checking its
+                # stored identity, TTL and single-use claim. It is fresh authority for
+                # these exact calls, even if the SDK snapshot's shorter TTL elapsed.
+                # Rebind only the dispatch window, never a client-supplied approval.
+                interruption.expires_at = time.time() + timeout
                 result: RunResult[Any] = await runner.resume_async(
                     built.agent,
                     interruption,

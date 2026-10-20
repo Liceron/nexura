@@ -73,6 +73,7 @@ export interface KnowledgeLimits {
   max_workspace_bytes: number;
   max_top_k: number;
   workspace_used_bytes: number;
+  is_test_fixture?: boolean;
 }
 
 /** One chunk returned by `GET /knowledge/documents/{id}/chunks/{index}`. */

@@ -10,7 +10,8 @@ is installed (``nexura_runtime.modules.optional_packages``); without it, that ca
 
 from __future__ import annotations
 
+from nexura_postgres.execution_store import PostgresExecutionStore
 from nexura_postgres.pgvector import PgVectorStoreAdapter
 from nexura_postgres.repository import PostgresRepository
 
-__all__ = ["PgVectorStoreAdapter", "PostgresRepository"]
+__all__ = ["PgVectorStoreAdapter", "PostgresRepository", "PostgresExecutionStore"]

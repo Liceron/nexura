@@ -31,6 +31,7 @@ from __future__ import annotations
 import contextlib
 import copy
 import dataclasses
+import hmac
 import inspect
 import json
 import math
@@ -38,6 +39,7 @@ import re
 import time
 import uuid
 import warnings
+from collections import OrderedDict
 from collections.abc import AsyncGenerator, Awaitable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -47,6 +49,10 @@ from pydantic import ValidationError
 from nexura_agents import tracing
 from nexura_agents._lazy import LazyModule
 from nexura_agents.agent import Agent
+from nexura_agents.approvals import ApprovalEnvelope, ApprovalStore
+from nexura_agents.approvals import check_expiry as _check_approval_expiry
+from nexura_agents.approvals import payload as _approval_payload
+from nexura_agents.approvals import signature as _approval_signature
 from nexura_agents.attachments import Attachment
 from nexura_agents.cancel import CancelToken
 from nexura_agents.errors import (
@@ -88,6 +94,7 @@ from nexura_agents.types import (
     ToolCall,
     Usage,
 )
+from nexura_agents.usage import admission
 
 if TYPE_CHECKING:
     import asyncio
@@ -726,6 +733,8 @@ class _RunState:
     memory_block: str = ""  # recalled memories, shown to the model but never saved
     checkpoint_store_failed: bool = False  # a checkpoint write failed: keep the last good one
     checkpoint_owner: str | None = None  # recovery lease holder; fences checkpoint writes
+    checkpoint_interruption_id: str | None = None
+    checkpoint_expires_at: float | None = None
     final_text: str | None = None  # the run's final output text, kept in "completed" checkpoints
     agent_started_at: int = 0  # index in messages where the active agent took over (handoffs)
     cancel: CancelToken | None = None  # run(..., cancel=token): stop when it is cancelled
@@ -766,7 +775,33 @@ class Runner:
         budget: Any | None = None,
         max_handoffs: int | None = None,
         checkpoint_store: RunCheckpointStore | None = None,
+        approval_ttl: float = 3600.0,
+        approval_signing_secret: str | bytes | None = None,
+        approval_store: ApprovalStore | None = None,
     ) -> None:
+        if (
+            isinstance(approval_ttl, bool)
+            or not isinstance(approval_ttl, (int, float))
+            or not math.isfinite(approval_ttl)
+            or approval_ttl <= 0
+        ):
+            raise SDKValidationError("approval_ttl must be a finite positive number of seconds.")
+        if approval_signing_secret is not None and (
+            not isinstance(approval_signing_secret, (str, bytes)) or not approval_signing_secret
+        ):
+            raise SDKValidationError("approval_signing_secret must be nonempty str or bytes.")
+        self.approval_ttl = float(approval_ttl)
+        self._approval_secret = (
+            approval_signing_secret.encode("utf-8")
+            if isinstance(approval_signing_secret, str)
+            else approval_signing_secret
+        )
+        self.approval_store: Any = (
+            approval_store if approval_store is not None else checkpoint_store
+        )
+        # Convenience for same-runner approval. This trusted copy never comes from the client.
+        self._approval_snapshots: OrderedDict[str, str] = OrderedDict()
+        self._approval_snapshot_expiries: dict[str, float] = {}
         if max_handoffs is not None and (
             not isinstance(max_handoffs, int) or isinstance(max_handoffs, bool) or max_handoffs < 0
         ):
@@ -780,7 +815,20 @@ class Runner:
         self.usage_limits = usage_limits
         self.model_settings = model_settings
         # A usage RunBudget; provider models admit and settle every call against it.
-        self.budget = budget
+        self._configured_budget = budget
+
+    @property
+    def budget(self) -> Any:
+        """The configured budget, or the inherited active allowance when unset."""
+        return (
+            self._configured_budget
+            if self._configured_budget is not None
+            else admission.active_budget.get()
+        )
+
+    @budget.setter
+    def budget(self, value: Any) -> None:
+        self._configured_budget = value
 
     # ------------------------------------------------------------------ public API
 
@@ -880,6 +928,12 @@ class Runner:
         or a mapping of call ID -> the action digest the reviewer saw
         (``interruption.pending_digests()``) so approval binds to the exact arguments.
         Approved calls execute; rejected calls are reported to the model with the reason.
+        True/list approvals and digest-free ApproveWith require a verified signed or
+        stored copy. SDK-issued in-memory interruptions carry a trusted snapshot across
+        runners; JSON omits it, while the originating Runner retains its own copy.
+        Fresh unsigned JSON resumes need reviewed digests. Interruptions expire after
+        approval_ttl. Without an approval/checkpoint store, single use is the caller's
+        responsibility; signatures provide authenticity, not replay prevention.
         """
         _validate_timeout(timeout)
         return await self._collect(
@@ -954,7 +1008,7 @@ class Runner:
             stream = self._traced(
                 tracing.start_run, agent.name, False, self._stream_impl, agent, prompt, **kwargs
             )
-        return stream
+        return admission.budget_stream(stream, self.budget)
 
     async def _stream_impl(
         self,
@@ -1156,15 +1210,20 @@ class Runner:
             "stream_text": stream_text,
         }
         if tracing._STATE is None:
-            return self._resume_stream_impl(agent, interruption, **kwargs)
-        return self._traced(
-            tracing.start_run,
-            agent.name,
-            True,
-            self._resume_stream_impl,
-            agent,
-            interruption,
-            **kwargs,
+            return admission.budget_stream(
+                self._resume_stream_impl(agent, interruption, **kwargs), self.budget
+            )
+        return admission.budget_stream(
+            self._traced(
+                tracing.start_run,
+                agent.name,
+                True,
+                self._resume_stream_impl,
+                agent,
+                interruption,
+                **kwargs,
+            ),
+            self.budget,
         )
 
     async def _resume_stream_impl(
@@ -1183,6 +1242,8 @@ class Runner:
         _span: Any = tracing.NOOP,
     ) -> AsyncGenerator[RunEvent, None]:
         _validate_timeout(timeout)
+        # Detach before awaiting storage: a client must not mutate arguments during admission.
+        interruption = copy.deepcopy(interruption)
         if interruption.agent_name != agent.name:
             raise ApprovalDecisionError(
                 f"Interruption belongs to agent '{interruption.agent_name}', not '{agent.name}'."
@@ -1190,12 +1251,21 @@ class Runner:
         # Only calls to the agent's built-in ask_user tool are questions; a user tool that
         # happens to be named "ask_user" is approved or rejected like any other.
         active = _resolve_active_agent(agent, interruption)
+        envelope, authenticated = await self._verify_approval(interruption)
+        if interruption.action_digests and (
+            interruption.action_digests != interruption.pending_digests()
+        ):
+            raise ApprovalDecisionError(
+                "Interruption action digest differs from the pending action; "
+                "the arguments changed after review."
+            )
         questions = {
             c.id
             for c in interruption.pending
             if getattr(active.tools_by_name.get(c.name), "asks_user", False)
         }
         answers = dict(answers or {})
+        approve_all = approve is True
         if approve is True:
             # Approve everything still pending, bound to the actions in this interruption.
             # Questions are answered, never approved (running ask_user would mean no answer).
@@ -1220,7 +1290,12 @@ class Runner:
             for call_id, digest in approve.items():
                 if isinstance(digest, ApproveWith):
                     if digest.digest is None:
-                        continue  # approved by call id; the edit is checked below
+                        if not authenticated:
+                            raise ApprovalDecisionError(
+                                "Pass the reviewed action digest for ApproveWith, or use a "
+                                "signed/stored interruption."
+                            )
+                        continue
                     digest = digest.digest
                 if expected.get(call_id) != digest:
                     raise ApprovalDecisionError(
@@ -1268,6 +1343,16 @@ class Runner:
                 )
         if edits:
             batch_calls = _apply_edits(agent, state.messages, batch_calls, edits)
+        if decisions.approved and not isinstance(approve, Mapping) and not authenticated:
+            raise ApprovalDecisionError(
+                "Pass approve={call_id: reviewed_digest}, or use a signed/stored interruption."
+            )
+        # approve=True is normalized to a mapping above; it must not self-certify its digests.
+        if approve_all and decisions.approved and not authenticated:
+            raise ApprovalDecisionError(
+                "approve=True requires a signed/stored interruption; pass reviewed digests."
+            )
+        await self._consume_approval(interruption, envelope)
         async for event in self._loop(
             state,
             self._store(session_store),
@@ -1636,6 +1721,7 @@ class Runner:
                         pause_span.end()
                     # The whole batch waits; on resume the other calls run with the approved ones.
                     interruption = self._make_interruption(state, pending, copy_messages=True)
+                    await self._remember_interruption(interruption)
                     if self.checkpoint_store is not None:
                         await self._save_interruption(state, "paused", interruption)
                     yield RunEvent(
@@ -1727,8 +1813,8 @@ class Runner:
                         stream_extra["model_settings"] = settings
                     else:
                         _warn_settings_ignored(model, "stream")
-                legacy_stream = model.stream(
-                    snapshot, tools_schema, timeout=remaining_timeout, **stream_extra
+                legacy_stream = admission.stream(
+                    model, snapshot, tools_schema, timeout=remaining_timeout, **stream_extra
                 )
                 async for event in self._consume_stream(
                     legacy_stream, state, holder, remaining_timeout
@@ -1743,8 +1829,8 @@ class Runner:
                     extra["model_settings"] = settings
                 else:
                     _warn_settings_ignored(model, "generate")
-            call = model.generate(
-                messages=snapshot, tools=tools_schema, timeout=remaining_timeout, **extra
+            call = admission.generate(
+                model, messages=snapshot, tools=tools_schema, timeout=remaining_timeout, **extra
             )
             with chat.activated():
                 if remaining_timeout is not None:
@@ -1790,7 +1876,7 @@ class Runner:
         if not (stream_text and capabilities is not None and capabilities.can_stream) or (
             native_schema is not None and not getattr(model, "streams_response_schema", False)
         ):
-            call = model.generate(request, context=exec_ctx)
+            call = admission.generate(model, request, context=exec_ctx)
             with chat.activated():
                 if remaining_timeout is not None:
                     holder.append(
@@ -1802,7 +1888,7 @@ class Runner:
                     holder.append(await _until_cancelled(call, state.cancel))
             return
 
-        stream = model.stream(request, context=exec_ctx)
+        stream = admission.stream(model, request, context=exec_ctx)
         async for event in self._consume_stream(stream, state, holder, remaining_timeout):
             yield event
 
@@ -2543,6 +2629,8 @@ class Runner:
             expected_revision=interruption.expected_revision,
             span=span,
             memory_block=interruption.memory_block,
+            checkpoint_interruption_id=interruption.interruption_id,
+            checkpoint_expires_at=interruption.expires_at,
         )
 
     @staticmethod
@@ -2571,7 +2659,11 @@ class Runner:
     ) -> RunInterruption:
         agent, root = state.agent, state.root
         handoff = state.pending_handoff
-        return RunInterruption(
+        fresh_approval = copy_messages or reason is not None
+        if fresh_approval or state.checkpoint_interruption_id is None:
+            state.checkpoint_interruption_id = str(uuid.uuid4())
+            state.checkpoint_expires_at = time.time() + self.approval_ttl
+        interruption = RunInterruption(
             run_id=state.run_id,
             agent_name=root.name,
             messages=copy.deepcopy(state.messages) if copy_messages else state.messages,
@@ -2603,7 +2695,98 @@ class Runner:
             pending_handoff=(
                 {"tool_call_id": handoff[2], "reason": handoff[1]} if handoff is not None else None
             ),
+            interruption_id=state.checkpoint_interruption_id,
+            expires_at=state.checkpoint_expires_at or 0.0,
         )
+        interruption.action_digests = interruption.pending_digests()
+        if self._approval_secret is not None:
+            interruption.signature = _approval_signature(interruption, self._approval_secret)
+        return interruption
+
+    def _check_approval_store(self) -> None:
+        if not all(
+            callable(getattr(self.approval_store, method, None))
+            for method in ("save_approval", "load_approval", "consume_approval")
+        ):
+            raise SDKValidationError(
+                "Checkpoint store needs atomic approval methods; provide approval_store=... "
+                "implementing nexura_agents.approvals.ApprovalStore."
+            )
+
+    def _prune_approval_snapshots(self) -> None:
+        now = time.time()
+        for key, expiry in list(self._approval_snapshot_expiries.items()):
+            if expiry <= now or key not in self._approval_snapshots:
+                self._approval_snapshots.pop(key, None)
+                self._approval_snapshot_expiries.pop(key, None)
+        while len(self._approval_snapshots) > 256:
+            key, _ = self._approval_snapshots.popitem(last=False)
+            self._approval_snapshot_expiries.pop(key, None)
+
+    async def _verify_approval(self, interruption: ApprovalEnvelope) -> tuple[str, bool]:
+        self._prune_approval_snapshots()
+        _check_approval_expiry(interruption)
+        envelope = _approval_payload(interruption)
+        authenticated = False
+        if self._approval_secret is not None:
+            if (
+                not isinstance(interruption.signature, str)
+                or re.fullmatch(r"[0-9a-f]{64}", interruption.signature) is None
+                or not hmac.compare_digest(
+                    interruption.signature, _approval_signature(interruption, self._approval_secret)
+                )
+            ):
+                raise ApprovalDecisionError(
+                    "Invalid interruption signature; refusing tampered approval."
+                )
+            authenticated = True
+        approval_store = self.approval_store
+        if approval_store is not None:
+            self._check_approval_store()
+            stored = await approval_store.load_approval(interruption.interruption_id)
+            if stored != envelope:
+                raise ApprovalDecisionError(
+                    "Stored interruption differs or is missing; refusing resume."
+                )
+            authenticated = True
+        elif interruption.interruption_id in self._approval_snapshots:
+            if self._approval_snapshots[interruption.interruption_id] != envelope:
+                raise ApprovalDecisionError("Stored interruption differs from the reviewed action.")
+            authenticated = True
+            self._approval_snapshots.move_to_end(interruption.interruption_id)
+        elif interruption._approval_snapshot is not None:
+            if interruption._approval_snapshot != envelope:
+                raise ApprovalDecisionError("Stored interruption differs from the reviewed action.")
+            authenticated = True
+        return envelope, authenticated
+
+    async def _consume_approval(self, interruption: ApprovalEnvelope, envelope: str) -> None:
+        _check_approval_expiry(interruption)
+        if self.approval_store is not None and not await self.approval_store.consume_approval(
+            interruption.interruption_id, envelope
+        ):
+            raise ApprovalDecisionError(
+                "Interruption already consumed or expired; refusing replay."
+            )
+        self._approval_snapshots.pop(interruption.interruption_id, None)
+        self._approval_snapshot_expiries.pop(interruption.interruption_id, None)
+
+    async def _remember_interruption(self, interruption: ApprovalEnvelope) -> None:
+        self._prune_approval_snapshots()
+        envelope = _approval_payload(interruption)
+        if self.approval_store is not None:
+            self._check_approval_store()
+            await self.approval_store.save_approval(
+                interruption.interruption_id, envelope, interruption.expires_at
+            )
+        else:
+            # Store-backed grants must be resumed through their configured store;
+            # do not issue an in-memory shortcut that could skip atomic consumption.
+            interruption._approval_snapshot = envelope
+            self._approval_snapshots[interruption.interruption_id] = envelope
+            self._approval_snapshots.move_to_end(interruption.interruption_id)
+            self._approval_snapshot_expiries[interruption.interruption_id] = interruption.expires_at
+            self._prune_approval_snapshots()
 
     async def _save_interruption(
         self, state: _RunState, phase: str, interruption: RunInterruption
@@ -2611,6 +2794,8 @@ class Runner:
         from nexura_agents.durable import accepts_fencing, encode_checkpoint
 
         assert self.checkpoint_store is not None
+        if phase == "paused":
+            await self._remember_interruption(interruption)
         final = state.final_text if phase == "completed" else None
         data = encode_checkpoint(
             phase,
@@ -2709,13 +2894,18 @@ class Runner:
             "stream_text": stream_text,
         }
         if tracing._STATE is None:
-            return self._recover_stream_impl(agent, run_id, **kwargs)
+            return admission.budget_stream(
+                self._recover_stream_impl(agent, run_id, **kwargs), self.budget
+            )
 
         def start(name: str, *, resumed: bool) -> Any:
             return tracing.start_recover(name)
 
-        return self._traced(
-            start, agent.name, True, self._recover_stream_impl, agent, run_id, **kwargs
+        return admission.budget_stream(
+            self._traced(
+                start, agent.name, True, self._recover_stream_impl, agent, run_id, **kwargs
+            ),
+            self.budget,
         )
 
     async def _recover_stream_impl(

@@ -397,13 +397,14 @@ async def test_approval_pause_in_target_round_trips_and_resumes_in_new_process()
     assert interruption.handoffs_count == 1
 
     payload = interruption.to_json()
+    reviewed = interruption.pending_digests()
     # A "new process": rebuild identical agents; nothing is shared except the JSON.
     triage2, _billing2, done2 = approval_setup()
     restored = RunInterruption.from_json(payload)
     assert restored.active_agent == "Billing" and restored.agent_path == ["Triage", "Billing"]
     # make the rebuilt Billing's model continue after the refund
     fake(triage2.handoffs[0].agent)._responses[:] = ["Refund done."]
-    result = await Runner().resume_async(triage2, restored, approve=True)
+    result = await Runner().resume_async(triage2, restored, approve=reviewed)
     assert result.status == "completed"
     assert result.final_output == "Refund done."
     assert result.agent_path == ["Triage", "Billing"]
@@ -421,13 +422,14 @@ async def test_old_interruption_payloads_still_load_and_resume() -> None:
     paused = await Runner().run_async(agent, "go")
     import json
 
+    reviewed = paused.interruption.pending_digests()  # type: ignore[union-attr]
     raw = json.loads(paused.interruption.to_json())  # type: ignore[union-attr]
     for key in ("active_agent", "agent_path", "handoffs_count"):
         raw.pop(key)
     old = RunInterruption.from_json(json.dumps(raw))
     assert old.active_agent is None and old.agent_path == []
     fake(agent)._responses[:] = ["ok"]
-    result = await Runner().resume_async(agent, old, approve=True)
+    result = await Runner().resume_async(agent, old, approve=reviewed)
     assert result.final_output == "ok" and result.agent_path == ["Solo"]
 
 
@@ -443,9 +445,12 @@ async def test_resume_with_unknown_active_agent_is_a_clear_error() -> None:
     triage2, _b2, done2 = approval_setup()
     paused2 = await Runner().run_async(triage2, "refund A1")
     assert paused2.interruption is not None
-    paused2.interruption.agent_path = []
+    reviewed = paused2.interruption.pending_digests()
+    # Simulate a legacy serialized representation, without in-memory provenance.
+    restored = RunInterruption.from_json(paused2.interruption.to_json())
+    restored.agent_path = []
     fake(triage2.handoffs[0].agent)._responses[:] = ["fine"]
-    result = await Runner().resume_async(triage2, paused2.interruption, approve=True)
+    result = await Runner().resume_async(triage2, restored, approve=reviewed)
     assert result.final_output == "fine" and done2 == ["A1"]
 
 
@@ -612,8 +617,9 @@ async def test_starting_system_message_survives_resume_then_handoff() -> None:
     store = MemorySessionStore()
     paused = await Runner(session_store=store).run_async(build(), "hi", session_id="s")
     assert paused.status == "paused"
+    reviewed = paused.interruption.pending_digests()
     intr = RunInterruption.from_json(paused.interruption.to_json())
-    res = await Runner(session_store=store).resume_async(build(), intr, approve=True)
+    res = await Runner(session_store=store).resume_async(build(), intr, approve=reviewed)
     assert res.messages[0].role == "system" and res.messages[0].content == "A sys"
 
 

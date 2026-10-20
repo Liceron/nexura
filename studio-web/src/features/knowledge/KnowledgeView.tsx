@@ -102,6 +102,11 @@ export function KnowledgeView() {
         gap: 16,
       }}
     >
+      {limits.is_test_fixture && (
+        <p role="note" style={{ margin: 0, padding: 12, border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-lg)', backgroundColor: 'var(--bg-surface)' }}>
+          {t('knowledge.testEmbeddingsNotice')}
+        </p>
+      )}
       {/* Top Bar: Collections & Tabs */}
       <div
         style={{

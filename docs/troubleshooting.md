@@ -98,16 +98,17 @@ model = FakeModel(
     responses=[[ToolCall(id="p1", name="pay", arguments={"invoice": "INV-1"})], "Done."]
 )
 agent = Agent(name="Billing", instructions="Pay.", model=model, tools=[pay])
-interruption = Runner().run(agent, "Pay it").interruption
+runner = Runner()
+interruption = runner.run(agent, "Pay it").interruption
 
 try:
-    Runner().resume(agent, interruption)  # no decision for p1
+    runner.resume(agent, interruption)  # no decision for p1
 except ApprovalDecisionError:
     pass
 else:
     raise AssertionError("expected ApprovalDecisionError")
 
-assert Runner().resume(agent, interruption, approve=["p1"]).final_output == "Done."
+assert runner.resume(agent, interruption, approve=["p1"]).final_output == "Done."
 ```
 
 **Workflow approvals.** `ApprovalAlreadyClaimedError` means someone else already used that `approval_id`; approvals can be used once. `WorkflowTerminalError` means the run already finished (or was rejected). Both derive from `WorkflowError`. Over the REST service a second decision returns HTTP 409 with code `NOT_PENDING_APPROVAL`. See [Workflows](workflows.md).

@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from nexura_runtime.knowledge.hybrid import (
     DocumentLimitError,
+    EmbeddingLineageMismatchError,
     FileTooLargeError,
     HybridKnowledgeIndex,
     IndexedDocument,
@@ -130,7 +131,7 @@ def _index(request: Request) -> HybridKnowledgeIndex:
     state = request.app.state
     index: HybridKnowledgeIndex | None = getattr(state, "hybrid_knowledge_index", None)
     if index is None:
-        index = HybridKnowledgeIndex(state.vector_store._conn)
+        index = HybridKnowledgeIndex(state.vector_store._conn, embedder=state.knowledge_embedder)
         state.hybrid_knowledge_index = index
     return index
 
@@ -168,8 +169,9 @@ def _safe_filename(name: str) -> bool:
 def _knowledge_http_error(exc: KnowledgeError) -> HTTPException:
     """Map a hybrid-index error to an HTTP error carrying its stable code."""
     too_big = isinstance(exc, (FileTooLargeError, WorkspaceQuotaExceededError, DocumentLimitError))
+    code = 413 if too_big else (409 if isinstance(exc, EmbeddingLineageMismatchError) else 400)
     return HTTPException(
-        status_code=413 if too_big else 400,
+        status_code=code,
         detail={"code": exc.code, "message": str(exc)},
     )
 
@@ -258,7 +260,36 @@ async def list_collections(request: Request) -> dict[str, Any]:
     return {
         "workspace_id": caller_ws,
         "collections": _workspace_collections(ws_repo, caller_ws),
+        **_index(request).embedding_status(caller_ws),
+        "collection_status": {
+            cid: _index(request).embedding_status(caller_ws, cid)
+            for cid in _workspace_collections(ws_repo, caller_ws)
+        },
     }
+
+
+@router.get("/status")
+async def knowledge_status(
+    request: Request, collection_id: str = Query(default="default")
+) -> dict[str, Any]:
+    """Configured and persisted collection embedding lineage (no provider calls)."""
+    caller_ws, _, _ = _get_caller_context(request)
+    return _index(request).embedding_status(caller_ws, collection_id)
+
+
+@router.post("/collections/{collection_id}/reindex", dependencies=[_require("edit")])
+async def reindex_collection(request: Request, collection_id: str) -> dict[str, Any]:
+    """Explicitly rebuild this workspace's collection using the configured embedder."""
+    caller_ws, principal, _ = _get_caller_context(request)
+    try:
+        require_resource(principal, "knowledge", collection_id)
+        return await _index(request).reindex(caller_ws, collection_id)
+    except PermissionDeniedError as exc:
+        raise HTTPException(
+            status_code=403, detail={"code": exc.code, "message": str(exc)}
+        ) from exc
+    except KnowledgeError as exc:
+        raise _knowledge_http_error(exc) from exc
 
 
 @router.post("/collections", status_code=status.HTTP_201_CREATED, dependencies=[_require("edit")])
@@ -288,7 +319,10 @@ async def knowledge_limits(request: Request) -> dict[str, Any]:
     """Upload size limits and the caller workspace's current usage."""
     caller_ws, _, _ = _get_caller_context(request)
     index = _index(request)
-    return {**index.limits(), "workspace_used_bytes": index.workspace_usage(caller_ws)}
+    return {
+        **index.limits(), "workspace_used_bytes": index.workspace_usage(caller_ws),
+        **index.embedding_status(caller_ws),
+    }
 
 
 @router.get("/documents")
@@ -455,15 +489,18 @@ async def retrieve_knowledge(request: Request, payload: RetrieveQueryRequest) ->
     _check_retrieval_rate(request, caller_ws)
     index = _index(request)
     t0 = time.perf_counter()
-    hits = await index.search(
-        workspace_id=caller_ws,
-        query=payload.query,
-        collection_id=payload.collection_id,
-        top_k=payload.top_k,
-        vector_weight=payload.dense_weight,
-        keyword_weight=payload.lexical_weight,
-        min_score=payload.min_score_threshold,
-    )
+    try:
+        hits = await index.search(
+            workspace_id=caller_ws,
+            query=payload.query,
+            collection_id=payload.collection_id,
+            top_k=payload.top_k,
+            vector_weight=payload.dense_weight,
+            keyword_weight=payload.lexical_weight,
+            min_score=payload.min_score_threshold,
+        )
+    except KnowledgeError as exc:
+        raise _knowledge_http_error(exc) from exc
     latency_ms = round((time.perf_counter() - t0) * 1000, 2)
 
     items_list = [
@@ -507,12 +544,15 @@ async def answer_with_citations(request: Request, payload: AnswerQueryRequest) -
         ) from exc
     _check_retrieval_rate(request, caller_ws)
     t0 = time.perf_counter()
-    hits = await _index(request).search(
-        workspace_id=caller_ws,
-        query=payload.query,
-        collection_id=payload.collection_id,
-        top_k=5,
-    )
+    try:
+        hits = await _index(request).search(
+            workspace_id=caller_ws,
+            query=payload.query,
+            collection_id=payload.collection_id,
+            top_k=5,
+        )
+    except KnowledgeError as exc:
+        raise _knowledge_http_error(exc) from exc
     retrieval_ms = round((time.perf_counter() - t0) * 1000, 2)
     citations_list = [_hit_citation(h) for h in hits]
     sufficient = bool(hits)

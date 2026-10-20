@@ -221,6 +221,8 @@ nexura-runtime serve --db ./nexura_service.sqlite3 --worker --poll-interval 1
 nexura-runtime worker --db ./nexura_service.sqlite3 --poll-interval 1
 ```
 
+Each run in `running` records the process executing it (host name, process id and the process start time). When a `serve` or `worker` process opens the database it marks a `running` run `interrupted` ("Run was interrupted by server restart or shutdown.") only if that process is on the same machine and has exited. A process id reused by a newer process, or one from before a reboot, counts as exited. Runs of a process that is still alive are left alone, so starting a worker, or restarting `serve` while a worker runs, does not interrupt another process's runs. Runs recorded by a database from before this change have no owner and are still marked `interrupted` on open. Runs owned by another machine are never marked, so share a SQLite file between processes on one machine only. On systems without `/proc` the check is weaker: macOS checks only the process id, so a reused process id keeps a dead run in `running`, and Windows treats every owning process as alive, so runs there are marked `interrupted` only by a clean shutdown. A service that shuts down cleanly still marks its own unfinished runs `interrupted` ("Run was interrupted by server shutdown.").
+
 Create a schedule that fires every 60 seconds (`cron_expr` with `timezone` also works). `release_id` pins what may run: `current` (default, no pin), a revision such as `rev:3`, or the workflow's spec hash. If the workflow has changed since, the job fails with a clear error and no run starts. Jobs whose workflow is missing or belongs to another workspace fail the same way.
 
 ```bash

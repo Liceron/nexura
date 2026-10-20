@@ -372,6 +372,20 @@ def test_hygiene_audit_flags_real_langflow_packages_but_not_our_reader(
     assert sorted(found) == ["langflow_base", "lfx.graph"]
 
 
+def test_hygiene_audit_ignores_own_test_dirs_but_flags_outside_langflow_paths(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Pytest adds tests/integrations/langflow to sys.path in any checkout, whatever the
+    checkout directory is called (the public CI clones into .../nexura/nexura)."""
+    own = Path(__file__).resolve().parents[2] / "integrations" / "langflow"
+    outside = tmp_path / "site" / "langflow"
+    monkeypatch.syspath_prepend(str(own))
+    monkeypatch.syspath_prepend(str(outside))
+    found = ReleaseDiagnostics.audit_environment().foreign_paths_found
+    assert str(outside) in found
+    assert str(own) not in found
+
+
 def test_capability_matrix_validates_in_the_public_tree(tmp_path: Path) -> None:
     """The public export has no planning catalog or reports; test evidence is still required."""
     from nexura_runtime.release.matrix import MODULE_REGISTRY, validate_matrix

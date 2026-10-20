@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from nexura_agents import Agent, FakeModel, ToolCall, Usage, tool
+from nexura_agents import Agent, FakeModel, Runner, ToolCall, Usage, tool
 from nexura_agents.attachments import Attachment
 from nexura_agents.events import RunEventType
 from nexura_agents.teams import GroupChat, MaxTurns, TeamInterruption, TextMention
@@ -56,13 +56,24 @@ def test_history_text_stable_across_pause_for_structured_output() -> None:
     plain = last_prompt(t1)
     # Interrupted after turn 1, resumed from JSON.
     t1b = say("Typed", '{"title": "T"}', '{"title": "U"}', output_type=Doc)
-    chat = GroupChat("C", [t1b, gated()], max_turns=3)
+    chat = GroupChat(
+        "C",
+        [t1b, gated()],
+        max_turns=3,
+        runner=Runner(approval_signing_secret=b"offline-structured-roundtrip"),
+    )
     paused = chat.run("go")
     assert paused.status == "paused"
+    reviewed = paused.interruption.pending_digests()  # type: ignore[union-attr]
     saved = TeamInterruption.from_json(paused.interruption.to_json())  # type: ignore[union-attr]
     t1c = say("Typed", '{"title": "U"}', output_type=Doc)
-    chat2 = GroupChat("C", [t1c, gated(True)], max_turns=3)
-    chat2.resume(saved, approve=True)
+    chat2 = GroupChat(
+        "C",
+        [t1c, gated(True)],
+        max_turns=3,
+        runner=Runner(approval_signing_secret=b"offline-structured-roundtrip"),
+    )
+    chat2.resume(saved, approve=reviewed)
     resumed = last_prompt(t1c)
     # normalise the later speaker name difference; compare turn-1 line only
     line = [ln for ln in plain.splitlines() if ln.startswith("Typed:")][0]
@@ -172,8 +183,19 @@ def test_colon_member_name_approval_roundtrip() -> None:
             tools=[refund],
         )
 
-    p = GroupChat("C", [mk(False)], max_turns=1).run("go")
+    p = GroupChat(
+        "C",
+        [mk(False)],
+        max_turns=1,
+        runner=Runner(approval_signing_secret=b"offline-colon-roundtrip"),
+    ).run("go")
     assert p.status == "paused"
+    reviewed = p.interruption.pending_digests()  # type: ignore[union-attr]
     saved = TeamInterruption.from_json(p.interruption.to_json())  # type: ignore[union-attr]
-    r = GroupChat("C", [mk(True)], max_turns=1).resume(saved, approve=True)
+    r = GroupChat(
+        "C",
+        [mk(True)],
+        max_turns=1,
+        runner=Runner(approval_signing_secret=b"offline-colon-roundtrip"),
+    ).resume(saved, approve=reviewed)
     assert r.status == "completed" and r.output == "done"

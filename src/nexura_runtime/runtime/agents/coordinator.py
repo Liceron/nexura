@@ -8,7 +8,6 @@ import asyncio
 import contextlib
 import copy
 import hashlib
-import inspect
 import json
 import uuid
 from collections.abc import Sequence
@@ -190,6 +189,9 @@ class AgentCoordinator:
         handoffs_count = 0
         current_prompt: str | list[Message] = prompt
 
+        from nexura_agents.usage import admission
+
+        budget_token = admission.active_budget.set(admission.effective_budget(effective_context))
         token = current_agent_context.set(effective_context)
         try:
             while True:
@@ -283,14 +285,12 @@ class AgentCoordinator:
                     )
 
                     # Invoke model
-                    model_gen = agent.model.generate(
+                    response = await admission.generate(
+                        agent.model,
                         messages=copy.deepcopy(agent_messages),
                         tools=tools_schema,
+                        context=effective_context,
                     )
-                    if inspect.iscoroutine(model_gen):
-                        response = await model_gen
-                    else:
-                        response = model_gen
 
                     # Check model refusal and length bounds
                     if response.finish_reason in ("refusal", "content_filter"):
@@ -484,3 +484,4 @@ class AgentCoordinator:
                     raise MaxTurnsExceededError(agent_turns, agent.max_turns)
         finally:
             current_agent_context.reset(token)
+            admission.active_budget.reset(budget_token)

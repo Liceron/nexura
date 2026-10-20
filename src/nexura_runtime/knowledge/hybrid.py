@@ -33,6 +33,7 @@ from nexura_agents.tools import Tool
 from pydantic import BaseModel, Field
 
 from nexura_runtime.knowledge.chunks.chunkers import BaseChunker, FixedWindowChunker
+from nexura_runtime.knowledge.embeddings.config import describe_embedder
 from nexura_runtime.knowledge.embeddings.embedder import EmbeddingOrchestrator
 from nexura_runtime.knowledge.ingest.detector import detect_mime_type
 from nexura_runtime.knowledge.ingest.errors import IngestionError
@@ -63,6 +64,12 @@ class FileTooLargeError(KnowledgeError):
     """Raised when one file exceeds the per-file size limit."""
 
     code = "OVERSIZED_DOCUMENT"
+
+
+class EmbeddingLineageMismatchError(KnowledgeError):
+    """A collection must be explicitly reindexed before this embedder can use it."""
+
+    code = "EMBEDDING_LINEAGE_MISMATCH"
 
 
 class WorkspaceQuotaExceededError(KnowledgeError):
@@ -280,6 +287,9 @@ def _stored_size(text: str, title: str, source_uri: str | None, meta_json: str) 
 
 
 _SCHEMA = (
+    """CREATE TABLE IF NOT EXISTS hk_lineage (
+        workspace_id TEXT NOT NULL, collection_id TEXT NOT NULL, embedder TEXT NOT NULL,
+        PRIMARY KEY (workspace_id, collection_id))""",
     """CREATE TABLE IF NOT EXISTS hk_documents (
         document_id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, collection_id TEXT NOT NULL,
         title TEXT NOT NULL, source_uri TEXT, mime_type TEXT NOT NULL, content_hash TEXT NOT NULL,
@@ -337,6 +347,81 @@ class HybridKnowledgeIndex:
             self._conn.commit()
 
     # -- limits ---------------------------------------------------------------------------------
+
+    def embedding_status(self, workspace_id: str, collection_id: str = "default") -> dict[str, Any]:
+        """Expose configured and indexed identities, including unverified legacy collections."""
+        configured = describe_embedder(self.embedder)
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT embedder FROM hk_lineage WHERE workspace_id = ? AND collection_id = ?",
+                (workspace_id, collection_id),
+            ).fetchone()
+            populated = self._conn.execute(
+                "SELECT 1 FROM hk_documents WHERE workspace_id = ? AND collection_id = ? LIMIT 1",
+                (workspace_id, collection_id),
+            ).fetchone() is not None
+        indexed = json.loads(row[0]) if row else None
+        return {
+            "embedder": configured,
+            "indexed_embedder": indexed,
+            "is_test_fixture": configured["is_test_fixture"],
+            "requires_reindex": (indexed != configured) if row else populated,
+        }
+
+    def _check_lineage(self, workspace_id: str, collection_id: str) -> None:
+        if self.embedding_status(workspace_id, collection_id)["requires_reindex"]:
+            raise EmbeddingLineageMismatchError(
+                "Collection embedding lineage is different or unknown. Explicitly reindex "
+                "with POST /knowledge/collections/{collection_id}/reindex before use."
+            )
+
+    def _write_lineage(self, workspace_id: str, collection_id: str) -> None:
+        self._conn.execute(
+            "INSERT OR REPLACE INTO hk_lineage VALUES (?, ?, ?)",
+            (
+                workspace_id, collection_id,
+                json.dumps(describe_embedder(self.embedder), sort_keys=True),
+            ),
+        )
+
+    async def reindex(self, workspace_id: str, collection_id: str = "default") -> dict[str, Any]:
+        """Replace all collection vectors and lineage atomically, retaining text and citations.
+
+        Provider failure leaves the old index intact. A concurrent change refuses the
+        replacement; the operator can retry against the new snapshot.
+        """
+        def snapshot() -> list[tuple[Any, ...]]:
+            return list(self._conn.execute(
+                "SELECT document_id, chunk_index, text, embedding FROM hk_chunks "
+                "WHERE workspace_id = ? AND collection_id = ? ORDER BY document_id, chunk_index",
+                (workspace_id, collection_id),
+            ).fetchall())
+
+        with self._lock:
+            before = snapshot()
+            old_status = self.embedding_status(workspace_id, collection_id)
+        result = await self.embedder.embed_texts([r[2] for r in before])
+
+        def commit() -> None:
+            if (
+                snapshot() != before
+                or self.embedding_status(workspace_id, collection_id) != old_status
+            ):
+                raise EmbeddingLineageMismatchError(
+                    "Collection changed during reindex; retry reindex."
+                )
+            for row, chunk in zip(before, result.embedded_chunks, strict=True):
+                self._conn.execute(
+                    "UPDATE hk_chunks SET embedding = ? WHERE document_id = ? AND chunk_index = ?",
+                    (_pack(chunk.embedding), row[0], row[1]),
+                )
+            self._write_lineage(workspace_id, collection_id)
+
+        self._atomic(commit)
+        return {
+            "reindexed_chunks": len(before),
+            **self.embedding_status(workspace_id, collection_id),
+        }
 
     def limits(self) -> dict[str, int]:
         """Configured per-file, per-workspace and top_k limits."""
@@ -440,6 +525,7 @@ class HybridKnowledgeIndex:
         metadata: dict[str, Any] | None = None,
     ) -> IngestOutcome:
         """Parse, chunk, embed and index ``data``; dedup by hash, replace same-title documents."""
+        self._check_lineage(workspace_id, collection_id)
         if len(data) > self.max_file_bytes:
             raise FileTooLargeError(
                 f"File is {len(data)} bytes; the per-file limit is {self.max_file_bytes} bytes."
@@ -488,6 +574,7 @@ class HybridKnowledgeIndex:
 
         def commit() -> IngestOutcome:
             # Re-check inside the transaction: another ingest may have run while embedding.
+            self._check_lineage(workspace_id, collection_id)
             dup = self._find_duplicate(workspace_id, collection_id, filename, content_hash)
             if dup is not None:
                 return self._dedup_outcome(
@@ -506,6 +593,7 @@ class HybridKnowledgeIndex:
             created = old[1] if old else now
             if old:
                 self._purge(final_id)
+            self._write_lineage(workspace_id, collection_id)
             for c in chunks:
                 first, last = _chunk_pages(pages, c.start_char, c.end_char)
                 self._conn.execute(
@@ -614,6 +702,7 @@ class HybridKnowledgeIndex:
         metadata: dict[str, Any] | None,
     ) -> IngestOutcome:
         """Dedup hit: keep chunks, but apply a changed source_uri / metadata and report it."""
+        self._check_lineage(workspace_id, collection_id)
         row = self._find_duplicate(workspace_id, collection_id, title, content_hash)
         if row is None:  # pragma: no cover - guarded by the caller's lookup
             raise KnowledgeError("Duplicate document vanished during ingest.")
@@ -741,6 +830,7 @@ class HybridKnowledgeIndex:
         ranker); ``min_score`` drops hits whose normalised score is below it.
         """
         top_k = max(1, min(int(top_k), self.max_top_k))
+        self._check_lineage(workspace_id, collection_id)
         terms = extract_query_terms(query)
         if not terms:
             return []
@@ -761,6 +851,7 @@ class HybridKnowledgeIndex:
         if vector_weight > 0:
             qvec = (await self.embedder.embed_texts([" ".join(terms)])).embedded_chunks[0].embedding
             with self._lock:
+                self._check_lineage(workspace_id, collection_id)
                 rows = self._conn.execute(
                     "SELECT chunk_id, embedding FROM hk_chunks "
                     "WHERE workspace_id = ? AND collection_id = ? ORDER BY rowid DESC LIMIT ?",

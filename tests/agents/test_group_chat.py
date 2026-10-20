@@ -208,11 +208,12 @@ def gated(shop: Shop, resumed: bool = False) -> Agent:
 
 
 def test_pause_and_resume_continues_the_same_turn_and_rest() -> None:
+    runner = Runner(approval_signing_secret=b"offline-group-chat-roundtrip")
     shop = Shop()
     first = say("First", "hi", "again")
     manager = say("Boss", "First", "Gated", "First")
     chat = GroupChat("C", [first, gated(shop)], max_turns=3, select=manager)
-    paused = chat.run("go")
+    paused = chat.run("go", runner=runner)
     assert paused.status == "paused" and paused.interruption is not None
     assert list(paused.interruption.pending) == ["turn-2:Gated"]
     assert shop.refunds == []
@@ -223,7 +224,11 @@ def test_pause_and_resume_continues_the_same_turn_and_rest() -> None:
     manager2 = say("Boss", "First")
     chat2 = GroupChat("C", [first2, gated(shop2, resumed=True)], max_turns=3, select=manager2)
     interruption = TeamInterruption.from_json(saved)
-    final = chat2.resume(interruption, approve=interruption.pending_digests())
+    final = chat2.resume(
+        interruption,
+        approve=interruption.pending_digests(),
+        runner=Runner(approval_signing_secret=b"offline-group-chat-roundtrip"),
+    )
     assert final.status == "completed"
     assert shop2.refunds == ["A1"]
     assert [s.path for s in final.steps] == [

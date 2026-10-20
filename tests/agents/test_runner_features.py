@@ -327,8 +327,9 @@ async def test_approval_pauses_before_effect_and_resumes_after_restart() -> None
     assert [c.id for c in paused.interruption.pending] == ["r1"]
 
     # Persist and reload, as a different process would.
+    reviewed = paused.interruption.pending_digests()
     restored = RunInterruption.from_json(paused.interruption.to_json())
-    done = await Runner().resume_async(agent, restored, approve=["r1"], deps=shop)
+    done = await Runner().resume_async(agent, restored, approve=reviewed, deps=shop)
     assert done.status == "completed" and done.output == "Refund issued."
     assert shop.refunds == ["A1:450"]
     tool_msgs = {m.tool_call_id: m.content for m in done.messages if m.role == "tool"}
@@ -473,9 +474,10 @@ async def test_approve_true_approves_everything_not_rejected() -> None:
         ToolCall(id="r2", name="refund", arguments={"order_id": "B2", "amount": 900}),
     ]
     agent = _refund_agent(FakeModel(responses=[batch, "Partly done."]), shop)
-    paused = await agent.run_async("refund both", deps=shop)
+    runner = Runner()
+    paused = await runner.run_async(agent, "refund both", deps=shop)
     assert paused.interruption is not None
-    done = await Runner().resume_async(
+    done = await runner.resume_async(
         agent, paused.interruption, approve=True, reject={"r2": "too large"}, deps=shop
     )
     assert shop.refunds == ["A1:450"]

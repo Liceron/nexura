@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar, overload
 
 from pydantic import BaseModel
 
-from nexura_agents.errors import SDKValidationError, ToolError
+from nexura_agents.errors import ModelRetry, SDKValidationError, ToolError
 from nexura_agents.events import RunEventType
 from nexura_agents.guardrails import GuardrailFn
 from nexura_agents.history import HistoryProcessor, check_processors
@@ -469,7 +469,25 @@ class Agent(Generic[OutputT]):  # noqa: UP046 (a TypeVar default needs typing_ex
         agent = self
 
         async def call_agent(ctx: RunContext[Any], request: str) -> Any:
-            result = await sub_runner.run_async(agent, request, deps=ctx.deps)
+            from nexura_agents.usage import admission
+            from nexura_agents.usage.errors import BudgetExceededError
+
+            enclosing = admission._budgets(admission.active_budget.get())
+            configured = sub_runner._configured_budget
+            try:
+                result = await sub_runner.run_async(agent, request, deps=ctx.deps)
+            except BudgetExceededError as exc:
+                if (
+                    configured is not None
+                    and not any(admission._descendant(held, configured) for held in enclosing)
+                    and exc.run_id == getattr(configured, "run_id", None)
+                    and exc.workspace_id == getattr(configured, "workspace_id", None)
+                ):
+                    # A local child allowance is a refused delegation, not exhaustion
+                    # of the parent's allowance. Report it as a tool result so the
+                    # parent can choose another action; ancestor failures still abort.
+                    raise ModelRetry(f"Sub-agent '{agent.name}' budget refused: {exc}") from exc
+                raise
             ctx.add_usage(result.usage)
             # Record which tools the sub-agent ran (its own sub-agents included), so audits
             # and evals of the calling run can see them.

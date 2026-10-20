@@ -12,11 +12,11 @@ jobs:
   python:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.0
         with:
           python-version: "3.12"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "24"
       - run: uv sync --frozen --all-extras
@@ -46,8 +46,8 @@ jobs:
       matrix:
         python: ["3.11", "3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.0
       - name: Test the standalone wheel on Python ${{ matrix.python }}
         # Builds the wheel, installs it in a fresh venv and runs every agent test file
         # that does not need the platform package (see the script's docstring).
@@ -70,8 +70,8 @@ jobs:
       NEXURA_TEST_POSTGRES_URI: postgresql://postgres:nexura-ci-only@127.0.0.1:5432/postgres
       NEXURA_TEST_QDRANT_URL: http://127.0.0.1:6333
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.0
         with:
           python-version: "3.12"
       - run: uv sync --frozen --all-extras
@@ -80,8 +80,8 @@ jobs:
   package:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.0
         with:
           python-version: "3.12"
       - run: uv build --all-packages
@@ -91,20 +91,24 @@ jobs:
           uv pip install --python /tmp/agents/bin/python dist/nexura_agents-*.whl
           cd /tmp && env -u PYTHONPATH /tmp/agents/bin/python -I -c \
             "import nexura_agents, importlib.util as u; from nexura_agents import Agent, Runner, tool; assert u.find_spec('nexura_runtime') is None"
+      # Each step runs as one shell script, so after "cd /tmp" a relative "dist" no longer
+      # names the workspace's dist/; the absolute "$dist" does.
       - name: nexura-runtime without nexura-connectors, then with it
         run: |
+          dist="$PWD/dist"
           uv venv /tmp/connectors --python 3.12
-          uv pip install --python /tmp/connectors/bin/python --find-links dist dist/nexura_runtime-*.whl
+          uv pip install --python /tmp/connectors/bin/python --find-links "$dist" "$dist"/nexura_runtime-*.whl
           cd /tmp && env -u PYTHONPATH /tmp/connectors/bin/python -I -c \
             "import importlib.util as u; from nexura_runtime.modules import default_registry as r; assert u.find_spec('nexura_connectors') is None; m = [x for x in r.list_modules() if x['module_id'].startswith('nexura.connectors.')]; assert len(m) == 15 and not any(x['is_available'] for x in m) and all('pip install nexura-connectors' in x['missing_reason'] for x in m)"
-          uv pip install --python /tmp/connectors/bin/python --find-links dist dist/nexura_connectors-*.whl
+          uv pip install --python /tmp/connectors/bin/python --find-links "$dist" "$dist"/nexura_connectors-*.whl
           cd /tmp && env -u PYTHONPATH /tmp/connectors/bin/python -I -c \
             "from nexura_runtime.modules import default_registry as r; m = [x for x in r.list_modules() if x['module_id'].startswith('nexura.connectors.')]; assert len(m) == 15 and all(x['is_available'] for x in m)"
       - name: nexura-runtime without the backend packages, then with each (P28 step 10 stage 4b)
         run: |
+          dist="$PWD/dist"
           uv venv /tmp/split --python 3.12
           py=/tmp/split/bin/python
-          uv pip install --python $py --find-links dist dist/nexura_runtime-*.whl
+          uv pip install --python $py --find-links "$dist" "$dist"/nexura_runtime-*.whl
           cd /tmp
           # Without them the runtime imports, and each feature names its package.
           env -u PYTHONPATH $py -I -c "import importlib.util as u; assert not any(u.find_spec(n) for n in ('nexura_postgres', 'nexura_qdrant', 'nexura_sandbox', 'nexura_studio', 'nexura_vertex'))"
@@ -116,24 +120,25 @@ jobs:
           try: infer_model('vertex:gemini-2.5-flash'); raise SystemExit('no error')
           except E as e: assert 'pip install nexura-vertex' in str(e)"
           test ! -e /tmp/split/bin/nexura-studio
-          uv pip install --python $py --find-links dist dist/nexura_postgres-*.whl dist/nexura_qdrant-*.whl dist/nexura_sandbox-*.whl dist/nexura_studio-*.whl dist/nexura_vertex-*.whl
+          uv pip install --python $py --find-links "$dist" "$dist"/nexura_postgres-*.whl "$dist"/nexura_qdrant-*.whl "$dist"/nexura_sandbox-*.whl "$dist"/nexura_studio-*.whl "$dist"/nexura_vertex-*.whl
           env -u PYTHONPATH $py -I -c "import nexura_postgres, nexura_qdrant; from nexura_runtime.storage import get_storage_repository as g; assert type(g('postgresql://u:p@localhost/db')) is nexura_postgres.PostgresRepository"
           env -u PYTHONPATH $py -I -c "import nexura_sandbox; from nexura_runtime.integrations.sandbox import build_backend; assert type(build_backend('gvisor_oci')) is nexura_sandbox.GVisorOCIWorker"
           env -u PYTHONPATH $py -I -c "import nexura_vertex, nexura_studio; from nexura_runtime.studio import create_app; assert create_app(db_path='/tmp/split-studio.sqlite3').title == 'Nexura Studio'"
           env -u PYTHONPATH /tmp/split/bin/nexura-studio --help
       - name: Clean consumer install (core, then studio extra)
         run: |
+          dist="$PWD/dist"
           uv venv /tmp/consumer --python 3.12
-          wheel=$(ls dist/nexura_runtime-*.whl)
-          uv pip install --python /tmp/consumer/bin/python --find-links dist "$wheel"
+          wheel=$(ls "$dist"/nexura_runtime-*.whl)
+          uv pip install --python /tmp/consumer/bin/python --find-links "$dist" "$wheel"
           cd /tmp && env -u PYTHONPATH /tmp/consumer/bin/python -I -c \
             "import sys, nexura_runtime; assert 'fastapi' not in sys.modules; print(nexura_runtime.__file__)"
-          uv pip install --python /tmp/consumer/bin/python --find-links dist "$wheel[studio]"
+          uv pip install --python /tmp/consumer/bin/python --find-links "$dist" "$wheel[studio]"
           cd /tmp && env -u PYTHONPATH /tmp/consumer/bin/python -I -m nexura_runtime.cli.main serve --help
           env -u PYTHONPATH /tmp/consumer/bin/nexura-runtime --help
           # The bare "nexura" command belongs to the Nexura Cloud client package.
           test ! -e /tmp/consumer/bin/nexura
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: python-dist
           path: dist/
@@ -143,8 +148,8 @@ jobs:
     # and must build and import on its own (EDITIONS_PLAN section 2.4).
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.0
         with:
           python-version: "3.12"
       - run: uv run --frozen python scripts/export_oss_tree.py /tmp/oss-tree
@@ -162,8 +167,8 @@ jobs:
       run:
         working-directory: clients/typescript
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: "24"
       - run: npm ci
@@ -174,11 +179,11 @@ jobs:
   studio-web:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.0
         with:
           python-version: "3.12"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "24"
       - run: uv sync --frozen --all-extras

@@ -126,8 +126,27 @@ def test_ci_never_publishes_or_needs_paid_keys() -> None:
     assert workflows
     for wf in workflows:
         text = wf.read_text(encoding="utf-8")
-        for forbidden in ("npm publish", "twine upload", "uv publish", "secrets.", "API_KEY"):
+        # No workflow reads stored secrets or provider keys, including the release workflow.
+        for forbidden in ("secrets.", "API_KEY"):
             assert forbidden not in text, f"{wf.name} contains {forbidden!r}"
+        if wf.name == "release.yml":
+            continue
+        for forbidden in ("npm publish", "twine upload", "uv publish", "pypi-publish"):
+            assert forbidden not in text, f"{wf.name} contains {forbidden!r}"
+
+
+def test_release_workflow_publishes_only_from_a_tag_or_by_hand() -> None:
+    """The one publishing workflow uses OIDC trusted publishing and never runs on push or PR."""
+    release = ROOT / ".github" / "workflows" / "release.yml"
+    if not release.exists():
+        return
+    text = release.read_text(encoding="utf-8")
+    on_block = text.split("\non:", 1)[1].split("\njobs:", 1)[0]
+    assert "workflow_dispatch" in on_block
+    assert "tags:" in on_block
+    assert "pull_request" not in on_block
+    assert "branches" not in on_block
+    assert "id-token: write" in text
 
 
 def test_built_wheel_contains_docs_and_excludes_local_state(tmp_path: Path) -> None:

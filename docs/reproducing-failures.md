@@ -25,10 +25,21 @@ An approval pause returns the usual interruption. Continue through
 `await recorder.resume_agent(result.interruption, approve=True)` or pass
 `reject={call_id: "reason"}`. Decisions are recorded along with the run.
 
-For a workflow, call `await recorder.run_workflow(engine, initial_state)`.
+Runs that hand off between agents are recorded too. Every agent reachable through
+`handoffs` gets its own entry in the bundle (`spec["agents"]`, with its tools and
+handoff list), and each model response and tool fixture is tagged with the agent that
+produced it. Replay rebuilds the same graph: each agent gets its own scripted replies
+and fixtures, and a reply or fixture consumed by a different agent is a divergence
+(`Model response 1: recorded for agent 'triage', requested by 'billing'`). Agent names
+must be unique within the graph. An `on_handoff` callback is recorded as a fixture
+(`on_handoff:<tool name>`) and is not run on replay.
+
+For a workflow, call `await recorder.run_workflow(engine, initial_state)`
+(extra keyword arguments such as `workflow_run_id` go to `engine.run`).
 Continue an approval pause through
 `await recorder.resume_workflow(result.workflow_run_id, approval_id, decision="approve")`
-(or `decision="reject"`). Use one recorder per run. Recording executes the original
+(or `decision="reject"`; `state_update=` is recorded and replayed, and `engine=`
+continues the recording on a fresh engine for the same run). Use one recorder per run. Recording executes the original
 tools and handlers under their usual approval rules; only replay blocks side effects.
 
 The exporter also accepts a complete recording dict, a dict with `repro`, or a stored
@@ -36,7 +47,41 @@ The exporter also accepts a complete recording dict, a dict with `repro`, or a s
 Persist that metadata through the existing `StorageRepository.create_run` or
 `update_run` interface. Ordinary tracing events and historical checkpoints lack full
 model responses and handler outputs. Export refuses incomplete records rather than
-inventing a history. Recording is opt-in; the service does not automatically capture runs.
+inventing a history. Recording is opt-in; the service captures runs only when failed-run
+capture is turned on (below).
+
+## Capturing failed service runs
+
+The REST service can keep a bundle for every workflow run that fails. It is off by
+default. Turn it on with one of:
+
+```bash
+nexura-runtime serve --capture-failed-runs
+NEXURA_CAPTURE_FAILED_RUNS=1 nexura-runtime serve      # also applies to `worker`
+```
+
+or `create_api_app(capture_failed_runs=True)` when embedding the app (an explicit
+`True`/`False` wins over the environment variable).
+
+While it is on, runs started with `POST /api/v1/runs` and by the trigger worker execute
+under `ReproRecorder`, and approval decisions (`POST /runs/{id}/decide`) made in the same
+process continue the recording. When the stored run status ends `failed`, the recording
+is exported with the same redaction as `export_repro_bundle`, plus the workspace's known
+credential values, and stored in the service database (table
+`nexura_service_repro_bundles`). Completed, rejected and cancelled runs keep nothing.
+Download a bundle with:
+
+```bash
+curl -OJ http://127.0.0.1:8765/api/v1/runs/RUN_ID/repro        # 404 REPRO_BUNDLE_NOT_FOUND if none
+nexura-runtime repro export RUN_ID --db ./nexura_service.sqlite3 -o bundle.json
+```
+
+The route applies the usual run ownership checks and only returns bundles of the
+caller's workspace; bundles stay downloadable after capture is turned off. Not captured:
+runs continued after a service restart (the in-memory recording is lost), runs that
+pause for `interrupt()` input, forks, and agent chat. Those runs simply have no bundle.
+Recording keeps each in-flight recording in memory until the run settles (at most 256
+runs paused for approval). Review a bundle before sharing it.
 
 ## Share and replay
 
@@ -53,7 +98,23 @@ nexura-runtime repro run bundle.json
 Use `--workspace NAME` on export when the stored run belongs to another workspace.
 The CLI exits 0 when the outcome is reproduced and 1 on divergence or an invalid bundle.
 From async Python, use `await replay_repro_bundle(ReproBundle.load("bundle.json"))`.
-`ReplayResult` contains `reproduced`, `outcome`, and `first_divergence`.
+`ReplayResult` contains `reproduced`, `outcome`, `first_divergence` and `notes`.
+
+The outcome includes the completed output: the agent's final output (the validated
+structured output when the agent has an `output_type`, otherwise the text) or, for a
+workflow, the final state. Both are stored as canonical JSON with a SHA-256 digest
+(`output_digest` / `state_digest`). A replay that finishes with a different value is not
+reproduced, and `first_divergence` names the first differing path, replayed value first:
+
+```text
+output differs at $.amount: 500 != 5000
+state differs at $.lines[0].qty: 2 != 7
+```
+
+Bundles written before this comparison existed have no output or final state. They
+still load and replay; status, error and failing step are compared, `reproduced` can be
+true, and `notes` (also printed by `repro run` as `note: ...`) says the output was not
+recorded.
 
 ## Captured data and safety
 
@@ -61,7 +122,9 @@ The versioned document contains creation time and framework version, run kind, i
 static agent instructions and tool schemas or the workflow node graph, model responses
 in observed order (including usage), tool/node outputs or error names and messages,
 approval decisions, run budget config, and the expected final status, error and failing
-step. Tool arguments have a canonical SHA-256 digest. Workflow fixtures cover whole
+step, plus the completed output or final workflow state with its canonical digest. For
+runs with handoffs, every agent's spec and handoffs, with responses and fixtures tagged
+by agent name. Tool arguments have a canonical SHA-256 digest. Workflow fixtures cover whole
 node invocations, including composite nodes, rather than rerunning their children.
 Tool retry policy (attempts, delays and exception names), timeout and timeout behavior,
 cache/idempotency settings and async status are recorded. Each executed attempt has
@@ -118,10 +181,13 @@ event loops are not intercepted.
 
 - Nondeterministic tools are replayed from fixtures; replay cannot verify their original
   real-world effects or diagnose behavior inside a recorded workflow node.
-- Agent recording currently requires static instructions and no handoffs. Custom
-  guardrails, hooks, memory, history processors, dynamic tool preparation and approval
-  predicates are not serialized as executable code; behavior depending on them can
-  diverge. Use the returned divergence rather than assuming they were replayed.
+- Agent recording requires static instructions for every agent in the handoff graph
+  and unique agent names. Custom guardrails, output validators, hooks, memory, history
+  processors, dynamic tool preparation, approval predicates, handoff `input_filter`s and
+  `enabled` rules are not serialized as executable code; behavior depending on them can
+  diverge (a validator that changed the output shows up as an output divergence). Use
+  the returned divergence rather than assuming they were replayed. Structured handoff
+  input (`input_type`) is replayed as given; its validation is not recreated.
 - The convenience recorder takes a text prompt or initial workflow state. It does not
   capture pre-existing sessions, edited approval arguments, interrupt answers, wall-clock
   scheduling, cancellation timing, or process-crash timing. Cancellation error outcomes
@@ -137,9 +203,12 @@ event loops are not intercepted.
 - Tool retries, timeouts and cache replay at recorded attempt boundaries; custom
   exception inheritance and custom cache/timeout hooks are not executable behavior
   in the bundle. Composite workflow internals remain opaque even for approved maps.
-- Outcome comparison checks status, error type/message and failing step, and requires
-  all recorded model responses, tool fixtures and workflow gate records to be consumed.
-  Completed output/final state are not compared. A recording fingerprint
+- Outcome comparison checks status, error type/message, failing step and the completed
+  output (agents) or final state (workflows), and requires all recorded model responses,
+  tool fixtures and workflow gate records to be consumed. A failed run has no output to
+  compare; agent `RunResult.state` is not compared (replayed tools do not change it).
+  Outputs are compared in redacted form, so a difference hidden by redaction is not
+  seen. A recording fingerprint
   also detects fixture edits; it is an integrity check, not a cryptographic signature or
   a guarantee that an untrusted recording describes a real run.
 - Schema version mismatches are refused. Framework version is recorded for diagnosis;

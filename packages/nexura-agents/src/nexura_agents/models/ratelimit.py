@@ -23,6 +23,7 @@ from nexura_agents.errors import SDKValidationError
 from nexura_agents.models.base import ModelProtocol
 from nexura_agents.models.resilience import _accepts_model_settings, _accepts_run_context
 from nexura_agents.types import ModelResponse, Usage
+from nexura_agents.usage import admission
 
 if TYPE_CHECKING:
     import asyncio
@@ -227,7 +228,7 @@ class RateLimitedModel:
         await self.limiter.acquire()
         usage: Usage | None = None
         try:
-            response: ModelResponse = await self.model.generate(*args, **kwargs)
+            response: ModelResponse = await admission.generate(self.model, *args, **kwargs)
             usage = response.usage
             return response
         finally:
@@ -249,7 +250,7 @@ class RateLimitedModel:
         usage: Usage | None = None
         inner: Any = None
         try:
-            inner = stream_fn(*args, **kwargs)
+            inner = admission.stream(self.model, *args, **kwargs)
             async for delta in inner:
                 reported = getattr(delta, "usage", None)
                 if reported is not None:  # any delta may carry usage, as the runner reads it

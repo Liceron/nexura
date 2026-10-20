@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from typing import Any, Protocol, runtime_checkable
@@ -15,7 +16,7 @@ from nexura_agents.providers.errors import (
     ProviderTimeoutError,
     StreamCancelledError,
 )
-from nexura_agents.providers.multimodal import attachments_in, reject_attachments
+from nexura_agents.providers.multimodal import reject_attachments
 from nexura_agents.providers.types import (
     EmbeddingResult,
     GenerationRequest,
@@ -23,6 +24,7 @@ from nexura_agents.providers.types import (
     StreamDelta,
 )
 from nexura_agents.types import Message, ModelResponse, Usage
+from nexura_agents.usage.admission import admit, attachment_surcharge, provider_budget, settle
 
 
 @runtime_checkable
@@ -116,24 +118,24 @@ class BaseProvider(ABC):
 
     def _estimate_tokens(self, request: GenerationRequest) -> int:
         """Conservative token estimate for pre-dispatch admission buffer."""
-        chars = sum(len(m.content or "") for m in request.messages if hasattr(m, "content"))
+        chars = sum(
+            len(str(getattr(m, "content", None) or getattr(m, "parts", "")).encode("utf-8"))
+            for m in request.messages
+        )
+        chars += len(json.dumps(request.tools or [], ensure_ascii=False).encode("utf-8"))
+        chars += len(json.dumps(request.schema or {}, ensure_ascii=False).encode("utf-8"))
+        for message in request.messages:
+            for call in getattr(message, "tool_calls", None) or []:
+                chars += len(json.dumps(call.arguments, ensure_ascii=False).encode("utf-8"))
         # Attachments: providers bill images at roughly 1-2k tokens and documents by size.
         # Over-estimating only reserves more; settlement uses the reported usage.
-        attached = 0
-        for a in attachments_in(request.messages):
-            size = a.size_bytes
-            if a.kind == "image":
-                attached += 1600
-            elif size is None:
-                attached += 4000
-            else:
-                attached += max(1000, size // 4)
-        return max(256, chars // 4 + attached + 256)
+        attached = attachment_surcharge(request.messages)
+        return max(256, chars + attached + (request.max_tokens or 4096))
 
     def _estimate_embed_tokens(self, texts: list[str]) -> int:
         """Conservative token estimate for vector embedding admission buffer."""
-        chars = sum(len(t) for t in texts)
-        return max(64, chars // 4)
+        chars = sum(len(t.encode("utf-8")) for t in texts)
+        return max(64, chars)
 
     async def generate(
         self,
@@ -172,22 +174,12 @@ class BaseProvider(ABC):
             req.context_decision = bundle.decision_record
             req.messages = bundle.messages
 
-        budget = context.budget if context else None
-        res_id: str | None = None
-        if budget is not None:
-            est_tokens = self._estimate_tokens(req)
-            if hasattr(budget, "admit_provider_call_async"):
-                res_id = await budget.admit_provider_call_async(
-                    self.model_id,
-                    estimated_tokens=est_tokens,
-                    metadata={"provider": self.model_id, "method": "generate"},
-                )
-            elif hasattr(budget, "admit_provider_call"):
-                res_id = budget.admit_provider_call(
-                    self.model_id,
-                    estimated_tokens=est_tokens,
-                    metadata={"provider": self.model_id, "method": "generate"},
-                )
+        budget = provider_budget(context, self.model_id, "generate")
+        res_id = (
+            await admit(budget, self.model_id, self._estimate_tokens(req), "generate")
+            if budget is not None
+            else None
+        )
 
         try:
             if effective_timeout is not None:
@@ -199,85 +191,19 @@ class BaseProvider(ABC):
                 resp = await self._generate_internal(req, context)
 
             if budget is not None and res_id is not None:
-                if hasattr(budget, "settle_provider_call_async"):
-                    await budget.settle_provider_call_async(
-                        res_id,
-                        usage=resp.usage,
-                        model_id=self.model_id,
-                        is_cancelled=False,
-                        description=f"Completed generate on {self.model_id}",
-                    )
-                elif hasattr(budget, "settle_provider_call"):
-                    budget.settle_provider_call(
-                        res_id,
-                        usage=resp.usage,
-                        model_id=self.model_id,
-                        is_cancelled=False,
-                        description=f"Completed generate on {self.model_id}",
-                    )
+                await settle(budget, res_id, self.model_id, resp.usage, failed=False)
             return resp
         except TimeoutError as exc:
             if budget is not None and res_id is not None:
-                if hasattr(budget, "settle_provider_call_async"):
-                    await budget.settle_provider_call_async(
-                        res_id,
-                        usage=None,
-                        model_id=self.model_id,
-                        is_cancelled=True,
-                        is_pre_dispatch=False,
-                        description=f"Timeout during generate on {self.model_id}",
-                    )
-                elif hasattr(budget, "settle_provider_call"):
-                    budget.settle_provider_call(
-                        res_id,
-                        usage=None,
-                        model_id=self.model_id,
-                        is_cancelled=True,
-                        is_pre_dispatch=False,
-                        description=f"Timeout during generate on {self.model_id}",
-                    )
+                await settle(budget, res_id, self.model_id, None, failed=True)
             raise ProviderTimeoutError(self.model_id, effective_timeout or 0.0) from exc
         except (StreamCancelledError, asyncio.CancelledError):
             if budget is not None and res_id is not None:
-                if hasattr(budget, "settle_provider_call_async"):
-                    await budget.settle_provider_call_async(
-                        res_id,
-                        usage=None,
-                        model_id=self.model_id,
-                        is_cancelled=True,
-                        is_pre_dispatch=False,
-                        description=f"Cancelled during generate on {self.model_id}",
-                    )
-                elif hasattr(budget, "settle_provider_call"):
-                    budget.settle_provider_call(
-                        res_id,
-                        usage=None,
-                        model_id=self.model_id,
-                        is_cancelled=True,
-                        is_pre_dispatch=False,
-                        description=f"Cancelled during generate on {self.model_id}",
-                    )
+                await settle(budget, res_id, self.model_id, None, failed=True)
             raise
         except Exception:
             if budget is not None and res_id is not None:
-                if hasattr(budget, "settle_provider_call_async"):
-                    await budget.settle_provider_call_async(
-                        res_id,
-                        usage=None,
-                        model_id=self.model_id,
-                        is_cancelled=True,
-                        is_pre_dispatch=False,
-                        description=f"Error during generate on {self.model_id}",
-                    )
-                elif hasattr(budget, "settle_provider_call"):
-                    budget.settle_provider_call(
-                        res_id,
-                        usage=None,
-                        model_id=self.model_id,
-                        is_cancelled=True,
-                        is_pre_dispatch=False,
-                        description=f"Error during generate on {self.model_id}",
-                    )
+                await settle(budget, res_id, self.model_id, None, failed=True)
             raise
 
     async def stream(
@@ -324,22 +250,12 @@ class BaseProvider(ABC):
             req.context_decision = bundle.decision_record
             req.messages = bundle.messages
 
-        budget = context.budget if context else None
-        res_id: str | None = None
-        if budget is not None:
-            est_tokens = self._estimate_tokens(req)
-            if hasattr(budget, "admit_provider_call_async"):
-                res_id = await budget.admit_provider_call_async(
-                    self.model_id,
-                    estimated_tokens=est_tokens,
-                    metadata={"provider": self.model_id, "method": "stream"},
-                )
-            elif hasattr(budget, "admit_provider_call"):
-                res_id = budget.admit_provider_call(
-                    self.model_id,
-                    estimated_tokens=est_tokens,
-                    metadata={"provider": self.model_id, "method": "stream"},
-                )
+        budget = provider_budget(context, self.model_id, "stream")
+        res_id = (
+            await admit(budget, self.model_id, self._estimate_tokens(req), "stream")
+            if budget is not None
+            else None
+        )
 
         latest_usage: Usage | None = None
         has_error = False
@@ -356,65 +272,16 @@ class BaseProvider(ABC):
         except (StreamCancelledError, asyncio.CancelledError):
             has_error = True
             if budget is not None and res_id is not None:
-                if hasattr(budget, "settle_provider_call_async"):
-                    await budget.settle_provider_call_async(
-                        res_id,
-                        usage=latest_usage,
-                        model_id=self.model_id,
-                        is_cancelled=True,
-                        is_pre_dispatch=False,
-                        description=f"Cancelled stream on {self.model_id}",
-                    )
-                elif hasattr(budget, "settle_provider_call"):
-                    budget.settle_provider_call(
-                        res_id,
-                        usage=latest_usage,
-                        model_id=self.model_id,
-                        is_cancelled=True,
-                        is_pre_dispatch=False,
-                        description=f"Cancelled stream on {self.model_id}",
-                    )
+                await settle(budget, res_id, self.model_id, latest_usage, failed=True)
             raise
         except Exception:
             has_error = True
             if budget is not None and res_id is not None:
-                if hasattr(budget, "settle_provider_call_async"):
-                    await budget.settle_provider_call_async(
-                        res_id,
-                        usage=latest_usage,
-                        model_id=self.model_id,
-                        is_cancelled=True,
-                        is_pre_dispatch=False,
-                        description=f"Error during stream on {self.model_id}",
-                    )
-                elif hasattr(budget, "settle_provider_call"):
-                    budget.settle_provider_call(
-                        res_id,
-                        usage=latest_usage,
-                        model_id=self.model_id,
-                        is_cancelled=True,
-                        is_pre_dispatch=False,
-                        description=f"Error during stream on {self.model_id}",
-                    )
+                await settle(budget, res_id, self.model_id, latest_usage, failed=True)
             raise
         finally:
             if not has_error and budget is not None and res_id is not None:
-                if hasattr(budget, "settle_provider_call_async"):
-                    await budget.settle_provider_call_async(
-                        res_id,
-                        usage=latest_usage,
-                        model_id=self.model_id,
-                        is_cancelled=False,
-                        description=f"Completed stream on {self.model_id}",
-                    )
-                elif hasattr(budget, "settle_provider_call"):
-                    budget.settle_provider_call(
-                        res_id,
-                        usage=latest_usage,
-                        model_id=self.model_id,
-                        is_cancelled=False,
-                        description=f"Completed stream on {self.model_id}",
-                    )
+                await settle(budget, res_id, self.model_id, latest_usage, failed=False)
 
     async def embed(
         self,
@@ -437,22 +304,12 @@ class BaseProvider(ABC):
                 stream_id=context.run_id,
             )
 
-        budget = context.budget if context else None
-        res_id: str | None = None
-        if budget is not None:
-            est_tokens = self._estimate_embed_tokens(texts)
-            if hasattr(budget, "admit_provider_call_async"):
-                res_id = await budget.admit_provider_call_async(
-                    self.model_id,
-                    estimated_tokens=est_tokens,
-                    metadata={"provider": self.model_id, "method": "embed"},
-                )
-            elif hasattr(budget, "admit_provider_call"):
-                res_id = budget.admit_provider_call(
-                    self.model_id,
-                    estimated_tokens=est_tokens,
-                    metadata={"provider": self.model_id, "method": "embed"},
-                )
+        budget = provider_budget(context, self.model_id, "embed")
+        res_id = (
+            await admit(budget, self.model_id, self._estimate_embed_tokens(texts), "embed")
+            if budget is not None
+            else None
+        )
 
         try:
             if timeout is not None:
@@ -464,85 +321,19 @@ class BaseProvider(ABC):
                 result = await self._embed_internal(texts, context)
 
             if budget is not None and res_id is not None:
-                if hasattr(budget, "settle_provider_call_async"):
-                    await budget.settle_provider_call_async(
-                        res_id,
-                        usage=result.usage,
-                        model_id=self.model_id,
-                        is_cancelled=False,
-                        description=f"Completed embed on {self.model_id}",
-                    )
-                elif hasattr(budget, "settle_provider_call"):
-                    budget.settle_provider_call(
-                        res_id,
-                        usage=result.usage,
-                        model_id=self.model_id,
-                        is_cancelled=False,
-                        description=f"Completed embed on {self.model_id}",
-                    )
+                await settle(budget, res_id, self.model_id, result.usage, failed=False)
             return result
         except TimeoutError as exc:
             if budget is not None and res_id is not None:
-                if hasattr(budget, "settle_provider_call_async"):
-                    await budget.settle_provider_call_async(
-                        res_id,
-                        usage=None,
-                        model_id=self.model_id,
-                        is_cancelled=True,
-                        is_pre_dispatch=False,
-                        description=f"Timeout during embed on {self.model_id}",
-                    )
-                elif hasattr(budget, "settle_provider_call"):
-                    budget.settle_provider_call(
-                        res_id,
-                        usage=None,
-                        model_id=self.model_id,
-                        is_cancelled=True,
-                        is_pre_dispatch=False,
-                        description=f"Timeout during embed on {self.model_id}",
-                    )
+                await settle(budget, res_id, self.model_id, None, failed=True)
             raise ProviderTimeoutError(self.model_id, timeout or 0.0) from exc
         except (StreamCancelledError, asyncio.CancelledError):
             if budget is not None and res_id is not None:
-                if hasattr(budget, "settle_provider_call_async"):
-                    await budget.settle_provider_call_async(
-                        res_id,
-                        usage=None,
-                        model_id=self.model_id,
-                        is_cancelled=True,
-                        is_pre_dispatch=False,
-                        description=f"Cancelled during embed on {self.model_id}",
-                    )
-                elif hasattr(budget, "settle_provider_call"):
-                    budget.settle_provider_call(
-                        res_id,
-                        usage=None,
-                        model_id=self.model_id,
-                        is_cancelled=True,
-                        is_pre_dispatch=False,
-                        description=f"Cancelled during embed on {self.model_id}",
-                    )
+                await settle(budget, res_id, self.model_id, None, failed=True)
             raise
         except Exception:
             if budget is not None and res_id is not None:
-                if hasattr(budget, "settle_provider_call_async"):
-                    await budget.settle_provider_call_async(
-                        res_id,
-                        usage=None,
-                        model_id=self.model_id,
-                        is_cancelled=True,
-                        is_pre_dispatch=False,
-                        description=f"Error during embed on {self.model_id}",
-                    )
-                elif hasattr(budget, "settle_provider_call"):
-                    budget.settle_provider_call(
-                        res_id,
-                        usage=None,
-                        model_id=self.model_id,
-                        is_cancelled=True,
-                        is_pre_dispatch=False,
-                        description=f"Error during embed on {self.model_id}",
-                    )
+                await settle(budget, res_id, self.model_id, None, failed=True)
             raise
 
     @abstractmethod

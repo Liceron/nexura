@@ -1,0 +1,1743 @@
+{
+  "dataset_version": "synthetic-en-hi-v1",
+  "dataset_sha256": "9121abb3cc741fdcfa17c724c18ed4a30f617feeb44735de78fc82e415cef84c",
+  "corpus_documents": 20,
+  "results": {
+    "bm25_only": {
+      "embedder": {
+        "provider": "deterministic",
+        "model": "deterministic-vector-fixture-non-semantic",
+        "revision": "v1",
+        "dimension": 8,
+        "is_test_fixture": true
+      },
+      "metrics": {
+        "all": {
+          "queries": 50,
+          "mrr@5": 0.794,
+          "recall@1": 0.74,
+          "recall@3": 0.82,
+          "recall@5": 0.88
+        },
+        "en": {
+          "queries": 30,
+          "mrr@5": 0.8,
+          "recall@1": 0.7333333333333333,
+          "recall@3": 0.8666666666666667,
+          "recall@5": 0.8666666666666667
+        },
+        "hi": {
+          "queries": 20,
+          "mrr@5": 0.7849999999999999,
+          "recall@1": 0.75,
+          "recall@3": 0.75,
+          "recall@5": 0.9
+        }
+      },
+      "queries": [
+        {
+          "id": "en01",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-library",
+            "en-market",
+            "en-bus",
+            "en-repair",
+            "en-recycling"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "en02",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-library",
+            "en-shelter",
+            "en-parcel",
+            "en-bus",
+            "en-seeds"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "en03",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-bus",
+            "en-water",
+            "en-parcel",
+            "en-shelter",
+            "en-seeds"
+          ],
+          "reciprocal_rank": 0.0,
+          "recalls": {
+            "1": 0.0,
+            "3": 0.0,
+            "5": 0.0
+          }
+        },
+        {
+          "id": "en04",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-bus",
+            "en-shelter",
+            "en-water",
+            "en-parcel",
+            "en-seeds"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "en05",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-bus",
+            "en-market",
+            "en-seeds",
+            "en-shelter",
+            "en-repair"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "en06",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-bus",
+            "en-water",
+            "en-parcel",
+            "en-shelter",
+            "en-seeds"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "en07",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-water"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "en08",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-water",
+            "en-repair",
+            "en-bus",
+            "en-parcel",
+            "en-shelter"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "en09",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-water",
+            "en-seeds",
+            "en-bus",
+            "en-recycling",
+            "en-pool"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "en10",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-shelter",
+            "en-seeds",
+            "en-bus",
+            "en-water",
+            "en-parcel"
+          ],
+          "reciprocal_rank": 0.5,
+          "recalls": {
+            "1": 0.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "en11",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-seeds",
+            "en-library",
+            "en-parcel",
+            "en-shelter",
+            "en-bus"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "en12",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-library",
+            "en-seeds",
+            "en-parcel"
+          ],
+          "reciprocal_rank": 0.5,
+          "recalls": {
+            "1": 0.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "en13",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-parcel"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "en14",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-parcel",
+            "en-bus",
+            "en-seeds",
+            "en-shelter",
+            "en-water"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "en15",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-pool"
+          ],
+          "reciprocal_rank": 0.0,
+          "recalls": {
+            "1": 0.0,
+            "3": 0.0,
+            "5": 0.0
+          }
+        },
+        {
+          "id": "en16",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-pool",
+            "en-shelter",
+            "en-bus",
+            "en-seeds",
+            "en-water"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "en17",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-pool"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "en18",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-pool",
+            "en-recycling",
+            "en-parcel",
+            "en-shelter",
+            "en-water"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "en19",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-repair",
+            "en-shelter",
+            "en-bus",
+            "en-water",
+            "en-parcel"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "en20",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-repair",
+            "en-water"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "en21",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-library",
+            "en-seeds",
+            "en-parcel"
+          ],
+          "reciprocal_rank": 0.0,
+          "recalls": {
+            "1": 0.0,
+            "3": 0.0,
+            "5": 0.0
+          }
+        },
+        {
+          "id": "en22",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-market",
+            "en-shelter",
+            "en-seeds",
+            "en-bus",
+            "en-repair"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "en23",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-market",
+            "en-recycling"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "en24",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-library",
+            "en-seeds",
+            "en-parcel"
+          ],
+          "reciprocal_rank": 0.0,
+          "recalls": {
+            "1": 0.0,
+            "3": 0.0,
+            "5": 0.0
+          }
+        },
+        {
+          "id": "en25",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-recycling",
+            "en-market",
+            "en-seeds",
+            "en-bus",
+            "en-repair"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "en26",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-recycling"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "en27",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-water",
+            "en-recycling",
+            "en-parcel",
+            "en-market",
+            "en-bus"
+          ],
+          "reciprocal_rank": 0.5,
+          "recalls": {
+            "1": 0.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "en28",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-shelter",
+            "en-bus",
+            "en-water",
+            "en-parcel",
+            "en-seeds"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "en29",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-shelter",
+            "en-bus",
+            "en-seeds",
+            "en-water",
+            "en-parcel"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "en30",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-bus",
+            "en-shelter",
+            "en-water",
+            "en-parcel",
+            "en-seeds"
+          ],
+          "reciprocal_rank": 0.5,
+          "recalls": {
+            "1": 0.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "hi01",
+          "language": "hi",
+          "ranked_document_ids": [
+            "hi-library",
+            "hi-bus",
+            "hi-water",
+            "hi-parcel",
+            "hi-repair"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "hi02",
+          "language": "hi",
+          "ranked_document_ids": [
+            "hi-library",
+            "hi-parcel",
+            "hi-seeds",
+            "hi-shelter",
+            "hi-recycling"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "hi03",
+          "language": "hi",
+          "ranked_document_ids": [
+            "hi-bus",
+            "hi-market",
+            "hi-pool",
+            "hi-parcel",
+            "hi-seeds"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "hi04",
+          "language": "hi",
+          "ranked_document_ids": [
+            "hi-bus",
+            "hi-water",
+            "hi-market",
+            "hi-library",
+            "hi-repair"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "hi05",
+          "language": "hi",
+          "ranked_document_ids": [
+            "hi-water",
+            "hi-bus",
+            "hi-market",
+            "hi-library",
+            "hi-repair"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "hi06",
+          "language": "hi",
+          "ranked_document_ids": [
+            "hi-water",
+            "hi-bus",
+            "hi-shelter",
+            "hi-seeds",
+            "hi-market"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "hi07",
+          "language": "hi",
+          "ranked_document_ids": [
+            "hi-seeds",
+            "hi-market",
+            "hi-pool",
+            "hi-shelter",
+            "hi-water"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "hi08",
+          "language": "hi",
+          "ranked_document_ids": [
+            "hi-repair",
+            "hi-water",
+            "hi-library",
+            "hi-pool",
+            "hi-seeds"
+          ],
+          "reciprocal_rank": 0.2,
+          "recalls": {
+            "1": 0.0,
+            "3": 0.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "hi09",
+          "language": "hi",
+          "ranked_document_ids": [
+            "hi-parcel",
+            "hi-pool",
+            "hi-library",
+            "hi-bus",
+            "hi-market"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "hi10",
+          "language": "hi",
+          "ranked_document_ids": [
+            "hi-library",
+            "hi-water",
+            "hi-pool",
+            "hi-parcel",
+            "hi-shelter"
+          ],
+          "reciprocal_rank": 0.25,
+          "recalls": {
+            "1": 0.0,
+            "3": 0.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "hi11",
+          "language": "hi",
+          "ranked_document_ids": [
+            "hi-pool",
+            "hi-shelter",
+            "hi-recycling",
+            "hi-bus",
+            "hi-market"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "hi12",
+          "language": "hi",
+          "ranked_document_ids": [
+            "hi-pool",
+            "hi-shelter",
+            "hi-library",
+            "hi-bus",
+            "hi-water"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "hi13",
+          "language": "hi",
+          "ranked_document_ids": [
+            "hi-repair",
+            "hi-water",
+            "hi-market",
+            "hi-seeds",
+            "hi-pool"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "hi14",
+          "language": "hi",
+          "ranked_document_ids": [
+            "hi-repair",
+            "hi-library",
+            "hi-recycling",
+            "hi-seeds",
+            "hi-pool"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "hi15",
+          "language": "hi",
+          "ranked_document_ids": [
+            "hi-market",
+            "hi-shelter",
+            "hi-seeds",
+            "hi-pool",
+            "hi-parcel"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "hi16",
+          "language": "hi",
+          "ranked_document_ids": [
+            "hi-pool",
+            "hi-bus",
+            "hi-water",
+            "hi-market",
+            "hi-shelter"
+          ],
+          "reciprocal_rank": 0.25,
+          "recalls": {
+            "1": 0.0,
+            "3": 0.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "hi17",
+          "language": "hi",
+          "ranked_document_ids": [
+            "hi-recycling",
+            "hi-parcel",
+            "hi-pool",
+            "hi-water",
+            "hi-market"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "hi18",
+          "language": "hi",
+          "ranked_document_ids": [
+            "hi-pool",
+            "hi-water",
+            "hi-bus",
+            "hi-market",
+            "hi-library"
+          ],
+          "reciprocal_rank": 0.0,
+          "recalls": {
+            "1": 0.0,
+            "3": 0.0,
+            "5": 0.0
+          }
+        },
+        {
+          "id": "hi19",
+          "language": "hi",
+          "ranked_document_ids": [
+            "hi-shelter",
+            "hi-pool",
+            "hi-water",
+            "hi-parcel",
+            "hi-bus"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "hi20",
+          "language": "hi",
+          "ranked_document_ids": [
+            "hi-bus",
+            "hi-library",
+            "hi-parcel",
+            "hi-pool",
+            "hi-water"
+          ],
+          "reciprocal_rank": 0.0,
+          "recalls": {
+            "1": 0.0,
+            "3": 0.0,
+            "5": 0.0
+          }
+        }
+      ]
+    },
+    "fixture_hybrid": {
+      "embedder": {
+        "provider": "deterministic",
+        "model": "deterministic-vector-fixture-non-semantic",
+        "revision": "v1",
+        "dimension": 8,
+        "is_test_fixture": true
+      },
+      "metrics": {
+        "all": {
+          "queries": 50,
+          "mrr@5": 0.25133333333333335,
+          "recall@1": 0.14,
+          "recall@3": 0.34,
+          "recall@5": 0.42
+        },
+        "en": {
+          "queries": 30,
+          "mrr@5": 0.24444444444444444,
+          "recall@1": 0.13333333333333333,
+          "recall@3": 0.36666666666666664,
+          "recall@5": 0.36666666666666664
+        },
+        "hi": {
+          "queries": 20,
+          "mrr@5": 0.26166666666666666,
+          "recall@1": 0.15,
+          "recall@3": 0.3,
+          "recall@5": 0.5
+        }
+      },
+      "queries": [
+        {
+          "id": "en01",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-water",
+            "en-recycling",
+            "en-shelter",
+            "en-market",
+            "hi-recycling"
+          ],
+          "reciprocal_rank": 0.0,
+          "recalls": {
+            "1": 0.0,
+            "3": 0.0,
+            "5": 0.0
+          }
+        },
+        {
+          "id": "en02",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-bus",
+            "en-library",
+            "en-water",
+            "hi-pool",
+            "hi-water"
+          ],
+          "reciprocal_rank": 0.5,
+          "recalls": {
+            "1": 0.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "en03",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-bus",
+            "en-parcel",
+            "en-water",
+            "en-market",
+            "hi-bus"
+          ],
+          "reciprocal_rank": 0.0,
+          "recalls": {
+            "1": 0.0,
+            "3": 0.0,
+            "5": 0.0
+          }
+        },
+        {
+          "id": "en04",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-parcel",
+            "en-market",
+            "en-seeds",
+            "hi-library",
+            "en-pool"
+          ],
+          "reciprocal_rank": 0.0,
+          "recalls": {
+            "1": 0.0,
+            "3": 0.0,
+            "5": 0.0
+          }
+        },
+        {
+          "id": "en05",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-parcel",
+            "en-shelter",
+            "en-seeds",
+            "en-pool",
+            "en-market"
+          ],
+          "reciprocal_rank": 0.0,
+          "recalls": {
+            "1": 0.0,
+            "3": 0.0,
+            "5": 0.0
+          }
+        },
+        {
+          "id": "en06",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-water",
+            "hi-recycling",
+            "hi-parcel",
+            "hi-pool",
+            "hi-water"
+          ],
+          "reciprocal_rank": 0.0,
+          "recalls": {
+            "1": 0.0,
+            "3": 0.0,
+            "5": 0.0
+          }
+        },
+        {
+          "id": "en07",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-water",
+            "en-library",
+            "hi-seeds",
+            "hi-shelter",
+            "en-shelter"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "en08",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-water",
+            "en-market",
+            "en-bus",
+            "hi-shelter",
+            "hi-pool"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "en09",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-seeds",
+            "en-pool",
+            "en-parcel",
+            "en-shelter",
+            "en-recycling"
+          ],
+          "reciprocal_rank": 0.0,
+          "recalls": {
+            "1": 0.0,
+            "3": 0.0,
+            "5": 0.0
+          }
+        },
+        {
+          "id": "en10",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-water",
+            "en-seeds",
+            "en-bus",
+            "en-market",
+            "en-repair"
+          ],
+          "reciprocal_rank": 0.5,
+          "recalls": {
+            "1": 0.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "en11",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-bus",
+            "en-parcel",
+            "en-recycling",
+            "hi-pool",
+            "hi-bus"
+          ],
+          "reciprocal_rank": 0.0,
+          "recalls": {
+            "1": 0.0,
+            "3": 0.0,
+            "5": 0.0
+          }
+        },
+        {
+          "id": "en12",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-library",
+            "en-seeds",
+            "hi-pool",
+            "hi-parcel",
+            "en-repair"
+          ],
+          "reciprocal_rank": 0.5,
+          "recalls": {
+            "1": 0.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "en13",
+          "language": "en",
+          "ranked_document_ids": [
+            "hi-parcel",
+            "hi-shelter",
+            "hi-recycling",
+            "hi-market",
+            "en-library"
+          ],
+          "reciprocal_rank": 0.0,
+          "recalls": {
+            "1": 0.0,
+            "3": 0.0,
+            "5": 0.0
+          }
+        },
+        {
+          "id": "en14",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-shelter",
+            "en-seeds",
+            "en-parcel",
+            "en-bus",
+            "en-market"
+          ],
+          "reciprocal_rank": 0.3333333333333333,
+          "recalls": {
+            "1": 0.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "en15",
+          "language": "en",
+          "ranked_document_ids": [
+            "hi-parcel",
+            "hi-market",
+            "en-recycling",
+            "en-market",
+            "en-water"
+          ],
+          "reciprocal_rank": 0.0,
+          "recalls": {
+            "1": 0.0,
+            "3": 0.0,
+            "5": 0.0
+          }
+        },
+        {
+          "id": "en16",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-bus",
+            "en-pool",
+            "hi-library",
+            "en-recycling",
+            "hi-market"
+          ],
+          "reciprocal_rank": 0.5,
+          "recalls": {
+            "1": 0.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "en17",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-bus",
+            "hi-pool",
+            "en-water",
+            "en-recycling",
+            "en-parcel"
+          ],
+          "reciprocal_rank": 0.0,
+          "recalls": {
+            "1": 0.0,
+            "3": 0.0,
+            "5": 0.0
+          }
+        },
+        {
+          "id": "en18",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-market",
+            "en-recycling",
+            "en-water",
+            "hi-parcel",
+            "hi-library"
+          ],
+          "reciprocal_rank": 0.0,
+          "recalls": {
+            "1": 0.0,
+            "3": 0.0,
+            "5": 0.0
+          }
+        },
+        {
+          "id": "en19",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-shelter",
+            "en-seeds",
+            "en-market",
+            "en-water",
+            "hi-shelter"
+          ],
+          "reciprocal_rank": 0.0,
+          "recalls": {
+            "1": 0.0,
+            "3": 0.0,
+            "5": 0.0
+          }
+        },
+        {
+          "id": "en20",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-repair",
+            "en-seeds",
+            "hi-pool",
+            "hi-bus",
+            "en-library"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "en21",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-library",
+            "hi-pool",
+            "en-bus",
+            "en-shelter",
+            "hi-water"
+          ],
+          "reciprocal_rank": 0.0,
+          "recalls": {
+            "1": 0.0,
+            "3": 0.0,
+            "5": 0.0
+          }
+        },
+        {
+          "id": "en22",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-recycling",
+            "en-bus",
+            "en-pool",
+            "en-seeds",
+            "hi-market"
+          ],
+          "reciprocal_rank": 0.0,
+          "recalls": {
+            "1": 0.0,
+            "3": 0.0,
+            "5": 0.0
+          }
+        },
+        {
+          "id": "en23",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-recycling",
+            "en-market",
+            "hi-parcel",
+            "en-water",
+            "hi-recycling"
+          ],
+          "reciprocal_rank": 0.5,
+          "recalls": {
+            "1": 0.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "en24",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-library",
+            "en-parcel",
+            "en-water",
+            "hi-seeds",
+            "hi-shelter"
+          ],
+          "reciprocal_rank": 0.0,
+          "recalls": {
+            "1": 0.0,
+            "3": 0.0,
+            "5": 0.0
+          }
+        },
+        {
+          "id": "en25",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-water",
+            "en-library",
+            "hi-seeds",
+            "hi-parcel",
+            "hi-recycling"
+          ],
+          "reciprocal_rank": 0.0,
+          "recalls": {
+            "1": 0.0,
+            "3": 0.0,
+            "5": 0.0
+          }
+        },
+        {
+          "id": "en26",
+          "language": "en",
+          "ranked_document_ids": [
+            "hi-library",
+            "hi-shelter",
+            "en-pool",
+            "en-parcel",
+            "en-seeds"
+          ],
+          "reciprocal_rank": 0.0,
+          "recalls": {
+            "1": 0.0,
+            "3": 0.0,
+            "5": 0.0
+          }
+        },
+        {
+          "id": "en27",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-bus",
+            "en-parcel",
+            "en-water",
+            "en-market",
+            "hi-pool"
+          ],
+          "reciprocal_rank": 0.0,
+          "recalls": {
+            "1": 0.0,
+            "3": 0.0,
+            "5": 0.0
+          }
+        },
+        {
+          "id": "en28",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-seeds",
+            "en-shelter",
+            "en-pool",
+            "en-library",
+            "hi-shelter"
+          ],
+          "reciprocal_rank": 0.5,
+          "recalls": {
+            "1": 0.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "en29",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-parcel",
+            "en-market",
+            "en-recycling",
+            "hi-market",
+            "en-pool"
+          ],
+          "reciprocal_rank": 0.0,
+          "recalls": {
+            "1": 0.0,
+            "3": 0.0,
+            "5": 0.0
+          }
+        },
+        {
+          "id": "en30",
+          "language": "en",
+          "ranked_document_ids": [
+            "en-shelter",
+            "hi-water",
+            "hi-seeds",
+            "hi-repair",
+            "en-library"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "hi01",
+          "language": "hi",
+          "ranked_document_ids": [
+            "hi-seeds",
+            "hi-water",
+            "hi-shelter",
+            "hi-repair",
+            "hi-library"
+          ],
+          "reciprocal_rank": 0.2,
+          "recalls": {
+            "1": 0.0,
+            "3": 0.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "hi02",
+          "language": "hi",
+          "ranked_document_ids": [
+            "hi-seeds",
+            "hi-library",
+            "hi-recycling",
+            "hi-shelter",
+            "hi-parcel"
+          ],
+          "reciprocal_rank": 0.5,
+          "recalls": {
+            "1": 0.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "hi03",
+          "language": "hi",
+          "ranked_document_ids": [
+            "hi-recycling",
+            "hi-parcel",
+            "hi-water",
+            "hi-shelter",
+            "hi-seeds"
+          ],
+          "reciprocal_rank": 0.0,
+          "recalls": {
+            "1": 0.0,
+            "3": 0.0,
+            "5": 0.0
+          }
+        },
+        {
+          "id": "hi04",
+          "language": "hi",
+          "ranked_document_ids": [
+            "hi-bus",
+            "hi-library",
+            "en-recycling",
+            "en-pool",
+            "en-bus"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "hi05",
+          "language": "hi",
+          "ranked_document_ids": [
+            "hi-water",
+            "hi-recycling",
+            "hi-repair",
+            "hi-parcel",
+            "en-seeds"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "hi06",
+          "language": "hi",
+          "ranked_document_ids": [
+            "hi-library",
+            "hi-parcel",
+            "hi-recycling",
+            "hi-shelter",
+            "hi-repair"
+          ],
+          "reciprocal_rank": 0.0,
+          "recalls": {
+            "1": 0.0,
+            "3": 0.0,
+            "5": 0.0
+          }
+        },
+        {
+          "id": "hi07",
+          "language": "hi",
+          "ranked_document_ids": [
+            "hi-library",
+            "hi-repair",
+            "en-bus",
+            "en-pool",
+            "en-recycling"
+          ],
+          "reciprocal_rank": 0.0,
+          "recalls": {
+            "1": 0.0,
+            "3": 0.0,
+            "5": 0.0
+          }
+        },
+        {
+          "id": "hi08",
+          "language": "hi",
+          "ranked_document_ids": [
+            "hi-water",
+            "hi-repair",
+            "hi-library",
+            "hi-shelter",
+            "hi-seeds"
+          ],
+          "reciprocal_rank": 0.2,
+          "recalls": {
+            "1": 0.0,
+            "3": 0.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "hi09",
+          "language": "hi",
+          "ranked_document_ids": [
+            "hi-pool",
+            "hi-bus",
+            "hi-seeds",
+            "en-repair",
+            "en-bus"
+          ],
+          "reciprocal_rank": 0.0,
+          "recalls": {
+            "1": 0.0,
+            "3": 0.0,
+            "5": 0.0
+          }
+        },
+        {
+          "id": "hi10",
+          "language": "hi",
+          "ranked_document_ids": [
+            "hi-library",
+            "hi-bus",
+            "hi-market",
+            "hi-water",
+            "en-pool"
+          ],
+          "reciprocal_rank": 0.0,
+          "recalls": {
+            "1": 0.0,
+            "3": 0.0,
+            "5": 0.0
+          }
+        },
+        {
+          "id": "hi11",
+          "language": "hi",
+          "ranked_document_ids": [
+            "hi-recycling",
+            "hi-repair",
+            "hi-seeds",
+            "hi-bus",
+            "hi-water"
+          ],
+          "reciprocal_rank": 0.0,
+          "recalls": {
+            "1": 0.0,
+            "3": 0.0,
+            "5": 0.0
+          }
+        },
+        {
+          "id": "hi12",
+          "language": "hi",
+          "ranked_document_ids": [
+            "hi-pool",
+            "hi-bus",
+            "en-bus",
+            "en-repair",
+            "en-parcel"
+          ],
+          "reciprocal_rank": 1.0,
+          "recalls": {
+            "1": 1.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "hi13",
+          "language": "hi",
+          "ranked_document_ids": [
+            "hi-market",
+            "hi-library",
+            "hi-shelter",
+            "hi-bus",
+            "en-parcel"
+          ],
+          "reciprocal_rank": 0.0,
+          "recalls": {
+            "1": 0.0,
+            "3": 0.0,
+            "5": 0.0
+          }
+        },
+        {
+          "id": "hi14",
+          "language": "hi",
+          "ranked_document_ids": [
+            "hi-seeds",
+            "hi-library",
+            "hi-water",
+            "hi-repair",
+            "hi-shelter"
+          ],
+          "reciprocal_rank": 0.25,
+          "recalls": {
+            "1": 0.0,
+            "3": 0.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "hi15",
+          "language": "hi",
+          "ranked_document_ids": [
+            "hi-seeds",
+            "hi-recycling",
+            "hi-repair",
+            "hi-parcel",
+            "hi-library"
+          ],
+          "reciprocal_rank": 0.0,
+          "recalls": {
+            "1": 0.0,
+            "3": 0.0,
+            "5": 0.0
+          }
+        },
+        {
+          "id": "hi16",
+          "language": "hi",
+          "ranked_document_ids": [
+            "hi-parcel",
+            "hi-market",
+            "hi-shelter",
+            "hi-bus",
+            "hi-recycling"
+          ],
+          "reciprocal_rank": 0.5,
+          "recalls": {
+            "1": 0.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "hi17",
+          "language": "hi",
+          "ranked_document_ids": [
+            "hi-pool",
+            "hi-seeds",
+            "hi-bus",
+            "en-repair",
+            "en-market"
+          ],
+          "reciprocal_rank": 0.0,
+          "recalls": {
+            "1": 0.0,
+            "3": 0.0,
+            "5": 0.0
+          }
+        },
+        {
+          "id": "hi18",
+          "language": "hi",
+          "ranked_document_ids": [
+            "hi-market",
+            "hi-parcel",
+            "hi-library",
+            "en-recycling",
+            "en-market"
+          ],
+          "reciprocal_rank": 0.0,
+          "recalls": {
+            "1": 0.0,
+            "3": 0.0,
+            "5": 0.0
+          }
+        },
+        {
+          "id": "hi19",
+          "language": "hi",
+          "ranked_document_ids": [
+            "hi-parcel",
+            "hi-market",
+            "hi-shelter",
+            "hi-recycling",
+            "en-recycling"
+          ],
+          "reciprocal_rank": 0.3333333333333333,
+          "recalls": {
+            "1": 0.0,
+            "3": 1.0,
+            "5": 1.0
+          }
+        },
+        {
+          "id": "hi20",
+          "language": "hi",
+          "ranked_document_ids": [
+            "hi-seeds",
+            "hi-pool",
+            "hi-water",
+            "hi-shelter",
+            "hi-parcel"
+          ],
+          "reciprocal_rank": 0.25,
+          "recalls": {
+            "1": 0.0,
+            "3": 0.0,
+            "5": 1.0
+          }
+        }
+      ]
+    }
+  }
+}

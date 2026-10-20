@@ -7,7 +7,30 @@ from __future__ import annotations
 import subprocess
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
+
+
+def _own_tests_dir() -> Path | None:
+    """The ``tests`` directory of the source checkout this package runs from, else None.
+
+    Pytest puts the checkout's own test directories (such as ``tests/integrations/langflow``)
+    on ``sys.path``; those are this project's files, whatever the checkout directory is
+    called. An installed wheel has no ``src/nexura_runtime`` beside it, so nothing is exempt.
+    """
+    root = Path(__file__).resolve().parents[3]
+    if (root / "pyproject.toml").is_file() and (root / "src" / "nexura_runtime").is_dir():
+        return root / "tests"
+    return None
+
+
+def _inside(path: str, root: Path | None) -> bool:
+    if root is None or not path:
+        return False
+    try:
+        return Path(path).resolve().is_relative_to(root)
+    except (OSError, ValueError):
+        return False
 
 
 @dataclass(frozen=True)
@@ -83,7 +106,10 @@ class ReleaseDiagnostics:
 
         # 1. Audit sys.path for Nexura V2 parent repo leaks
         forbidden_substrings = ["Nexura V2", "nexura-sdk", "langflow", "lfx"]
+        own_tests = _own_tests_dir()
         for p in sys.path:
+            if _inside(p, own_tests):
+                continue  # this checkout's own test directories
             for forbidden in forbidden_substrings:
                 if forbidden.lower() in p.lower() and "nexura-standalone-sdk" not in p:
                     foreign_paths.append(p)

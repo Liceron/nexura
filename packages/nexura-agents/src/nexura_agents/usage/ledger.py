@@ -79,11 +79,40 @@ class UsageLedger:
                 finally:
                     self._transaction = None
 
+    def budget_policy(
+        self, kind: str, name: str, payload: str | None = None, *, replace: bool = False
+    ) -> str | None:
+        """Persist named policies alongside spend; first run registration wins atomically."""
+        if not self.db_path:
+            return payload
+        with self._atomic(), self._connection() as conn:
+            if payload is not None:
+                if replace:
+                    conn.execute(
+                        "INSERT INTO budget_policies VALUES (?, ?, ?) "
+                        "ON CONFLICT(kind, name) DO UPDATE SET payload=excluded.payload",
+                        (kind, name, payload),
+                    )
+                else:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO budget_policies VALUES (?, ?, ?)",
+                        (kind, name, payload),
+                    )
+            row = conn.execute(
+                "SELECT payload FROM budget_policies WHERE kind=? AND name=?", (kind, name)
+            ).fetchone()
+            return str(row[0]) if row else None
+
     def _init_sqlite(self) -> None:
         """Create tables in SQLite if database path is configured."""
         if not self.db_path:
             return
         with self._connection() as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS budget_policies "
+                "(kind TEXT NOT NULL, name TEXT NOT NULL, payload TEXT NOT NULL, "
+                "PRIMARY KEY(kind, name))"
+            )
             conn.execute("PRAGMA journal_mode=WAL;")
             conn.execute("PRAGMA synchronous=NORMAL;")
             conn.execute(

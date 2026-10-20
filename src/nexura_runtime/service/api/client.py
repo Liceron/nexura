@@ -277,6 +277,14 @@ class RunsClient:
             "POST", f"/runs/{_safe_quote(run_id)}/fork", json_data=payload
         )
 
+    async def repro_bundle(self, run_id: str) -> dict[str, Any]:
+        """Download the repro bundle captured when this run failed (opt-in capture).
+
+        Replay it offline with ``nexura-runtime repro run FILE``. A 404 means no bundle was
+        captured for the run.
+        """
+        return await self._root._request("GET", f"/runs/{_safe_quote(run_id)}/repro")
+
     async def stream_events(
         self, run_id: str, cursor: int = 0, live: bool = False
     ) -> AsyncIterator[dict[str, Any]]:
@@ -523,6 +531,18 @@ class KnowledgeClient:
 
     async def limits(self) -> dict[str, Any]:
         return await self._root._request("GET", "/knowledge/limits")
+
+    async def status(self, collection_id: str = "default") -> dict[str, Any]:
+        """Configured and persisted embedding lineage of a collection (no provider calls)."""
+        return await self._root._request(
+            "GET", "/knowledge/status", params={"collection_id": collection_id}
+        )
+
+    async def reindex(self, collection_id: str) -> dict[str, Any]:
+        """Rebuild the collection with the configured embedder (needs edit permission)."""
+        return await self._root._request(
+            "POST", f"/knowledge/collections/{_safe_quote(collection_id)}/reindex"
+        )
 
     async def list_documents(
         self, collection_id: str = "default", limit: int = 50, offset: int = 0
@@ -1303,6 +1323,7 @@ class NexuraClient:
         ("GET", "/api/v1/runs/{run_id}/subruns/{child_key}"): ("runs", "subrun"),
         ("POST", "/api/v1/runs/{run_id}/fork"): ("runs", "fork"),
         ("GET", "/api/v1/runs/{run_id}/events"): ("runs", "stream_events"),
+        ("GET", "/api/v1/runs/{run_id}/repro"): ("runs", "repro_bundle"),
         # Descriptors & Capabilities
         ("GET", "/api/v1/modules"): ("modules", "list"),
         ("GET", "/api/v1/modules/{module_id}"): ("modules", "get"),
@@ -1324,6 +1345,11 @@ class NexuraClient:
         ("GET", "/api/v1/knowledge/collections"): ("knowledge", "list_collections"),
         ("POST", "/api/v1/knowledge/collections"): ("knowledge", "create_collection"),
         ("GET", "/api/v1/knowledge/limits"): ("knowledge", "limits"),
+        ("GET", "/api/v1/knowledge/status"): ("knowledge", "status"),
+        ("POST", "/api/v1/knowledge/collections/{collection_id}/reindex"): (
+            "knowledge",
+            "reindex",
+        ),
         ("GET", "/api/v1/knowledge/documents"): ("knowledge", "list_documents"),
         ("POST", "/api/v1/knowledge/documents/upload"): ("knowledge", "upload_document"),
         ("GET", "/api/v1/knowledge/documents/{document_id}"): ("knowledge", "get_document"),

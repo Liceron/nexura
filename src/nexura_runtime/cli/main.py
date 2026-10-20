@@ -30,6 +30,8 @@ def repro_command(args: argparse.Namespace) -> int:
             print(f"reproduced: {result.reproduced}")
             if result.first_divergence:
                 print(result.first_divergence, file=sys.stderr)
+            for note in result.notes:
+                print(f"note: {note}", file=sys.stderr)
             return 0 if result.reproduced else 1
         from nexura_runtime.storage.repository import SQLiteRepository
 
@@ -38,6 +40,15 @@ def repro_command(args: argparse.Namespace) -> int:
         repository = SQLiteRepository(args.db)
         try:
             record = await repository.get_run(args.workspace, args.run_id)
+            if record is None or not record.metadata.get("repro"):
+                # A service run captured by failed-run capture (serve --capture-failed-runs).
+                from nexura_runtime.service.repro_capture import load_captured_bundle
+
+                captured = load_captured_bundle(args.db, args.run_id)
+                if captured is not None and captured[0] == args.workspace:
+                    ReproBundle(captured[1]).save(args.output)
+                    print(f"Wrote repro bundle to: {args.output}")
+                    return 0
             if record is None:
                 raise ValueError(f"Run not found: {args.run_id}")
             export_repro_bundle(record).save(args.output)
@@ -223,6 +234,7 @@ def serve_command(args: argparse.Namespace) -> int:
             run_trigger_worker=bool(args.worker),
             trigger_poll_interval=args.poll_interval,
             listen_host=args.host,
+            capture_failed_runs=getattr(args, "capture_failed_runs", None),
             allow_unauthenticated_network=bool(
                 getattr(args, "insecure_allow_unauthenticated_network", False)
             ),
@@ -699,6 +711,15 @@ def build_parser() -> argparse.ArgumentParser:
             "Allow a chat model in the playground (repeatable), e.g. "
             "gem=gemini:gemini-2.5-flash. Keys come from the server environment. "
             "Also NEXURA_CHAT_MODELS=name=provider:model,... (flags win)."
+        ),
+    )
+    serve_p.add_argument(
+        "--capture-failed-runs",
+        action="store_true",
+        default=None,
+        help=(
+            "Keep a redacted repro bundle for each workflow run that fails "
+            "(GET /api/v1/runs/RUN_ID/repro). Also NEXURA_CAPTURE_FAILED_RUNS=1. Default off."
         ),
     )
     serve_p.add_argument(

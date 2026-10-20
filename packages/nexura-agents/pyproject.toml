@@ -29,8 +29,11 @@ litellm = ["litellm>=1.104,<2"]
 otel = ["opentelemetry-api>=1.20,<2"]
 
 [project.urls]
+Homepage = "https://github.com/Liceron/nexura"
+Documentation = "https://github.com/Liceron/nexura/blob/main/docs/README.md"
 Source = "https://github.com/Liceron/nexura"
 Issues = "https://github.com/Liceron/nexura/issues"
+Changelog = "https://github.com/Liceron/nexura/blob/main/CHANGELOG.md"
 
 [build-system]
 requires = ["hatchling"]
