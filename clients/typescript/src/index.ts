@@ -28,6 +28,9 @@ export {
 } from "./client.js";
 export type { ClientConfig } from "./client.js";
 export type {
+  EffectResolution,
+  ExecutionEffect,
+  ResolveEffectOptions,
   WorkspaceRecord,
   SkillItem,
   SkillDetail,

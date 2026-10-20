@@ -77,6 +77,10 @@ export async function authorizeApiRequests(
   await page.context().setExtraHTTPHeaders(cluster.apiHeaders);
 }
 
+// Startup polls every 100 ms. Cold Vite starts on shared CI runners take well over the old
+// 8 s, which failed whole spec files with "Frontend failed to start".
+const STARTUP_POLLS = 450;
+
 let portCounter = Math.floor(Math.random() * 200);
 
 export async function startTestCluster(): Promise<TestCluster> {
@@ -106,7 +110,7 @@ export async function startTestCluster(): Promise<TestCluster> {
   // Wait for backend to be ready
   const backendUrl = `http://127.0.0.1:${backendPort}`;
   let backendReady = false;
-  for (let i = 0; i < 80; i++) {
+  for (let i = 0; i < STARTUP_POLLS; i++) {
     if (backendProc.exitCode !== null) {
       throw new Error(`Backend process exited early with code ${backendProc.exitCode}: ${backendStderr}`);
     }
@@ -145,7 +149,7 @@ export async function startTestCluster(): Promise<TestCluster> {
 
   // Wait for frontend to be ready
   let frontendReady = false;
-  for (let i = 0; i < 80; i++) {
+  for (let i = 0; i < STARTUP_POLLS; i++) {
     if (frontendProc.exitCode !== null) {
       throw new Error(`Frontend process exited early with code ${frontendProc.exitCode}`);
     }

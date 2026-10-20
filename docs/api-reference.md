@@ -2452,7 +2452,7 @@ Raised when an outbound URL violates security destination policy.
 ~~~
 
 
-## Execution stores (`nexura_agents.execution_store`, not yet wired to executors)
+## Execution stores (`nexura_agents.execution_store`, used by `DurableExecutionEngine`)
 
 ### `ExecutionStore`
 
@@ -2471,7 +2471,7 @@ an unexpired owner/token pair, including operator effect resolution.
   Claim a free/expired/own lease; every acquisition after expiry increments token.
 - `close(self) -> 'None'`
   Release owned backend resources.
-- `commit(self, lease: 'ExecutionLease', *, state: 'dict[str, Any]', cursor: 'str | None' = None, status: 'str' = 'running', steps: 'Sequence[StepIntent | StepOutcome]' = (), effects: 'Sequence[EffectRecord]' = (), events: 'Sequence[dict[str, Any]]' = (), state_version: 'int' = 2) -> 'ExecutionRun'`
+- `commit(self, lease: 'ExecutionLease', *, state: 'dict[str, Any]', cursor: 'str | None' = None, status: 'str' = 'running', steps: 'Sequence[StepIntent | StepOutcome]' = (), effects: 'Sequence[EffectRecord]' = (), events: 'Sequence[dict[str, Any]]' = (), state_version: 'int' = 2, expected_revision: 'int | None' = None) -> 'ExecutionRun'`
   Commit state/cursor/steps/effects/events together; failures roll everything back.
 - `create(self, execution_id: 'ExecutionId', *, owner: 'str', definition_digest: 'str', state: 'dict[str, Any] | None' = None, ttl: 'float' = 30.0, kind: 'str' = 'agent', parent_run_id: 'str | None' = None, origin: 'dict[str, Any] | None' = None) -> 'ExecutionRun'`
   Atomically create a leased run; duplicate identity is an error.
@@ -2522,6 +2522,8 @@ multi-host coordination. Call init_db() before using a new database.
 
 - `close(self) -> 'None'`
   Close this store's SQLite connection; other store instances are unaffected.
+- `from_connection(cls, connection: 'sqlite3.Connection') -> 'SQLiteExecutionStore'`
+  Borrow an idle SQLite connection; close() leaves it open for its owner.
 
 ### `ExecutionLease`
 

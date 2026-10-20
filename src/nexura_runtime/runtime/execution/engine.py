@@ -8,7 +8,9 @@ import asyncio
 import copy
 import inspect
 import time
+import uuid
 from collections.abc import Callable
+from dataclasses import asdict
 from typing import Any
 
 from nexura_agents.contracts.canonical import canonical_digest
@@ -18,9 +20,20 @@ from nexura_agents.contracts.errors import (
     DeadlineExceededError,
     IndeterminateEffectError,
 )
+from nexura_agents.contracts.execution import (
+    EffectClass,
+    EffectRecord,
+    EffectResolution,
+    EffectStatus,
+    ExecutionId,
+    LeaseLostError,
+    effect_class_from_policy,
+)
 from nexura_agents.errors import ExecutionCancelledError, SessionConflictError, StorageError
+from nexura_agents.execution_store import EffectAlreadyResolvedError, ExecutionStore
 
 from nexura_runtime.runtime.execution.errors import (
+    DurableDefinitionMismatchError,
     DurableExecutionError,
     FencingConflictError,
     LeaseExpiredError,
@@ -31,6 +44,11 @@ from nexura_runtime.runtime.execution.models import (
     NodeIntent,
 )
 from nexura_runtime.storage import StorageRepository
+from nexura_runtime.storage.execution_bridge import (
+    ExecutionRepositoryBridge,
+    execution_store_for,
+    visit_key,
+)
 
 
 class DurableExecutionEngine:
@@ -38,11 +56,26 @@ class DurableExecutionEngine:
 
     def __init__(
         self,
-        repository: StorageRepository,
+        repository: StorageRepository | ExecutionStore,
         handlers: dict[str, Callable[..., Any]] | None = None,
     ) -> None:
         self.repository = repository
         self.handlers: dict[str, Callable[..., Any]] = handlers.copy() if handlers else {}
+        self._execution_store: ExecutionStore | None = None
+
+    async def get_execution_store(self) -> ExecutionStore:
+        """Return the authoritative execution journal behind this deprecated adapter."""
+        if self._execution_store is not None:
+            return self._execution_store
+        if isinstance(self.repository, ExecutionStore):
+            await self.repository.init_db()
+            self._execution_store = self.repository
+        else:
+            self._execution_store = await execution_store_for(self.repository)
+        return self._execution_store
+
+    async def _records(self) -> ExecutionRepositoryBridge:
+        return ExecutionRepositoryBridge(await self.get_execution_store())
 
     def register_handler(self, name: str, handler: Callable[..., Any]) -> None:
         """Register a node handler callable."""
@@ -91,17 +124,18 @@ class DurableExecutionEngine:
         meta["entry_node"] = spec.entry_node
         meta["workflow_digest"] = canonical_digest(spec.model_dump())
 
-        await self.repository.create_run(
+        record = await (await self._records()).create_run(
             workspace_id=workspace_id,
             run_id=run_id,
             initial_state=durable_state.model_dump(),
             metadata=meta,
         )
+        durable_state.revision = record.revision
         return durable_state
 
     async def get_state(self, workspace_id: str, run_id: str) -> DurableRunState:
         """Retrieve current durable state from storage."""
-        rec = await self.repository.get_run(workspace_id=workspace_id, run_id=run_id)
+        rec = await (await self._records()).get_run(workspace_id=workspace_id, run_id=run_id)
         if rec is None:
             raise StorageError(f"Run '{run_id}' not found in workspace '{workspace_id}'.")
         state_dict = copy.deepcopy(rec.state)
@@ -117,72 +151,52 @@ class DurableExecutionEngine:
         lease_duration: float = 30.0,
     ) -> DurableRunState:
         """Claim a run for execution by an active worker, acquiring a lease and fencing token."""
-        rec = await self.repository.get_run(workspace_id=workspace_id, run_id=run_id)
-        if rec is None:
-            raise StorageError(f"Run '{run_id}' not found in workspace '{workspace_id}'.")
-
-        cur_state = DurableRunState.model_validate(rec.state)
-        now = time.time()
-
-        # If already terminal, return as is
-        if rec.status in {"completed", "failed", "cancelled"}:
-            cur_state.revision = rec.revision
-            cur_state.status = rec.status
+        store = await self.get_execution_store()
+        identity = ExecutionId(workspace_id, run_id)
+        cur_state = await self.get_state(workspace_id, run_id)
+        if cur_state.status in {"completed", "failed", "cancelled"}:
             return cur_state
-
-        # Check if existing lease is active and held by a different worker
-        if (
-            cur_state.worker_id
-            and cur_state.worker_id != worker_id
-            and now < cur_state.lease_expires_at
-        ):
+        snapshot = await store.get(identity)
+        lease = await store.claim(
+            identity, worker_id, lease_duration, definition_digest=snapshot.run.definition_digest
+        )
+        if lease is None:
             raise FencingConflictError(
-                run_id=run_id,
-                expected_token=cur_state.fencing_token,
-                actual_token=cur_state.fencing_token,
-                worker_id=worker_id,
-                details={
-                    "held_by": cur_state.worker_id,
-                    "expires_at": cur_state.lease_expires_at,
-                },
+                run_id, cur_state.fencing_token, cur_state.fencing_token, worker_id
             )
-
-        # Increment fencing token
-        new_token = cur_state.fencing_token + 1
-        new_status = "running" if rec.status == "pending" else rec.status
-
-        cur_state.fencing_token = new_token
+        cur_state = await self.get_state(workspace_id, run_id)
         cur_state.worker_id = worker_id
-        cur_state.lease_expires_at = now + lease_duration
-        cur_state.status = new_status
-        cur_state.updated_at = now
-
-        claim_event = {
-            "type": "worker_lease_acquired",
-            "worker_id": worker_id,
-            "fencing_token": new_token,
-            "lease_expires_at": cur_state.lease_expires_at,
-        }
-
+        cur_state.fencing_token = lease.fencing_token - 1
+        cur_state.lease_expires_at = lease.expires_at
+        if cur_state.status == "pending":
+            cur_state.status = "running"
+        # Keep unresolved runs paused; only the current visit's resolution can continue it.
+        if cur_state.status == "paused" and any(
+            effect.status == EffectStatus.RESOLVED
+            and effect.intent.step_key == visit_key(cur_state.model_dump())
+            for effect in snapshot.effects.values()
+        ):
+            cur_state.status = "running"
         try:
-            updated_rec = await self.repository.update_run(
-                workspace_id=workspace_id,
-                run_id=run_id,
-                expected_revision=rec.revision,
-                status=new_status,
-                state_update=cur_state.model_dump(),
-                events=[claim_event],
+            rec = await (await self._records()).update_run(
+                workspace_id,
+                run_id,
+                cur_state.revision,
+                cur_state.status,
+                cur_state.model_dump(),
+                [
+                    {
+                        "type": "worker_lease_acquired",
+                        "worker_id": worker_id,
+                        "fencing_token": cur_state.fencing_token,
+                    }
+                ],
             )
-            cur_state.revision = updated_rec.revision
-            return cur_state
-        except SessionConflictError as exc:
+        except (SessionConflictError, LeaseLostError) as exc:
             raise FencingConflictError(
-                run_id=run_id,
-                expected_token=new_token,
-                actual_token=cur_state.fencing_token,
-                worker_id=worker_id,
-                details={"reason": "CAS race during claim", "error": str(exc)},
+                run_id, cur_state.fencing_token, cur_state.fencing_token, worker_id
             ) from exc
+        return DurableRunState.model_validate(rec.state)
 
     async def execute_step(
         self,
@@ -193,18 +207,24 @@ class DurableExecutionEngine:
         context: ExecutionContext | None = None,
     ) -> DurableRunState:
         """Execute a single workflow node with lease verification and crash recovery."""
-        rec = await self.repository.get_run(workspace_id=workspace_id, run_id=run_id)
+        rec = await (await self._records()).get_run(workspace_id=workspace_id, run_id=run_id)
         if rec is None:
             raise StorageError(f"Run '{run_id}' not found in workspace '{workspace_id}'.")
 
         state = DurableRunState.model_validate(rec.state)
         expected_digest = rec.metadata.get("workflow_digest")
         if expected_digest is not None and expected_digest != canonical_digest(spec.model_dump()):
-            raise DurableExecutionError("Workflow specification differs from the stored run")
+            raise DurableDefinitionMismatchError(
+                "Workflow specification differs from the stored run"
+            )
         state.revision = rec.revision
         state.status = rec.status
-        now = time.time()
 
+        # Terminal state is returned before lease checks because terminal commits release it.
+        if state.status == "cancelled":
+            raise ExecutionCancelledError(f"Run '{run_id}' has been cancelled.")
+        if state.status in {"completed", "failed", "paused"}:
+            return state
         # 1. Lease & fencing verification
         if state.worker_id != worker_id:
             raise FencingConflictError(
@@ -213,13 +233,6 @@ class DurableExecutionEngine:
                 actual_token=state.fencing_token,
                 worker_id=worker_id,
                 details={"assigned_worker": state.worker_id},
-            )
-        if now > state.lease_expires_at:
-            raise LeaseExpiredError(
-                run_id=run_id,
-                worker_id=worker_id,
-                expires_at=state.lease_expires_at,
-                current_time=now,
             )
 
         # 2. Check for explicit cancellation
@@ -247,16 +260,50 @@ class DurableExecutionEngine:
             raise DurableExecutionError(state.error)
 
         node_spec = spec.nodes[current_node_id]
+        effect_class = (
+            EffectClass(node_spec.effect_policy)
+            if node_spec.effect_policy in {item.value for item in EffectClass}
+            else effect_class_from_policy(node_spec.effect_policy)
+        )
+        recovered_output: Any = None
+        recovered = False
 
         # 4. Crash Recovery Check on Pre-Dispatch Intent
         if state.pre_dispatch_intent is not None:
             intent = state.pre_dispatch_intent
+            snapshot = await (await self.get_execution_store()).get(
+                ExecutionId(workspace_id, run_id)
+            )
+            effects = [
+                effect
+                for effect in snapshot.effects.values()
+                if effect.intent.step_key == visit_key(state.model_dump())
+            ]
+            effect = effects[0] if effects else None
+            if effect is not None and effect.status == EffectStatus.RESOLVED:
+                if effect.resolution == EffectResolution.CONFIRMED:
+                    recovered_output, recovered = effect.result, True
+                elif effect.resolution == EffectResolution.FAILED:
+                    state.status, state.error = "failed", "Effect resolution failed"
+                    await self._commit_state(workspace_id, run_id, state, rec.revision, [])
+                    return state
+                else:
+                    # not_applied: dispatch again as a new attempt with a new key.
+                    if effect.intent.approval_id is not None:
+                        raise DurableExecutionError("Re-dispatch needs a fresh approval")
+                    state.dispatch_attempt += 1
+                    state.pre_dispatch_intent = None
+                state.pause_reason, state.pending_effect = None, None
             if (
                 intent.node_id == current_node_id
                 and intent.dispatched
-                and intent.effect_policy == "non_idempotent_write"
+                and effect_class in (EffectClass.NON_IDEMPOTENT, EffectClass.RECONCILABLE)
+                and not recovered
+                and state.pre_dispatch_intent is not None
             ):
-                state.status = "failed"
+                state.status = "paused"
+                state.pause_reason = "effect_unknown"
+                state.pending_effect = asdict(effect) if effect is not None else intent.model_dump()
                 state.error = (
                     f"Indeterminate remote outcome on non-idempotent node '{current_node_id}'"
                 )
@@ -314,7 +361,17 @@ class DurableExecutionEngine:
                 elapsed_seconds=state.time_consumed,
             )
 
-        # 7. Record Pre-Dispatch Intent & Advance Revision
+        # 7. Resolve the handler before recording a dispatch, so a missing handler
+        # never leaves a dispatched intent (and a pending effect) behind.
+        handler = self.handlers.get(node_spec.handler)
+        if handler is None and not recovered:
+            state.status = "failed"
+            state.error = f"Handler '{node_spec.handler}' not registered."
+            await self._commit_state(workspace_id, run_id, state, rec.revision, [])
+            raise DurableExecutionError(state.error)
+
+        # 8. Record Pre-Dispatch Intent & Advance Revision. For a non-pure node the
+        # same fenced commit writes the journal StepIntent and a pending effect.
         state.pre_dispatch_intent = NodeIntent(
             node_id=current_node_id,
             effect_policy=node_spec.effect_policy,
@@ -326,32 +383,45 @@ class DurableExecutionEngine:
             "node_id": current_node_id,
             "effect_policy": node_spec.effect_policy,
         }
-        rec = await self._commit_state(workspace_id, run_id, state, rec.revision, [pre_event])
+        if not recovered:
+            rec = await self._commit_state(workspace_id, run_id, state, rec.revision, [pre_event])
         state.revision = rec.revision
-
-        # 8. Resolve handler
-        handler = self.handlers.get(node_spec.handler)
-        if handler is None:
-            state.status = "failed"
-            state.error = f"Handler '{node_spec.handler}' not registered."
-            await self._commit_state(workspace_id, run_id, state, rec.revision, [])
-            raise DurableExecutionError(state.error)
 
         # 9. Execute with Timeout
         effective_timeout = state.time_budget_remaining
         if node_spec.timeout_seconds is not None:
             effective_timeout = min(effective_timeout, node_spec.timeout_seconds)
 
+        if context is not None and not recovered:
+            # Handlers that call remote systems should forward these: the key is stable
+            # across takeover of this visit, the token only increases.
+            snapshot = await (await self.get_execution_store()).get(
+                ExecutionId(workspace_id, run_id)
+            )
+            key = visit_key(state.model_dump())
+            context.attributes["fencing_token"] = snapshot.run.fencing_token
+            context.attributes["idempotency_key"] = next(
+                (
+                    item.intent.idempotency_key
+                    for item in snapshot.effects.values()
+                    if item.intent.step_key == key
+                ),
+                None,
+            )
+
         start_time = time.time()
         try:
-            if inspect.iscoroutinefunction(handler):
-                coro = handler(context, state.state) if context else handler(state.state)
-                output = await asyncio.wait_for(coro, timeout=effective_timeout)
+            if recovered:
+                output = recovered_output
+            elif inspect.iscoroutinefunction(handler):
+                async_call = handler(context, state.state) if context else handler(state.state)
+                output = await asyncio.wait_for(async_call, timeout=effective_timeout)
             else:
-                coro = asyncio.to_thread(
+                assert handler is not None
+                thread_call = asyncio.to_thread(
                     handler, *([context, state.state] if context else [state.state])
                 )
-                output = await asyncio.wait_for(coro, timeout=effective_timeout)
+                output = await asyncio.wait_for(thread_call, timeout=effective_timeout)
         except TimeoutError as exc:
             elapsed = time.time() - start_time
             state.time_consumed += elapsed
@@ -397,6 +467,8 @@ class DurableExecutionEngine:
 
         state.completed_nodes.append(current_node_id)
         state.pre_dispatch_intent = None
+        state.pause_reason, state.pending_effect = None, None
+        state.dispatch_attempt = 1
 
         # Resolve next transition
         if current_node_id in spec.terminal_nodes:
@@ -419,7 +491,15 @@ class DurableExecutionEngine:
         if state.status == "completed":
             completion_events.append({"type": "workflow_completed"})
 
-        rec = await self._commit_state(workspace_id, run_id, state, rec.revision, completion_events)
+        rec = await self._commit_state(
+            workspace_id,
+            run_id,
+            state,
+            rec.revision,
+            completion_events,
+            outcome=output,
+            has_outcome=True,
+        )
         state.revision = rec.revision
         return state
 
@@ -444,7 +524,7 @@ class DurableExecutionEngine:
 
     async def request_cancellation(self, workspace_id: str, run_id: str) -> DurableRunState:
         """Durable cancellation request independent of API transport disconnection."""
-        rec = await self.repository.get_run(workspace_id=workspace_id, run_id=run_id)
+        rec = await (await self._records()).get_run(workspace_id=workspace_id, run_id=run_id)
         if rec is None:
             raise StorageError(f"Run '{run_id}' not found in workspace '{workspace_id}'.")
 
@@ -452,7 +532,7 @@ class DurableExecutionEngine:
         state.status = "cancelled"
         state.updated_at = time.time()
 
-        updated_rec = await self.repository.update_run(
+        updated_rec = await (await self._records()).update_run(
             workspace_id=workspace_id,
             run_id=run_id,
             expected_revision=rec.revision,
@@ -490,21 +570,75 @@ class DurableExecutionEngine:
         state: DurableRunState,
         expected_revision: int,
         events: list[dict[str, Any]],
+        *,
+        outcome: Any = None,
+        has_outcome: bool = False,
     ) -> Any:
         now = time.time()
-        if state.worker_id is not None and now >= state.lease_expires_at:
+        state.updated_at = now
+        try:
+            return await (await self._records()).update_run(
+                workspace_id=workspace_id,
+                run_id=run_id,
+                expected_revision=expected_revision,
+                status=state.status,
+                state_update=state.model_dump(),
+                events=events,
+                outcome=outcome,
+                has_outcome=has_outcome,
+            )
+        except LeaseLostError as exc:
+            # The journal judged the lease by the store's clock; keep the legacy error type.
             raise LeaseExpiredError(
                 run_id=run_id,
-                worker_id=state.worker_id,
+                worker_id=state.worker_id or "",
                 expires_at=state.lease_expires_at,
-                current_time=now,
-            )
-        state.updated_at = now
-        return await self.repository.update_run(
-            workspace_id=workspace_id,
-            run_id=run_id,
-            expected_revision=expected_revision,
-            status=state.status,
-            state_update=state.model_dump(),
-            events=events,
+                current_time=time.time(),
+            ) from exc
+
+    async def resolve_effect(
+        self,
+        workspace_id: str,
+        run_id: str,
+        effect_id: str,
+        resolution: EffectResolution,
+        *,
+        actor: str,
+        result: Any = None,
+    ) -> EffectRecord:
+        """Record a person's decision about an ``indeterminate`` effect, exactly once.
+
+        ``resolution`` is ``confirmed`` (it happened; ``result`` becomes the node output),
+        ``not_applied`` (it did not happen; the node runs again with a new idempotency key)
+        or ``failed`` (the run fails). The decision and ``actor`` are journaled together.
+        It does not dispatch anything: the next ``claim_run``/``run_until_idle`` continues
+        the paused run. A second resolution raises ``EffectAlreadyResolvedError``; an
+        unknown run raises ``StorageError``, an unknown effect ``DurableExecutionError``.
+        """
+        store = await self.get_execution_store()
+        identity = ExecutionId(workspace_id, run_id)
+        try:
+            snapshot = await store.get(identity)
+        except KeyError:
+            raise StorageError(f"Run '{run_id}' not found in workspace '{workspace_id}'.") from None
+        effect = snapshot.effects.get(effect_id)
+        if effect is None:
+            raise DurableExecutionError(f"Effect '{effect_id}' not found in run '{run_id}'.")
+        if effect.status == EffectStatus.RESOLVED:
+            raise EffectAlreadyResolvedError("Effect is already resolved")
+        lease = await store.claim(
+            identity,
+            "resolve-" + uuid.uuid4().hex,
+            30,
+            definition_digest=snapshot.run.definition_digest,
         )
+        if lease is None:
+            raise DurableExecutionError("Run has a live lease; resolve it after the owner stops")
+        try:
+            return await store.resolve_effect(
+                lease, effect_id, resolution, actor=actor, result=result
+            )
+        finally:
+            current = await store.get(identity)
+            if current.run.lease_owner == lease.owner:
+                await store.release(lease)

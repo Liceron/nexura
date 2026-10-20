@@ -2,7 +2,8 @@ import { defineConfig, devices } from '@playwright/test';
 
 export default defineConfig({
   testDir: './tests/e2e',
-  timeout: 30000,
+  // CI runners need more time for the per-file server start inside beforeAll.
+  timeout: process.env.CI ? 90000 : 30000,
   expect: {
     timeout: 10000,
   },

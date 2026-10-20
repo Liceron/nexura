@@ -56,6 +56,25 @@ class SQLiteExecutionStore(_SQLStore):
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA synchronous=FULL")
         self._lock = threading.RLock()
+        self._owns_connection = True
+
+    @classmethod
+    def from_connection(cls, connection: sqlite3.Connection) -> SQLiteExecutionStore:
+        """Borrow an idle SQLite connection; close() leaves it open for its owner.
+
+        The connection stays on its creating thread and uses sqlite3.Row results
+        (its row_factory is set). It must not be in a transaction, and must not use
+        ``autocommit=False`` (that mode is always inside a transaction): existing
+        transactions are refused rather than committed implicitly.
+        """
+        if connection.in_transaction or getattr(connection, "autocommit", None) is False:
+            raise ValueError("A borrowed execution connection must be idle")
+        store = cls.__new__(cls)
+        store._db = connection
+        store._db.row_factory = sqlite3.Row
+        store._lock = threading.RLock()
+        store._owns_connection = False
+        return store
 
     @asynccontextmanager
     async def _connection(self) -> AsyncIterator[_Connection]:
@@ -63,9 +82,11 @@ class SQLiteExecutionStore(_SQLStore):
             self._db.execute("BEGIN IMMEDIATE")
             try:
                 yield _SQLiteConnection(self._db)
-                self._db.commit()
+                # Explicit SQL: Connection.commit() is a no-op on a borrowed connection
+                # opened with autocommit=True, which would leave this transaction open.
+                self._db.execute("COMMIT")
             except BaseException as exc:
-                self._db.rollback()
+                self._db.execute("ROLLBACK")
                 if isinstance(exc, sqlite3.IntegrityError):
                     raise ExecutionConflictError("Execution journal constraint conflict") from exc
                 raise
@@ -73,4 +94,5 @@ class SQLiteExecutionStore(_SQLStore):
     async def close(self) -> None:
         """Close this store's SQLite connection; other store instances are unaffected."""
         with self._lock:
-            self._db.close()
+            if self._owns_connection:
+                self._db.close()

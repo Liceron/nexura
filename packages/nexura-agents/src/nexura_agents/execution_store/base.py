@@ -95,6 +95,7 @@ class ExecutionStore(Protocol):
         effects: Sequence[EffectRecord] = (),
         events: Sequence[dict[str, Any]] = (),
         state_version: int = STATE_VERSION,
+        expected_revision: int | None = None,
     ) -> ExecutionRun:
         """Commit state/cursor/steps/effects/events together; failures roll everything back."""
         ...
@@ -274,6 +275,7 @@ class _Store:
         effects: Sequence[EffectRecord] = (),
         events: Sequence[dict[str, Any]] = (),
         state_version: int = STATE_VERSION,
+        expected_revision: int | None = None,
     ) -> ExecutionRun:
         """Atomically replace state/cursor and append immutable journal facts under a lease."""
         keys = {str(step.step_key) for step in steps}
@@ -284,6 +286,8 @@ class _Store:
             effect_ids=[effect.effect_id for effect in effects],
         ) as tx:
             tx.check(lease)
+            if expected_revision is not None and tx.snapshot.run.revision != expected_revision:
+                raise ExecutionConflictError("Execution revision changed")
             if state_version != STATE_VERSION:
                 raise ExecutionVersionError("Writers must use the current state_version")
             if status not in ("running", "interrupted", "paused", "completed", "failed"):

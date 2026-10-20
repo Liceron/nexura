@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from nexura_agents.contracts.execution import DefinitionMismatchError
 from nexura_agents.errors import NexuraError
 
 
@@ -79,3 +80,11 @@ class LeaseExpiredError(DurableExecutionError):
         self.worker_id = worker_id
         self.expires_at = expires_at
         self.current_time = current_time
+
+
+class DurableDefinitionMismatchError(DurableExecutionError, DefinitionMismatchError):
+    """The workflow spec differs from the stored run's digest (refused before dispatch).
+
+    Catchable as the legacy ``DurableExecutionError`` and as the Execution Contract's
+    ``DefinitionMismatchError``.
+    """

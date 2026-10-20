@@ -5,6 +5,8 @@
  */
 
 import type {
+  ExecutionEffect,
+  ResolveEffectOptions,
   AgentListResponse,
   AgentOptions,
   AgentRecord,
@@ -576,6 +578,34 @@ export class RunsClient {
   public async subruns(runId: string, options: { limit?: number; offset?: number } = {}): Promise<PaginatedResponse<RunCheckpoint>> {
     return this.client.request<PaginatedResponse<RunCheckpoint>>(
       "GET", `/runs/${encodeURIComponent(runId)}/subruns`, { params: options }
+    );
+  }
+
+  /**
+   * The run's journaled external effects (`GET /runs/{id}/effects`). A run whose executor
+   * does not journal effects yet returns an empty list.
+   */
+  public async effects(runId: string): Promise<{ effects: ExecutionEffect[] }> {
+    return this.client.request<{ effects: ExecutionEffect[] }>(
+      "GET", `/runs/${encodeURIComponent(runId)}/effects`
+    );
+  }
+
+  /**
+   * Resolve an `indeterminate` effect once (`POST /runs/{id}/effects/{effectId}/resolve`).
+   * Needs the `approve` permission; the caller is recorded as `resolved_by`. A second
+   * resolution fails with 409 `EFFECT_ALREADY_RESOLVED`. It does not run anything: the run
+   * continues when its executor next claims it.
+   */
+  public async resolveEffect(
+    runId: string,
+    effectId: string,
+    options: ResolveEffectOptions
+  ): Promise<ExecutionEffect> {
+    return this.client.request<ExecutionEffect>(
+      "POST",
+      `/runs/${encodeURIComponent(runId)}/effects/${encodeURIComponent(effectId)}/resolve`,
+      { body: options }
     );
   }
 

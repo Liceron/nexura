@@ -4,6 +4,38 @@
  * Typed domain schemas and payload structures for the Nexura Service API.
  */
 
+/** A person's decision about an `indeterminate` effect. */
+export type EffectResolution = "confirmed" | "not_applied" | "failed";
+
+/** One journaled external effect of a run (Execution Contract v1). */
+export interface ExecutionEffect {
+  effect_id: string;
+  execution_id: { workspace_id: string; run_id: string };
+  intent: {
+    step_key: string;
+    effect_class: "pure" | "idempotent" | "non_idempotent" | "reconcilable";
+    payload_digest: string;
+    idempotency_key: string;
+    approval_id: string | null;
+    reservation_ids: string[];
+    status: "dispatched";
+  };
+  effect_index: number;
+  status: "pending" | "confirmed" | "indeterminate" | "resolved";
+  /** Set only when `status` is `resolved`. */
+  resolution: EffectResolution | null;
+  /** Credential-like fields are redacted. */
+  result: unknown;
+  resolved_by: string | null;
+}
+
+/** Body of `runs.resolveEffect`. The actor is the authenticated caller, never a field. */
+export interface ResolveEffectOptions {
+  resolution: EffectResolution;
+  /** For `confirmed`: what the remote system did; becomes the step's output. */
+  result?: unknown;
+}
+
 export interface PaginatedResponse<T> {
   items: T[];
   total: number;

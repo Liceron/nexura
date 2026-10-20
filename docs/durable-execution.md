@@ -4,8 +4,12 @@
 
 This page describes the target shared contract for SDK agents, workflows and trigger
 jobs. S1 adds value types and documentation; S2 adds standalone memory, SQLite
-and Postgres execution stores. Executors do not use these stores yet, so dispatch
-and recovery behavior on existing paths is unchanged. The A6 design report
+and Postgres execution stores. S3 rebuilds the deprecated `DurableExecutionEngine`
+on those stores, and S4 adds effect resolution over REST and the TypeScript client
+(see [DurableExecutionEngine on the journal](#durableexecutionengine-on-the-journal-s3)
+and [Resolving an unknown effect](#resolving-an-unknown-effect-s4)). The SDK `Runner`,
+`WorkflowEngine` and trigger worker do not use the journal yet, so their dispatch and
+recovery behavior is unchanged. The A6 design report
 (`P35_A6_DURABLE_EXECUTION_DESIGN.md`, an internal planning record that is not part of
 the public repository) gives today's behavior per path in §1 and the implementation
 sequence in §3. Teams and
@@ -180,7 +184,7 @@ library and existing SDK error types. Postgres remains optional in
 `nexura_agents.execution_store` exports `ExecutionStore`, `MemoryExecutionStore`,
 `SQLiteExecutionStore`, lease/snapshot types and store errors.
 `nexura_postgres.PostgresExecutionStore` implements the same asynchronous protocol.
-No existing executor uses these stores yet.
+`DurableExecutionEngine` is the first executor that uses them (S3).
 
 Call `init_db()` before using a new SQL database and `close()` when finished.
 `create(execution_id, owner=..., definition_digest=..., state=..., ttl=...)`
@@ -190,7 +194,10 @@ digest and returns a lease or `None` when another owner is still active. Missing
 runs raise `KeyError`; digest mismatches raise `DefinitionMismatchError`.
 
 `commit(lease, state=..., cursor=..., steps=..., effects=..., events=...)` replaces
-the state/cursor and appends journal facts atomically. `steps` accepts S1
+the state/cursor and appends journal facts atomically. The optional
+`expected_revision=` also refuses the commit with `ExecutionConflictError` when the run's
+revision changed since the caller read it (a compare-and-swap inside the fenced
+transaction). `steps` accepts S1
 `StepIntent` and `StepOutcome` objects; effects must link to a persisted intent.
 State and outputs must already be JSON-compatible. A step has at most one
 immutable intent and one immutable outcome; exact repeats are accepted. New
@@ -252,6 +259,127 @@ async def example():
 
 asyncio.run(example())
 ```
+
+## DurableExecutionEngine on the journal (S3)
+
+`DurableExecutionEngine` (`nexura_runtime.runtime.execution`, deprecated, removed in
+0.6) keeps its public methods and errors, but its runs now live in the execution
+journal as `kind="durable_graph"`:
+
+- Pass a `StorageRepository` as before: `SQLiteRepository` uses a
+  `SQLiteExecutionStore` on the same database file and `PostgresRepository` a
+  `PostgresExecutionStore` on the same pool. You can also pass an `ExecutionStore`
+  directly. `engine.get_execution_store()` returns the store in use.
+- `repository.get_run`, `update_run` and `get_run_events` serve these runs from the
+  journal (the legacy `runs`/`run_events` rows are not written for them), so existing
+  callers keep working and a stale `update_run` is still refused.
+- Leases, fencing tokens and expiry come from the journal and the store's clock.
+  `claim_run(..., lease_duration=)` bounds each step as before: this engine does
+  **not** heartbeat, and a step that outlives its lease cannot commit
+  (`LeaseExpiredError`). A changed spec raises `DurableDefinitionMismatchError`, which is
+  both a `DurableExecutionError` and a `DefinitionMismatchError`.
+- Before a non-pure node runs, the same fenced commit that records the legacy
+  `pre_dispatch_intent` writes a `StepIntent` and a `pending` effect. A handler that
+  returns marks it `confirmed` with its output; a handler that raises or times out
+  leaves it `indeterminate` (the remote system may have applied it). A missing handler
+  is detected before any intent is written.
+- Handlers that take an `ExecutionContext` get `ctx.attributes["idempotency_key"]`
+  (stable for this graph visit across takeover) and `ctx.attributes["fencing_token"]`
+  (the journal token; `DurableRunState.fencing_token` keeps the legacy numbering, one
+  lower).
+- After a crash with a dispatched intent: `pure`/`read` nodes re-run, `idempotent_write`
+  nodes re-run with the same key, and `non_idempotent_write` nodes now **pause**
+  (`status="paused"`, `pause_reason="effect_unknown"`, `pending_effect` set, effect
+  `indeterminate`) and raise `IndeterminateEffectError`, instead of failing.
+- **Behavior change:** `DurableNodeSpec.effect_policy` now defaults to
+  `"non_idempotent_write"` (it was `"pure"`), following the founder default that
+  undeclared effects are `non_idempotent`. Declare `effect_policy="pure"` or `"read"`
+  for nodes that may repeat. This also changes the spec digest, so a run started with an
+  undeclared policy must continue with the same declaration.
+- Upgrade note: runs started before 0.5 live only in the legacy `runs` table and are not
+  visible to the rebuilt engine; finish them on 0.4 first.
+
+`EffectReconciler` (`nexura_runtime.runtime.effects`) is now a deprecated synchronous
+wrapper (removed in 0.6) over `SQLiteExecutionStore` effects: each legacy `effect_id`
+is a journal run `legacy-effect:<effect_id>` with one effect. `reconcile_effect(...,
+actor=...)` records who resolved it; `rolled_back` is stored as `not_applied` and
+`voided` as `failed`; a second resolution raises `ReconciliationError`. Rows in the
+pre-0.5 `effect_records` table are imported when the wrapper opens the database (the old
+table is left as it was). Idempotency keys are unique per workspace, so a second effect
+with the same key is refused.
+
+## Resolving an unknown effect (S4)
+
+A paused run waits for a person. `DurableExecutionEngine.resolve_effect(workspace_id,
+run_id, effect_id, resolution, actor=..., result=...)`, `ExecutionStore.resolve_effect`
+and the REST endpoints record the decision once:
+
+- `confirmed` with `result`: it happened; the node completes with `result` as its output
+  and the handler is **not** called again.
+- `not_applied`: it did not happen; the node runs again as a new attempt with a new
+  idempotency key.
+- `failed`: the run fails.
+
+The decision and actor are journaled together (an `effect_resolved` event). A second
+resolution raises `EffectAlreadyResolvedError` (REST: `409 EFFECT_ALREADY_RESOLVED`).
+Resolution runs nothing; the next `claim_run`/`run_until_idle` continues the run.
+
+```python
+import asyncio
+from nexura_agents.contracts.errors import IndeterminateEffectError
+from nexura_agents.contracts.execution import EffectResolution, ExecutionId
+from nexura_runtime.runtime.execution import (
+    DurableExecutionEngine, DurableNodeSpec, DurableWorkflowSpec, NodeIntent,
+)
+from nexura_runtime.storage import SQLiteRepository
+
+spec = DurableWorkflowSpec(
+    workflow_id="refund", entry_node="pay", terminal_nodes=["pay"],
+    nodes={"pay": DurableNodeSpec(node_id="pay", handler="pay")},  # non_idempotent
+)
+
+async def example():
+    repository = SQLiteRepository(":memory:")
+    engine = DurableExecutionEngine(repository, {"pay": lambda state: {"paid": "local fake"}})
+    await engine.init_run("local", "run-1", spec)
+    # Simulate a worker that crashed right after recording its dispatch.
+    state = await engine.claim_run("local", "run-1", "crashed-worker")
+    state.pre_dispatch_intent = NodeIntent(
+        node_id="pay", effect_policy="non_idempotent_write", dispatched=True
+    )
+    await repository.update_run(
+        "local", "run-1", state.revision, "running", state.model_dump()
+    )
+    try:
+        await engine.execute_step("local", "run-1", "crashed-worker", spec)
+    except IndeterminateEffectError:
+        pass
+    paused = await engine.get_state("local", "run-1")
+    assert paused.status == "paused" and paused.pause_reason == "effect_unknown"
+
+    store = await engine.get_execution_store()
+    snapshot = await store.get(ExecutionId("local", "run-1"))
+    (effect_id,) = snapshot.effects
+    await engine.resolve_effect(
+        "local", "run-1", effect_id, EffectResolution.CONFIRMED,
+        actor="ops@example.test", result={"paid": "confirmed on the ledger"},
+    )
+    done = await engine.run_until_idle("local", "run-1", "worker-2", spec)
+    assert done.status == "completed" and done.state["paid"] == "confirmed on the ledger"
+    await repository.close()
+
+asyncio.run(example())
+```
+
+Over HTTP, `GET /api/v1/runs/{run_id}/effects` lists a run's effects and
+`POST /api/v1/runs/{run_id}/effects/{effect_id}/resolve` with
+`{"resolution": "not_applied"}` resolves one; the authenticated caller is recorded as
+`resolved_by` and the `approve` permission is required. The service reads the journal
+in its own database (`create_api_app(execution_store=...)` supplies another store, for
+example Postgres). Only `DurableExecutionEngine` writes effects there today; other runs
+list none. The TypeScript client has `client.runs.effects(runId)` and
+`client.runs.resolveEffect(runId, effectId, {resolution, result})`. Studio has no effects
+view yet. Endpoint details are in [Studio and service](studio-and-service.md).
 
 ## See also
 

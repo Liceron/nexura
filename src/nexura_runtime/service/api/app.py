@@ -17,6 +17,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
+from nexura_agents.execution_store import ExecutionStore, SQLiteExecutionStore
 from nexura_agents.limits import UsageLimits
 from nexura_agents.models.base import ModelProtocol
 from nexura_agents.session import SQLiteSessionStore
@@ -41,6 +42,7 @@ from nexura_runtime.service.api.credentials import router as credentials_router
 from nexura_runtime.service.api.descriptors import BUILTIN_CAPABILITIES
 from nexura_runtime.service.api.descriptors import router as descriptors_router
 from nexura_runtime.service.api.diagnostics import router as diagnostics_router
+from nexura_runtime.service.api.effects import router as effects_router
 from nexura_runtime.service.api.errors import register_validation_handler
 from nexura_runtime.service.api.evaluations import router as evaluations_router
 from nexura_runtime.service.api.integrations import router as integrations_router
@@ -187,6 +189,7 @@ def create_api_app(
     embeddings: str | None = None,
     embeddings_dimensions: int | None = None,
     capture_failed_runs: bool | None = None,
+    execution_store: ExecutionStore | None = None,
 ) -> FastAPI:
     """Create a configured FastAPI application exposing the Nexura REST API.
 
@@ -254,6 +257,12 @@ def create_api_app(
             each run that ends ``failed`` (download: ``GET /api/v1/runs/{run_id}/repro``).
             Off by default; ``None`` reads ``NEXURA_CAPTURE_FAILED_RUNS`` (``1``/``true``).
             See ``docs/reproducing-failures.md``.
+
+    Durable execution:
+        execution_store: the execution journal served by ``GET /api/v1/runs/{run_id}/effects``
+            and ``POST .../effects/{effect_id}/resolve``. Default: a ``SQLiteExecutionStore``
+            on ``db_path``, closed with the app; a supplied store (for example
+            ``PostgresExecutionStore``) stays caller-owned. See ``docs/durable-execution.md``.
     """
     requested_extensions = check_extensions(
         [*extensions, *load_entry_point_extensions(enabled_extensions)],
@@ -401,6 +410,11 @@ def create_api_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        if execution_store is None and app.state.execution_store_closed:
+            # The app is started again after a shutdown closed its own journal store.
+            app.state.execution_store = SQLiteExecutionStore(effective_store.db_path)
+            app.state.execution_store_closed = False
+        await app.state.execution_store.init_db()
         # Startup phase: reconcile missed schedule triggers after restart
         with contextlib.suppress(Exception):
             app_trigger_manager.reconcile_missed_runs()
@@ -479,6 +493,9 @@ def create_api_app(
 
         if store is None:
             await effective_store.close()
+        if execution_store is None:
+            await app.state.execution_store.close()
+            app.state.execution_store_closed = True
 
     docs_enabled = (
         expose_api_docs
@@ -500,6 +517,8 @@ def create_api_app(
     # Attach state
     app.state.registry = effective_registry
     app.state.store = effective_store
+    app.state.execution_store = execution_store or SQLiteExecutionStore(effective_store.db_path)
+    app.state.execution_store_closed = False
     app.state.session_store = SQLiteSessionStore(effective_store.db_path)
     app.state.chat_models = ChatModelRegistry(chat_models)
     app.state.repro_capture = (
@@ -571,6 +590,7 @@ def create_api_app(
     api_v1 = APIRouter(prefix="/api/v1", dependencies=[Depends(require_shared_principal)])
     api_v1.include_router(workflows_router)
     api_v1.include_router(runs_router)
+    api_v1.include_router(effects_router)
     api_v1.include_router(diagnostics_router)
     api_v1.include_router(traces_router)
     api_v1.include_router(sessions_router)

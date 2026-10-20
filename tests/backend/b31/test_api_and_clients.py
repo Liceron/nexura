@@ -401,7 +401,7 @@ def test_typescript_client_interop(test_setup: dict[str, Any]) -> None:
         ts_runner = Path("clients/typescript/test_runner.ts").resolve()
         res = subprocess.run(
             ["node", "--experimental-strip-types", str(ts_runner), f"http://127.0.0.1:{port}"],
-            cwd="/home/ubuntu/projects/nexura-standalone-sdk",
+            cwd=str(Path(__file__).resolve().parents[3]),
             capture_output=True,
             text=True,
             timeout=15,

@@ -96,7 +96,7 @@ The service covers these areas under `/api/v1`:
 | Area | Paths |
 |---|---|
 | Workflows | `/workflows` (list, create, get, update, delete, validate, export, import) |
-| Runs | `/runs` (start, get, list, cancel, decide an approval, `/{run_id}/input`, `/{run_id}/history`, `/{run_id}/fork`, `/{run_id}/subruns`, `/events` as server-sent events, `/{run_id}/diagnostics`) |
+| Runs | `/runs` (start, get, list, cancel, decide an approval, `/{run_id}/input`, `/{run_id}/history`, `/{run_id}/fork`, `/{run_id}/subruns`, `/{run_id}/effects`, `/events` as server-sent events, `/{run_id}/diagnostics`) |
 | Chat sessions | `/sessions`, `/sessions/{id}/chat`, and `/sessions/{id}/chat/stream` for streamed turns |
 | Modules and capabilities | `/modules`, `/capabilities` |
 | Knowledge | `/knowledge/collections`, `/documents`, `/retrieve`, `/answer` |
@@ -189,6 +189,7 @@ curl -s http://127.0.0.1:8765/api/v1/runs/RUN_ID/subruns/CHILD_KEY
 - `GET /runs/{run_id}/subruns` returns `{"items": [...]}`: the latest checkpoint of every child run whose id starts with `<run_id>/`, in natural id order (numbers inside an id compare as numbers, so `[2]` comes before `[10]`). It takes `limit` (default 50, 1 to 200) and `offset` and also returns `total`, `limit`, `offset` and `has_more`, like `GET /runs`. A run without sub-workflows returns an empty list. An unknown `child_key` is `404 RUN_NOT_FOUND` naming the key.
 - `GET /runs/{run_id}/trace` returns a span tree for the run: `run_id`, `status`, `include_content`, `truncated`, `span_count`, `duration_ms` and a flat `spans` list linked by `parent_id` (a root `run` span, one `node` span per workflow node attempt with status, timing, tokens, cost, model and module, and child spans for model calls, tool calls, retries and handoffs inside agent nodes). The only query parameter is `include_content` (default `false`); inputs, outputs and errors are included, redacted, only when it is `true`, and are always dropped for runs older than the diagnostic retention window. An unknown run returns `404 RUN_NOT_FOUND`. Studio shows it under Run Traces.
 - All of these return `403 CROSS_WORKSPACE_ACCESS_DENIED` for a run owned by another workspace and `404 RUN_NOT_FOUND` for an unknown run.
+- `GET /runs/{run_id}/effects` returns `{"effects": [...]}`: the run's journaled external effects (`effect_id`, `intent` with its `idempotency_key` and `effect_class`, `status` `pending`/`confirmed`/`indeterminate`/`resolved`, `resolution`, `result` with credential-like fields redacted, `resolved_by`). Only executors that write the execution journal record effects (today `DurableExecutionEngine` sharing the service database); other runs return an empty list. `POST /runs/{run_id}/effects/{effect_id}/resolve` with `{"resolution": "confirmed" | "not_applied" | "failed", "result": ...}` settles an `indeterminate` effect once. It needs the `approve` permission and records the authenticated caller as `resolved_by` (the body cannot name an actor). It returns `409 EFFECT_ALREADY_RESOLVED` the second time, `409 EFFECT_NOT_INDETERMINATE` for another status, `409 RUN_LEASE_HELD` while a worker holds the run and `409 RUN_FINISHED` for a finished run; an unknown effect is `404 EFFECT_NOT_FOUND`. Resolving runs nothing: the run continues when its executor next claims it. A journaled run is looked up in the caller's workspace, so another workspace's run is `404 RUN_NOT_FOUND`. See [Durable execution](durable-execution.md).
 
 The TypeScript client has matching methods:
 
@@ -422,7 +423,7 @@ Runs that wait for a person are visible in the API: a run waiting on `interrupt(
 status `waiting_for_input` and `pending_input`; `POST /api/v1/runs/{id}/input` answers it,
 `GET /api/v1/runs/{id}/history` lists checkpoints, `POST .../fork` starts a new run from
 one (optionally with edited state) and `GET .../subruns` lists sub-workflow runs. The TS
-client has `runs.provideInput/history/fork/subruns`, and Studio shows a Pending input
+client has `runs.provideInput/history/fork/subruns/effects/resolveEffect`, and Studio shows a Pending input
 banner and a History tab with "Fork from here".
 
 Other commands:

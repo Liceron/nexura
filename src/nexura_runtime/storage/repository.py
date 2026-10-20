@@ -226,7 +226,32 @@ class SQLiteRepository:
             finally:
                 conn.close()
 
+    async def _journal(self, workspace_id: str, run_id: str) -> Any:
+        """The execution-journal bridge when this run is a journaled durable graph."""
+        from nexura_runtime.storage.execution_bridge import journal_bridge
+
+        async def probe() -> bool:
+            conn = self._get_connection()
+            try:
+                row = conn.execute(
+                    "SELECT 1 FROM nexura_exec_runs WHERE workspace_id = ? AND run_id = ?",
+                    (workspace_id, run_id),
+                ).fetchone()
+            except sqlite3.OperationalError as exc:
+                if "no such table" in str(exc):
+                    return False  # the journal was never created in this database
+                raise
+            finally:
+                conn.close()
+            return row is not None
+
+        return await journal_bridge(self, workspace_id, run_id, probe)
+
     async def get_run(self, workspace_id: str, run_id: str) -> RunRecord | None:
+        # DurableExecutionEngine runs live in the execution journal; this is their view.
+        journal = await self._journal(workspace_id, run_id)
+        if journal is not None:
+            return await journal.get_run(workspace_id, run_id)  # type: ignore[no-any-return]
         async with self._async_lock:
             conn = self._get_connection()
             try:
@@ -261,6 +286,11 @@ class SQLiteRepository:
         state_update: dict[str, Any] | None = None,
         events: list[dict[str, Any]] | None = None,
     ) -> RunRecord:
+        journal = await self._journal(workspace_id, run_id)
+        if journal is not None:
+            return await journal.update_run(  # type: ignore[no-any-return]
+                workspace_id, run_id, expected_revision, status, state_update, events
+            )
         async with self._async_lock:
             conn = self._get_connection()
             try:
@@ -339,6 +369,9 @@ class SQLiteRepository:
                 conn.close()
 
     async def get_run_events(self, workspace_id: str, run_id: str) -> list[RunEventRecord]:
+        journal = await self._journal(workspace_id, run_id)
+        if journal is not None:
+            return await journal.get_run_events(workspace_id, run_id)  # type: ignore[no-any-return]
         async with self._async_lock:
             conn = self._get_connection()
             try:
@@ -364,6 +397,10 @@ class SQLiteRepository:
                 conn.close()
 
     async def close(self) -> None:
+        journal = getattr(self, "_execution_store", None)
+        if journal is not None:
+            await journal.close()
+            self._execution_store = None
         async with self._async_lock:
             if self._memory_keeper is not None:
                 self._memory_keeper.close()

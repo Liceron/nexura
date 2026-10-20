@@ -285,6 +285,31 @@ class RunsClient:
         """
         return await self._root._request("GET", f"/runs/{_safe_quote(run_id)}/repro")
 
+    async def effects(self, run_id: str) -> dict[str, Any]:
+        """List the run's journaled external effects: ``{"effects": [...]}``.
+
+        A run whose executor does not journal effects yet returns an empty list.
+        """
+        return await self._root._request("GET", f"/runs/{_safe_quote(run_id)}/effects")
+
+    async def resolve_effect(
+        self, run_id: str, effect_id: str, resolution: str, result: Any = None
+    ) -> dict[str, Any]:
+        """Resolve an ``indeterminate`` effect once (``confirmed``/``not_applied``/``failed``).
+
+        Needs the ``approve`` permission; the caller is recorded as ``resolved_by``. A second
+        resolution is ``409 EFFECT_ALREADY_RESOLVED``. Nothing runs until the run's executor
+        claims it again.
+        """
+        payload: dict[str, Any] = {"resolution": resolution}
+        if result is not None:
+            payload["result"] = result
+        return await self._root._request(
+            "POST",
+            f"/runs/{_safe_quote(run_id)}/effects/{_safe_quote(effect_id)}/resolve",
+            json_data=payload,
+        )
+
     async def stream_events(
         self, run_id: str, cursor: int = 0, live: bool = False
     ) -> AsyncIterator[dict[str, Any]]:
@@ -1324,6 +1349,8 @@ class NexuraClient:
         ("POST", "/api/v1/runs/{run_id}/fork"): ("runs", "fork"),
         ("GET", "/api/v1/runs/{run_id}/events"): ("runs", "stream_events"),
         ("GET", "/api/v1/runs/{run_id}/repro"): ("runs", "repro_bundle"),
+        ("GET", "/api/v1/runs/{run_id}/effects"): ("runs", "effects"),
+        ("POST", "/api/v1/runs/{run_id}/effects/{effect_id}/resolve"): ("runs", "resolve_effect"),
         # Descriptors & Capabilities
         ("GET", "/api/v1/modules"): ("modules", "list"),
         ("GET", "/api/v1/modules/{module_id}"): ("modules", "get"),

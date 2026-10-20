@@ -13,6 +13,7 @@ import json
 import os
 import platform
 import selectors
+import shutil
 import signal
 import subprocess
 import sys
@@ -35,11 +36,10 @@ from nexura_runtime.integrations.sandbox import (
 )
 from nexura_runtime.integrations.sandbox.monty_worker import _WorkerLaunch
 
-
-# Host cases run wherever bubblewrap works (_bwrap_config probes it), so the release gate
-# host runs them instead of skipping; there is no manual switch.
-def HOST(fn: Any) -> Any:  # noqa: N802 - decorator name kept for readability
-    return fn
+# Host cases run wherever the bubblewrap binary is installed (_bwrap_config then requires it
+# to work, so a broken install still fails), so the release gate host runs them. Hosts without
+# bwrap at all, such as public CI runners, skip them.
+HOST = pytest.mark.skipif(shutil.which("bwrap") is None, reason="bwrap is not installed")
 
 
 GVISOR = pytest.mark.skipif(os.environ.get("NEXURA_REAL_GVISOR") != "1", reason="gVisor host only")

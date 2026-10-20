@@ -35,7 +35,7 @@ class DurableNodeSpec(BaseModel):
 
     node_id: str
     handler: str
-    effect_policy: str = "pure"
+    effect_policy: str = "non_idempotent_write"
     timeout_seconds: float | None = None
     fuel_cost: int = 1
 
@@ -71,6 +71,9 @@ class DurableRunState(BaseModel):
     time_budget_remaining: float = 60.0
     time_consumed: float = 0.0
     pre_dispatch_intent: NodeIntent | None = None
+    pause_reason: str | None = None
+    pending_effect: dict[str, Any] | None = None
+    dispatch_attempt: int = 1
     error: str | None = None
     created_at: float = Field(default_factory=time.time)
     updated_at: float = Field(default_factory=time.time)

@@ -196,7 +196,32 @@ class PostgresRepository:
             )
             return rec
 
+    async def _journal(self, workspace_id: str, run_id: str) -> Any:
+        """The execution-journal bridge when this run is a journaled durable graph."""
+        from nexura_runtime.storage.execution_bridge import journal_bridge
+
+        async def probe() -> bool:
+            pool = await self._get_pool()
+            async with pool.acquire() as conn:
+                try:
+                    row = await conn.fetchrow(
+                        "SELECT 1 FROM nexura_exec_runs WHERE workspace_id = $1 AND run_id = $2",
+                        workspace_id,
+                        run_id,
+                    )
+                except Exception as exc:
+                    if type(exc).__name__ == "UndefinedTableError":
+                        return False  # the journal was never created in this database
+                    raise
+            return row is not None
+
+        return await journal_bridge(self, workspace_id, run_id, probe)
+
     async def get_run(self, workspace_id: str, run_id: str) -> RunRecord | None:
+        # DurableExecutionEngine runs live in the execution journal; this is their view.
+        journal = await self._journal(workspace_id, run_id)
+        if journal is not None:
+            return await journal.get_run(workspace_id, run_id)  # type: ignore[no-any-return]
         pool = await self._get_pool()
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -228,6 +253,11 @@ class PostgresRepository:
         state_update: dict[str, Any] | None = None,
         events: list[dict[str, Any]] | None = None,
     ) -> RunRecord:
+        journal = await self._journal(workspace_id, run_id)
+        if journal is not None:
+            return await journal.update_run(  # type: ignore[no-any-return]
+                workspace_id, run_id, expected_revision, status, state_update, events
+            )
         pool = await self._get_pool()
         async with pool.acquire() as conn, conn.transaction():
             row = await conn.fetchrow(
@@ -296,6 +326,9 @@ class PostgresRepository:
             )
 
     async def get_run_events(self, workspace_id: str, run_id: str) -> list[RunEventRecord]:
+        journal = await self._journal(workspace_id, run_id)
+        if journal is not None:
+            return await journal.get_run_events(workspace_id, run_id)  # type: ignore[no-any-return]
         pool = await self._get_pool()
         async with pool.acquire() as conn:
             rows = await conn.fetch(
@@ -317,6 +350,10 @@ class PostgresRepository:
             ]
 
     async def close(self) -> None:
+        journal = getattr(self, "_execution_store", None)
+        if journal is not None:
+            await journal.close()
+            self._execution_store = None
         if self._pool is not None:
             await self._pool.close()
             self._pool = None
