@@ -1,0 +1,429 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Liceron
+"""Serve Nexura agents and tools over MCP, so Claude Desktop, Cursor, VS Code or any
+other MCP client can use them.
+
+    server = AgentMCPServer("support", agents=[support_agent], tools=[lookup_order])
+    server.run_stdio()                       # local clients launch this as a command
+    app = server.http_app(token="secret")    # or serve over HTTP: uvicorn module:app
+
+Each agent becomes one tool that takes a ``request`` string and returns the agent's
+answer. Tools that need human approval are refused over MCP rather than run unattended,
+and a run that pauses for approval is reported back as an error, not executed.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hmac
+import json
+import secrets
+import sys
+import time
+import uuid
+from collections import OrderedDict
+from collections.abc import Awaitable, Callable, MutableMapping, Sequence
+from typing import Any
+
+from pydantic import BaseModel
+
+from nexura_agents.agent import Agent
+from nexura_agents.guardrails import check_tool_input, check_tool_output
+from nexura_agents.mcp.server import McpServerSession
+from nexura_agents.mcp.transports import McpTransport
+from nexura_agents.mcp.types import SUPPORTED_PROTOCOL_VERSIONS, McpImplementation
+from nexura_agents.run_context import RunContext
+from nexura_agents.teams import Team
+from nexura_agents.tools import Tool
+
+Scope = MutableMapping[str, Any]
+Receive = Callable[[], Awaitable[MutableMapping[str, Any]]]
+Send = Callable[[MutableMapping[str, Any]], Awaitable[None]]
+
+
+class ApprovalRequiredOverMCP(Exception):
+    """A call needed a human decision, which MCP clients cannot give here."""
+
+
+class ToolGuardrailRejected(Exception):
+    """A tool guardrail rejected the call or its result; the message says which."""
+
+
+class ToolNotAvailable(Exception):
+    """The tool's ``enabled`` rule refused this call."""
+
+
+class ToolTimedOut(Exception):
+    """A served tool did not finish within its ``timeout``."""
+
+
+class _NoTransport(McpTransport):
+    """Requests are fed to ``handle_request`` directly; the transport is never used."""
+
+    async def send_message(self, message: dict[str, Any]) -> None:
+        raise RuntimeError("unused")
+
+    async def receive_message(self, timeout: float | None = None) -> dict[str, Any]:
+        raise RuntimeError("unused")
+
+    async def close(self) -> None:
+        return None
+
+
+class AgentMCPServer:
+    """Expose agents and tools as an MCP server.
+
+    Args:
+        name: Server name shown to MCP clients.
+        agents: Each becomes a tool named after the agent (``Agent(description=...)``
+            is shown to the client, so describe what the agent is for). Teams
+            (``SequentialAgent`` and friends) are served the same way.
+        tools: Plain tools, exposed with their own schemas.
+        deps: Passed to every run and tool call as ``RunContext.deps``.
+        runner: Runner used for agent calls (for usage limits, hooks or budgets), and for
+            teams that were not given their own runner.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        agents: Sequence[Agent | Team] = (),
+        tools: Sequence[Tool] = (),
+        deps: Any = None,
+        runner: Any = None,
+        version: str = "0.4.0",
+    ) -> None:
+        from nexura_agents.runner import Runner
+
+        self.name = name
+        self.deps = deps
+        self.runner = runner or Runner()
+        self.info = McpImplementation(name=name, version=version)
+        self.session = McpServerSession(_NoTransport(), server_info=self.info)
+        seen: set[str] = set()
+        for agent in agents:
+            self._add(seen, _agent_tool_name(agent))
+            self._register_agent(agent)
+        for tool in tools:
+            self._add(seen, tool.name)
+            self._register_tool(tool)
+
+    @staticmethod
+    def _add(seen: set[str], name: str) -> None:
+        if name in seen:
+            raise ValueError(f"Two agents or tools would both be exposed as '{name}'.")
+        seen.add(name)
+
+    # ---------------------------------------------------------------- registration
+
+    def _register_agent(self, agent: Agent | Team) -> None:
+        async def handler(args: dict[str, Any]) -> str:
+            if isinstance(agent, Team):
+                team_result = await agent._run(
+                    args["request"], deps=self.deps, timeout=None, runner=self.runner
+                )
+                status: str = team_result.status
+                output = team_result.output
+                held = team_result.interruption
+                pending = [c for _, c in held.pending_calls()] if held else []
+            else:
+                result = await self.runner.run_async(agent, args["request"], deps=self.deps)
+                status = result.status
+                output = result.output
+                pending = result.interruption.pending if result.interruption else []
+            if status == "paused" and pending:
+                names = ", ".join(c.name for c in pending)
+                if isinstance(agent, Team):
+                    raise ApprovalRequiredOverMCP(
+                        f"Stopped before {names}: these actions need human approval, which "
+                        "cannot be given over MCP. Team members before the pause already ran "
+                        "and their effects stand."
+                    )
+                raise ApprovalRequiredOverMCP(
+                    f"Stopped before {names}: these actions need human approval, which "
+                    "cannot be given over MCP. Nothing was executed."
+                )
+            if isinstance(output, BaseModel):
+                return output.model_dump_json()
+            return output if isinstance(output, str) else json.dumps(output, default=str)
+
+        kind = "team" if isinstance(agent, Team) else "agent"
+        self.session.register_tool(
+            _agent_tool_name(agent),
+            agent.description or f"Ask the {agent.name} {kind}.",
+            {
+                "type": "object",
+                "properties": {"request": {"type": "string", "description": "What to do."}},
+                "required": ["request"],
+            },
+            handler,
+        )
+
+    def _register_tool(self, tool: Tool) -> None:
+        if tool.enabled is False:
+            return  # never offered, as in the runner
+        schema = tool.to_schema()["function"]
+
+        async def handler(args: dict[str, Any]) -> str:
+            ctx: RunContext[Any] = RunContext(
+                deps=self.deps,
+                run_id=f"mcp-{uuid.uuid4().hex[:12]}",
+                agent_name=self.name,
+                tool_name=tool.name,
+            )
+            if not await tool.is_enabled(ctx):
+                # An ``enabled`` rule that says no for this call: refuse, as the runner does.
+                raise ToolNotAvailable(f"Tool '{tool.name}' is not available.")
+            if tool.needs_approval(ctx, args):
+                raise ApprovalRequiredOverMCP(
+                    f"'{tool.name}' needs human approval for these arguments, which cannot "
+                    "be given over MCP. Nothing was executed."
+                )
+            # The tool's own guardrails apply here too: a rejection is an error result.
+            blocked = await check_tool_input(tool, ctx, args)
+            if blocked is not None:
+                raise ToolGuardrailRejected(blocked)
+            try:
+                raw = await asyncio.wait_for(tool.execute(args, ctx), timeout=tool.timeout)
+            except TimeoutError as expired:
+                # Either way the client gets an error result; nothing is half-returned.
+                raise ToolTimedOut(
+                    f"Tool call timed out: '{tool.name}' did not finish within {tool.timeout:g}s."
+                ) from expired
+            result, rejected = await check_tool_output(tool, ctx, raw)
+            if rejected:
+                raise ToolGuardrailRejected(result)
+            return str(result)
+
+        self.session.register_tool(tool.name, schema["description"], schema["parameters"], handler)
+
+    # ---------------------------------------------------------------- stdio
+
+    def run_stdio(self) -> None:
+        """Serve on stdin/stdout until the client closes the pipe (blocks)."""
+        asyncio.run(self.serve_stdio())
+
+    async def serve_stdio(
+        self,
+        reader: Callable[[], Awaitable[str]] | None = None,
+        writer: Callable[[str], Awaitable[None]] | None = None,
+    ) -> None:
+        """Newline-delimited JSON-RPC over stdio. Logs must go to stderr, never stdout."""
+
+        async def read_stdin() -> str:
+            return await asyncio.to_thread(sys.stdin.readline)
+
+        async def write_stdout(line: str) -> None:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+
+        read = reader or read_stdin
+        write = writer or write_stdout
+        pending: set[asyncio.Task[None]] = set()
+        lock = asyncio.Lock()
+
+        async def answer(message: dict[str, Any]) -> None:
+            try:
+                reply = await self.session.handle_request(message)
+            except Exception:
+                reply = {
+                    "jsonrpc": "2.0",
+                    "id": message.get("id"),
+                    "error": {"code": -32603, "message": "Internal error"},
+                }
+            if reply is not None and reply.get("id") is not None:
+                async with lock:
+                    await write(json.dumps(reply, ensure_ascii=False) + "\n")
+
+        while True:
+            line = await read()
+            if not line:
+                break
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                message = json.loads(line)
+            except json.JSONDecodeError:
+                error = {
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {"code": -32700, "message": "Parse error"},
+                }
+                async with lock:
+                    await write(json.dumps(error) + "\n")
+                continue
+            if isinstance(message, dict) and "method" in message:
+                # Calls run concurrently so a slow agent doesn't block pings.
+                task = asyncio.create_task(answer(message))
+                pending.add(task)
+                task.add_done_callback(pending.discard)
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    # ---------------------------------------------------------------- HTTP
+
+    def http_app(
+        self,
+        *,
+        token: str | None = None,
+        path: str = "/mcp",
+        allowed_origins: Sequence[str] = (),
+        max_body_bytes: int = 4 * 1024 * 1024,
+        max_sessions: int = 1000,
+        session_ttl_seconds: float = 3600.0,
+    ) -> Callable[[Scope, Receive, Send], Awaitable[None]]:
+        """An ASGI app speaking MCP Streamable HTTP. Run it with any ASGI server.
+
+        ``token`` requires ``Authorization: Bearer <token>``; always set one unless the
+        server is bound to localhost. Browser requests are refused unless their
+        ``Origin`` is listed in ``allowed_origins`` (DNS-rebinding protection).
+        Bodies over ``max_body_bytes`` get 413. Sessions idle past ``session_ttl_seconds``
+        expire, and beyond ``max_sessions`` the least recently used one is evicted.
+        """
+        # id -> last-used time, least recently used first.
+        sessions: OrderedDict[str, float] = OrderedDict()
+
+        def live_session(session_id: str | None) -> bool:
+            now = time.monotonic()
+            while sessions:
+                oldest = next(iter(sessions))
+                if now - sessions[oldest] <= session_ttl_seconds:
+                    break
+                del sessions[oldest]
+            if session_id is None or session_id not in sessions:
+                return False
+            sessions[session_id] = now
+            sessions.move_to_end(session_id)
+            return True
+
+        async def respond(
+            send: Send, status: int, body: Any = None, headers: dict[str, str] | None = None
+        ) -> None:
+            raw = b"" if body is None else json.dumps(body, ensure_ascii=False).encode()
+            hdrs = [(b"content-type", b"application/json")] if body is not None else []
+            hdrs += [(k.lower().encode(), v.encode()) for k, v in (headers or {}).items()]
+            await send({"type": "http.response.start", "status": status, "headers": hdrs})
+            await send({"type": "http.response.body", "body": raw})
+
+        async def app(scope: Scope, receive: Receive, send: Send) -> None:
+            if scope["type"] == "lifespan":
+                while True:
+                    event = await receive()
+                    if event["type"] == "lifespan.startup":
+                        await send({"type": "lifespan.startup.complete"})
+                    elif event["type"] == "lifespan.shutdown":
+                        await send({"type": "lifespan.shutdown.complete"})
+                        return
+            if scope["type"] != "http":
+                return
+            # HTTP header bytes are latin-1; decoding as UTF-8 can fail on hostile input.
+            headers = {
+                k.decode("latin-1").lower(): v.decode("latin-1")
+                for k, v in scope.get("headers", [])
+            }
+            if scope["path"] != path:
+                await respond(send, 404, {"error": "not found"})
+                return
+            origin = headers.get("origin")
+            if origin and origin not in allowed_origins:
+                await respond(send, 403, {"error": "origin not allowed"})
+                return
+            if token is not None:
+                supplied = headers.get("authorization", "").encode("latin-1")
+                if not hmac.compare_digest(supplied, f"Bearer {token}".encode()):
+                    await respond(
+                        send, 401, {"error": "unauthorized"}, {"WWW-Authenticate": "Bearer"}
+                    )
+                    return
+
+            method = scope["method"]
+            session_id = headers.get("mcp-session-id")
+            if method == "DELETE":
+                sessions.pop(session_id or "", None)
+                await respond(send, 200 if session_id else 400)
+                return
+            if method == "GET":
+                await respond(send, 405, None, {"Allow": "POST, DELETE"})
+                return
+            if method != "POST":
+                await respond(send, 405, None, {"Allow": "POST, DELETE"})
+                return
+
+            declared = headers.get("content-length", "")
+            too_large = declared.isdigit() and int(declared) > max_body_bytes
+            body = b""
+            while not too_large:
+                event = await receive()
+                body += event.get("body", b"")
+                if len(body) > max_body_bytes:
+                    too_large = True
+                elif not event.get("more_body"):
+                    break
+            if too_large:
+                await respond(send, 413, {"error": "request body too large"})
+                return
+            try:
+                message = json.loads(body)
+            except json.JSONDecodeError:
+                await respond(
+                    send,
+                    400,
+                    {
+                        "jsonrpc": "2.0",
+                        "id": None,
+                        "error": {"code": -32700, "message": "Parse error"},
+                    },
+                )
+                return
+            if not isinstance(message, dict) or "method" not in message:
+                # Responses to server requests (we send none) and batches are not accepted.
+                await respond(
+                    send,
+                    400,
+                    {
+                        "jsonrpc": "2.0",
+                        "id": None,
+                        "error": {"code": -32600, "message": "Invalid request"},
+                    },
+                )
+                return
+
+            if message["method"] == "initialize":
+                reply = await self.session.handle_request(message)
+                new_id = secrets.token_urlsafe(24)
+                live_session(None)  # drop expired sessions first
+                sessions[new_id] = time.monotonic()
+                while len(sessions) > max_sessions:
+                    sessions.popitem(last=False)
+                await respond(send, 200, reply, {"Mcp-Session-Id": new_id})
+                return
+            if not live_session(session_id):
+                await respond(
+                    send,
+                    404 if session_id else 400,
+                    {
+                        "jsonrpc": "2.0",
+                        "id": message.get("id"),
+                        "error": {"code": -32000, "message": "Missing or unknown Mcp-Session-Id."},
+                    },
+                )
+                return
+            version = headers.get("mcp-protocol-version")
+            if version and version not in SUPPORTED_PROTOCOL_VERSIONS:
+                await respond(send, 400, {"error": f"Unsupported MCP-Protocol-Version {version}"})
+                return
+            reply = await self.session.handle_request(message)
+            if reply is None:
+                await respond(send, 202)
+            else:
+                await respond(send, 200, reply)
+
+        return app
+
+
+def _agent_tool_name(agent: Agent | Team) -> str:
+    from nexura_agents.module_tools import tool_name
+
+    return tool_name(agent.name.lower().replace(" ", "_"))

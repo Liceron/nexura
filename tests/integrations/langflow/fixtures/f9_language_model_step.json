@@ -1,0 +1,205 @@
+{
+ "name": "lm step",
+ "description": "hand-written test fixture",
+ "is_component": false,
+ "data": {
+  "nodes": [
+   {
+    "id": "ChatInput-a1",
+    "type": "genericNode",
+    "position": {
+     "x": 0,
+     "y": 0
+    },
+    "data": {
+     "id": "ChatInput-a1",
+     "type": "ChatInput",
+     "node": {
+      "display_name": "Chat Input",
+      "template": {
+       "input_value": {
+        "_input_type": "MessageTextInput",
+        "type": "str",
+        "value": "",
+        "show": true,
+        "input_types": [
+         "Message"
+        ]
+       },
+       "code": {
+        "type": "code",
+        "value": "class Stock:\n    pass\n",
+        "_input_type": "CodeInput",
+        "required": true
+       }
+      },
+      "outputs": [
+       {
+        "name": "message"
+       }
+      ],
+      "metadata": {
+       "code_hash": "c7e78710a73b"
+      }
+     }
+    }
+   },
+   {
+    "id": "LM-m1",
+    "type": "genericNode",
+    "position": {
+     "x": 0,
+     "y": 0
+    },
+    "data": {
+     "id": "LM-m1",
+     "type": "LanguageModelComponent",
+     "node": {
+      "display_name": "Model",
+      "template": {
+       "model": {
+        "_input_type": "ModelInput",
+        "type": "model",
+        "value": [
+         {
+          "name": "gpt-4o-mini",
+          "provider": "OpenAI"
+         }
+        ],
+        "show": true,
+        "input_types": [
+         "Message"
+        ]
+       },
+       "system_message": {
+        "_input_type": "MessageTextInput",
+        "type": "str",
+        "value": "Answer in one line.",
+        "show": true,
+        "input_types": [
+         "Message"
+        ]
+       },
+       "input_value": {
+        "_input_type": "MessageTextInput",
+        "type": "str",
+        "value": "",
+        "show": true,
+        "input_types": [
+         "Message"
+        ]
+       },
+       "code": {
+        "type": "code",
+        "value": "class Stock:\n    pass\n",
+        "_input_type": "CodeInput",
+        "required": true
+       }
+      },
+      "outputs": [
+       {
+        "name": "text_output"
+       }
+      ],
+      "metadata": {
+       "code_hash": "c7e78710a73b"
+      }
+     }
+    }
+   },
+   {
+    "id": "ChatOutput-z9",
+    "type": "genericNode",
+    "position": {
+     "x": 0,
+     "y": 0
+    },
+    "data": {
+     "id": "ChatOutput-z9",
+     "type": "ChatOutput",
+     "node": {
+      "display_name": "Chat Output",
+      "template": {
+       "input_value": {
+        "_input_type": "MessageTextInput",
+        "type": "str",
+        "value": "",
+        "show": true,
+        "input_types": [
+         "Message"
+        ]
+       },
+       "code": {
+        "type": "code",
+        "value": "class Stock:\n    pass\n",
+        "_input_type": "CodeInput",
+        "required": true
+       }
+      },
+      "outputs": [],
+      "metadata": {
+       "code_hash": "c7e78710a73b"
+      }
+     }
+    }
+   }
+  ],
+  "edges": [
+   {
+    "id": "reactflow__edge-ChatInput-a1-LM-m1",
+    "source": "ChatInput-a1",
+    "target": "LM-m1",
+    "sourceHandle": "{œdataTypeœ:œChatInputœ,œidœ:œChatInput-a1œ,œnameœ:œmessageœ,œoutput_typesœ:[œMessageœ]}",
+    "targetHandle": "{œfieldNameœ:œinput_valueœ,œidœ:œLM-m1œ,œinputTypesœ:[œMessageœ],œtypeœ:œstrœ}",
+    "data": {
+     "sourceHandle": {
+      "dataType": "ChatInput",
+      "id": "ChatInput-a1",
+      "name": "message",
+      "output_types": [
+       "Message"
+      ]
+     },
+     "targetHandle": {
+      "fieldName": "input_value",
+      "id": "LM-m1",
+      "inputTypes": [
+       "Message"
+      ],
+      "type": "str"
+     }
+    }
+   },
+   {
+    "id": "reactflow__edge-LM-m1-ChatOutput-z9",
+    "source": "LM-m1",
+    "target": "ChatOutput-z9",
+    "sourceHandle": "{œdataTypeœ:œLanguageModelComponentœ,œidœ:œLM-m1œ,œnameœ:œtext_outputœ,œoutput_typesœ:[œMessageœ]}",
+    "targetHandle": "{œfieldNameœ:œinput_valueœ,œidœ:œChatOutput-z9œ,œinputTypesœ:[œMessageœ],œtypeœ:œstrœ}",
+    "data": {
+     "sourceHandle": {
+      "dataType": "LanguageModelComponent",
+      "id": "LM-m1",
+      "name": "text_output",
+      "output_types": [
+       "Message"
+      ]
+     },
+     "targetHandle": {
+      "fieldName": "input_value",
+      "id": "ChatOutput-z9",
+      "inputTypes": [
+       "Message"
+      ],
+      "type": "str"
+     }
+    }
+   }
+  ],
+  "viewport": {
+   "x": 0,
+   "y": 0,
+   "zoom": 1
+  }
+ }
+}

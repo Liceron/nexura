@@ -1,0 +1,79 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Testing and linting
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+.mypy_cache/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local databases and run state (never commit)
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+/:memory:
+.agy/
+
+# Node / Studio build output
+node_modules/
+studio-web/dist/
+clients/typescript/dist/
+studio-web/test-results/
+studio-web/playwright-report/
+*.tgz
+
+# Never commit (added 2026-10-18 before the first local git commit)
+# Local databases, trigger encryption keys and other key material
+*.db
+*.key
+*.sqlite3.trigger.key
+.env
+.env.*
+!.env.example
+*.pem
+# Local run logs at the project root (gate, suite, browser)
+*.log
+.*.log
+# Autopilot scratch (backups, repros, agent prompts); history lives in oss-completion-blueprint/
+/.autopilot/
+# Tool caches and local agent state
+.mypy_cache/
+.claude/
+.playwright-mcp/
+# Closed edition: its own nested local git repository, never part of this one
+/enterprise/
+# Internal review archive from the founder; not part of the public repository
+/codex reviews/
+# Demo-video recorder (local only; videos go to .autopilot)
+studio-web/demos/

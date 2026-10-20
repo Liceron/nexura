@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Nexura Studio - Local Workflow & Approval Developer Environment</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="app-header">
+    <div class="header-left">
+      <div class="logo">
+        <span class="logo-accent">▲</span> Nexura Studio
+      </div>
+      <span class="synthetic-badge">Local Developer Mode (Synthetic Data)</span>
+    </div>
+    <nav class="nav-tabs" role="tablist">
+      <button class="nav-tab active" data-tab="workflows" role="tab" id="tab-btn-workflows" aria-selected="true">Workflows</button>
+      <button class="nav-tab" data-tab="modules" role="tab" id="tab-btn-modules" aria-selected="false">Modules</button>
+      <button class="nav-tab" data-tab="runs" role="tab" id="tab-btn-runs" aria-selected="false">Runs</button>
+    </nav>
+  </header>
+
+  <main class="app-main">
+    <!-- TAB 1: WORKFLOWS -->
+    <section id="tab-workflows" class="tab-content active" role="tabpanel" aria-labelledby="tab-btn-workflows">
+      <div class="toolbar">
+        <div class="toolbar-group">
+          <label for="workflow-select" class="sr-only">Saved Workflows</label>
+          <select id="workflow-select" class="form-select">
+            <option value="">Loading workflows...</option>
+          </select>
+          <button id="btn-load-template" class="btn btn-secondary">Load Seeded Template</button>
+          <button id="btn-new-workflow" class="btn btn-secondary">+ New</button>
+        </div>
+        <div class="toolbar-group">
+          <button id="btn-import-json" class="btn btn-secondary">Import JSON</button>
+          <button id="btn-export-json" class="btn btn-secondary">Export JSON</button>
+          <button id="btn-validate-workflow" class="btn btn-secondary">Validate</button>
+          <button id="btn-save-workflow" class="btn btn-primary">Save Workflow</button>
+        </div>
+      </div>
+
+      <div id="workflow-alert" class="alert hidden" role="alert"></div>
+
+      <div class="workflow-editor-grid">
+        <div class="editor-main">
+          <!-- Spec Metadata -->
+          <div class="card meta-card">
+            <h3>Workflow Configuration</h3>
+            <div class="form-row">
+              <div class="form-group flex-2">
+                <label for="wf-name">Workflow Name</label>
+                <input type="text" id="wf-name" class="form-input" placeholder="e.g. OrderSupportWorkflow">
+              </div>
+              <div class="form-group flex-1">
+                <label for="wf-entry-node">Entry Node</label>
+                <select id="wf-entry-node" class="form-select"></select>
+              </div>
+              <div class="form-group flex-1">
+                <label for="wf-terminal-nodes">Terminal Nodes</label>
+                <input type="text" id="wf-terminal-nodes" class="form-input" placeholder="e.g. agent_assist">
+              </div>
+            </div>
+            <div class="revision-indicator">
+              <span>Revision: <strong id="wf-revision-label">1</strong></span>
+              <span class="spec-hash-label">Hash: <code id="wf-hash-label">None</code></span>
+            </div>
+          </div>
+
+          <!-- Visual Transition Diagram -->
+          <div class="card visual-graph-card">
+            <div class="card-header-row">
+              <h3>Transition Overview</h3>
+              <span class="hint-text">Sequential &amp; Branch Flow</span>
+            </div>
+            <div id="visual-graph" class="visual-graph-container"></div>
+          </div>
+
+          <!-- Nodes Section -->
+          <div class="nodes-section">
+            <div class="nodes-header">
+              <h3>Workflow Nodes</h3>
+              <button id="btn-add-node" class="btn btn-secondary btn-sm">+ Add Node</button>
+            </div>
+            <div id="nodes-container" class="nodes-list"></div>
+          </div>
+        </div>
+
+        <!-- Execution Panel -->
+        <aside class="editor-sidebar">
+          <div class="card run-launcher-card">
+            <h3>Execute Workflow</h3>
+            <p class="section-desc">Test execution locally using synthetic data.</p>
+            <div class="form-group">
+              <label for="input-state-json">Initial State (JSON)</label>
+              <textarea id="input-state-json" class="form-textarea code-font" rows="8" spellcheck="false">{
+  "order_id": "ORD-DELHI-501"
+}</textarea>
+            </div>
+            <div class="btn-row">
+              <button id="btn-format-json" class="btn btn-ghost btn-sm">Format JSON</button>
+              <button id="btn-start-run" class="btn btn-accent">Start Execution Run</button>
+            </div>
+            <div id="run-launch-status" class="run-launch-status hidden"></div>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <!-- TAB 2: MODULES -->
+    <section id="tab-modules" class="tab-content" role="tabpanel" aria-labelledby="tab-btn-modules">
+      <div class="section-intro">
+        <h2>Registered Workflow Modules</h2>
+        <p>These trusted Python handlers are pre-registered in the ModuleRegistry. In local developer mode, default modules operate on synthetic mock data without requiring paid LLM API keys or cloud connections.</p>
+      </div>
+      <div id="modules-grid" class="modules-grid"></div>
+    </section>
+
+    <!-- TAB 3: RUNS -->
+    <section id="tab-runs" class="tab-content" role="tabpanel" aria-labelledby="tab-btn-runs">
+      <div class="runs-layout">
+        <!-- Runs List Column -->
+        <div class="runs-list-panel">
+          <div class="panel-header">
+            <h3>Execution Runs</h3>
+            <button id="btn-refresh-runs" class="btn btn-secondary btn-sm">Refresh</button>
+          </div>
+          <div id="runs-list" class="runs-table-container">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Status</th>
+                  <th>Run ID</th>
+                  <th>Node</th>
+                  <th>Steps</th>
+                  <th>Time</th>
+                </tr>
+              </thead>
+              <tbody id="runs-tbody">
+                <tr><td colspan="5" class="empty-cell">No runs recorded yet.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Run Detail Inspector Column -->
+        <div class="run-inspector-panel">
+          <div id="run-empty-placeholder" class="empty-placeholder">
+            <p>Select a run from the list to inspect execution details, approval gates, and ordered events.</p>
+          </div>
+          <div id="run-detail-content" class="run-detail-content hidden">
+            <!-- Run Header -->
+            <div class="run-header-card card">
+              <div class="run-header-top">
+                <div class="run-id-block">
+                  <span class="label">Run ID:</span>
+                  <code id="detail-run-id">run-...</code>
+                </div>
+                <div id="detail-status-badge" class="status-badge">RUNNING</div>
+              </div>
+              <div class="run-meta-grid">
+                <div><span>Current Node:</span> <strong id="detail-current-node">-</strong></div>
+                <div><span>Step Count:</span> <strong id="detail-step-count">0</strong></div>
+                <div><span>Created:</span> <span id="detail-created-at">-</span></div>
+                <div><span>Updated:</span> <span id="detail-updated-at">-</span></div>
+              </div>
+            </div>
+
+            <!-- Pending Approval Gate Card -->
+            <div id="pending-approval-box" class="card approval-card hidden">
+              <div class="approval-header">
+                <span class="warning-icon">⚠</span>
+                <div>
+                  <h4>Execution Paused: Approval Gate Reached</h4>
+                  <p class="approval-subtitle">This node requires explicit operator authorization before executing any side effects.</p>
+                </div>
+              </div>
+              <div class="approval-details">
+                <div class="form-group">
+                  <label>Pending Node:</label>
+                  <strong id="approval-node-id">-</strong>
+                </div>
+                <div class="form-group">
+                  <label>Approval Request ID:</label>
+                  <code id="approval-request-id">-</code>
+                </div>
+                <div class="form-group">
+                  <label>Node Input State Snapshot:</label>
+                  <pre id="approval-input-state" class="json-box code-font"></pre>
+                </div>
+                <div class="form-group">
+                  <label for="approval-notes">Supervisor Audit Note / State Update (Optional JSON)</label>
+                  <input type="text" id="approval-notes" class="form-input" placeholder='e.g. {"approved_by": "Operator Priya", "notes": "Verified"}'>
+                </div>
+                <div class="approval-actions">
+                  <button id="btn-reject-approval" class="btn btn-danger">Reject (Abort Run)</button>
+                  <button id="btn-grant-approval" class="btn btn-success">Approve (Resume Execution)</button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Error Banner -->
+            <div id="detail-error-card" class="card error-card hidden">
+              <h4>Execution Error</h4>
+              <p id="detail-error-message"></p>
+            </div>
+
+            <!-- Ordered Events Timeline -->
+            <div class="card timeline-card">
+              <h3>Lifecycle Events Log</h3>
+              <div id="events-timeline" class="events-timeline"></div>
+            </div>
+
+            <!-- State Viewer -->
+            <div class="card state-card">
+              <div class="card-header-row">
+                <h3>Current / Final State</h3>
+                <button id="btn-copy-state" class="btn btn-ghost btn-sm">Copy JSON</button>
+              </div>
+              <pre id="detail-current-state" class="json-box code-font"></pre>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- JSON Modal -->
+  <div id="json-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 id="modal-title">Workflow Specification JSON</h3>
+        <button id="btn-close-modal" class="btn btn-ghost btn-sm" aria-label="Close modal">✕</button>
+      </div>
+      <div class="modal-body">
+        <textarea id="modal-json-textarea" class="form-textarea code-font" rows="18" spellcheck="false"></textarea>
+      </div>
+      <div class="modal-footer">
+        <button id="btn-modal-action" class="btn btn-primary">Apply JSON</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

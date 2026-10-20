@@ -1,0 +1,582 @@
+[
+  {
+    "code": "B00",
+    "name": "Typed module contracts",
+    "description": "Backend work package: Typed module contracts",
+    "status": "verified",
+    "profile": "core",
+    "test_path": "tests/backend/b00",
+    "report_path": "docs/testing.md",
+    "dependencies": [],
+    "capabilities": [],
+    "isolation_guarantees": [],
+    "verification_note": "Status summarizes recorded test evidence, not production certification; historical evidence scope and limitations are in docs/testing.md."
+  },
+  {
+    "code": "B01",
+    "name": "Versioned registry and standalone module CLI",
+    "description": "Backend work package: Versioned registry and standalone module CLI",
+    "status": "verified",
+    "profile": "core",
+    "test_path": "tests/backend/b01",
+    "report_path": "docs/testing.md",
+    "dependencies": [
+      "B00"
+    ],
+    "capabilities": [],
+    "isolation_guarantees": [],
+    "verification_note": "Status summarizes recorded test evidence, not production certification; historical evidence scope and limitations are in docs/testing.md."
+  },
+  {
+    "code": "B02",
+    "name": "Artifact and file storage",
+    "description": "Backend work package: Artifact and file storage",
+    "status": "verified",
+    "profile": "core",
+    "test_path": "tests/backend/b02",
+    "report_path": "docs/testing.md",
+    "dependencies": [
+      "B00"
+    ],
+    "capabilities": [],
+    "isolation_guarantees": [],
+    "verification_note": "Status summarizes recorded test evidence, not production certification; historical evidence scope and limitations are in docs/testing.md."
+  },
+  {
+    "code": "B03",
+    "name": "Credentials and outbound access policy",
+    "description": "Backend work package: Credentials and outbound access policy",
+    "status": "verified",
+    "profile": "core",
+    "test_path": "tests/backend/b03",
+    "report_path": "docs/testing.md",
+    "dependencies": [
+      "B00"
+    ],
+    "capabilities": [],
+    "isolation_guarantees": [],
+    "verification_note": "Status summarizes recorded test evidence, not production certification; historical evidence scope and limitations are in docs/testing.md."
+  },
+  {
+    "code": "B04",
+    "name": "Storage, migrations and concurrency",
+    "description": "Backend work package: Storage, migrations and concurrency",
+    "status": "verified",
+    "profile": "core",
+    "test_path": "tests/backend/b04",
+    "report_path": "docs/testing.md",
+    "dependencies": [
+      "B00"
+    ],
+    "capabilities": [],
+    "isolation_guarantees": [],
+    "verification_note": "PostgreSQL and SQLite storage tests passed, including independent connection CAS."
+  },
+  {
+    "code": "B05",
+    "name": "Durable execution and worker lifecycle",
+    "description": "Backend work package: Durable execution and worker lifecycle",
+    "status": "verified",
+    "profile": "core",
+    "test_path": "tests/backend/b05",
+    "report_path": "docs/testing.md",
+    "dependencies": [
+      "B00",
+      "B01",
+      "B04"
+    ],
+    "capabilities": [],
+    "isolation_guarantees": [],
+    "verification_note": "Real PostgreSQL worker processes, killed lease owners, stale writes and durable lost-response service tested."
+  },
+  {
+    "code": "B06",
+    "name": "Workflow compiler, ports and control flow",
+    "description": "Backend work package: Workflow compiler, ports and control flow",
+    "status": "verified",
+    "profile": "core",
+    "test_path": "tests/backend/b06",
+    "report_path": "docs/testing.md",
+    "dependencies": [
+      "B00",
+      "B01",
+      "B05"
+    ],
+    "capabilities": [],
+    "isolation_guarantees": [],
+    "verification_note": "Status summarizes recorded test evidence, not production certification; historical evidence scope and limitations are in docs/testing.md."
+  },
+  {
+    "code": "B07",
+    "name": "Approval policies and effect reconciliation",
+    "description": "Backend work package: Approval policies and effect reconciliation",
+    "status": "verified",
+    "profile": "core",
+    "test_path": "tests/backend/b07",
+    "report_path": "docs/testing.md",
+    "dependencies": [
+      "B03",
+      "B04",
+      "B05"
+    ],
+    "capabilities": [],
+    "isolation_guarantees": [],
+    "verification_note": "Status summarizes recorded test evidence, not production certification; historical evidence scope and limitations are in docs/testing.md."
+  },
+  {
+    "code": "B08",
+    "name": "Sessions and long-term memory",
+    "description": "Backend work package: Sessions and long-term memory",
+    "status": "verified",
+    "profile": "core",
+    "test_path": "tests/backend/b08",
+    "report_path": "docs/testing.md",
+    "dependencies": [
+      "B00",
+      "B04"
+    ],
+    "capabilities": [],
+    "isolation_guarantees": [],
+    "verification_note": "Status summarizes recorded test evidence, not production certification; historical evidence scope and limitations are in docs/testing.md."
+  },
+  {
+    "code": "B09",
+    "name": "Model protocol and streaming",
+    "description": "Backend work package: Model protocol and streaming",
+    "status": "verified",
+    "profile": "core",
+    "test_path": "tests/backend/b09",
+    "report_path": "docs/testing.md",
+    "dependencies": [
+      "B00",
+      "B03"
+    ],
+    "capabilities": [],
+    "isolation_guarantees": [],
+    "verification_note": "Status summarizes recorded test evidence, not production certification; historical evidence scope and limitations are in docs/testing.md."
+  },
+  {
+    "code": "B10",
+    "name": "OpenAI-compatible and local model adapter",
+    "description": "Backend work package: OpenAI-compatible and local model adapter",
+    "status": "mock_verified",
+    "profile": "core",
+    "test_path": "tests/backend/b10",
+    "report_path": "docs/testing.md",
+    "dependencies": [
+      "B09"
+    ],
+    "capabilities": [],
+    "isolation_guarantees": [],
+    "verification_note": "Status summarizes recorded test evidence, not production certification; historical evidence scope and limitations are in docs/testing.md."
+  },
+  {
+    "code": "B11",
+    "name": "Native Gemini adapter",
+    "description": "Backend work package: Native Gemini adapter",
+    "status": "mock_verified",
+    "profile": "core",
+    "test_path": "tests/backend/b11",
+    "report_path": "docs/testing.md",
+    "dependencies": [
+      "B09"
+    ],
+    "capabilities": [],
+    "isolation_guarantees": [],
+    "verification_note": "Status summarizes recorded test evidence, not production certification; historical evidence scope and limitations are in docs/testing.md."
+  },
+  {
+    "code": "B12",
+    "name": "Native Anthropic adapter",
+    "description": "Backend work package: Native Anthropic adapter",
+    "status": "mock_verified",
+    "profile": "core",
+    "test_path": "tests/backend/b12",
+    "report_path": "docs/testing.md",
+    "dependencies": [
+      "B09"
+    ],
+    "capabilities": [],
+    "isolation_guarantees": [],
+    "verification_note": "Status summarizes recorded test evidence, not production certification; historical evidence scope and limitations are in docs/testing.md."
+  },
+  {
+    "code": "B13",
+    "name": "Sarvam text and translation",
+    "description": "Backend work package: Sarvam text and translation",
+    "status": "mock_verified",
+    "profile": "core",
+    "test_path": "tests/backend/b13",
+    "report_path": "docs/testing.md",
+    "dependencies": [
+      "B09"
+    ],
+    "capabilities": [],
+    "isolation_guarantees": [],
+    "verification_note": "Status summarizes recorded test evidence, not production certification; historical evidence scope and limitations are in docs/testing.md."
+  },
+  {
+    "code": "B14",
+    "name": "Speech input and output",
+    "description": "Backend work package: Speech input and output",
+    "status": "mock_verified",
+    "profile": "core",
+    "test_path": "tests/backend/b14",
+    "report_path": "docs/testing.md",
+    "dependencies": [
+      "B02",
+      "B03",
+      "B13"
+    ],
+    "capabilities": [],
+    "isolation_guarantees": [],
+    "verification_note": "Status summarizes recorded test evidence, not production certification; historical evidence scope and limitations are in docs/testing.md."
+  },
+  {
+    "code": "B15",
+    "name": "Prompts, templates and data transforms",
+    "description": "Backend work package: Prompts, templates and data transforms",
+    "status": "verified",
+    "profile": "core",
+    "test_path": "tests/backend/b15",
+    "report_path": "docs/testing.md",
+    "dependencies": [
+      "B00",
+      "B01"
+    ],
+    "capabilities": [],
+    "isolation_guarantees": [],
+    "verification_note": "Status summarizes recorded test evidence, not production certification; historical evidence scope and limitations are in docs/testing.md."
+  },
+  {
+    "code": "B16",
+    "name": "Typed tools, HTTP and OpenAPI connectors",
+    "description": "Backend work package: Typed tools, HTTP and OpenAPI connectors",
+    "status": "verified",
+    "profile": "core",
+    "test_path": "tests/backend/b16",
+    "report_path": "docs/testing.md",
+    "dependencies": [
+      "B01",
+      "B03",
+      "B07"
+    ],
+    "capabilities": [],
+    "isolation_guarantees": [],
+    "verification_note": "Status summarizes recorded test evidence, not production certification; historical evidence scope and limitations are in docs/testing.md."
+  },
+  {
+    "code": "B17",
+    "name": "SQL data connector",
+    "description": "Backend work package: SQL data connector",
+    "status": "verified",
+    "profile": "core",
+    "test_path": "tests/backend/b17",
+    "report_path": "docs/testing.md",
+    "dependencies": [
+      "B03",
+      "B04",
+      "B16"
+    ],
+    "capabilities": [],
+    "isolation_guarantees": [],
+    "verification_note": "Status summarizes recorded test evidence, not production certification; historical evidence scope and limitations are in docs/testing.md."
+  },
+  {
+    "code": "B18",
+    "name": "MCP client and server interoperability",
+    "description": "Backend work package: MCP client and server interoperability",
+    "status": "verified",
+    "profile": "core",
+    "test_path": "tests/backend/b18",
+    "report_path": "docs/testing.md",
+    "dependencies": [
+      "B01",
+      "B03",
+      "B07",
+      "B16"
+    ],
+    "capabilities": [],
+    "isolation_guarantees": [],
+    "verification_note": "Status summarizes recorded test evidence, not production certification; historical evidence scope and limitations are in docs/testing.md."
+  },
+  {
+    "code": "B19",
+    "name": "Agents, subagents and handoffs",
+    "description": "Backend work package: Agents, subagents and handoffs",
+    "status": "verified",
+    "profile": "core",
+    "test_path": "tests/backend/b19",
+    "report_path": "docs/testing.md",
+    "dependencies": [
+      "B05",
+      "B06",
+      "B07",
+      "B08",
+      "B09",
+      "B16"
+    ],
+    "capabilities": [],
+    "isolation_guarantees": [],
+    "verification_note": "Status summarizes recorded test evidence, not production certification; historical evidence scope and limitations are in docs/testing.md."
+  },
+  {
+    "code": "B20",
+    "name": "Document ingestion and parsers",
+    "description": "Backend work package: Document ingestion and parsers",
+    "status": "verified",
+    "profile": "knowledge",
+    "test_path": "tests/backend/b20",
+    "report_path": "docs/testing.md",
+    "dependencies": [
+      "B02"
+    ],
+    "capabilities": [],
+    "isolation_guarantees": [],
+    "verification_note": "Status summarizes recorded test evidence, not production certification; historical evidence scope and limitations are in docs/testing.md."
+  },
+  {
+    "code": "B21",
+    "name": "Chunking and embedding generation",
+    "description": "Backend work package: Chunking and embedding generation",
+    "status": "verified",
+    "profile": "knowledge",
+    "test_path": "tests/backend/b21",
+    "report_path": "docs/testing.md",
+    "dependencies": [
+      "B09",
+      "B20"
+    ],
+    "capabilities": [],
+    "isolation_guarantees": [],
+    "verification_note": "Status summarizes recorded test evidence, not production certification; historical evidence scope and limitations are in docs/testing.md."
+  },
+  {
+    "code": "B22",
+    "name": "Vector storage and indexes",
+    "description": "Backend work package: Vector storage and indexes",
+    "status": "verified",
+    "profile": "knowledge",
+    "test_path": "tests/backend/b22",
+    "report_path": "docs/testing.md",
+    "dependencies": [
+      "B02",
+      "B04",
+      "B21"
+    ],
+    "capabilities": [],
+    "isolation_guarantees": [],
+    "verification_note": "Actual task-local Qdrant and PostgreSQL pgvector integration tests passed; no live cloud validation."
+  },
+  {
+    "code": "B23",
+    "name": "Retrieval, reranking and citation-backed RAG",
+    "description": "Backend work package: Retrieval, reranking and citation-backed RAG",
+    "status": "verified",
+    "profile": "knowledge",
+    "test_path": "tests/backend/b23",
+    "report_path": "docs/testing.md",
+    "dependencies": [
+      "B09",
+      "B21",
+      "B22"
+    ],
+    "capabilities": [],
+    "isolation_guarantees": [],
+    "verification_note": "Status summarizes recorded test evidence, not production certification; historical evidence scope and limitations are in docs/testing.md."
+  },
+  {
+    "code": "B24",
+    "name": "Local workspaces and ownership",
+    "description": "Single local owner, workspace resource scoping and extension seams; no authentication or membership administration.",
+    "status": "verified",
+    "profile": "core",
+    "test_path": "tests/test_p28s7_auth_moved.py",
+    "report_path": "docs/testing.md",
+    "dependencies": [
+      "B03",
+      "B04"
+    ],
+    "capabilities": [
+      "local_owner",
+      "workspace_ownership",
+      "resource_scoping"
+    ],
+    "isolation_guarantees": [],
+    "verification_note": "Local-owner equivalents and closed-route absence are tested; no multi-user authentication or tenant-isolation claim."
+  },
+  {
+    "code": "B25",
+    "name": "Webhooks, schedules and durable triggers",
+    "description": "Backend work package: Webhooks, schedules and durable triggers",
+    "status": "verified",
+    "profile": "core",
+    "test_path": "tests/backend/b25",
+    "report_path": "docs/testing.md",
+    "dependencies": [
+      "B04",
+      "B05",
+      "B06",
+      "B24"
+    ],
+    "capabilities": [],
+    "isolation_guarantees": [],
+    "verification_note": "Status summarizes recorded test evidence, not production certification; historical evidence scope and limitations are in docs/testing.md."
+  },
+  {
+    "code": "B26",
+    "name": "Business channels: email and WhatsApp adapters",
+    "description": "Backend work package: Business channels: email and WhatsApp adapters",
+    "status": "mock_verified",
+    "profile": "core",
+    "test_path": "tests/backend/b26",
+    "report_path": "docs/testing.md",
+    "dependencies": [
+      "B03",
+      "B16",
+      "B24",
+      "B25"
+    ],
+    "capabilities": [],
+    "isolation_guarantees": [],
+    "verification_note": "Status summarizes recorded test evidence, not production certification; historical evidence scope and limitations are in docs/testing.md."
+  },
+  {
+    "code": "B27",
+    "name": "Tracing, events, metrics and audit",
+    "description": "Backend work package: Tracing, events, metrics and audit",
+    "status": "verified",
+    "profile": "core",
+    "test_path": "tests/backend/b27",
+    "report_path": "docs/testing.md",
+    "dependencies": [
+      "B00",
+      "B04",
+      "B05"
+    ],
+    "capabilities": [],
+    "isolation_guarantees": [],
+    "verification_note": "Status summarizes recorded test evidence, not production certification; historical evidence scope and limitations are in docs/testing.md."
+  },
+  {
+    "code": "B28",
+    "name": "Usage, cost and budget enforcement",
+    "description": "Backend work package: Usage, cost and budget enforcement",
+    "status": "verified",
+    "profile": "core",
+    "test_path": "tests/backend/b28",
+    "report_path": "docs/testing.md",
+    "dependencies": [
+      "B04",
+      "B09"
+    ],
+    "capabilities": [],
+    "isolation_guarantees": [],
+    "verification_note": "Status summarizes recorded test evidence, not production certification; historical evidence scope and limitations are in docs/testing.md."
+  },
+  {
+    "code": "B29",
+    "name": "Evaluation datasets and regression runner",
+    "description": "Backend work package: Evaluation datasets and regression runner",
+    "status": "verified",
+    "profile": "core",
+    "test_path": "tests/backend/b29",
+    "report_path": "docs/testing.md",
+    "dependencies": [
+      "B19",
+      "B23",
+      "B27",
+      "B28"
+    ],
+    "capabilities": [],
+    "isolation_guarantees": [],
+    "verification_note": "Status summarizes recorded test evidence, not production certification; historical evidence scope and limitations are in docs/testing.md."
+  },
+  {
+    "code": "B30",
+    "name": "Isolated code execution module",
+    "description": "Backend work package: Isolated code execution module",
+    "status": "verified",
+    "profile": "core",
+    "test_path": "tests/backend/b30",
+    "report_path": "docs/testing.md",
+    "dependencies": [
+      "B01",
+      "B02",
+      "B03",
+      "B07",
+      "B24"
+    ],
+    "capabilities": [],
+    "isolation_guarantees": [],
+    "verification_note": "Configured task-local gVisor OCI isolation, fail-closed behavior and cleanup tests passed."
+  },
+  {
+    "code": "B31",
+    "name": "Backend API, Python/TypeScript clients and export",
+    "description": "Backend work package: Backend API, Python/TypeScript clients and export",
+    "status": "verified",
+    "profile": "studio",
+    "test_path": "tests/backend/b31",
+    "report_path": "docs/testing.md",
+    "dependencies": [
+      "B06",
+      "B07",
+      "B19",
+      "B23",
+      "B24",
+      "B25",
+      "B27",
+      "B28"
+    ],
+    "capabilities": [],
+    "isolation_guarantees": [],
+    "verification_note": "Local workspace scoping, durable ownership and server approval policy tested. Authentication and cross-tenant role checks belong to the closed edition."
+  },
+  {
+    "code": "B32",
+    "name": "Packaging, deployment and backend release gate",
+    "description": "Backend work package: Packaging, deployment and backend release gate",
+    "status": "verified",
+    "profile": "core",
+    "test_path": "tests/backend/b32",
+    "report_path": "docs/testing.md",
+    "dependencies": [
+      "B00",
+      "B01",
+      "B02",
+      "B03",
+      "B04",
+      "B05",
+      "B06",
+      "B07",
+      "B08",
+      "B09",
+      "B10",
+      "B11",
+      "B12",
+      "B13",
+      "B14",
+      "B15",
+      "B16",
+      "B17",
+      "B18",
+      "B19",
+      "B20",
+      "B21",
+      "B22",
+      "B23",
+      "B24",
+      "B25",
+      "B26",
+      "B27",
+      "B28",
+      "B29",
+      "B30",
+      "B31"
+    ],
+    "capabilities": [],
+    "isolation_guarantees": [],
+    "verification_note": "Packaging, recovery, and composite backend release gates verified across disposable PostgreSQL, vector services, cross-resource scoping, and clean wheel installation."
+  }
+]

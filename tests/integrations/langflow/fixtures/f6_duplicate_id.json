@@ -1,0 +1,226 @@
+{
+ "name": "duplicate id",
+ "description": "hand-written test fixture",
+ "is_component": false,
+ "data": {
+  "nodes": [
+   {
+    "id": "ChatInput-a1",
+    "type": "genericNode",
+    "position": {
+     "x": 0,
+     "y": 0
+    },
+    "data": {
+     "id": "ChatInput-a1",
+     "type": "ChatInput",
+     "node": {
+      "display_name": "Chat Input",
+      "template": {
+       "input_value": {
+        "_input_type": "MessageTextInput",
+        "type": "str",
+        "value": "",
+        "show": true,
+        "input_types": [
+         "Message"
+        ]
+       },
+       "code": {
+        "type": "code",
+        "value": "class Stock:\n    pass\n",
+        "_input_type": "CodeInput",
+        "required": true
+       }
+      },
+      "outputs": [
+       {
+        "name": "message"
+       }
+      ],
+      "metadata": {
+       "code_hash": "c7e78710a73b"
+      }
+     }
+    }
+   },
+   {
+    "id": "ChatInput-a1",
+    "type": "genericNode",
+    "position": {
+     "x": 0,
+     "y": 0
+    },
+    "data": {
+     "id": "ChatInput-a1",
+     "type": "ChatInput",
+     "node": {
+      "display_name": "Chat Input",
+      "template": {
+       "input_value": {
+        "_input_type": "MessageTextInput",
+        "type": "str",
+        "value": "",
+        "show": true,
+        "input_types": [
+         "Message"
+        ]
+       },
+       "code": {
+        "type": "code",
+        "value": "class Stock:\n    pass\n",
+        "_input_type": "CodeInput",
+        "required": true
+       }
+      },
+      "outputs": [
+       {
+        "name": "message"
+       }
+      ],
+      "metadata": {
+       "code_hash": "c7e78710a73b"
+      }
+     }
+    }
+   },
+   {
+    "id": "Agent-b2",
+    "type": "genericNode",
+    "position": {
+     "x": 0,
+     "y": 0
+    },
+    "data": {
+     "id": "Agent-b2",
+     "type": "Agent",
+     "node": {
+      "display_name": "Agent",
+      "template": {
+       "model": {
+        "_input_type": "ModelInput",
+        "type": "model",
+        "value": [
+         {
+          "name": "gpt-4o-mini",
+          "provider": "OpenAI"
+         }
+        ],
+        "show": true,
+        "input_types": [
+         "Message"
+        ]
+       },
+       "api_key": {
+        "_input_type": "SecretStrInput",
+        "type": "str",
+        "value": "OPENAI_API_KEY",
+        "show": true,
+        "input_types": [
+         "Message"
+        ],
+        "load_from_db": true,
+        "password": true
+       },
+       "system_prompt": {
+        "_input_type": "MessageTextInput",
+        "type": "str",
+        "value": "You are helpful.",
+        "show": true,
+        "input_types": [
+         "Message"
+        ]
+       },
+       "input_value": {
+        "_input_type": "MessageTextInput",
+        "type": "str",
+        "value": "",
+        "show": true,
+        "input_types": [
+         "Message"
+        ]
+       },
+       "tools": {
+        "_input_type": "HandleInput",
+        "type": "other",
+        "value": null,
+        "show": true,
+        "input_types": [
+         "Tool"
+        ]
+       },
+       "n_messages": {
+        "_input_type": "IntInput",
+        "type": "int",
+        "value": 100,
+        "show": true,
+        "input_types": [
+         "Message"
+        ]
+       },
+       "code": {
+        "type": "code",
+        "value": "class Stock:\n    pass\n",
+        "_input_type": "CodeInput",
+        "required": true
+       }
+      },
+      "outputs": [
+       {
+        "name": "response"
+       },
+       {
+        "name": "structured_response"
+       }
+      ],
+      "metadata": {
+       "code_hash": "c7e78710a73b"
+      }
+     }
+    }
+   },
+   {
+    "id": "ChatOutput-z9",
+    "type": "genericNode",
+    "position": {
+     "x": 0,
+     "y": 0
+    },
+    "data": {
+     "id": "ChatOutput-z9",
+     "type": "ChatOutput",
+     "node": {
+      "display_name": "Chat Output",
+      "template": {
+       "input_value": {
+        "_input_type": "MessageTextInput",
+        "type": "str",
+        "value": "",
+        "show": true,
+        "input_types": [
+         "Message"
+        ]
+       },
+       "code": {
+        "type": "code",
+        "value": "class Stock:\n    pass\n",
+        "_input_type": "CodeInput",
+        "required": true
+       }
+      },
+      "outputs": [],
+      "metadata": {
+       "code_hash": "c7e78710a73b"
+      }
+     }
+    }
+   }
+  ],
+  "edges": [],
+  "viewport": {
+   "x": 0,
+   "y": 0,
+   "zoom": 1
+  }
+ }
+}

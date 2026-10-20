@@ -1,0 +1,3 @@
+{"input": [{"role": "system", "content": "Answer with one word."}, {"role": "user", "content": "What colour is the sky on a clear day?"}], "ideal": "Blue"}
+{"input": [{"role": "user", "content": "What is 2 + 2?"}], "ideal": ["4", "four"]}
+{"input": "Capital of France?", "ideal": "Paris"}

@@ -1,0 +1,197 @@
+# Offline checks only: no provider credentials, no publishing, no deployment.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: uv sync --frozen --all-extras
+      - run: uv run --frozen ruff check src packages tests examples
+      - run: >-
+          uv run --frozen mypy src packages/nexura-agents/src packages/nexura-connectors/src
+          packages/nexura-postgres/src packages/nexura-qdrant/src packages/nexura-sandbox/src
+          packages/nexura-studio/src packages/nexura-vertex/src
+      # The suite also checks the TypeScript client, installed wheels and the WASI sandbox.
+      - run: npm ci && npm run build
+        working-directory: clients/typescript
+      - run: uv build --all-packages
+      - name: Fetch the pinned CPython WASI runtime (the installer verifies its SHA256)
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/python-wasi.zip" \
+            https://github.com/brettcannon/cpython-wasi-build/releases/download/v3.13.15/python-3.13.15-wasi_sdk-24.zip
+          echo "67e1c32a85d5e0600c0939f5fd4023ca0127f1a9e81f5499697467bda67af78d  $RUNNER_TEMP/python-wasi.zip" | sha256sum -c -
+          echo "NEXURA_WASI_RUNTIME_ZIP=$RUNNER_TEMP/python-wasi.zip" >> "$GITHUB_ENV"
+      # b22 needs live Postgres/Qdrant services; see the vector-stores job.
+      - run: uv run --frozen pytest --deselect tests/backend/b22
+      - run: uv run --frozen python examples/oss/o07.py
+
+  agents-python-versions:
+    # nexura-agents supports 3.11-3.13; the platform package is 3.12-only.
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Test the standalone wheel on Python ${{ matrix.python }}
+        # Builds the wheel, installs it in a fresh venv and runs every agent test file
+        # that does not need the platform package (see the script's docstring).
+        run: uv run --frozen python scripts/test_agents_wheel.py --python ${{ matrix.python }}
+
+  vector-stores:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: nexura-ci-only
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-retries 20
+      qdrant:
+        image: qdrant/qdrant:v1.12.4
+        ports: ["6333:6333"]
+    env:
+      NEXURA_TEST_POSTGRES_URI: postgresql://postgres:nexura-ci-only@127.0.0.1:5432/postgres
+      NEXURA_TEST_QDRANT_URL: http://127.0.0.1:6333
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv sync --frozen --all-extras
+      - run: uv run --frozen pytest tests/backend/b22 tests/postgres
+
+  package:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv build --all-packages
+      - name: nexura-agents alone (no platform installed)
+        run: |
+          uv venv /tmp/agents --python 3.12
+          uv pip install --python /tmp/agents/bin/python dist/nexura_agents-*.whl
+          cd /tmp && env -u PYTHONPATH /tmp/agents/bin/python -I -c \
+            "import nexura_agents, importlib.util as u; from nexura_agents import Agent, Runner, tool; assert u.find_spec('nexura_runtime') is None"
+      - name: nexura-runtime without nexura-connectors, then with it
+        run: |
+          uv venv /tmp/connectors --python 3.12
+          uv pip install --python /tmp/connectors/bin/python --find-links dist dist/nexura_runtime-*.whl
+          cd /tmp && env -u PYTHONPATH /tmp/connectors/bin/python -I -c \
+            "import importlib.util as u; from nexura_runtime.modules import default_registry as r; assert u.find_spec('nexura_connectors') is None; m = [x for x in r.list_modules() if x['module_id'].startswith('nexura.connectors.')]; assert len(m) == 15 and not any(x['is_available'] for x in m) and all('pip install nexura-connectors' in x['missing_reason'] for x in m)"
+          uv pip install --python /tmp/connectors/bin/python --find-links dist dist/nexura_connectors-*.whl
+          cd /tmp && env -u PYTHONPATH /tmp/connectors/bin/python -I -c \
+            "from nexura_runtime.modules import default_registry as r; m = [x for x in r.list_modules() if x['module_id'].startswith('nexura.connectors.')]; assert len(m) == 15 and all(x['is_available'] for x in m)"
+      - name: nexura-runtime without the backend packages, then with each (P28 step 10 stage 4b)
+        run: |
+          uv venv /tmp/split --python 3.12
+          py=/tmp/split/bin/python
+          uv pip install --python $py --find-links dist dist/nexura_runtime-*.whl
+          cd /tmp
+          # Without them the runtime imports, and each feature names its package.
+          env -u PYTHONPATH $py -I -c "import importlib.util as u; assert not any(u.find_spec(n) for n in ('nexura_postgres', 'nexura_qdrant', 'nexura_sandbox', 'nexura_studio', 'nexura_vertex'))"
+          env -u PYTHONPATH $py -I -c "from nexura_runtime.storage import get_storage_repository as g; from nexura_agents.contracts import MissingDependencyError as E
+          try: g('postgresql://u:p@localhost/db'); raise SystemExit('no error')
+          except E as e: assert 'pip install nexura-postgres' in str(e)"
+          env -u PYTHONPATH $py -I -c "from nexura_runtime.integrations.sandbox import build_backend, SandboxConfig; assert all('pip install nexura-sandbox' in build_backend(n).probe(SandboxConfig()).reason for n in ('wasi', 'bubblewrap', 'gvisor_oci'))"
+          env -u PYTHONPATH $py -I -c "from nexura_agents import infer_model; from nexura_agents.errors import SDKValidationError as E
+          try: infer_model('vertex:gemini-2.5-flash'); raise SystemExit('no error')
+          except E as e: assert 'pip install nexura-vertex' in str(e)"
+          test ! -e /tmp/split/bin/nexura-studio
+          uv pip install --python $py --find-links dist dist/nexura_postgres-*.whl dist/nexura_qdrant-*.whl dist/nexura_sandbox-*.whl dist/nexura_studio-*.whl dist/nexura_vertex-*.whl
+          env -u PYTHONPATH $py -I -c "import nexura_postgres, nexura_qdrant; from nexura_runtime.storage import get_storage_repository as g; assert type(g('postgresql://u:p@localhost/db')) is nexura_postgres.PostgresRepository"
+          env -u PYTHONPATH $py -I -c "import nexura_sandbox; from nexura_runtime.integrations.sandbox import build_backend; assert type(build_backend('gvisor_oci')) is nexura_sandbox.GVisorOCIWorker"
+          env -u PYTHONPATH $py -I -c "import nexura_vertex, nexura_studio; from nexura_runtime.studio import create_app; assert create_app(db_path='/tmp/split-studio.sqlite3').title == 'Nexura Studio'"
+          env -u PYTHONPATH /tmp/split/bin/nexura-studio --help
+      - name: Clean consumer install (core, then studio extra)
+        run: |
+          uv venv /tmp/consumer --python 3.12
+          wheel=$(ls dist/nexura_runtime-*.whl)
+          uv pip install --python /tmp/consumer/bin/python --find-links dist "$wheel"
+          cd /tmp && env -u PYTHONPATH /tmp/consumer/bin/python -I -c \
+            "import sys, nexura_runtime; assert 'fastapi' not in sys.modules; print(nexura_runtime.__file__)"
+          uv pip install --python /tmp/consumer/bin/python --find-links dist "$wheel[studio]"
+          cd /tmp && env -u PYTHONPATH /tmp/consumer/bin/python -I -m nexura_runtime.cli.main serve --help
+          env -u PYTHONPATH /tmp/consumer/bin/nexura-runtime --help
+          # The bare "nexura" command belongs to the Nexura Cloud client package.
+          test ! -e /tmp/consumer/bin/nexura
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-dist
+          path: dist/
+
+  edition-boundary:
+    # The public tree comes from an explicit allow-list; it must hold no closed-edition code
+    # and must build and import on its own (EDITIONS_PLAN section 2.4).
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: uv run --frozen python scripts/export_oss_tree.py /tmp/oss-tree
+      - name: Exported tree builds and imports without the closed edition
+        run: |
+          cd /tmp/oss-tree && uv build --all-packages
+          uv venv /tmp/oss-consumer --python 3.12
+          uv pip install --python /tmp/oss-consumer/bin/python --find-links dist dist/nexura_runtime-*.whl
+          cd /tmp && env -u PYTHONPATH /tmp/oss-consumer/bin/python -I -c \
+            "import importlib.util as u, nexura_runtime; assert u.find_spec('nexura_enterprise') is None"
+
+  typescript-client:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: clients/typescript
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - run: npm pack --dry-run
+
+  studio-web:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: uv sync --frozen --all-extras
+      - run: npm ci
+        working-directory: clients/typescript
+      - run: npm run build
+        working-directory: clients/typescript
+      - working-directory: studio-web
+        run: |
+          npm ci
+          npm run typecheck
+          npm run lint
+          npm test
+          npm run build
+          npx playwright install --with-deps chromium
+          npm run test:e2e

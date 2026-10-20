@@ -1,0 +1,5 @@
+{"item": {"question": "First good line", "answer": "ok"}}
+{"item": {"question": "broken json", 
+["not", "an", "object"]
+{"item": {"answer": "no question field"}}
+{"item": {"question": "Fifth line is fine", "answer": "ok"}}

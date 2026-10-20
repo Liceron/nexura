@@ -1,0 +1,115 @@
+{
+  "template_version": 1,
+  "id": "approval-workflow",
+  "title": "Approval workflow with a human decision",
+  "description": "Small requests pass automatically. Requests over the threshold stop and wait for a person to approve or reject before they run.",
+  "category": "governance",
+  "difficulty": "beginner",
+  "tags": [
+    "approval",
+    "human-in-the-loop",
+    "governance"
+  ],
+  "required_modules": [
+    "tpl_request_execute",
+    "tpl_request_intake",
+    "tpl_request_notify"
+  ],
+  "required_credentials": [],
+  "spec": {
+    "spec_version": 1,
+    "name": "Approval workflow",
+    "entry_node": "intake",
+    "nodes": {
+      "intake": {
+        "id": "intake",
+        "handler": "tpl_request_intake",
+        "transitions": {
+          "auto": "notify",
+          "needs_approval": "execute"
+        },
+        "default_transition": "notify",
+        "requires_approval": false
+      },
+      "execute": {
+        "id": "execute",
+        "handler": "tpl_request_execute",
+        "transitions": {},
+        "default_transition": "notify",
+        "requires_approval": true
+      },
+      "notify": {
+        "id": "notify",
+        "handler": "tpl_request_notify",
+        "transitions": {},
+        "default_transition": null,
+        "requires_approval": false
+      }
+    },
+    "terminal_nodes": [
+      "notify"
+    ]
+  },
+  "sample_input": {
+    "title": "Buy conference tickets",
+    "amount": 2500
+  },
+  "fixture": {
+    "runs": [
+      {
+        "name": "high amount waits and runs after approval",
+        "input": {
+          "title": "Tickets",
+          "amount": 2500
+        },
+        "approval": {
+          "node": "execute",
+          "decision": "approve"
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "risk": "high",
+          "executed": true
+        },
+        "expect_path": [
+          "intake",
+          "execute",
+          "notify"
+        ]
+      },
+      {
+        "name": "high amount rejected does not run",
+        "input": {
+          "title": "Tickets",
+          "amount": 2500
+        },
+        "approval": {
+          "node": "execute",
+          "decision": "reject"
+        },
+        "expect_status": "rejected",
+        "expect_absent": [
+          "executed"
+        ]
+      },
+      {
+        "name": "low amount passes automatically",
+        "input": {
+          "title": "Pens",
+          "amount": 20
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "risk": "low"
+        },
+        "expect_absent": [
+          "executed"
+        ],
+        "expect_path": [
+          "intake",
+          "notify"
+        ]
+      }
+    ]
+  }
+}

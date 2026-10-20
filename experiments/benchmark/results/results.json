@@ -1,0 +1,226 @@
+{
+  "metadata": {
+    "timestamp": "2026-10-18T20:28:31.158919+00:00",
+    "python_version": "3.12.14",
+    "platform": "Linux-7.0.0-1014-gcp-x86_64-with-glibc2.43",
+    "frameworks": {
+      "nexura": "0.4.0",
+      "pydantic-ai": "2.57.0",
+      "langgraph": "1.2.16"
+    }
+  },
+  "results": [
+    {
+      "framework": "nexura",
+      "version": "0.4.0",
+      "scenario_id": "S1",
+      "scenario_name": "unauthorized side effect",
+      "supported": "Yes",
+      "measured_numbers": {
+        "unauthorized_writes": 0,
+        "approved_resumed_writes": 1,
+        "paused_at_gate": true
+      },
+      "configuration": "@tool(requires_approval=True) with Runner.run_async and resume_async",
+      "documentation_urls": [
+        "docs/approvals.md"
+      ],
+      "notes": "Tool execution is gated before invocation; 0 writes execute without approval."
+    },
+    {
+      "framework": "nexura",
+      "version": "0.4.0",
+      "scenario_id": "S2a",
+      "scenario_name": "crash inside tool after side effect before return",
+      "supported": "Yes",
+      "measured_numbers": {
+        "writes_before_crash": 1,
+        "total_writes_after_recovery": 1,
+        "duplicate_writes": 0,
+        "recovered_status": "paused",
+        "interruption_reason": "outcome_unknown_after_crash"
+      },
+      "configuration": "Runner(checkpoint_store=MemoryCheckpointStore()) with recover_async",
+      "documentation_urls": [
+        "docs/durable-runs.md"
+      ],
+      "notes": "Nexura flags non-idempotent in-flight tools as outcome_unknown_after_crash. Instead of blindly re-running, it halts in status='paused' and requests human review; 0 duplicate writes execute."
+    },
+    {
+      "framework": "nexura",
+      "version": "0.4.0",
+      "scenario_id": "S2b",
+      "scenario_name": "crash after tool returned before next step",
+      "supported": "Yes",
+      "measured_numbers": {
+        "writes_before_crash": 1,
+        "total_writes_after_recovery": 1,
+        "duplicate_writes": 0,
+        "recovered_status": "completed"
+      },
+      "configuration": "Runner(checkpoint_store=MemoryCheckpointStore()) with recover_async",
+      "documentation_urls": [
+        "docs/durable-runs.md"
+      ],
+      "notes": "Nexura commits completed tool outputs to checkpoint; recovery reuses the recorded output without re-executing the non-idempotent write."
+    },
+    {
+      "framework": "nexura",
+      "version": "0.4.0",
+      "scenario_id": "S3",
+      "scenario_name": "parallel spending",
+      "supported": "Yes (shared allowance)",
+      "measured_numbers": {
+        "allowance_calls": 3,
+        "parallel_agents": 10,
+        "admitted_calls": 3,
+        "admitted_above_allowance": 0,
+        "successful_runs": 3
+      },
+      "configuration": "BudgetManager.create_run_budget with child budgets and Runner(budget=...)",
+      "documentation_urls": [
+        "docs/budgets-and-usage.md"
+      ],
+      "notes": "Atomic admission reservations ensure no calls above the shared allowance are dispatched to provider models."
+    },
+    {
+      "framework": "pydantic-ai",
+      "version": "2.57.0",
+      "scenario_id": "S1",
+      "scenario_name": "unauthorized side effect",
+      "supported": "Yes",
+      "measured_numbers": {
+        "unauthorized_writes": 0,
+        "approved_resumed_writes": 1,
+        "output_type_at_gate": "DeferredToolRequests"
+      },
+      "configuration": "ApprovalRequired in tool body with output_type=[str, DeferredToolRequests] and DeferredToolResults resume",
+      "documentation_urls": [
+        "https://ai.pydantic.dev/deferred-tools/#human-in-the-loop-tool-approval"
+      ],
+      "notes": "DeferredToolRequests halts the agent before tool execution; 0 writes execute without approval."
+    },
+    {
+      "framework": "pydantic-ai",
+      "version": "2.57.0",
+      "scenario_id": "S2a",
+      "scenario_name": "crash inside tool after side effect before return",
+      "supported": "No",
+      "measured_numbers": {
+        "duplicate_writes": "not supported",
+        "native_checkpointer": "not supported"
+      },
+      "configuration": "None (durable execution requires external Temporal/DBOS/Prefect engine)",
+      "documentation_urls": [
+        "https://ai.pydantic.dev/durable-execution/"
+      ],
+      "notes": "Pydantic AI delegates durable execution and checkpoint persistence to external orchestrators (Temporal, DBOS, Prefect). Out-of-the-box, standalone Agent runs are ephemeral in-memory; in-flight crash recovery is not natively supported."
+    },
+    {
+      "framework": "pydantic-ai",
+      "version": "2.57.0",
+      "scenario_id": "S2b",
+      "scenario_name": "crash after tool returned before next step",
+      "supported": "No",
+      "measured_numbers": {
+        "duplicate_writes": "not supported",
+        "native_checkpointer": "not supported"
+      },
+      "configuration": "None (durable execution requires external Temporal/DBOS/Prefect engine)",
+      "documentation_urls": [
+        "https://ai.pydantic.dev/durable-execution/"
+      ],
+      "notes": "Pydantic AI delegates durable execution and checkpoint persistence to external orchestrators (Temporal, DBOS, Prefect). Out-of-the-box, intermediate crash recovery after tool completion is not natively supported."
+    },
+    {
+      "framework": "pydantic-ai",
+      "version": "2.57.0",
+      "scenario_id": "S3",
+      "scenario_name": "parallel spending",
+      "supported": "Partial (shared counter, not concurrent admission)",
+      "measured_numbers": {
+        "allowance_calls": 3,
+        "parallel_agents": 10,
+        "admitted_calls": 10,
+        "admitted_above_allowance": 7,
+        "successful_runs": 10
+      },
+      "configuration": "Agent.run(usage_limits=UsageLimits(request_limit=3), usage=shared_usage)",
+      "documentation_urls": [
+        "https://ai.pydantic.dev/usage/"
+      ],
+      "notes": "Note: sharing one RunUsage is documented in Pydantic AI for agent delegation (sequential execution), not as a concurrent admission control across parallel runs. This benchmark evaluates the documented feature under concurrent load outside its stated design. Because check_before_request lacks atomic reservations, all 10 coroutines pass the pre-check concurrently when requests==0, admitting all 10 calls."
+    },
+    {
+      "framework": "langgraph",
+      "version": "1.2.16",
+      "scenario_id": "S1",
+      "scenario_name": "unauthorized side effect",
+      "supported": "Yes",
+      "measured_numbers": {
+        "unauthorized_writes": 0,
+        "approved_resumed_writes": 1,
+        "interrupted_node": "tools"
+      },
+      "configuration": "StateGraph.compile(checkpointer=MemorySaver(), interrupt_before=['tools'])",
+      "documentation_urls": [
+        "https://langchain-ai.github.io/langgraph/how-tos/human-in-the-loop/",
+        "https://langchain-ai.github.io/langgraph/concepts/human_in_the_loop/"
+      ],
+      "notes": "interrupt_before=['tools'] pauses execution prior to tool dispatch; 0 writes execute without approval."
+    },
+    {
+      "framework": "langgraph",
+      "version": "1.2.16",
+      "scenario_id": "S2a",
+      "scenario_name": "crash inside tool after side effect before return",
+      "supported": "Yes",
+      "measured_numbers": {
+        "writes_before_crash": 1,
+        "total_writes_after_recovery": 2,
+        "duplicate_writes": 1
+      },
+      "configuration": "StateGraph.compile(checkpointer=MemorySaver()) with graph.invoke(None, config)",
+      "documentation_urls": [
+        "https://langchain-ai.github.io/langgraph/concepts/persistence/#replaying"
+      ],
+      "notes": "LangGraph commits checkpoints at superstep boundaries (after node completion). Because the tool superstep crashed mid-tool, recovery rolls back to the pre-tool checkpoint and replays the tool node, causing 1 duplicate write."
+    },
+    {
+      "framework": "langgraph",
+      "version": "1.2.16",
+      "scenario_id": "S2b",
+      "scenario_name": "crash after tool returned before next step",
+      "supported": "Yes",
+      "measured_numbers": {
+        "writes_before_crash": 1,
+        "total_writes_after_recovery": 1,
+        "duplicate_writes": 0
+      },
+      "configuration": "StateGraph.compile(checkpointer=MemorySaver()) with edge tools -> agent",
+      "documentation_urls": [
+        "https://langchain-ai.github.io/langgraph/concepts/persistence/#replaying"
+      ],
+      "notes": "Because the write tool returned successfully, the ToolNode superstep completed and committed its checkpoint. Recovery resumes directly at the subsequent agent node; 0 duplicate writes occur."
+    },
+    {
+      "framework": "langgraph",
+      "version": "1.2.16 (langchain==1.4.6)",
+      "scenario_id": "S3",
+      "scenario_name": "parallel spending",
+      "supported": "Partial (per-thread/run limit only)",
+      "measured_numbers": {
+        "allowance_calls": 3,
+        "parallel_agents": 10,
+        "admitted_calls": 10,
+        "admitted_above_allowance": 7,
+        "successful_runs": 10
+      },
+      "configuration": "create_agent(model, middleware=[ModelCallLimitMiddleware(thread_limit=3, run_limit=3, exit_behavior='error')])",
+      "documentation_urls": [
+        "https://langchain-ai.github.io/langgraph/"
+      ],
+      "notes": "Tested LangChain v1 ModelCallLimitMiddleware (source: experiments/benchmark/.venv/lib/python3.12/site-packages/langchain/agents/middleware/model_call_limit.py). It stores call counts in ModelCallLimitState channels thread_model_call_count and run_model_call_count, which are scoped per thread/run. It cannot share an allowance across parallel agent threads. Additionally, after_model increments counts only post-hoc without atomic pre-admission reservation, admitting all 10 calls."
+    }
+  ]
+}

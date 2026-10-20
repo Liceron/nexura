@@ -1,0 +1,108 @@
+{
+  "template_version": 1,
+  "id": "scheduled-report",
+  "title": "Scheduled weekly report",
+  "description": "Collects metrics, summarises them and queues the report in a dry-run outbox. Attach a schedule so it runs every Monday morning.",
+  "category": "automation",
+  "difficulty": "beginner",
+  "tags": [
+    "schedule",
+    "trigger",
+    "report"
+  ],
+  "required_modules": [
+    "tpl_report_collect",
+    "tpl_report_deliver",
+    "tpl_report_summarize"
+  ],
+  "required_credentials": [
+    "email_smtp_password"
+  ],
+  "suggested_trigger": {
+    "type": "schedule",
+    "cron_expr": "0 9 * * 1",
+    "timezone": "UTC",
+    "missed_run_policy": "fire_once"
+  },
+  "spec": {
+    "spec_version": 1,
+    "name": "Scheduled weekly report",
+    "entry_node": "collect",
+    "nodes": {
+      "collect": {
+        "id": "collect",
+        "handler": "tpl_report_collect",
+        "transitions": {},
+        "default_transition": "summarize",
+        "requires_approval": false
+      },
+      "summarize": {
+        "id": "summarize",
+        "handler": "tpl_report_summarize",
+        "transitions": {},
+        "default_transition": "deliver",
+        "requires_approval": false
+      },
+      "deliver": {
+        "id": "deliver",
+        "handler": "tpl_report_deliver",
+        "transitions": {},
+        "default_transition": null,
+        "requires_approval": false
+      }
+    },
+    "terminal_nodes": [
+      "deliver"
+    ]
+  },
+  "sample_input": {
+    "metrics": [
+      {
+        "day": "Mon",
+        "signups": 12,
+        "revenue": 340.0
+      },
+      {
+        "day": "Tue",
+        "signups": 18,
+        "revenue": 410.0
+      }
+    ]
+  },
+  "fixture": {
+    "runs": [
+      {
+        "name": "totals are summed and delivered to the outbox",
+        "input": {
+          "metrics": [
+            {
+              "day": "Mon",
+              "signups": 12,
+              "revenue": 340.0
+            },
+            {
+              "day": "Tue",
+              "signups": 18,
+              "revenue": 410.0
+            }
+          ]
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "totals.signups": 30,
+          "totals.revenue": 750.0,
+          "delivery.sent": false,
+          "delivery.mode": "dry_run"
+        }
+      },
+      {
+        "name": "runs with built-in sample data when scheduled with no payload",
+        "input": {},
+        "expect_status": "completed",
+        "expect_state": {
+          "totals.days": 3
+        }
+      }
+    ]
+  }
+}

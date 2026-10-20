@@ -1,0 +1,60 @@
+{
+  "object": "eval",
+  "name": "IT ticket categorization (synthetic fixture)",
+  "metadata": {"fixture": "synthetic P30 test data, not a real eval"},
+  "data_source_config": {
+    "type": "custom",
+    "item_schema": {
+      "type": "object",
+      "properties": {
+        "ticket_text": {"type": "string"},
+        "correct_label": {"type": "string"}
+      },
+      "required": ["ticket_text", "correct_label"]
+    },
+    "include_sample_schema": true
+  },
+  "testing_criteria": [
+    {
+      "type": "string_check",
+      "name": "Match output to human label",
+      "input": "{{ sample.output_text }}",
+      "operation": "eq",
+      "reference": "{{ item.correct_label }}"
+    },
+    {
+      "type": "string_check",
+      "name": "Mentions a category",
+      "input": "{{ sample.output_text }}",
+      "operation": "ilike",
+      "reference": "ware"
+    },
+    {
+      "type": "string_check",
+      "name": "Not the placeholder",
+      "input": "{{ sample.output_text }}",
+      "operation": "ne",
+      "reference": "TODO"
+    },
+    {
+      "type": "text_similarity",
+      "name": "Close to label",
+      "input": "{{ sample.output_text }}",
+      "reference": "{{ item.correct_label }}",
+      "evaluation_metric": "fuzzy_match",
+      "pass_threshold": 0.9
+    },
+    {
+      "type": "score_model",
+      "name": "Helpfulness",
+      "model": "a-model",
+      "input": [{"role": "user", "content": "Rate {{ sample.output_text }}"}],
+      "range": [0, 1]
+    },
+    {
+      "type": "python",
+      "name": "Custom code",
+      "source": "def grade(sample, item):\n    return 1.0"
+    }
+  ]
+}

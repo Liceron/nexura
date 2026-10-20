@@ -1,0 +1,101 @@
+{
+  "template_version": 1,
+  "id": "research-team",
+  "title": "Research team (planner, researcher, writer, reviewer)",
+  "description": "Four agents in sequence: plan questions, gather notes from your sources, write a brief, and review that every claim has a source.",
+  "category": "agents",
+  "difficulty": "intermediate",
+  "tags": [
+    "multi-agent",
+    "research",
+    "sequential"
+  ],
+  "required_modules": [
+    "tpl_research_gather",
+    "tpl_research_plan",
+    "tpl_research_review",
+    "tpl_research_write"
+  ],
+  "required_credentials": [
+    "model_api_key",
+    "search_api_key"
+  ],
+  "spec": {
+    "spec_version": 1,
+    "name": "Research team",
+    "entry_node": "plan",
+    "nodes": {
+      "plan": {
+        "id": "plan",
+        "handler": "tpl_research_plan",
+        "transitions": {},
+        "default_transition": "gather",
+        "requires_approval": false
+      },
+      "gather": {
+        "id": "gather",
+        "handler": "tpl_research_gather",
+        "transitions": {},
+        "default_transition": "write",
+        "requires_approval": false
+      },
+      "write": {
+        "id": "write",
+        "handler": "tpl_research_write",
+        "transitions": {},
+        "default_transition": "review",
+        "requires_approval": false
+      },
+      "review": {
+        "id": "review",
+        "handler": "tpl_research_review",
+        "transitions": {},
+        "default_transition": null,
+        "requires_approval": false
+      }
+    },
+    "terminal_nodes": [
+      "review"
+    ]
+  },
+  "sample_input": {
+    "topic": "heat pumps",
+    "sources": [
+      "IEA report 2024",
+      "Manufacturer datasheet"
+    ]
+  },
+  "fixture": {
+    "runs": [
+      {
+        "name": "sourced topic is approved",
+        "input": {
+          "topic": "heat pumps",
+          "sources": [
+            "IEA report 2024"
+          ]
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "verdict": "approved"
+        },
+        "expect_path": [
+          "plan",
+          "gather",
+          "write",
+          "review"
+        ]
+      },
+      {
+        "name": "no sources is flagged by the reviewer",
+        "input": {
+          "topic": "heat pumps"
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "verdict": "needs_sources"
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,136 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Liceron
+"""Identity, workspaces, triggers and tenant security service (open-source edition).
+
+Authentication (tokens, API keys, the shared profile) and workspace membership, including the
+``nexura.service.auth`` and ``nexura.service.workspaces`` workflow modules, moved to the closed
+edition in EDITIONS_PLAN step 7.
+"""
+
+from __future__ import annotations
+
+from nexura_runtime.modules.registry import default_registry
+from nexura_runtime.service.auth import (
+    ROLE_PERMISSIONS,
+    ActionPermission,
+    ApiKeyNotFoundError,
+    ApiKeyRevokedError,
+    AuthenticationError,
+    AuthError,
+    CrossWorkspaceAccessError,
+    InvalidAudienceError,
+    InvalidIssuerError,
+    InvalidKeyError,
+    InvalidSignatureError,
+    PermissionDeniedError,
+    Principal,
+    ProfileManager,
+    ProfileType,
+    TokenExpiredError,
+    UnauthenticatedNetworkError,
+    WorkspaceRole,
+    check_permission,
+    get_role_permissions,
+    has_permission,
+)
+from nexura_runtime.service.triggers import (
+    DuplicateWebhookError,
+    DurableTriggerJob,
+    InvalidScheduleError,
+    InvalidWebhookSignatureError,
+    JobClaimConflictError,
+    JobStatus,
+    MemoryTriggerStore,
+    MissedRunPolicy,
+    ReplayWindowExceededError,
+    ScheduleConfig,
+    ScheduleNotFoundError,
+    SqliteTriggerStore,
+    TriggerError,
+    TriggerManager,
+    TriggerServiceModule,
+    TriggerStore,
+    TriggerType,
+    WebhookConfig,
+    WebhookEvent,
+    WebhookReceipt,
+    WorkflowReleaseNotFoundError,
+    calculate_next_cron_fire,
+    calculate_next_fire,
+    compute_webhook_signature,
+    evaluate_missed_runs,
+    verify_webhook_signature,
+)
+from nexura_runtime.service.workspaces import (
+    MemberAlreadyExistsError,
+    MemberNotFoundError,
+    ResourceScopeEnforcer,
+    Workspace,
+    WorkspaceError,
+    WorkspaceMember,
+    WorkspaceNotFoundError,
+    WorkspaceRepository,
+)
+
+# Register default service modules
+_trigger_mod = TriggerServiceModule()
+if not default_registry.has(_trigger_mod.manifest.module_id):
+    default_registry.register(_trigger_mod)
+
+__all__ = [
+    "ActionPermission",
+    "ApiKeyNotFoundError",
+    "ApiKeyRevokedError",
+    "AuthenticationError",
+    "AuthError",
+    "CrossWorkspaceAccessError",
+    "DuplicateWebhookError",
+    "DurableTriggerJob",
+    "InvalidAudienceError",
+    "InvalidIssuerError",
+    "InvalidKeyError",
+    "InvalidScheduleError",
+    "InvalidSignatureError",
+    "InvalidWebhookSignatureError",
+    "JobClaimConflictError",
+    "JobStatus",
+    "MemberAlreadyExistsError",
+    "MemberNotFoundError",
+    "MemoryTriggerStore",
+    "MissedRunPolicy",
+    "PermissionDeniedError",
+    "Principal",
+    "ProfileManager",
+    "ProfileType",
+    "ROLE_PERMISSIONS",
+    "ReplayWindowExceededError",
+    "ResourceScopeEnforcer",
+    "ScheduleConfig",
+    "ScheduleNotFoundError",
+    "SqliteTriggerStore",
+    "TokenExpiredError",
+    "TriggerError",
+    "TriggerManager",
+    "TriggerServiceModule",
+    "TriggerStore",
+    "TriggerType",
+    "UnauthenticatedNetworkError",
+    "WebhookConfig",
+    "WebhookEvent",
+    "WebhookReceipt",
+    "WorkflowReleaseNotFoundError",
+    "Workspace",
+    "WorkspaceError",
+    "WorkspaceMember",
+    "WorkspaceNotFoundError",
+    "WorkspaceRepository",
+    "WorkspaceRole",
+    "calculate_next_cron_fire",
+    "calculate_next_fire",
+    "check_permission",
+    "compute_webhook_signature",
+    "evaluate_missed_runs",
+    "get_role_permissions",
+    "has_permission",
+    "verify_webhook_signature",
+]

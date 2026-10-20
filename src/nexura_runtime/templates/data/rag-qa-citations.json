@@ -1,0 +1,126 @@
+{
+  "template_version": 1,
+  "id": "rag-qa-citations",
+  "title": "RAG Q&A over uploaded documents with citations",
+  "description": "Retrieves the best passages from the documents you supply, answers from them with numbered citations, and refuses when nothing matches.",
+  "category": "knowledge",
+  "difficulty": "beginner",
+  "tags": [
+    "rag",
+    "citations",
+    "documents",
+    "q&a"
+  ],
+  "required_modules": [
+    "tpl_rag_answer",
+    "tpl_rag_no_answer",
+    "tpl_rag_retrieve"
+  ],
+  "required_credentials": [
+    "model_api_key"
+  ],
+  "spec": {
+    "spec_version": 1,
+    "name": "RAG Q&A with citations",
+    "entry_node": "retrieve",
+    "nodes": {
+      "retrieve": {
+        "id": "retrieve",
+        "handler": "tpl_rag_retrieve",
+        "transitions": {
+          "found": "answer",
+          "none": "no_answer"
+        },
+        "default_transition": "answer",
+        "requires_approval": false
+      },
+      "answer": {
+        "id": "answer",
+        "handler": "tpl_rag_answer",
+        "transitions": {},
+        "default_transition": null,
+        "requires_approval": false
+      },
+      "no_answer": {
+        "id": "no_answer",
+        "handler": "tpl_rag_no_answer",
+        "transitions": {},
+        "default_transition": null,
+        "requires_approval": false
+      }
+    },
+    "terminal_nodes": [
+      "answer",
+      "no_answer"
+    ]
+  },
+  "sample_input": {
+    "question": "How long do refunds take?",
+    "documents": [
+      {
+        "id": "policy",
+        "title": "Refund policy",
+        "text": "Refunds take five business days to reach your bank.\n\nShipping is free over 500."
+      },
+      {
+        "id": "faq",
+        "title": "FAQ",
+        "text": "You can change your delivery address before dispatch."
+      }
+    ]
+  },
+  "fixture": {
+    "runs": [
+      {
+        "name": "answers with a citation to the right document",
+        "input": {
+          "question": "How long do refunds take?",
+          "documents": [
+            {
+              "id": "policy",
+              "title": "Refund policy",
+              "text": "Refunds take five business days to reach your bank.\n\nShipping is free over 500."
+            },
+            {
+              "id": "faq",
+              "title": "FAQ",
+              "text": "You can change your delivery address before dispatch."
+            }
+          ]
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "citations.0.doc_id": "policy"
+        },
+        "expect_contains": {
+          "answer": "[1]"
+        },
+        "expect_path": [
+          "retrieve",
+          "answer"
+        ]
+      },
+      {
+        "name": "refuses when no passage matches",
+        "input": {
+          "question": "What is the capital of Mars?",
+          "documents": [
+            {
+              "id": "faq",
+              "title": "FAQ",
+              "text": "You can change your delivery address before dispatch."
+            }
+          ]
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "citations": []
+        },
+        "expect_path": [
+          "retrieve",
+          "no_answer"
+        ]
+      }
+    ]
+  }
+}

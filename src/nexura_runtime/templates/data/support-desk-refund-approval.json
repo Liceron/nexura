@@ -1,0 +1,121 @@
+{
+  "template_version": 1,
+  "id": "support-desk-refund-approval",
+  "title": "Support desk with refund approval",
+  "description": "Classifies a customer message, holds every refund for a human approval before money moves, then writes the reply.",
+  "category": "support",
+  "difficulty": "beginner",
+  "tags": [
+    "support",
+    "approval",
+    "refunds",
+    "human-in-the-loop"
+  ],
+  "required_modules": [
+    "tpl_support_classify",
+    "tpl_support_issue_refund",
+    "tpl_support_reply"
+  ],
+  "required_credentials": [
+    "model_api_key"
+  ],
+  "spec": {
+    "spec_version": 1,
+    "name": "Support desk with refund approval",
+    "entry_node": "classify",
+    "nodes": {
+      "classify": {
+        "id": "classify",
+        "handler": "tpl_support_classify",
+        "transitions": {
+          "refund": "issue_refund",
+          "answer": "reply"
+        },
+        "default_transition": "reply",
+        "requires_approval": false
+      },
+      "issue_refund": {
+        "id": "issue_refund",
+        "handler": "tpl_support_issue_refund",
+        "transitions": {},
+        "default_transition": "reply",
+        "requires_approval": true
+      },
+      "reply": {
+        "id": "reply",
+        "handler": "tpl_support_reply",
+        "transitions": {},
+        "default_transition": null,
+        "requires_approval": false
+      }
+    },
+    "terminal_nodes": [
+      "reply"
+    ]
+  },
+  "sample_input": {
+    "message": "I want a refund for my broken order",
+    "customer": "Asha",
+    "order_id": "ORD-7",
+    "amount": 1499
+  },
+  "fixture": {
+    "runs": [
+      {
+        "name": "refund waits for approval then is issued",
+        "input": {
+          "message": "I want a refund",
+          "customer": "Asha",
+          "order_id": "ORD-7",
+          "amount": 1499
+        },
+        "approval": {
+          "node": "issue_refund",
+          "decision": "approve"
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "intent": "refund",
+          "refund.status": "issued",
+          "refund.amount": 1499.0
+        },
+        "expect_path": [
+          "classify",
+          "issue_refund",
+          "reply"
+        ]
+      },
+      {
+        "name": "rejected refund never issues",
+        "input": {
+          "message": "refund please",
+          "customer": "Ravi",
+          "order_id": "ORD-8",
+          "amount": 50
+        },
+        "approval": {
+          "node": "issue_refund",
+          "decision": "reject"
+        },
+        "expect_status": "rejected",
+        "expect_absent": [
+          "refund"
+        ]
+      },
+      {
+        "name": "plain question needs no approval",
+        "input": {
+          "message": "Where is my parcel?",
+          "customer": "Meena"
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "intent": "question"
+        },
+        "expect_absent": [
+          "refund"
+        ]
+      }
+    ]
+  }
+}

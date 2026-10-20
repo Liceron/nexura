@@ -1,0 +1,104 @@
+{
+  "template_version": 1,
+  "id": "structured-extraction",
+  "title": "Invoice extraction to structured output",
+  "description": "Pulls invoice fields out of free text, validates them against a typed schema, and flags incomplete documents for review.",
+  "category": "data",
+  "difficulty": "intermediate",
+  "tags": [
+    "extraction",
+    "structured-output",
+    "validation"
+  ],
+  "required_modules": [
+    "tpl_extract_fields",
+    "tpl_extract_finalize",
+    "tpl_extract_flag",
+    "tpl_extract_validate"
+  ],
+  "required_credentials": [
+    "model_api_key"
+  ],
+  "spec": {
+    "spec_version": 1,
+    "name": "Invoice extraction",
+    "entry_node": "extract",
+    "nodes": {
+      "extract": {
+        "id": "extract",
+        "handler": "tpl_extract_fields",
+        "transitions": {},
+        "default_transition": "validate",
+        "requires_approval": false
+      },
+      "validate": {
+        "id": "validate",
+        "handler": "tpl_extract_validate",
+        "transitions": {
+          "valid": "finalize",
+          "invalid": "flag"
+        },
+        "default_transition": "flag",
+        "requires_approval": false
+      },
+      "finalize": {
+        "id": "finalize",
+        "handler": "tpl_extract_finalize",
+        "transitions": {},
+        "default_transition": null,
+        "requires_approval": false
+      },
+      "flag": {
+        "id": "flag",
+        "handler": "tpl_extract_flag",
+        "transitions": {},
+        "default_transition": null,
+        "requires_approval": false
+      }
+    },
+    "terminal_nodes": [
+      "finalize",
+      "flag"
+    ]
+  },
+  "sample_input": {
+    "text": "Invoice No: INV-1042\nVendor: Acme Supplies\nDate: 2026-03-14\nTotal: USD 1,250.50"
+  },
+  "fixture": {
+    "runs": [
+      {
+        "name": "complete invoice becomes a typed record",
+        "input": {
+          "text": "Invoice No: INV-1042\nVendor: Acme Supplies\nDate: 2026-03-14\nTotal: USD 1,250.50"
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "record.invoice_number": "INV-1042",
+          "record.total": 1250.5,
+          "record.currency": "USD",
+          "status": "extracted"
+        },
+        "expect_path": [
+          "extract",
+          "validate",
+          "finalize"
+        ]
+      },
+      {
+        "name": "missing fields are flagged, not guessed",
+        "input": {
+          "text": "Vendor: Acme Supplies"
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "status": "needs_review"
+        },
+        "expect_path": [
+          "extract",
+          "validate",
+          "flag"
+        ]
+      }
+    ]
+  }
+}

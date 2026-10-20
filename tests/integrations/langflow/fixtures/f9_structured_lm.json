@@ -1,0 +1,313 @@
+{
+ "name": "structured",
+ "description": "hand-written test fixture",
+ "is_component": false,
+ "data": {
+  "nodes": [
+   {
+    "id": "ChatInput-a1",
+    "type": "genericNode",
+    "position": {
+     "x": 0,
+     "y": 0
+    },
+    "data": {
+     "id": "ChatInput-a1",
+     "type": "ChatInput",
+     "node": {
+      "display_name": "Chat Input",
+      "template": {
+       "input_value": {
+        "_input_type": "MessageTextInput",
+        "type": "str",
+        "value": "",
+        "show": true,
+        "input_types": [
+         "Message"
+        ]
+       },
+       "code": {
+        "type": "code",
+        "value": "class Stock:\n    pass\n",
+        "_input_type": "CodeInput",
+        "required": true
+       }
+      },
+      "outputs": [
+       {
+        "name": "message"
+       }
+      ],
+      "metadata": {
+       "code_hash": "c7e78710a73b"
+      }
+     }
+    }
+   },
+   {
+    "id": "LM-m1",
+    "type": "genericNode",
+    "position": {
+     "x": 0,
+     "y": 0
+    },
+    "data": {
+     "id": "LM-m1",
+     "type": "LanguageModelComponent",
+     "node": {
+      "display_name": "Model",
+      "template": {
+       "model": {
+        "_input_type": "ModelInput",
+        "type": "model",
+        "value": [
+         {
+          "name": "claude-3-5-haiku",
+          "provider": "Anthropic"
+         }
+        ],
+        "show": true,
+        "input_types": [
+         "Message"
+        ]
+       },
+       "api_key": {
+        "_input_type": "SecretStrInput",
+        "type": "str",
+        "value": "ANTHROPIC_API_KEY",
+        "show": true,
+        "input_types": [
+         "Message"
+        ],
+        "load_from_db": true,
+        "password": true
+       },
+       "system_message": {
+        "_input_type": "MessageTextInput",
+        "type": "str",
+        "value": "Be concise.",
+        "show": true,
+        "input_types": [
+         "Message"
+        ]
+       },
+       "input_value": {
+        "_input_type": "MessageTextInput",
+        "type": "str",
+        "value": "",
+        "show": true,
+        "input_types": [
+         "Message"
+        ]
+       },
+       "code": {
+        "type": "code",
+        "value": "class Stock:\n    pass\n",
+        "_input_type": "CodeInput",
+        "required": true
+       }
+      },
+      "outputs": [
+       {
+        "name": "text_output"
+       },
+       {
+        "name": "model_output"
+       }
+      ],
+      "metadata": {
+       "code_hash": "c7e78710a73b"
+      }
+     }
+    }
+   },
+   {
+    "id": "StructuredOutput-s1",
+    "type": "genericNode",
+    "position": {
+     "x": 0,
+     "y": 0
+    },
+    "data": {
+     "id": "StructuredOutput-s1",
+     "type": "StructuredOutput",
+     "node": {
+      "display_name": "Extractor",
+      "template": {
+       "system_prompt": {
+        "_input_type": "MessageTextInput",
+        "type": "str",
+        "value": "Extract the person.",
+        "show": true,
+        "input_types": [
+         "Message"
+        ]
+       },
+       "input_value": {
+        "_input_type": "MessageTextInput",
+        "type": "str",
+        "value": "",
+        "show": true,
+        "input_types": [
+         "Message"
+        ]
+       },
+       "output_schema": {
+        "_input_type": "TableInput",
+        "type": "table",
+        "value": [
+         {
+          "name": "name",
+          "type": "str",
+          "description": "person name"
+         },
+         {
+          "name": "age",
+          "type": "int",
+          "description": "age"
+         }
+        ],
+        "show": true,
+        "input_types": [
+         "Message"
+        ]
+       },
+       "code": {
+        "type": "code",
+        "value": "class Stock:\n    pass\n",
+        "_input_type": "CodeInput",
+        "required": true
+       }
+      },
+      "outputs": [
+       {
+        "name": "structured_output"
+       }
+      ],
+      "metadata": {
+       "code_hash": "c7e78710a73b"
+      }
+     }
+    }
+   },
+   {
+    "id": "ChatOutput-z9",
+    "type": "genericNode",
+    "position": {
+     "x": 0,
+     "y": 0
+    },
+    "data": {
+     "id": "ChatOutput-z9",
+     "type": "ChatOutput",
+     "node": {
+      "display_name": "Chat Output",
+      "template": {
+       "input_value": {
+        "_input_type": "MessageTextInput",
+        "type": "str",
+        "value": "",
+        "show": true,
+        "input_types": [
+         "Message"
+        ]
+       },
+       "code": {
+        "type": "code",
+        "value": "class Stock:\n    pass\n",
+        "_input_type": "CodeInput",
+        "required": true
+       }
+      },
+      "outputs": [],
+      "metadata": {
+       "code_hash": "c7e78710a73b"
+      }
+     }
+    }
+   }
+  ],
+  "edges": [
+   {
+    "id": "reactflow__edge-ChatInput-a1-StructuredOutput-s1",
+    "source": "ChatInput-a1",
+    "target": "StructuredOutput-s1",
+    "sourceHandle": "{œdataTypeœ:œChatInputœ,œidœ:œChatInput-a1œ,œnameœ:œmessageœ,œoutput_typesœ:[œMessageœ]}",
+    "targetHandle": "{œfieldNameœ:œinput_valueœ,œidœ:œStructuredOutput-s1œ,œinputTypesœ:[œMessageœ],œtypeœ:œstrœ}",
+    "data": {
+     "sourceHandle": {
+      "dataType": "ChatInput",
+      "id": "ChatInput-a1",
+      "name": "message",
+      "output_types": [
+       "Message"
+      ]
+     },
+     "targetHandle": {
+      "fieldName": "input_value",
+      "id": "StructuredOutput-s1",
+      "inputTypes": [
+       "Message"
+      ],
+      "type": "str"
+     }
+    }
+   },
+   {
+    "id": "reactflow__edge-LM-m1-StructuredOutput-s1",
+    "source": "LM-m1",
+    "target": "StructuredOutput-s1",
+    "sourceHandle": "{œdataTypeœ:œLanguageModelComponentœ,œidœ:œLM-m1œ,œnameœ:œmodel_outputœ,œoutput_typesœ:[œMessageœ]}",
+    "targetHandle": "{œfieldNameœ:œmodelœ,œidœ:œStructuredOutput-s1œ,œinputTypesœ:[œLanguageModelœ],œtypeœ:œstrœ}",
+    "data": {
+     "sourceHandle": {
+      "dataType": "LanguageModelComponent",
+      "id": "LM-m1",
+      "name": "model_output",
+      "output_types": [
+       "Message"
+      ]
+     },
+     "targetHandle": {
+      "fieldName": "model",
+      "id": "StructuredOutput-s1",
+      "inputTypes": [
+       "LanguageModel"
+      ],
+      "type": "str"
+     }
+    }
+   },
+   {
+    "id": "reactflow__edge-StructuredOutput-s1-ChatOutput-z9",
+    "source": "StructuredOutput-s1",
+    "target": "ChatOutput-z9",
+    "sourceHandle": "{œdataTypeœ:œStructuredOutputœ,œidœ:œStructuredOutput-s1œ,œnameœ:œstructured_outputœ,œoutput_typesœ:[œMessageœ]}",
+    "targetHandle": "{œfieldNameœ:œinput_valueœ,œidœ:œChatOutput-z9œ,œinputTypesœ:[œMessageœ],œtypeœ:œstrœ}",
+    "data": {
+     "sourceHandle": {
+      "dataType": "StructuredOutput",
+      "id": "StructuredOutput-s1",
+      "name": "structured_output",
+      "output_types": [
+       "Message"
+      ]
+     },
+     "targetHandle": {
+      "fieldName": "input_value",
+      "id": "ChatOutput-z9",
+      "inputTypes": [
+       "Message"
+      ],
+      "type": "str"
+     }
+    }
+   }
+  ],
+  "viewport": {
+   "x": 0,
+   "y": 0,
+   "zoom": 1
+  }
+ }
+}

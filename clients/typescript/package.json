@@ -1,0 +1,26 @@
+{
+  "name": "@liceron/nexura-sdk",
+  "version": "0.4.0",
+  "description": "TypeScript HTTP client for the Nexura Service API",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {".": {"types": "./dist/index.d.ts", "import": "./dist/index.js"}},
+  "files": ["dist", "LICENSE"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepack": "npm run build",
+    "test": "npm run build && node --test tests/*.test.mjs"
+  },
+  "devDependencies": {"typescript": "^5.9.0"},
+  "keywords": [
+    "nexura",
+    "agentkit",
+    "ai",
+    "sdk",
+    "client"
+  ],
+  "author": "Liceron <info@liceron.in>",
+  "license": "MIT",
+  "repository": {"type": "git", "url": "https://github.com/Liceron/nexura"}
+}

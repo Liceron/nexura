@@ -1,0 +1,7 @@
+{
+  "type": "file_content",
+  "content": [
+    {"item": {"input": "Synthetic headline about a new phone", "ground_truth": "Technology"}, "sample": {"output_text": "Technology"}},
+    {"item": {"input": "Synthetic headline about a football final", "ground_truth": "Sports"}}
+  ]
+}

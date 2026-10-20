@@ -1,0 +1,435 @@
+{
+ "name": "tweakable",
+ "description": "hand-written test fixture",
+ "is_component": false,
+ "data": {
+  "nodes": [
+   {
+    "id": "ChatInput-a1",
+    "type": "genericNode",
+    "position": {
+     "x": 0,
+     "y": 0
+    },
+    "data": {
+     "id": "ChatInput-a1",
+     "type": "ChatInput",
+     "node": {
+      "display_name": "Chat Input",
+      "template": {
+       "input_value": {
+        "_input_type": "MessageTextInput",
+        "type": "str",
+        "value": "",
+        "show": true,
+        "input_types": [
+         "Message"
+        ]
+       },
+       "code": {
+        "type": "code",
+        "value": "class Stock:\n    pass\n",
+        "_input_type": "CodeInput",
+        "required": true
+       }
+      },
+      "outputs": [
+       {
+        "name": "message"
+       }
+      ],
+      "metadata": {
+       "code_hash": "c7e78710a73b"
+      }
+     }
+    }
+   },
+   {
+    "id": "Prompt-p1",
+    "type": "genericNode",
+    "position": {
+     "x": 0,
+     "y": 0
+    },
+    "data": {
+     "id": "Prompt-p1",
+     "type": "Prompt",
+     "node": {
+      "display_name": "Prompt",
+      "template": {
+       "template": {
+        "_input_type": "PromptInput",
+        "type": "prompt",
+        "value": "Q: {question} Tone: {tone}",
+        "show": true,
+        "input_types": [
+         "Message"
+        ]
+       },
+       "question": {
+        "_input_type": "MessageTextInput",
+        "type": "str",
+        "value": "",
+        "show": true,
+        "input_types": [
+         "Message"
+        ]
+       },
+       "tone": {
+        "_input_type": "MessageTextInput",
+        "type": "str",
+        "value": "",
+        "show": true,
+        "input_types": [
+         "Message"
+        ]
+       },
+       "code": {
+        "type": "code",
+        "value": "class Stock:\n    pass\n",
+        "_input_type": "CodeInput",
+        "required": true
+       }
+      },
+      "outputs": [
+       {
+        "name": "prompt"
+       }
+      ],
+      "metadata": {
+       "code_hash": "c7e78710a73b"
+      }
+     }
+    }
+   },
+   {
+    "id": "TextInput-t1",
+    "type": "genericNode",
+    "position": {
+     "x": 0,
+     "y": 0
+    },
+    "data": {
+     "id": "TextInput-t1",
+     "type": "TextInput",
+     "node": {
+      "display_name": "Tone",
+      "template": {
+       "input_value": {
+        "_input_type": "MessageTextInput",
+        "type": "str",
+        "value": "TONE_VAR",
+        "show": true,
+        "input_types": [
+         "Message"
+        ],
+        "load_from_db": true
+       },
+       "code": {
+        "type": "code",
+        "value": "class Stock:\n    pass\n",
+        "_input_type": "CodeInput",
+        "required": true
+       }
+      },
+      "outputs": [
+       {
+        "name": "text"
+       }
+      ],
+      "metadata": {
+       "code_hash": "c7e78710a73b"
+      }
+     }
+    }
+   },
+   {
+    "id": "SQL-q1",
+    "type": "genericNode",
+    "position": {
+     "x": 0,
+     "y": 0
+    },
+    "data": {
+     "id": "SQL-q1",
+     "type": "SQLComponent",
+     "node": {
+      "display_name": "SQL",
+      "template": {
+       "database_url": {
+        "_input_type": "MessageTextInput",
+        "type": "str",
+        "value": "sqlite://",
+        "show": true,
+        "input_types": [
+         "Message"
+        ]
+       },
+       "query": {
+        "_input_type": "MessageTextInput",
+        "type": "str",
+        "value": "select 1",
+        "show": true,
+        "input_types": [
+         "Message"
+        ]
+       },
+       "code": {
+        "type": "code",
+        "value": "class Stock:\n    pass\n",
+        "_input_type": "CodeInput",
+        "required": true
+       }
+      },
+      "outputs": [
+       {
+        "name": "component_as_tool"
+       }
+      ],
+      "metadata": {
+       "code_hash": "c7e78710a73b"
+      }
+     }
+    }
+   },
+   {
+    "id": "Agent-b2",
+    "type": "genericNode",
+    "position": {
+     "x": 0,
+     "y": 0
+    },
+    "data": {
+     "id": "Agent-b2",
+     "type": "Agent",
+     "node": {
+      "display_name": "Responder",
+      "template": {
+       "model": {
+        "_input_type": "ModelInput",
+        "type": "model",
+        "value": [
+         {
+          "name": "gpt-4o-mini",
+          "provider": "OpenAI"
+         }
+        ],
+        "show": true,
+        "input_types": [
+         "Message"
+        ]
+       },
+       "api_key": {
+        "_input_type": "SecretStrInput",
+        "type": "str",
+        "value": "OPENAI_API_KEY",
+        "show": true,
+        "input_types": [
+         "Message"
+        ],
+        "load_from_db": true,
+        "password": true
+       },
+       "system_prompt": {
+        "_input_type": "MessageTextInput",
+        "type": "str",
+        "value": "You are helpful.",
+        "show": true,
+        "input_types": [
+         "Message"
+        ]
+       },
+       "input_value": {
+        "_input_type": "MessageTextInput",
+        "type": "str",
+        "value": "",
+        "show": true,
+        "input_types": [
+         "Message"
+        ]
+       },
+       "tools": {
+        "_input_type": "HandleInput",
+        "type": "other",
+        "value": null,
+        "show": true,
+        "input_types": [
+         "Tool"
+        ]
+       },
+       "n_messages": {
+        "_input_type": "IntInput",
+        "type": "int",
+        "value": 100,
+        "show": true,
+        "input_types": [
+         "Message"
+        ]
+       },
+       "code": {
+        "type": "code",
+        "value": "class Stock:\n    pass\n",
+        "_input_type": "CodeInput",
+        "required": true
+       }
+      },
+      "outputs": [
+       {
+        "name": "response"
+       },
+       {
+        "name": "structured_response"
+       }
+      ],
+      "metadata": {
+       "code_hash": "c7e78710a73b"
+      }
+     }
+    }
+   },
+   {
+    "id": "ChatOutput-z9",
+    "type": "genericNode",
+    "position": {
+     "x": 0,
+     "y": 0
+    },
+    "data": {
+     "id": "ChatOutput-z9",
+     "type": "ChatOutput",
+     "node": {
+      "display_name": "Chat Output",
+      "template": {
+       "input_value": {
+        "_input_type": "MessageTextInput",
+        "type": "str",
+        "value": "",
+        "show": true,
+        "input_types": [
+         "Message"
+        ]
+       },
+       "code": {
+        "type": "code",
+        "value": "class Stock:\n    pass\n",
+        "_input_type": "CodeInput",
+        "required": true
+       }
+      },
+      "outputs": [],
+      "metadata": {
+       "code_hash": "c7e78710a73b"
+      }
+     }
+    }
+   }
+  ],
+  "edges": [
+   {
+    "id": "reactflow__edge-ChatInput-a1-Prompt-p1",
+    "source": "ChatInput-a1",
+    "target": "Prompt-p1",
+    "sourceHandle": "{œdataTypeœ:œChatInputœ,œidœ:œChatInput-a1œ,œnameœ:œmessageœ,œoutput_typesœ:[œMessageœ]}",
+    "targetHandle": "{œfieldNameœ:œquestionœ,œidœ:œPrompt-p1œ,œinputTypesœ:[œMessageœ],œtypeœ:œstrœ}",
+    "data": {
+     "sourceHandle": {
+      "dataType": "ChatInput",
+      "id": "ChatInput-a1",
+      "name": "message",
+      "output_types": [
+       "Message"
+      ]
+     },
+     "targetHandle": {
+      "fieldName": "question",
+      "id": "Prompt-p1",
+      "inputTypes": [
+       "Message"
+      ],
+      "type": "str"
+     }
+    }
+   },
+   {
+    "id": "reactflow__edge-TextInput-t1-Prompt-p1",
+    "source": "TextInput-t1",
+    "target": "Prompt-p1",
+    "sourceHandle": "{œdataTypeœ:œTextInputœ,œidœ:œTextInput-t1œ,œnameœ:œtextœ,œoutput_typesœ:[œMessageœ]}",
+    "targetHandle": "{œfieldNameœ:œtoneœ,œidœ:œPrompt-p1œ,œinputTypesœ:[œMessageœ],œtypeœ:œstrœ}",
+    "data": {
+     "sourceHandle": {
+      "dataType": "TextInput",
+      "id": "TextInput-t1",
+      "name": "text",
+      "output_types": [
+       "Message"
+      ]
+     },
+     "targetHandle": {
+      "fieldName": "tone",
+      "id": "Prompt-p1",
+      "inputTypes": [
+       "Message"
+      ],
+      "type": "str"
+     }
+    }
+   },
+   {
+    "id": "reactflow__edge-Prompt-p1-Agent-b2",
+    "source": "Prompt-p1",
+    "target": "Agent-b2",
+    "sourceHandle": "{œdataTypeœ:œPromptœ,œidœ:œPrompt-p1œ,œnameœ:œpromptœ,œoutput_typesœ:[œMessageœ]}",
+    "targetHandle": "{œfieldNameœ:œinput_valueœ,œidœ:œAgent-b2œ,œinputTypesœ:[œMessageœ],œtypeœ:œstrœ}",
+    "data": {
+     "sourceHandle": {
+      "dataType": "Prompt",
+      "id": "Prompt-p1",
+      "name": "prompt",
+      "output_types": [
+       "Message"
+      ]
+     },
+     "targetHandle": {
+      "fieldName": "input_value",
+      "id": "Agent-b2",
+      "inputTypes": [
+       "Message"
+      ],
+      "type": "str"
+     }
+    }
+   },
+   {
+    "id": "reactflow__edge-Agent-b2-ChatOutput-z9",
+    "source": "Agent-b2",
+    "target": "ChatOutput-z9",
+    "sourceHandle": "{œdataTypeœ:œAgentœ,œidœ:œAgent-b2œ,œnameœ:œresponseœ,œoutput_typesœ:[œMessageœ]}",
+    "targetHandle": "{œfieldNameœ:œinput_valueœ,œidœ:œChatOutput-z9œ,œinputTypesœ:[œMessageœ],œtypeœ:œstrœ}",
+    "data": {
+     "sourceHandle": {
+      "dataType": "Agent",
+      "id": "Agent-b2",
+      "name": "response",
+      "output_types": [
+       "Message"
+      ]
+     },
+     "targetHandle": {
+      "fieldName": "input_value",
+      "id": "ChatOutput-z9",
+      "inputTypes": [
+       "Message"
+      ],
+      "type": "str"
+     }
+    }
+   }
+  ],
+  "viewport": {
+   "x": 0,
+   "y": 0,
+   "zoom": 1
+  }
+ }
+}

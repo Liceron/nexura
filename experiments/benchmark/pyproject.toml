@@ -1,0 +1,29 @@
+[project]
+name = "experiments-benchmark"
+version = "0.1.0"
+description = "Reproducible benchmark harness comparing Nexura with Pydantic AI and LangGraph"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "nexura-agents",
+    "nexura-runtime",
+    "pydantic-ai==2.57.0",
+    "langgraph==1.2.16",
+    "langchain-core==1.6.12",
+    "langchain==1.4.6",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+]
+
+[project.urls]
+Source = "https://github.com/Liceron/nexura"
+Issues = "https://github.com/Liceron/nexura/issues"
+
+[tool.uv.sources]
+nexura-agents = { path = "../../packages/nexura-agents", editable = true }
+nexura-runtime = { path = "../..", editable = true }
+
+[tool.uv.workspace]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+asyncio_mode = "auto"

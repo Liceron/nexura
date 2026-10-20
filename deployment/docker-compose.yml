@@ -1,0 +1,34 @@
+# Single-user local setup, published on loopback only. This is the open-source edition's Docker
+# setup. Multi-user, authenticated self-hosting (and publishing) is part of the closed edition
+# (EDITIONS_PLAN step 4).
+#
+# The container listens on 0.0.0.0 inside the container only, so Studio requires a token:
+#   export NEXURA_STUDIO_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+#   docker compose -f deployment/docker-compose.yml up --build
+# then open http://127.0.0.1:8765/#token=<the token>. Keep the port published on 127.0.0.1.
+services:
+  nexura-service:
+    build:
+      context: ..
+      dockerfile: deployment/Dockerfile
+    container_name: nexura-service
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8765:8765"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - NEXURA_WORKSPACE_ID=default
+      - NEXURA_STUDIO_TOKEN=${NEXURA_STUDIO_TOKEN:?Set NEXURA_STUDIO_TOKEN (see the comment at the top of this file)}
+    volumes:
+      - nexura-data:/app/data
+      - nexura-artifacts:/app/artifacts
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/healthz').read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  nexura-data:
+  nexura-artifacts:

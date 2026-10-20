@@ -1,0 +1,57 @@
+[project]
+name = "nexura-studio"
+version = "0.4.0"
+description = "Nexura Studio: a local web page to build, run and approve nexura-runtime workflows, and its nexura-studio launcher."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+# The bundled Noto Sans Devanagari font is under the SIL Open Font License 1.1.
+license = "MIT AND OFL-1.1"
+license-files = ["LICENSE", "src/nexura_studio/static/fonts/OFL.txt"]
+authors = [{ name = "Liceron", email = "info@liceron.in" }]
+keywords = ["agents", "workflows", "studio", "approvals", "fastapi"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Framework :: FastAPI",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+# Same version as the runtime it serves. FastAPI and uvicorn have the same constraints as the
+# runtime's `studio` extra, which the REST service (`nexura-runtime serve`) still uses.
+dependencies = [
+    "nexura-runtime==0.4.0",
+    "nexura-agents==0.4.0",
+    "fastapi>=0.111.0,<1.0.0",
+    "uvicorn>=0.30.0,<1.0.0",
+    "pydantic>=2.7.0,<3.0.0",
+]
+
+[project.urls]
+Source = "https://github.com/Liceron/nexura"
+Issues = "https://github.com/Liceron/nexura/issues"
+
+[project.scripts]
+nexura-studio = "nexura_studio.cli:main"
+
+[project.entry-points."nexura.commands"]
+studio = "nexura_studio.commands:main"
+
+[tool.uv.sources]
+# Development inside the monorepo uses the workspace copies.
+nexura-runtime = { workspace = true }
+nexura-agents = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nexura_studio"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/src", "/README.md", "/LICENSE", "/pyproject.toml"]
+exclude = [
+    "**/__pycache__", "**/*.pyc",
+    "**/*blueprint*/**", "**/internal/**", "**/product/**", "**/.autopilot/**",
+]

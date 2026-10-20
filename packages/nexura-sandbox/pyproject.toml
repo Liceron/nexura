@@ -1,0 +1,48 @@
+[project]
+name = "nexura-sandbox"
+version = "0.4.0"
+description = "Stronger code-execution sandboxes for nexura-runtime: WebAssembly (WASI), bubblewrap namespaces with seccomp, and gVisor."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Liceron", email = "info@liceron.in" }]
+keywords = ["agents", "sandbox", "code-execution", "gvisor", "bubblewrap", "seccomp", "wasi", "webassembly"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+# Same version as the runtime it plugs into: the runtime's sandbox backend selection
+# (build_backend) imports these backends when this package is installed.
+dependencies = [
+    "nexura-runtime==0.4.0",
+]
+
+[project.urls]
+Source = "https://github.com/Liceron/nexura"
+Issues = "https://github.com/Liceron/nexura/issues"
+
+[project.optional-dependencies]
+# The WASI backend's WebAssembly engine (was the `nexura-runtime[sandbox-wasi]` extra). Without
+# it the WASI backend probes as unavailable ("wasmtime is missing").
+wasi = ["wasmtime==49.0.0"]
+
+[tool.uv.sources]
+# Development inside the monorepo uses the workspace copies.
+nexura-runtime = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nexura_sandbox"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/src", "/README.md", "/LICENSE", "/pyproject.toml"]
+exclude = ["**/__pycache__", "**/*.pyc"]

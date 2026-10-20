@@ -1,0 +1,160 @@
+[project]
+name = "nexura-runtime"
+version = "0.4.0"
+description = "Standalone, typed agent SDK foundation for Nexura"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = "MIT"
+license-files = ["LICENSE", "THIRD_PARTY.md"]
+authors = [{ name = "Liceron", email = "info@liceron.in" }]
+keywords = ["agents", "llm", "sdk", "tools", "ai"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "nexura-agents==0.4.0",
+    "httpx>=0.27.0,<1.0.0",
+    "pydantic>=2.7.0,<3.0.0",
+    "packaging>=24.0",
+    # Core since 2026-10-18: encryption for the secrets store, signed tokens and trigger keys.
+    "cryptography>=46.0.0",
+]
+
+[project.urls]
+Source = "https://github.com/Liceron/nexura"
+Issues = "https://github.com/Liceron/nexura/issues"
+
+[project.optional-dependencies]
+# The REST service (`nexura-runtime serve`, `worker`, `create_api_app`) that Studio web and the
+# TypeScript client call. The `nexura-studio` launcher is its own package (packages/nexura-studio).
+studio = [
+    "fastapi>=0.111.0,<1.0.0",
+    "uvicorn>=0.30.0,<1.0.0",
+]
+knowledge = [
+    "pypdf>=6.19.0",
+]
+# Kept so `pip install "nexura-runtime[secrets]"` still works; cryptography is now core.
+secrets = []
+sandbox = [
+    "pydantic-monty>=1.1.0,<2.0.0",
+]
+
+[project.scripts]
+nexura-runtime = "nexura_runtime.cli:main"
+
+[project.entry-points."nexura.commands"]
+serve = "nexura_runtime.cli.commands:serve"
+worker = "nexura_runtime.cli.commands:worker"
+workflow = "nexura_runtime.cli.commands:workflow"
+repro = "nexura_runtime.cli.commands:repro"
+redteam = "nexura_runtime.cli.commands:redteam"
+evals = "nexura_runtime.cli.commands:evals"
+sandbox = "nexura_runtime.cli.commands:sandbox"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv.workspace]
+members = [
+    "packages/nexura-agents",
+    "packages/nexura-connectors",
+    "packages/nexura-postgres",
+    "packages/nexura-qdrant",
+    "packages/nexura-sandbox",
+    "packages/nexura-studio",
+    "packages/nexura-vertex",
+]
+# The closed edition is its own uv project, never a member (EDITIONS_PLAN 2.1).
+exclude = ["enterprise"]
+
+[tool.uv.sources]
+nexura-agents = { workspace = true }
+nexura-connectors = { workspace = true }
+nexura-postgres = { workspace = true }
+nexura-qdrant = { workspace = true }
+nexura-sandbox = { workspace = true }
+nexura-studio = { workspace = true }
+nexura-vertex = { workspace = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nexura_runtime"]
+
+[tool.hatch.build.targets.sdist]
+# Internal planning, report and deployment folders are never shipped (EDITIONS_PLAN step 1).
+include = [
+    "/src", "/README.md", "/THIRD_PARTY.md", "/LICENSE", "/pyproject.toml",
+]
+exclude = [
+    "**/__pycache__", "**/*.pyc",
+    "**/*blueprint*/**", "**/internal/**", "**/product/**", "**/.autopilot/**",
+    "/deployment",
+    # The closed edition never ships in an open-source artifact.
+    "/enterprise",
+]
+
+[dependency-groups]
+dev = [
+    # Separate packages under packages/ that depend on this one (the 15 SaaS connectors, the
+    # PostgreSQL and Qdrant backends, the WASI/bubblewrap/gVisor sandbox backends with
+    # wasmtime, the Studio launcher, the Vertex AI provider); installed for development so the
+    # whole suite runs.
+    "nexura-connectors",
+    "nexura-postgres",
+    "nexura-qdrant",
+    "nexura-sandbox[wasi]",
+    "nexura-studio",
+    "nexura-vertex",
+    "pytest>=8.0.0,<9.0.0",
+    "pytest-asyncio>=0.24.0,<1.0.0",
+    "ruff>=0.5.0,<1.0.0",
+    "mypy>=1.10.0,<2.0.0",
+    "fastapi>=0.111.0,<1.0.0",
+    "uvicorn>=0.30.0,<1.0.0",
+    "asyncpg>=0.30.0,<1.0.0",
+    "sqlalchemy>=2.0.0,<3.0.0",
+    "qdrant-client>=1.12.0,<2.0.0",
+    "opentelemetry-sdk>=1.20,<2",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-v --strict-markers"
+# pytest defaults plus the closed edition, which runs its own suite.
+norecursedirs = [
+    "*.egg", ".*", "_darcs", "build", "CVS", "dist", "node_modules", "venv", "{arch}",
+    "enterprise",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+# The closed edition has its own lint configuration.
+extend-exclude = ["enterprise"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI dependency markers are evaluated once by design.
+extend-immutable-calls = ["fastapi.Query", "fastapi.Depends", "fastapi.Header", "fastapi.Body"]
+
+[tool.mypy]
+python_version = "3.12"
+# The closed edition is type-checked from its own project.
+exclude = ["^enterprise/"]
+strict = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_return_any = true
+show_error_codes = true

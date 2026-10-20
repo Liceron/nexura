@@ -1,0 +1,257 @@
+{
+ "name": "loop-agent",
+ "description": "hand-written V3 test fixture",
+ "is_component": false,
+ "data": {
+  "nodes": [
+   {
+    "id": "ChatInput-a1",
+    "type": "genericNode",
+    "position": {
+     "x": 0,
+     "y": 0
+    },
+    "data": {
+     "id": "ChatInput-a1",
+     "type": "ChatInput",
+     "node": {
+      "display_name": "Chat Input",
+      "template": {
+       "input_value": {
+        "_input_type": "MessageTextInput",
+        "type": "str",
+        "value": "",
+        "show": true
+       },
+       "code": {
+        "type": "code",
+        "value": "class Stock:\n    pass\n",
+        "_input_type": "CodeInput"
+       }
+      },
+      "outputs": [
+       {
+        "name": "message"
+       }
+      ]
+     }
+    }
+   },
+   {
+    "id": "Agent-b2",
+    "type": "genericNode",
+    "position": {
+     "x": 0,
+     "y": 0
+    },
+    "data": {
+     "id": "Agent-b2",
+     "type": "Agent",
+     "node": {
+      "display_name": "Agent",
+      "template": {
+       "system_prompt": {
+        "_input_type": "MessageTextInput",
+        "type": "str",
+        "value": "You are helpful.",
+        "show": true
+       },
+       "input_value": {
+        "_input_type": "MessageTextInput",
+        "type": "str",
+        "value": "",
+        "show": true
+       },
+       "code": {
+        "type": "code",
+        "value": "class Stock:\n    pass\n",
+        "_input_type": "CodeInput"
+       },
+       "model": {
+        "_input_type": "ModelInput",
+        "type": "model",
+        "value": [
+         {
+          "name": "gpt-4o-mini",
+          "provider": "OpenAI"
+         }
+        ]
+       }
+      },
+      "outputs": [
+       {
+        "name": "response"
+       }
+      ]
+     }
+    }
+   },
+   {
+    "id": "Loop-l1",
+    "type": "genericNode",
+    "position": {
+     "x": 0,
+     "y": 0
+    },
+    "data": {
+     "id": "Loop-l1",
+     "type": "LoopComponent",
+     "node": {
+      "display_name": "Loop",
+      "template": {
+       "code": {
+        "type": "code",
+        "value": "class Stock:\n    pass\n",
+        "_input_type": "CodeInput"
+       }
+      },
+      "outputs": [
+       {
+        "name": "item"
+       },
+       {
+        "name": "done"
+       }
+      ]
+     }
+    }
+   },
+   {
+    "id": "ChatOutput-z9",
+    "type": "genericNode",
+    "position": {
+     "x": 0,
+     "y": 0
+    },
+    "data": {
+     "id": "ChatOutput-z9",
+     "type": "ChatOutput",
+     "node": {
+      "display_name": "Chat Output",
+      "template": {
+       "input_value": {
+        "_input_type": "MessageTextInput",
+        "type": "str",
+        "value": "",
+        "show": true
+       },
+       "code": {
+        "type": "code",
+        "value": "class Stock:\n    pass\n",
+        "_input_type": "CodeInput"
+       }
+      },
+      "outputs": []
+     }
+    }
+   }
+  ],
+  "edges": [
+   {
+    "id": "reactflow__edge-ChatInput-a1message-Loop-l1data",
+    "source": "ChatInput-a1",
+    "target": "Loop-l1",
+    "sourceHandle": "{\u0153dataType\u0153:\u0153ChatInput\u0153,\u0153id\u0153:\u0153ChatInput-a1\u0153,\u0153name\u0153:\u0153message\u0153,\u0153output_types\u0153:[\u0153Message\u0153]}",
+    "targetHandle": "{\u0153fieldName\u0153:\u0153data\u0153,\u0153id\u0153:\u0153Loop-l1\u0153,\u0153inputTypes\u0153:[\u0153Message\u0153],\u0153type\u0153:\u0153str\u0153}",
+    "data": {
+     "sourceHandle": {
+      "dataType": "ChatInput",
+      "id": "ChatInput-a1",
+      "name": "message",
+      "output_types": [
+       "Message"
+      ]
+     },
+     "targetHandle": {
+      "fieldName": "data",
+      "id": "Loop-l1",
+      "inputTypes": [
+       "Message"
+      ],
+      "type": "str"
+     }
+    }
+   },
+   {
+    "id": "reactflow__edge-Loop-l1item-Agent-b2input_value",
+    "source": "Loop-l1",
+    "target": "Agent-b2",
+    "sourceHandle": "{\u0153dataType\u0153:\u0153LoopComponent\u0153,\u0153id\u0153:\u0153Loop-l1\u0153,\u0153name\u0153:\u0153item\u0153,\u0153output_types\u0153:[\u0153Message\u0153]}",
+    "targetHandle": "{\u0153fieldName\u0153:\u0153input_value\u0153,\u0153id\u0153:\u0153Agent-b2\u0153,\u0153inputTypes\u0153:[\u0153Message\u0153],\u0153type\u0153:\u0153str\u0153}",
+    "data": {
+     "sourceHandle": {
+      "dataType": "LoopComponent",
+      "id": "Loop-l1",
+      "name": "item",
+      "output_types": [
+       "Message"
+      ]
+     },
+     "targetHandle": {
+      "fieldName": "input_value",
+      "id": "Agent-b2",
+      "inputTypes": [
+       "Message"
+      ],
+      "type": "str"
+     }
+    }
+   },
+   {
+    "id": "reactflow__edge-Agent-b2response-Loop-l1item",
+    "source": "Agent-b2",
+    "target": "Loop-l1",
+    "sourceHandle": "{\u0153dataType\u0153:\u0153Agent\u0153,\u0153id\u0153:\u0153Agent-b2\u0153,\u0153name\u0153:\u0153response\u0153,\u0153output_types\u0153:[\u0153Message\u0153]}",
+    "targetHandle": "{\u0153fieldName\u0153:\u0153item\u0153,\u0153id\u0153:\u0153Loop-l1\u0153,\u0153inputTypes\u0153:[\u0153Message\u0153],\u0153type\u0153:\u0153str\u0153}",
+    "data": {
+     "sourceHandle": {
+      "dataType": "Agent",
+      "id": "Agent-b2",
+      "name": "response",
+      "output_types": [
+       "Message"
+      ]
+     },
+     "targetHandle": {
+      "fieldName": "item",
+      "id": "Loop-l1",
+      "inputTypes": [
+       "Message"
+      ],
+      "type": "str"
+     }
+    }
+   },
+   {
+    "id": "reactflow__edge-Loop-l1done-ChatOutput-z9input_value",
+    "source": "Loop-l1",
+    "target": "ChatOutput-z9",
+    "sourceHandle": "{\u0153dataType\u0153:\u0153LoopComponent\u0153,\u0153id\u0153:\u0153Loop-l1\u0153,\u0153name\u0153:\u0153done\u0153,\u0153output_types\u0153:[\u0153Message\u0153]}",
+    "targetHandle": "{\u0153fieldName\u0153:\u0153input_value\u0153,\u0153id\u0153:\u0153ChatOutput-z9\u0153,\u0153inputTypes\u0153:[\u0153Message\u0153],\u0153type\u0153:\u0153str\u0153}",
+    "data": {
+     "sourceHandle": {
+      "dataType": "LoopComponent",
+      "id": "Loop-l1",
+      "name": "done",
+      "output_types": [
+       "Message"
+      ]
+     },
+     "targetHandle": {
+      "fieldName": "input_value",
+      "id": "ChatOutput-z9",
+      "inputTypes": [
+       "Message"
+      ],
+      "type": "str"
+     }
+    }
+   }
+  ],
+  "viewport": {
+   "x": 0,
+   "y": 0,
+   "zoom": 1
+  }
+ }
+}

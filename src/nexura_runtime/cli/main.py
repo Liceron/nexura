@@ -1,0 +1,812 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Liceron
+"""Command-line interface for Nexura standalone SDK, export, and execution."""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import contextlib
+import json
+import sys
+from pathlib import Path
+from typing import Any
+
+from nexura_agents.errors import WorkflowValidationError
+
+from nexura_runtime.codegen import CodeImportError, python_to_workflow, workflow_to_python
+from nexura_runtime.service.api.export import WorkflowExporter
+from nexura_runtime.studio.builtin_modules import get_default_registry
+from nexura_runtime.workflow import ModuleRegistry, WorkflowEngine, WorkflowSpec
+
+
+def repro_command(args: argparse.Namespace) -> int:
+    """Export a stored complete recording, or replay a portable bundle offline."""
+    from nexura_agents.repro import ReproBundle, export_repro_bundle, replay_repro_bundle
+
+    async def execute() -> int:
+        if args.repro_action == "run":
+            result = await replay_repro_bundle(ReproBundle.load(args.bundle))
+            print(f"reproduced: {result.reproduced}")
+            if result.first_divergence:
+                print(result.first_divergence, file=sys.stderr)
+            return 0 if result.reproduced else 1
+        from nexura_runtime.storage.repository import SQLiteRepository
+
+        if not Path(args.db).is_file():
+            raise ValueError(f"Run database does not exist: {args.db}")
+        repository = SQLiteRepository(args.db)
+        try:
+            record = await repository.get_run(args.workspace, args.run_id)
+            if record is None:
+                raise ValueError(f"Run not found: {args.run_id}")
+            export_repro_bundle(record).save(args.output)
+        finally:
+            await repository.close()
+        print(f"Wrote repro bundle to: {args.output}")
+        return 0
+
+    try:
+        return asyncio.run(execute())
+    except (
+        OSError,
+        ValueError,
+        TypeError,
+        KeyError,
+        RecursionError,
+        AttributeError,
+        IndexError,
+    ) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+
+def export_command(args: argparse.Namespace) -> int:
+    """Export a workflow specification to a self-contained portable bundle."""
+    source_path = Path(args.source)
+    if not source_path.exists():
+        print(f"Error: Specification file '{source_path}' does not exist.", file=sys.stderr)
+        return 1
+
+    try:
+        spec_dict = json.loads(source_path.read_text(encoding="utf-8"))
+        spec = WorkflowSpec.from_dict(spec_dict)
+    except Exception as exc:
+        print(f"Error parsing workflow spec: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        registry = _registry_with(args.handlers)
+    except WorkflowValidationError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    if getattr(args, "format", "bundle") == "python":
+        return _export_python(spec, args)
+    if not args.out:
+        print("Error: --out is required for --format bundle.", file=sys.stderr)
+        return 1
+
+    dest_dir = Path(args.out).resolve()
+    exporter = WorkflowExporter()
+    try:
+        bundle = exporter.export_bundle(
+            spec, target_dir=dest_dir, workflow_id=args.id or spec.name, registry=registry
+        )
+    except (WorkflowValidationError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Successfully exported workflow '{bundle.workflow_id}' to: {bundle.target_dir}")
+    print(f"Canonical Spec Hash: {bundle.spec_hash}")
+    print(f"Generated Files: {', '.join(bundle.files)}")
+    return 0
+
+
+def _export_python(spec: WorkflowSpec, args: argparse.Namespace) -> int:
+    """Write the workflow as plain Python (to --out, or stdout when omitted)."""
+    try:
+        source = workflow_to_python(spec, registry_import=args.registry)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    if not args.out or args.out == "-":
+        sys.stdout.write(source)
+        return 0
+    dest = Path(args.out)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(source, encoding="utf-8")
+    print(f"Wrote Python workflow to: {dest}")
+    return 0
+
+
+def import_command(args: argparse.Namespace) -> int:
+    """Read a generated Python workflow back to a JSON spec. The file is parsed, never run."""
+    source_path = Path(args.source)
+    try:
+        source = source_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        print(f"Error: cannot read '{source_path}': {exc}", file=sys.stderr)
+        return 1
+    try:
+        spec = python_to_workflow(source)
+    except CodeImportError as exc:
+        print(f"Error: {source_path}: {exc}", file=sys.stderr)
+        return 1
+    text = spec.to_json() + "\n"
+    if not args.out or args.out == "-":
+        sys.stdout.write(text)
+    else:
+        dest = Path(args.out)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(text, encoding="utf-8")
+        print(f"Wrote workflow spec to: {dest}")
+    return 0
+
+
+def _registry_with(handler_sources: list[str] | None) -> ModuleRegistry:
+    """Built-in handlers plus trusted handler modules named on the command line."""
+    registry = get_default_registry()
+    for target in handler_sources or []:
+        registry.include_from(target)
+    return registry
+
+
+async def _run_workflow_async(
+    spec_path: Path, initial_state: dict[str, Any], handler_sources: list[str] | None = None
+) -> int:
+    try:
+        spec_dict = json.loads(spec_path.read_text(encoding="utf-8"))
+        spec = WorkflowSpec.from_dict(spec_dict)
+    except Exception as exc:
+        print(f"Error loading workflow spec: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        registry = _registry_with(handler_sources)
+    except WorkflowValidationError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    engine = WorkflowEngine(spec=spec, registry=registry)
+    result = await engine.run(initial_state)
+
+    print(f"Workflow Status: {result.status}")
+    print(f"Step Count: {result.step_count}")
+    print("Final State:")
+    print(json.dumps(result.state, indent=2))
+
+    return 0 if result.status == "completed" else 1
+
+
+def run_command(args: argparse.Namespace) -> int:
+    """Run an exported workflow bundle or spec file."""
+    target = Path(args.target)
+    spec_file = target / "workflow.json" if target.is_dir() else target
+
+    if not spec_file.exists():
+        print(f"Error: Workflow file '{spec_file}' not found.", file=sys.stderr)
+        return 1
+
+    initial_state = json.loads(args.state) if args.state else {}
+    return asyncio.run(_run_workflow_async(spec_file, initial_state, args.handlers))
+
+
+def serve_command(args: argparse.Namespace) -> int:
+    """Serve the local REST API that Studio web and the TypeScript client call."""
+    try:
+        import uvicorn
+
+        from nexura_runtime.service.api.app import create_api_app
+    except ImportError:
+        print(
+            "Error: 'nexura-runtime serve' needs the studio extra: "
+            'pip install "nexura-runtime[studio]"',
+            file=sys.stderr,
+        )
+        return 1
+
+    from nexura_runtime.service.api.chat_models import chat_models_from_environment
+
+    try:
+        chat_models = chat_models_from_environment(args.chat_model)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+
+    from nexura_runtime.service.auth import UnauthenticatedNetworkError
+
+    try:
+        app = create_api_app(
+            db_path=args.db,
+            chat_models=chat_models,
+            profile="local-owner",
+            run_trigger_worker=bool(args.worker),
+            trigger_poll_interval=args.poll_interval,
+            listen_host=args.host,
+            allow_unauthenticated_network=bool(
+                getattr(args, "insecure_allow_unauthenticated_network", False)
+            ),
+        )
+    except UnauthenticatedNetworkError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    # The token itself is not printed: Studio reads it from its own origin.
+    print(
+        "Per-session token: state-changing requests need the X-Nexura-Session header. Studio "
+        "reads it from GET /api/v1/local-session on its own origin; scripts on this machine "
+        "can read it there too, or set NEXURA_STUDIO_TOKEN before starting. It changes on "
+        "every start unless NEXURA_STUDIO_TOKEN is set."
+    )
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    return 0
+
+
+def worker_command(args: argparse.Namespace) -> int:
+    """Process schedule and webhook trigger jobs against a shared SQLite database."""
+    try:
+        from nexura_runtime.service.api.app import create_api_app
+        from nexura_runtime.service.triggers.worker import TriggerWorker
+    except ImportError:
+        print(
+            "Error: 'nexura-runtime worker' needs the studio extra: "
+            'pip install "nexura-runtime[studio]"',
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        registry = _registry_with(args.handlers)
+    except WorkflowValidationError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    app = create_api_app(db_path=args.db, profile="local-owner", registry=registry)
+    try:
+        worker = TriggerWorker(
+            app.state,
+            poll_interval=args.poll_interval,
+            lease_seconds=args.lease_seconds,
+            max_attempts=args.max_attempts,
+            max_concurrent_jobs=args.max_concurrent_jobs,
+        )
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    async def _main() -> None:
+        try:
+            if args.once:
+                for outcome in await worker.run_once():
+                    suffix = f" error={outcome.error}" if outcome.error else ""
+                    print(
+                        f"job={outcome.job_id} status={outcome.status} run={outcome.run_id}{suffix}"
+                    )
+            else:
+                stop = asyncio.Event()
+                print(f"Trigger worker {worker.worker_id} started on {args.db}", file=sys.stderr)
+                await worker.run_forever(stop)
+        finally:
+            await app.state.store.close()
+
+    with contextlib.suppress(KeyboardInterrupt):
+        asyncio.run(_main())
+    return 0
+
+
+def _load_agent(target: str) -> Any:
+    """Import ``package.module:attribute``; a zero-argument factory is called for the Agent."""
+    import importlib
+
+    module_name, sep, attr = target.partition(":")
+    if not sep or not module_name or not attr:
+        raise ValueError(f"'{target}' is not 'package.module:attribute'.")
+    if "" not in sys.path and str(Path.cwd()) not in sys.path:
+        sys.path.insert(0, str(Path.cwd()))
+    try:
+        module = importlib.import_module(module_name)
+    except ImportError as exc:
+        raise ValueError(f"cannot import module '{module_name}': {exc}") from exc
+    try:
+        found = getattr(module, attr)
+    except AttributeError:
+        raise ValueError(f"module '{module_name}' has no attribute '{attr}'.") from None
+    from nexura_agents import Agent
+
+    if not isinstance(found, Agent) and callable(found):
+        found = found()
+    if not isinstance(found, Agent):
+        raise ValueError(f"'{target}' is not an Agent (or a factory that returns one).")
+    return found
+
+
+def redteam_command(args: argparse.Namespace) -> int:
+    """Run the red-team pack against an agent; exit 1 when any case fails, 2 on usage errors."""
+    from nexura_agents import FakeModel
+    from nexura_agents.evals import evaluate
+    from nexura_agents.redteam import CANARY, redteam_ok, redteam_suite, scrub_canary
+
+    from nexura_runtime.evaluation.studio_engine import redact_report
+
+    try:
+        agent = _load_agent(args.agent)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:
+        print(f"Error: loading '{args.agent}' failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+    live = not isinstance(agent.model, FakeModel)
+    if live and not args.allow_live_model:
+        print(
+            f"Error: agent '{agent.name}' uses {type(agent.model).__name__}, not a fake model. "
+            "Red-team runs send many requests and cost money; pass --allow-live-model to proceed.",
+            file=sys.stderr,
+        )
+        return 2
+    if live:
+        print(
+            f"Warning: running against a live model ({type(agent.model).__name__}); "
+            "this makes paid requests.",
+            file=sys.stderr,
+        )
+    write_tools = list(
+        dict.fromkeys(args.write_tool or [t.name for t in agent.tools if t.requires_approval])
+    )
+    unknown = [name for name in write_tools if name not in agent.tools_by_name]
+    if unknown:
+        print(
+            f"Error: --write-tool {', '.join(unknown)}: not a tool of agent '{agent.name}' "
+            f"(its tools: {', '.join(agent.tools_by_name) or 'none'}). A name that never runs "
+            "would make every approval-bypass case pass.",
+            file=sys.stderr,
+        )
+        return 2
+    if not write_tools:
+        print(
+            "Warning: no write tools to attack (none passed with --write-tool and none of the "
+            "agent's tools requires approval), so no approval-bypass check runs. Name the "
+            "agent's write tools with --write-tool.",
+            file=sys.stderr,
+        )
+    dest = Path(args.out) if args.out else None
+    if dest is not None:
+        try:
+            if dest.is_dir():
+                raise IsADirectoryError(f"{dest} is a directory")
+            dest.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            print(f"Error: cannot write --out {dest}: {exc}", file=sys.stderr)
+            return 2
+    canary = args.canary or CANARY
+    try:
+        cases, scorers = redteam_suite(
+            write_tools,
+            canary=canary,
+            indirect_tool="read_document" if "read_document" in agent.tools_by_name else None,
+        )
+        report = evaluate(agent, cases, scorers)
+    except Exception as exc:
+        print(f"Error: red-team run failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+    ok = redteam_ok(report)
+    tools_label = ", ".join(write_tools) or "none"
+    print(f"Red-team report for agent '{agent.name}' (write tools: {tools_label})")
+    for result in report.results:
+        if result.status == "paused":
+            verdict, reason = "PASS", "paused for approval (nothing ran)"
+        elif result.status == "error":
+            verdict = "FAIL"
+            reason = f"error: {(result.error or {}).get('message', 'unknown')}"
+        else:
+            failed = [sc for sc in result.scores if not sc.passed]
+            verdict = "FAIL" if failed or not result.scores else "PASS"
+            reason = "; ".join(f"{sc.name}: {sc.reason}" for sc in failed)
+        reason = scrub_canary(reason, canary)  # console output often ends up in CI logs
+        print(f"  {verdict}  {result.name}" + (f"  - {reason}" if reason else ""))
+    bad = sum(
+        1 for r in report.results if r.status == "error" or any(not sc.passed for sc in r.scores)
+    )
+    total = len(report.results)
+    print(f"{'OK' if ok else 'FAILED'}: {total - bad} of {total} cases safe")
+    if dest is not None:
+        payload = {
+            "ok": ok,
+            "agent": agent.name,
+            "live_model": live,
+            "write_tools": write_tools,
+            # Secrets and every form of the canary are removed: the file may become a CI
+            # artifact, and a leaked canary is what the report records, not what it keeps.
+            "report": scrub_canary(redact_report(report), canary),
+        }
+        try:
+            dest.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        except OSError as exc:
+            print(f"Error: cannot write --out {dest}: {exc}", file=sys.stderr)
+            return 2
+        print(f"Wrote JSON report to: {dest}")
+    return 0 if ok else 1
+
+
+#: Environment variable the ``evals import-openai --url`` upload reads its API key from.
+API_KEY_ENV = "NEXURA_API_KEY"
+
+
+def _http_client(base_url: str, headers: dict[str, str]) -> Any:
+    """The HTTP client for ``--url`` uploads (tests swap in an in-process client)."""
+    import httpx
+
+    return httpx.Client(base_url=base_url, headers=headers, timeout=30.0)
+
+
+def _upload_target_error(url: str, has_key: bool) -> str | None:
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return f"--url must be an http(s) URL of a Nexura service, got {url!r}."
+    loopback = parts.hostname in ("localhost", "127.0.0.1", "::1")
+    if has_key and parts.scheme == "http" and not loopback:
+        return (
+            "refusing to send the API key over plain http to a non-loopback host; "
+            "use https (or a loopback URL)."
+        )
+    return None
+
+
+def evals_import_openai_command(args: argparse.Namespace) -> int:
+    """Convert an OpenAI Evals JSONL export to a Studio dataset; optionally upload it.
+
+    Exit 0 on success, 1 when the file cannot be converted (line errors are printed), 2 on
+    usage, file or upload errors. Nothing touches the network without ``--url``.
+    """
+    import os
+
+    from nexura_runtime.evaluation.openai_import import (
+        OpenAIImportError,
+        convert_openai_evals,
+    )
+
+    source = Path(args.file)
+    try:
+        # utf-8-sig: files saved by Windows editors and spreadsheets start with a BOM.
+        text = source.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError) as exc:
+        print(f"Error: cannot read {source}: {exc}", file=sys.stderr)
+        return 2
+    criteria: Any = None
+    if args.criteria:
+        try:
+            criteria = json.loads(Path(args.criteria).read_text(encoding="utf-8-sig"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            print(f"Error: cannot read --criteria {args.criteria}: {exc}", file=sys.stderr)
+            return 2
+        except RecursionError:
+            print(f"Error: --criteria {args.criteria} is nested too deeply", file=sys.stderr)
+            return 2
+    api_key = os.environ.get(API_KEY_ENV, "").strip()
+    if args.url:
+        problem = _upload_target_error(args.url, bool(api_key))
+        if problem:
+            print(f"Error: {problem}", file=sys.stderr)
+            return 2
+    try:
+        result = convert_openai_evals(
+            text,
+            args.dataset_id,
+            input_field=args.input_field,
+            expected_field=args.expected_field,
+            name_field=args.name_field,
+            testing_criteria=criteria,
+            name=args.name,
+            skip_invalid=args.skip_invalid,
+        )
+    except OpenAIImportError as exc:
+        print(f"Error: {exc.message} ({exc.code})", file=sys.stderr)
+        for fe in exc.field_errors:
+            print(f"  {fe.get('field', '')}: {fe.get('error', '')}", file=sys.stderr)
+        return 1
+    report = result.report()
+    document = json.dumps(result.dataset, indent=2, ensure_ascii=False) + "\n"
+    if args.out:
+        try:
+            Path(args.out).write_text(document, encoding="utf-8")
+        except (OSError, UnicodeEncodeError) as exc:
+            print(f"Error: cannot write --out {args.out}: {exc}", file=sys.stderr)
+            return 2
+    elif not args.url:
+        sys.stdout.write(document)
+    if args.report:
+        try:
+            Path(args.report).write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        except OSError as exc:
+            print(f"Error: cannot write --report {args.report}: {exc}", file=sys.stderr)
+            return 2
+    print(
+        f"Converted {report['cases']} item(s) into dataset '{args.dataset_id}' "
+        f"(input: {report['input_field']}, expected: {report['expected_field'] or 'none'}).",
+        file=sys.stderr,
+    )
+    for spec in result.scorers:
+        print(f"  scorer: {json.dumps(spec)}", file=sys.stderr)
+    for item in result.unmapped_criteria:
+        print(f"  not mapped: {item['name'] or item['type']}: {item['reason']}", file=sys.stderr)
+    for skipped in result.skipped_lines:
+        print(f"  skipped line {skipped['line']}: {skipped['error']}", file=sys.stderr)
+    for warning in result.warnings:
+        print(f"  note: {warning}", file=sys.stderr)
+    if result.redactions:
+        print(f"  note: {result.redactions} secret-looking value(s) redacted", file=sys.stderr)
+    if args.url:
+        from urllib.parse import quote
+
+        headers = {"Accept": "application/json"}
+        if api_key:
+            headers["X-API-Key"] = api_key
+        if args.workspace:
+            headers["X-Workspace-Id"] = args.workspace
+        path = f"/api/v1/evaluations/studio/datasets/{quote(args.dataset_id, safe='')}"
+        try:
+            with _http_client(args.url.rstrip("/"), headers) as client:
+                response = client.put(path, json=result.dataset)
+        except Exception as exc:
+            print(
+                f"Error: upload to {args.url} failed: {type(exc).__name__}: {exc}", file=sys.stderr
+            )
+            return 2
+        if response.status_code >= 400:
+            try:
+                detail = response.json().get("detail", response.text)
+            except ValueError:
+                detail = response.text
+            print(
+                f"Error: the service refused the dataset (HTTP {response.status_code}): "
+                f"{json.dumps(detail)[:2000]}",
+                file=sys.stderr,
+            )
+            return 2
+        saved = response.json()
+        print(
+            f"Saved dataset '{saved.get('dataset_id')}' revision {saved.get('revision')} "
+            f"at {args.url}.",
+            file=sys.stderr,
+        )
+    return 0
+
+
+HANDLERS_HELP = (
+    "Trusted handler source 'package.module:attribute' (a ModuleRegistry or a function "
+    "that registers handlers); repeatable"
+)
+
+
+def sandbox_install_runtime_command(args: argparse.Namespace) -> int:
+    """Install only the operator-supplied pinned WASI archive; no network access."""
+    from subprocess import SubprocessError
+
+    from nexura_runtime.modules.optional_packages import (
+        SANDBOX_PACKAGE,
+        find_package,
+        package_missing_message,
+    )
+
+    if find_package(SANDBOX_PACKAGE) is None:
+        message = package_missing_message("The WASI sandbox backend", SANDBOX_PACKAGE)
+        print(f"Error: {message}", file=sys.stderr)
+        return 1
+    from nexura_sandbox.wasi_runtime import RUNTIME_URL, install_runtime, runtime_path
+
+    if not args.from_file:
+        print(
+            f"Supply --from-file ZIP (operator download: {RUNTIME_URL}); no download is performed.",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        installed = install_runtime(Path(args.from_file), runtime_path(args.runtime_dir))
+    except (OSError, ValueError, SubprocessError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    print(f"Installed pinned CPython WASI runtime: {installed}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="nexura-runtime",
+        description="Nexura AgentKit standalone developer and export CLI.",
+    )
+    subparsers = parser.add_subparsers(dest="subcommand", required=True)
+
+    sandbox = subparsers.add_parser("sandbox", help="Manage operator-owned sandbox runtimes")
+    sandbox_subs = sandbox.add_subparsers(dest="sandbox_action", required=True)
+    install = sandbox_subs.add_parser("install-runtime", help="Install a pinned offline runtime")
+    install.add_argument("backend", choices=["wasi"])
+    install.add_argument("--from-file", metavar="ZIP")
+    install.add_argument("--runtime-dir", help="Absolute operator-owned destination directory")
+    install.set_defaults(func=sandbox_install_runtime_command)
+
+    # workflow subcommand group
+    repro = subparsers.add_parser("repro", help="Portable offline failure reproduction")
+    repro_subs = repro.add_subparsers(dest="repro_action", required=True)
+    repro_export = repro_subs.add_parser("export", help="Export a recorded stored run")
+    repro_export.add_argument("run_id")
+    repro_export.add_argument("-o", "--output", required=True)
+    repro_export.add_argument("--db", default="./nexura_service.sqlite3")
+    repro_export.add_argument("--workspace", default="default")
+    repro_export.set_defaults(func=repro_command)
+    repro_run = repro_subs.add_parser("run", help="Replay a bundle with side effects blocked")
+    repro_run.add_argument("bundle")
+    repro_run.set_defaults(func=repro_command)
+
+    wf_parser = subparsers.add_parser("workflow", help="Workflow export and local execution")
+    wf_subs = wf_parser.add_subparsers(dest="wf_action", required=True)
+
+    # workflow export
+    export_p = wf_subs.add_parser("export", help="Export workflow to standalone bundle")
+    export_p.add_argument("source", help="Path to workflow specification JSON file")
+    export_p.add_argument(
+        "--out",
+        "-o",
+        help="Destination directory for the bundle (or the .py file for --format python)",
+    )
+    export_p.add_argument(
+        "--format",
+        choices=("bundle", "python"),
+        default="bundle",
+        help="bundle: runnable directory (default); python: readable Python source",
+    )
+    export_p.add_argument(
+        "--registry",
+        metavar="MODULE:ATTR",
+        help="With --format python: registry the generated __main__ block imports",
+    )
+    export_p.add_argument("--id", help="Optional workflow identifier override")
+    export_p.add_argument("--handlers", action="append", metavar="MODULE:ATTR", help=HANDLERS_HELP)
+    export_p.set_defaults(func=export_command)
+
+    # workflow import
+    import_p = wf_subs.add_parser(
+        "import", help="Read a Python workflow file back to a JSON spec (never executes it)"
+    )
+    import_p.add_argument("source", help="Path to a .py file written by 'export --format python'")
+    import_p.add_argument("--out", "-o", help="Write the JSON spec here (default: stdout)")
+    import_p.set_defaults(func=import_command)
+
+    # workflow run
+    run_p = wf_subs.add_parser("run", help="Run a workflow locally from spec or bundle")
+    run_p.add_argument("target", help="Path to bundle directory or workflow.json")
+    run_p.add_argument("--state", "-s", help="JSON initial state string")
+    run_p.add_argument("--handlers", action="append", metavar="MODULE:ATTR", help=HANDLERS_HELP)
+    run_p.set_defaults(func=run_command)
+
+    # serve: local single-owner REST API (default port matches the studio-web dev proxy)
+    serve_p = subparsers.add_parser("serve", help="Serve the local REST API for Studio web")
+    serve_p.add_argument("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")
+    serve_p.add_argument("--port", type=int, default=8765, help="Port (default: 8765)")
+    serve_p.add_argument("--db", default="./nexura_service.sqlite3", help="SQLite database path")
+    serve_p.add_argument(
+        "--worker", action="store_true", help="Also run the trigger worker (schedules, webhooks)"
+    )
+    serve_p.add_argument(
+        "--poll-interval", type=float, default=1.0, help="Worker poll interval in seconds"
+    )
+    serve_p.add_argument(
+        "--chat-model",
+        action="append",
+        default=[],
+        metavar="NAME=PROVIDER:MODEL",
+        help=(
+            "Allow a chat model in the playground (repeatable), e.g. "
+            "gem=gemini:gemini-2.5-flash. Keys come from the server environment. "
+            "Also NEXURA_CHAT_MODELS=name=provider:model,... (flags win)."
+        ),
+    )
+    serve_p.add_argument(
+        "--insecure-allow-unauthenticated-network",
+        action="store_true",
+        help=(
+            "UNSAFE: allow a non-loopback --host without authentication "
+            "(the local-owner profile has full authority). Throwaway development only."
+        ),
+    )
+    serve_p.set_defaults(func=serve_command)
+
+    # worker: standalone trigger worker sharing the serve database
+    worker_p = subparsers.add_parser(
+        "worker", help="Run scheduled and webhook trigger jobs against a SQLite database"
+    )
+    worker_p.add_argument("--db", default="./nexura_service.sqlite3", help="SQLite database path")
+    worker_p.add_argument(
+        "--poll-interval", type=float, default=1.0, help="Poll interval in seconds"
+    )
+    worker_p.add_argument(
+        "--lease-seconds",
+        type=float,
+        default=300.0,
+        help="Job claim lease in seconds; renewed every third of it while a run executes",
+    )
+    worker_p.add_argument(
+        "--max-attempts",
+        type=int,
+        default=3,
+        help="Claims per job before a repeatedly expired lease fails it",
+    )
+    worker_p.add_argument(
+        "--max-concurrent-jobs", type=int, default=4, help="Jobs this worker runs at once"
+    )
+    worker_p.add_argument("--once", action="store_true", help="Process due jobs once and exit")
+    worker_p.add_argument("--handlers", action="append", metavar="MODULE:ATTR", help=HANDLERS_HELP)
+    worker_p.set_defaults(func=worker_command)
+
+    # redteam: attack-case pack against an agent (offline fake model by default)
+    redteam_p = subparsers.add_parser(
+        "redteam", help="Run the red-team pack (prompt injection, approval bypass, canary leaks)"
+    )
+    redteam_p.add_argument("agent", help="Agent to attack: 'package.module:agent' (or a factory)")
+    redteam_p.add_argument("--canary", help="Secret the agent holds; the leak cases look for it")
+    redteam_p.add_argument(
+        "--write-tool",
+        action="append",
+        metavar="NAME",
+        help="Write tool to try to trigger without approval (repeatable; default: the agent's "
+        "tools that require approval)",
+    )
+    redteam_p.add_argument("--out", "-o", help="Write the JSON report here")
+    redteam_p.add_argument(
+        "--allow-live-model",
+        action="store_true",
+        help="Allow a non-fake model (sends many paid requests); refused without this flag",
+    )
+    redteam_p.set_defaults(func=redteam_command)
+
+    # evals: dataset tools (OpenAI Evals import)
+    evals_p = subparsers.add_parser("evals", help="Studio eval dataset tools")
+    evals_subs = evals_p.add_subparsers(dest="evals_action", required=True)
+    oai_p = evals_subs.add_parser(
+        "import-openai",
+        help="Convert an OpenAI Evals JSONL export into a Studio eval dataset (offline)",
+    )
+    oai_p.add_argument("file", help='JSONL of eval items ({"item": {...}} per line)')
+    oai_p.add_argument("--dataset-id", required=True, help="Dataset id ([A-Za-z0-9_.-], 1-80)")
+    oai_p.add_argument("--input-field", help="Item field holding the input (default: detected)")
+    oai_p.add_argument(
+        "--expected-field",
+        help="Item field holding the expected output (default: from --criteria or detected)",
+    )
+    oai_p.add_argument("--name-field", help="Item field to use as the case name (unique)")
+    oai_p.add_argument(
+        "--criteria",
+        metavar="FILE",
+        help="JSON of the eval (with testing_criteria) or the criteria list, to map scorers",
+    )
+    oai_p.add_argument("--name", help="Dataset display name (default: the dataset id)")
+    oai_p.add_argument(
+        "--skip-invalid",
+        action="store_true",
+        help="Skip lines that cannot be converted (they are listed) instead of failing",
+    )
+    oai_p.add_argument("--out", "-o", help="Write the dataset JSON here (default: stdout)")
+    oai_p.add_argument("--report", help="Write the conversion report JSON here")
+    oai_p.add_argument(
+        "--url",
+        help=f"Also PUT the dataset to a running service at this base URL (API key from "
+        f"${API_KEY_ENV})",
+    )
+    oai_p.add_argument("--workspace", help="Workspace id header for --url (X-Workspace-Id)")
+    oai_p.set_defaults(func=evals_import_openai_command)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    func = getattr(args, "func", None)
+    if func is not None:
+        return int(func(args))
+    parser.print_help()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
