@@ -34,11 +34,14 @@ interface ModalProps {
   maxWidth?: number;
   variant?: 'dialog' | 'drawer';
   footer?: React.ReactNode;
+  initialFocus?: 'title';
+  className?: string;
+  closeDisabled?: boolean;
   /** Used only when the opener disappears, for example after deleting an edited node. */
   returnFocusTo?: () => HTMLElement | null;
 }
 
-export function Modal({ open, onClose, title, children, maxWidth, variant = 'dialog', footer, returnFocusTo }: ModalProps) {
+export function Modal({ open, onClose, title, children, maxWidth, variant = 'dialog', footer, returnFocusTo, initialFocus, className = '', closeDisabled = false }: ModalProps) {
   const t = useT();
   const dialogRef = useRef<HTMLDivElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
@@ -65,13 +68,14 @@ export function Modal({ open, onClose, title, children, maxWidth, variant = 'dia
     modalStack.push(overlay);
     syncModalBackground();
     const focusableElements = () => Array.from(dialog.querySelectorAll<HTMLElement>(
-      'a[href], button, input, select, textarea, [tabindex]'
+      'a[href], button, input, select, textarea, summary, [tabindex]'
     )).filter((element) => element.tabIndex >= 0 && !element.matches(':disabled') &&
       !element.closest('[hidden], [inert]') && element.getClientRects().length > 0 &&
       getComputedStyle(element).visibility !== 'hidden');
 
     const elements = focusableElements();
-    (elements.find((element) => element.matches('[autofocus], [data-autofocus]')) ??
+    if (initialFocus === 'title') dialog.querySelector<HTMLElement>('h2')?.focus();
+    if (initialFocus !== 'title') (elements.find((element) => element.matches('[autofocus], [data-autofocus]')) ??
       elements.find((element) => element === document.activeElement && bodyRef.current?.contains(element)) ??
       elements.find((element) => bodyRef.current?.contains(element)) ?? elements[0] ?? dialog).focus();
 
@@ -85,7 +89,7 @@ export function Modal({ open, onClose, title, children, maxWidth, variant = 'dia
         const elements = focusableElements();
         const first = elements[0] ?? dialog;
         const last = elements[elements.length - 1] ?? dialog;
-        if (!dialog?.contains(document.activeElement) || document.activeElement === dialog ||
+        if (!dialog?.contains(document.activeElement) || document.activeElement === dialog || document.activeElement === dialog.querySelector('h2') ||
           (event.shiftKey ? document.activeElement === first : document.activeElement === last)) {
           event.preventDefault();
           (event.shiftKey ? last : first)?.focus();
@@ -111,7 +115,7 @@ export function Modal({ open, onClose, title, children, maxWidth, variant = 'dia
   return createPortal(
     <div
       ref={overlayRef}
-      className={`studio-modal-overlay studio-modal-overlay--${variant}`}
+      className={`studio-modal-overlay studio-modal-overlay--${variant} ${className}`}
       role="dialog"
       aria-modal="true"
       aria-labelledby={titleId}
@@ -130,13 +134,14 @@ export function Modal({ open, onClose, title, children, maxWidth, variant = 'dia
         <div
           className="studio-modal-header"
         >
-          <h2 id={titleId} style={{ fontSize: 'var(--type-section)', lineHeight: 'var(--leading-section)', fontWeight: 600 }}>
+          <h2 id={titleId} tabIndex={initialFocus === 'title' ? -1 : undefined} style={{ fontSize: 'var(--type-section)', lineHeight: 'var(--leading-section)', fontWeight: 600 }}>
             {title}
           </h2>
           <button
             onClick={onClose}
             aria-label={t('ui.closeDialog')}
             type="button"
+            disabled={closeDisabled}
             className="studio-icon-button"
           >
             <Icon name="close" />

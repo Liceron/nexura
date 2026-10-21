@@ -16,9 +16,15 @@ from typing import Any, Literal, TypeVar
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi import status as http_status
 from fastapi.responses import JSONResponse, StreamingResponse
+from nexura_agents.contracts.execution import (
+    DefinitionMismatchError,
+    ExecutionId,
+    LeaseLostError,
+)
 from nexura_agents.errors import (
     ApprovalAlreadyClaimedError,
     ApprovalError,
+    WorkflowConflictError,
     WorkflowError,
     WorkflowSpecMismatchError,
     WorkflowTerminalError,
@@ -35,6 +41,7 @@ from nexura_runtime.service.api.models import (
     ForkRunRequest,
     PaginatedResponse,
     ProvideInputRequest,
+    RecoverRunRequest,
     RunResponse,
     StartRunRequest,
 )
@@ -52,6 +59,18 @@ from nexura_runtime.service.repro_capture import (
     load_captured_bundle,
     settle_failed_run_capture,
 )
+from nexura_runtime.service.run_liveness import (
+    LIVE,
+    SHUTDOWN_ERROR,
+    SHUTDOWN_REASON,
+    journal_workspace,
+    reconcile_quietly,
+    run_journal,
+    run_liveness,
+    show_live,
+    workflow_lease_ttl,
+)
+from nexura_runtime.service.run_liveness import journal_decides as _journal_decides
 from nexura_runtime.service.workspaces.repository import UNOWNED_WORKSPACE, WorkspaceRepository
 from nexura_runtime.service.workspaces.scoping import ResourceScopeEnforcer
 from nexura_runtime.studio.store import StudioStore
@@ -62,6 +81,7 @@ from nexura_runtime.workflow import (
     WorkflowEngine,
     WorkflowRunResult,
     WorkflowSpec,
+    _LeaseBusyError,
     checkpoint_to_dict,
 )
 
@@ -233,6 +253,7 @@ _REDACTED_RUN_FIELDS = (
     "pending_input",
     "forked_from",
     "error",
+    "pending_effect",
 )
 
 
@@ -304,7 +325,26 @@ async def _record_event(
     return await store.record_run_event(run_id, event_type, node_id=node_id, data=safe)
 
 
+def _lost_lease(exc: BaseException) -> bool:
+    """The run's lease went to another worker (A6): that worker now owns its status."""
+    seen: BaseException | None = exc
+    for _ in range(5):
+        if seen is None:
+            return False
+        if isinstance(seen, (LeaseLostError, WorkflowConflictError)):
+            return True
+        seen = seen.__cause__ or seen.__context__
+    return False
+
+
 async def _record_execution_failure(store: StudioStore, run_id: str, exc: Exception) -> None:
+    if _lost_lease(exc):
+        # A stale owner (its lease expired and another process recovered the run) must not
+        # mark the run failed: the recovering process records the outcome (A6 S9).
+        await _record_event(
+            store, run_id, "RUN_LEASE_LOST", data={"error": str(redact_run_content(str(exc)))}
+        )
+        return
     checkpoint = await store.checkpoint_store.get(run_id)
     snapshot = await store.get_run(run_id)
     if snapshot is None or snapshot.get("status") == "cancelled":
@@ -355,6 +395,20 @@ async def _persist_result(store: StudioStore, run_id: str, res: WorkflowRunResul
             },
         )
         await store.update_run(status="waiting_for_input", pending_input=pending_input, **common)
+    elif res.status == "paused" and res.pending_effect is not None:
+        # A6: an effect's outcome is unknown after a crash; a person resolves it
+        # (POST /runs/{id}/effects/{effect_id}/resolve), then POST /runs/{id}/recover.
+        await _record_event(
+            store,
+            run_id,
+            "RUN_PAUSED_EFFECT_UNKNOWN",
+            node_id=res.current_node_id,
+            data={
+                "pause_reason": res.pause_reason,
+                "effect_id": res.pending_effect.get("effect_id"),
+            },
+        )
+        await store.update_run(status="paused", pending_effect=res.pending_effect, **common)
     elif res.status == "paused":
         app_id = res.pending_approval.approval_id if res.pending_approval else None
         await _record_event(
@@ -458,6 +512,11 @@ class RunEventRegistry(ModuleRegistry):
     def describe_module(self, module_id: str, version: str | None = None) -> dict[str, Any] | None:
         return self._inner.describe_module(module_id, version)
 
+    def declared_effect(self, name: str) -> Any:
+        # The engine journals a node by the effect class its handler was registered with
+        # (``register(..., effect=...)``); without this every handler was non_idempotent.
+        return self._inner.declared_effect(name)
+
     def get(self, name: str) -> Any:
         obj = self._inner.get(name)
         from nexura_agents.contracts.base import BaseModule
@@ -548,12 +607,14 @@ async def list_runs(
             r_id = row.get("run_id", "")
             if ws_repo.get_resource_workspace("run", r_id) is None:
                 ws_repo.record_resource_ownership("run", r_id, "default", principal.principal_id)  # type: ignore[union-attr]
+    # A6 S9: journaled runs nobody executes any more become interrupted before filtering.
+    live_again = await reconcile_quietly(request.app.state, workspace_id=caller_ws)
     # The workspace filter runs in SQL before LIMIT/OFFSET so other tenants' runs can
     # neither hide nor delay this workspace's runs.
     owned_ids = ws_repo.list_workspace_resource_ids("run", caller_ws)
     total = await store.count_runs(workflow_id=workflow_id, run_ids=owned_ids, status=status)
     page_items = [
-        _redact_events(r, request.app.state)
+        _redact_events(show_live(r, live_again), request.app.state)
         for r in await store.list_runs(
             workflow_id=workflow_id,
             limit=limit,
@@ -729,6 +790,7 @@ async def start_workflow_run(
         spec=spec,
         initial_state=initial_state,
         started_by=_started_by(principal_id, api_key_id),
+        journal_workspace=journal_workspace(app_state, workspace_id),
     )
 
     # Record durable workspace ownership for the run
@@ -773,6 +835,7 @@ async def start_workflow_run(
         budget=run_budget,
         event_sink=event_sink,
         approval_required_handlers=approval_handlers,
+        lease_ttl=workflow_lease_ttl(app_state),
     )
 
     async def _execute_job() -> None:
@@ -802,6 +865,17 @@ async def start_workflow_run(
                 "cancelled",
                 "interrupted",
             ):
+                raise
+            if await _journal_decides(app_state, run_id):
+                # A6 S9: the run lease decides. This process released it when the task was
+                # cancelled, so the run is interrupted unless another worker holds it now.
+                await reconcile_quietly(
+                    app_state,
+                    run_ids=[run_id],
+                    error=SHUTDOWN_ERROR,
+                    reason=SHUTDOWN_REASON,
+                    stopped_here=True,
+                )
                 raise
             # Background task was interrupted during execution (e.g. by app shutdown)
             await _record_event(
@@ -868,6 +942,11 @@ async def get_run(request: Request, run_id: str) -> dict[str, Any]:
         )
     _assert_run_ownership(request, run_id)
     _assert_run_resource(request, run)
+    if run["status"] in ("running", "interrupted"):
+        # A6 S9: the status comes from the run's journal lease, not from who opened the
+        # database last: a run another live process executes is never shown interrupted.
+        live_again = await reconcile_quietly(request.app.state, run_ids=[run_id])
+        run = show_live(await store.get_run(run_id) or run, live_again)
     run = _redact_events(run, request.app.state)
     run = dict(run)
     run["has_subworkflows"] = _spec_has_subworkflows(run.get("spec"))
@@ -1356,6 +1435,7 @@ def _build_engine(
         budget=run_budget,
         event_sink=event_sink,
         approval_required_handlers=approval_handlers,
+        lease_ttl=workflow_lease_ttl(request.app.state),
     )
     return engine, event_sink
 
@@ -1467,6 +1547,148 @@ async def provide_run_input(
     updated = await store.get_run(run_id)
     assert updated is not None
     return _redact_events(updated, request.app.state)
+
+
+#: Studio statuses ``POST /runs/{id}/recover`` continues from (``paused``: an effect_unknown pause).
+_RECOVERABLE_STATUSES = frozenset({"running", "interrupted", "paused"})
+
+
+def _conflict(code: str, message: str) -> HTTPException:
+    return HTTPException(
+        status_code=http_status.HTTP_409_CONFLICT, detail={"code": code, "message": message}
+    )
+
+
+@router.post("/{run_id}/recover")
+async def recover_run(
+    request: Request, run_id: str, payload: RecoverRunRequest | None = None
+) -> dict[str, Any]:
+    """Continue a run whose process stopped, or an ``effect_unknown`` pause a person resolved.
+
+    Calls ``WorkflowEngine.recover`` under the run's lease (Execution Contract v1, A6 S9).
+    A node that never dispatched runs; one that dispatched without a recorded outcome runs
+    again only when it is ``pure`` or ``idempotent`` (with the same idempotency key) or a
+    ``reconcilable`` probe says it did not happen; a ``non_idempotent`` one pauses the run
+    (status ``paused``, ``pause_reason`` ``effect_unknown``, ``pending_effect``) until a
+    person resolves the effect (``POST /runs/{id}/effects/{effect_id}/resolve``) and calls
+    this again. ``on_uncertain="fail"`` fails the run instead of pausing.
+
+    Needs the ``run`` permission. 409 ``RUN_LEASE_HELD`` while another live process executes
+    the run, ``RUN_WAITING_FOR_PERSON`` for a run waiting for an approval or an answer,
+    ``RUN_ALREADY_TERMINAL`` for a finished run and ``RUN_NOT_JOURNALED`` for a run without
+    an execution journal (recorded before journaled runs: fork it from a checkpoint).
+    """
+    caller_ws, _ = _require_permission(request, "run")
+    app_state = request.app.state
+    store: StudioStore = app_state.store
+    run = await _get_owned_run(request, run_id)
+    _assert_run_resource(request, run)
+    _refuse_if_revoked(run)
+    status = run["status"]
+    if status in _CANCEL_TERMINAL_STATUSES:
+        raise _already_terminal(run_id, status)
+    waiting = status == "paused" and not run.get("pending_effect")
+    if status not in _RECOVERABLE_STATUSES or waiting:
+        raise _conflict(
+            "RUN_WAITING_FOR_PERSON",
+            f"Run '{run_id}' is waiting for a person (status: '{status}'); decide or answer it.",
+        )
+    journal = await run_journal(app_state)
+    snapshot = None
+    if journal is not None:
+        try:
+            snapshot = await journal.get(ExecutionId(caller_ws, run_id))
+        except KeyError:
+            snapshot = None
+    if snapshot is None:
+        raise _conflict(
+            "RUN_NOT_JOURNALED",
+            f"Run '{run_id}' has no execution journal, so what its last step did is unknown; "
+            "it cannot be recovered safely. Fork it from a checkpoint instead.",
+        )
+    if status == "running":
+        rows = await store.list_journaled_runs(("running",), run_ids=[run_id]) or [
+            {"run_id": run_id, "journal_workspace": caller_ws, "owner_process": None}
+        ]
+        verdict = (await run_liveness(journal, rows)).get(run_id)
+        if verdict == LIVE:
+            raise _conflict(
+                "RUN_LEASE_HELD",
+                f"Run '{run_id}' is being executed by a live process (its run lease is held).",
+            )
+
+    on_uncertain = payload.on_uncertain if payload is not None else "pause"
+    bound_spec = WorkflowSpec.from_dict(run["spec"])
+    enforce_approval_policy(request, bound_spec)
+    engine, event_sink = _build_engine(request, bound_spec, run_id, caller_ws)
+    await _record_event(
+        store,
+        run_id,
+        "RUN_RECOVERY_STARTED",
+        node_id=run.get("current_node_id"),
+        data={"previous_status": status, "on_uncertain": on_uncertain},
+    )
+
+    async def recover() -> None:
+        current = await _settled_run(app_state, run_id)
+        if current is None or current["status"] not in _RECOVERABLE_STATUSES:
+            if current is not None:
+                _refuse_if_revoked(current)
+            raise _conflict(
+                "RUN_STATUS_CHANGED",
+                f"Run '{run_id}' changed while recovering "
+                f"(status: '{current['status'] if current else 'missing'}').",
+            )
+        # This process executes the run from now on (its owner for the B46 fallback).
+        await store.update_run(
+            run_id=run_id,
+            status="running",
+            current_node_id=current["current_node_id"],
+            current_state=current["current_state"],
+            step_count=current["step_count"],
+            unless_status=_CANCEL_TERMINAL_STATUSES,
+        )
+        try:
+            res = await engine.recover(run_id, on_uncertain=on_uncertain)
+        except (_LeaseBusyError, WorkflowSpecMismatchError, DefinitionMismatchError):
+            # Refused before anything ran: the run keeps the status it had.
+            await store.update_run(
+                run_id=run_id,
+                status=current["status"],
+                current_node_id=current["current_node_id"],
+                current_state=current["current_state"],
+                step_count=current["step_count"],
+                error=current.get("error"),
+                pending_effect=current.get("pending_effect"),
+                unless_status=_CANCEL_TERMINAL_STATUSES,
+            )
+            raise
+        except WorkflowTerminalError:
+            # The checkpoint finished before the process stopped; only the run row lagged.
+            checkpoint = await store.checkpoint_store.get(run_id)
+            if checkpoint is None:
+                raise
+            res = engine._result_from_checkpoint(checkpoint)
+        await event_sink.flush()
+        await _persist_result(store, run_id, res)
+
+    try:
+        await run_in_request(app_state, run_id, recover)
+    except HTTPException:
+        raise
+    except _LeaseBusyError as exc:
+        raise _conflict("RUN_LEASE_HELD", str(exc)) from exc
+    except (WorkflowSpecMismatchError, DefinitionMismatchError) as exc:
+        raise _conflict("SPEC_MISMATCH", str(exc)) from exc
+    except (WrongWorkspaceError, CrossWorkspaceAccessError) as exc:
+        raise _cross_workspace_error(exc) from exc
+    except Exception as exc:
+        await event_sink.flush()
+        await _record_execution_failure(store, run_id, exc)
+
+    updated = await store.get_run(run_id)
+    assert updated is not None
+    return _redact_events(updated, app_state)
 
 
 @router.get("/{run_id}/repro")
@@ -1684,6 +1906,7 @@ async def fork_run(request: Request, run_id: str, payload: ForkRunRequest) -> di
         started_by=_started_by(
             principal.principal_id if principal else "local-owner", _api_key_id(principal)
         ),
+        journal_workspace=journal_workspace(request.app.state, caller_ws),
     )
     principal_id = principal.principal_id if principal else "local-owner"
     ws_repo.record_resource_ownership("run", new_id, caller_ws, principal_id)

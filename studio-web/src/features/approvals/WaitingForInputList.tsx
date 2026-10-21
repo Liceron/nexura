@@ -4,8 +4,8 @@ import { useEffect, useState } from 'react';
 import type { RunRecord } from '@liceron/nexura-sdk';
 import { useApi } from '../../api/context';
 import { formatApiError } from '../../api/errors';
-import { Badge } from '../../components/Badge';
-import { Card } from '../../components/Card';
+import { RunStatus } from '../runs/RunStatus';
+
 import { Spinner } from '../../components/Spinner';
 import { useI18n } from '../../i18n';
 import { runHref } from '../../app/routes';
@@ -51,9 +51,7 @@ export function WaitingForInputList({ reloadKey = 0 }: { reloadKey?: number }) {
     <section aria-label={t('runs.waitingTitle')} data-testid="waiting-input-section" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         <h2 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>{t('runs.waitingTitle')}</h2>
-        <Badge variant={total > 0 ? 'warning' : 'neutral'} data-testid="waiting-input-count">
-          {total}
-        </Badge>
+        <span data-testid="waiting-input-count">{total}</span>
       </div>
       <p style={{ color: 'var(--text-secondary)', fontSize: 13, margin: 0 }}>{t('runs.waitingSubtitle')}</p>
       {loading && runs.length === 0 && (
@@ -74,11 +72,11 @@ export function WaitingForInputList({ reloadKey = 0 }: { reloadKey?: number }) {
       {runs.map((run) => {
         const { question } = describeInterrupt(run.pending_input?.value);
         return (
-          <Card key={run.run_id} data-testid="waiting-input-row" style={{ padding: 12 }}>
+          <div key={run.run_id} data-testid="waiting-input-row" style={{ padding: '12px 0', borderBottom: '1px solid var(--border-subtle)' }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12 }}>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                  <Badge variant="warning">{t('traces.status_waiting_for_input')}</Badge>
+                  <RunStatus status="waiting_for_input" />
                   <code>{run.run_id}</code>
                   {run.workflow_id && (
                     <span style={{ color: 'var(--text-secondary)' }}>
@@ -101,7 +99,7 @@ export function WaitingForInputList({ reloadKey = 0 }: { reloadKey?: number }) {
                 </span>
               </a>
             </div>
-          </Card>
+          </div>
         );
       })}
       {total > runs.length && (

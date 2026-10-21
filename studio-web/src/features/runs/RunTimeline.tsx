@@ -4,7 +4,8 @@ import { useLocale } from '../../i18n';
 import { useT } from '../../i18n';
 import { useState, useMemo } from 'react';
 import type { RunEvent } from '@liceron/nexura-sdk';
-import { Badge } from '../../components/Badge';
+import { JsonText } from '../approvals/ExactAction';
+import { Button } from '../../components/Button';
 import { formatEventTitle } from './events';
 
 interface RunTimelineProps {
@@ -58,180 +59,33 @@ export function RunTimeline({ events, onSelectNode }: RunTimelineProps) {
     return 'neutral';
   };
 
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-      {/* Controls & Filter Bar */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
-        <div style={{ display: 'flex', gap: 6 }}>
-          <button
-            type="button"
-            onClick={() => setFilterType('all')}
-            style={{
-              padding: '4px 10px',
-              borderRadius: 'var(--radius-sm)',
-              fontSize: 12,
-              fontWeight: 500,
-              backgroundColor: filterType === 'all' ? 'var(--button-primary)' : 'var(--bg-canvas)',
-              color: filterType === 'all' ? '#fff' : 'var(--text-secondary)',
-              border: '1px solid var(--border-subtle)',
-              cursor: 'pointer',
-            }}
-          >
-            {t('ui.all')}{events.length})
-          </button>
-          <button
-            type="button"
-            onClick={() => setFilterType('nodes')}
-            style={{
-              padding: '4px 10px',
-              borderRadius: 'var(--radius-sm)',
-              fontSize: 12,
-              fontWeight: 500,
-              backgroundColor: filterType === 'nodes' ? 'var(--button-primary)' : 'var(--bg-canvas)',
-              color: filterType === 'nodes' ? '#fff' : 'var(--text-secondary)',
-              border: '1px solid var(--border-subtle)',
-              cursor: 'pointer',
-            }}
-          >
-            {t('ui.nodeSteps')}
-          </button>
-          <button
-            type="button"
-            onClick={() => setFilterType('approvals')}
-            style={{
-              padding: '4px 10px',
-              borderRadius: 'var(--radius-sm)',
-              fontSize: 12,
-              fontWeight: 500,
-              backgroundColor: filterType === 'approvals' ? 'var(--button-primary)' : 'var(--bg-canvas)',
-              color: filterType === 'approvals' ? '#fff' : 'var(--text-secondary)',
-              border: '1px solid var(--border-subtle)',
-              cursor: 'pointer',
-            }}
-          >
-            {t('ui.approvals')}
-          </button>
-          <button
-            type="button"
-            onClick={() => setFilterType('errors')}
-            style={{
-              padding: '4px 10px',
-              borderRadius: 'var(--radius-sm)',
-              fontSize: 12,
-              fontWeight: 500,
-              backgroundColor: filterType === 'errors' ? 'var(--button-primary)' : 'var(--bg-canvas)',
-              color: filterType === 'errors' ? '#fff' : 'var(--text-secondary)',
-              border: '1px solid var(--border-subtle)',
-              cursor: 'pointer',
-            }}
-          >
-            {t('ui.failuresHalts')}
-          </button>
-        </div>
-
-        <input
-          type="text"
-          placeholder={t('ui.searchTimeline')}
-          value={searchTerm}
-          onChange={(e) => setSearchTerm(e.target.value)}
-          aria-label={t('ui.searchEventTimeline')}
-          style={{
-            fontSize: 12,
-            padding: '5px 10px',
-            borderRadius: 'var(--radius-sm)',
-            border: '1px solid var(--border-subtle)',
-            backgroundColor: 'var(--bg-canvas)',
-            color: 'var(--text-primary)',
-            width: 200,
-          }}
-        />
-      </div>
-
-      {/* Events List */}
-      {filteredEvents.length === 0 ? (
-        <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-secondary)', fontSize: 13 }}>
-          {events.length === 0 ? t('ui.noEventsRecordedYetRunIsInitializing') : t('ui.noEventsMatchingSearchFilter')}
-        </div>
-      ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 420, overflowY: 'auto' }}>
-          {filteredEvents.map((ev) => {
-            const isExpanded = expandedSeq === ev.seq;
-            const timeStr = new Date(ev.timestamp * 1000).toLocaleTimeString(locale);
-            const nodeId = ev.node_id || (ev.data && (ev.data.node_id as string));
-
-            return (
-              <div
-                key={ev.seq}
-                data-testid={`event-item-${ev.seq}`}
-                style={{
-                  padding: '8px 12px',
-                  borderRadius: 'var(--radius-sm)',
-                  backgroundColor: 'var(--bg-surface)',
-                  border: '1px solid var(--border-subtle)',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: 6,
-                  cursor: 'pointer',
-                }}
-                onClick={() => toggleExpand(ev.seq)}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <code style={{ fontSize: 11, color: 'var(--text-muted)' }}>#{ev.seq}</code>
-                    <Badge variant={getBadgeVariant(ev.type)}>{t(`eventTitles.${ev.type}`, formatEventTitle(ev.type))}</Badge>
-                    {nodeId && (
-                      <span
-                        style={{
-                          fontSize: 12,
-                          fontWeight: 600,
-                          color: 'var(--brand-primary)',
-                        }}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          if (onSelectNode) onSelectNode(nodeId);
-                        }}
-                      >
-                        <code>{nodeId}</code>
-                      </span>
-                    )}
-                  </div>
-                  <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{timeStr}</div>
-                </div>
-
-                {/* Brief summary line */}
-                {ev.data && ev.type === 'NODE_COMPLETED' && ev.data.branch && (
-                  <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
-                    {t('ui.branchedTransition') + " "}<code>{String(ev.data.branch)}</code>
-                  </div>
-                )}
-                {ev.data && ev.type === 'NODE_FAILED' && ev.data.error && (
-                  <div style={{ fontSize: 11, color: 'var(--status-danger)' }}>
-                    {t('ui.error2') + " "}{String(ev.data.error)}
-                  </div>
-                )}
-
-                {/* Expanded data payload view */}
-                {isExpanded && ev.data && (
-                  <pre
-                    style={{
-                      margin: '6px 0 0 0',
-                      padding: 8,
-                      backgroundColor: 'var(--bg-canvas)',
-                      borderRadius: 'var(--radius-sm)',
-                      fontSize: 11,
-                      fontFamily: 'var(--font-mono)',
-                      overflowX: 'auto',
-                    }}
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    {JSON.stringify(ev.data, null, 2)}
-                  </pre>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      )}
+  return <div className="run-timeline">
+    <div className="inspection-actions">
+      {[
+        ['all', t('ui.all') + events.length + ')'], ['nodes', t('ui.nodeSteps')],
+        ['approvals', t('ui.approvals')], ['errors', t('ui.failuresHalts')],
+      ].map(([id, label]) => <Button key={id} variant="ghost" aria-pressed={filterType === id}
+        onClick={() => setFilterType(id)}>{label}</Button>)}
+      <input placeholder={t('ui.searchTimeline')} value={searchTerm} onChange={e => setSearchTerm(e.target.value)} aria-label={t('ui.searchEventTimeline')} />
     </div>
-  );
+    {filteredEvents.length === 0 ? <p className="inspection-empty">{events.length === 0 ? t('ui.noEventsRecordedYetRunIsInitializing') : t('ui.noEventsMatchingSearchFilter')}</p> :
+      <ol style={{ listStyle: 'none' }}>{filteredEvents.map(ev => {
+        const nodeId = ev.node_id || (ev.data && ev.data.node_id as string);
+        const isExpanded = expandedSeq === ev.seq;
+        const title = t(`eventTitles.${ev.type}`, formatEventTitle(ev.type));
+        return <li key={ev.seq} data-testid={`event-item-${ev.seq}`} style={{ borderBottom: '1px solid var(--border-subtle)', padding: '8px 0' }}>
+          <div className="inspection-actions">
+            <button type="button" aria-expanded={isExpanded} aria-controls={isExpanded ? 'timeline-event-' + ev.seq : undefined}
+              onClick={() => toggleExpand(ev.seq)} style={{ flex: 1, textAlign: 'left', padding: '8px 0', minWidth: 0 }}>
+              <span className={`run-status run-status--${getBadgeVariant(ev.type)}`}>{title}</span>
+              <span className="inspection-meta">#{ev.seq} · {new Date(ev.timestamp * 1000).toLocaleTimeString(locale)}</span>
+            </button>
+            {nodeId && (onSelectNode ? <Button variant="ghost" onClick={() => onSelectNode(nodeId)}><code>{nodeId}</code></Button> : <code>{nodeId}</code>)}
+          </div>
+          {ev.data && ev.type === 'NODE_COMPLETED' && ev.data.branch && <p className="inspection-meta">{t('ui.branchedTransition')} {String(ev.data.branch)}</p>}
+          {ev.data && ev.type === 'NODE_FAILED' && ev.data.error && <p className="inspection-error">{t('ui.error2')} {String(ev.data.error)}</p>}
+          {isExpanded && ev.data && <div id={'timeline-event-' + ev.seq}><JsonText label={title} text={JSON.stringify(ev.data, null, 2)} /></div>}
+        </li>;
+      })}</ol>}
+  </div>;
 }

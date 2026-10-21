@@ -1,230 +1,75 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Liceron
-import { Icon } from '../../components/Icon';
-import { useState, useMemo } from 'react';
-import { Card } from '../../components/Card';
+import { useState, useMemo, useRef } from 'react';
+import { PageHeader, PageLayout } from '../../components/PageHeader';
 import { Button } from '../../components/Button';
-import { Badge } from '../../components/Badge';
-import { Spinner } from '../../components/Spinner';
+import { useApi } from '../../api/context';
 import { usePendingApprovals } from './usePendingApprovals';
 import { ApprovalDecisionModal } from './ApprovalDecisionModal';
-import type { PendingApprovalItem } from './types';
+import type { PendingApprovalItem, ExactApprovalRequest } from './types';
 import { WaitingForInputList } from './WaitingForInputList';
 import { useI18n } from '../../i18n';
 import { runHref } from '../../app/routes';
+import { describeAgentToolCalls } from './agentToolCalls';
+import { RunStatus } from '../runs/RunStatus';
 
-interface ApprovalInboxProps {
-  onOpenWorkflow?: (workflowId: string) => void;
-}
-
-export function ApprovalInbox({ onOpenWorkflow }: ApprovalInboxProps) {
-  const {
-    approvals,
-    count,
-    loading,
-    error,
-    refresh,
-    decideApproval,
-  } = usePendingApprovals();
-
+export function ApprovalInbox({ onOpenWorkflow }: { onOpenWorkflow?: (workflowId: string) => void }) {
+  const { approvals, count, loading, error, refresh, decideApproval } = usePendingApprovals();
+  const { connection } = useApi();
   const { t, locale } = useI18n();
   const [waitingReload, setWaitingReload] = useState(0);
-  const [searchQuery, setSearchQuery] = useState<string>('');
+  const [searchQuery, setSearchQuery] = useState('');
   const [selectedItem, setSelectedItem] = useState<PendingApprovalItem | null>(null);
-
-  const filteredApprovals = useMemo(() => {
-    if (!searchQuery.trim()) return approvals;
-    const q = searchQuery.toLowerCase();
-    return approvals.filter(
-      (item) =>
-        item.runId.toLowerCase().includes(q) ||
-        item.workflowId.toLowerCase().includes(q) ||
-        item.nodeId.toLowerCase().includes(q) ||
-        item.approvalId.toLowerCase().includes(q) ||
-        JSON.stringify(item.currentState).toLowerCase().includes(q)
-    );
+  const countRef = useRef<HTMLSpanElement>(null);
+  const filtered = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    return !q ? approvals : approvals.filter(item =>
+      [item.runId, item.workflowId, item.nodeId, item.approvalId, item.spec?.name ?? '', JSON.stringify(item.currentState)].some(value => value.toLowerCase().includes(q)));
   }, [approvals, searchQuery]);
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-      {/* Top Header Card */}
-      <Card elevated>
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            flexWrap: 'wrap',
-            gap: 16,
-          }}
-        >
-          <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
-              <h1 style={{ fontSize: 20, fontWeight: 700, margin: 0 }}>{t('approvalReview.inbox', "Approval Inbox")}</h1>
-              <Badge variant={count > 0 ? 'warning' : 'neutral'} aria-label={t('approvalReview.counter', "Pending approvals counter")}>
-                {count} {t('approvalReview.pending', 'Pending Approval')}
-              </Badge>
-            </div>
-            <p style={{ color: 'var(--text-secondary)', fontSize: 13, margin: 0 }}>
-              {t('approvalReview.subtitle', "Human-in-the-loop decisions paused at approval gates across active executions.")}
-            </p>
-          </div>
-
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => {
-                void refresh();
-                setWaitingReload((n) => n + 1);
-              }}
-              loading={loading}
-            >
-              {t('approvalReview.refresh', "Refresh Inbox")}
-            </Button>
-          </div>
-        </div>
-      </Card>
-
-      {/* Search Filter */}
-      {approvals.length > 0 && (
-        <div style={{ display: 'flex', gap: 12 }}>
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder={t('approvalReview.searchPlaceholder', "Search pending approvals by run, node, or workflow ID...")}
-            aria-label={t('approvalReview.search', "Search pending approvals")}
-            style={{
-              flex: 1,
-              padding: '8px 12px',
-              borderRadius: 'var(--radius-sm)',
-              border: '1px solid var(--border-subtle)',
-              backgroundColor: 'var(--bg-surface)',
-              color: 'var(--text-primary)',
-              fontSize: 13,
-            }}
-          />
-        </div>
-      )}
-
-      {/* Loading state */}
-      {loading && approvals.length === 0 && (
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 60, gap: 10 }}>
-          <Spinner size={24} />
-          <span style={{ color: 'var(--text-secondary)' }}>{t('approvalReview.loading', "Loading pending approvals...")}</span>
-        </div>
-      )}
-
-      {/* Error state */}
-      {error && (
-        <Card elevated style={{ borderColor: 'var(--status-danger)' }}>
-          <div style={{ color: 'var(--status-danger)', fontWeight: 600, fontSize: 14 }}>
-            {t('approvalReview.loadingError', "Error loading approvals")}
-          </div>
-          <div style={{ color: 'var(--text-secondary)', fontSize: 13, marginTop: 4 }}>{error}</div>
-          <div style={{ marginTop: 12 }}>
-            <Button variant="secondary" size="sm" onClick={refresh}>
-              {t('approvalReview.retry', "Retry")}
-            </Button>
-          </div>
-        </Card>
-      )}
-
-      {/* Empty State */}
-      {!loading && !error && filteredApprovals.length === 0 && (
-        <Card elevated style={{ textAlign: 'center', padding: 48 }}>
-          <div style={{ fontSize: 36, marginBottom: 12 }}><Icon name="approvals" /></div>
-          <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 6 }}>{t('approvalReview.empty', "No Pending Approvals")}</h2>
-          <p style={{ color: 'var(--text-secondary)', fontSize: 13, maxWidth: 440, margin: '0 auto 16px auto' }}>
-            {approvals.length === 0
-              ? t('approvalReview.emptyHelp', "All workflow runs in this workspace are running smoothly or completed. When an execution requires human authorization, it will appear here.")
-              : t('approvalReview.noMatch', "No approvals match your current filter query.")}
-          </p>
-          <Button variant="secondary" size="sm" onClick={refresh}>
-            {t('approvalReview.check', "Check Again")}
-          </Button>
-        </Card>
-      )}
-
-      {/* Approval List */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-        {filteredApprovals.map((item) => (
-          <Card key={item.approvalId} elevated>
-            <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                  <Badge variant="warning"><Icon name="pause" /> {t('approvalReview.gate', 'Approval Gate')}: {item.nodeId}</Badge>
-                  <Badge variant="neutral">{t('exactAction.run', 'Run')}: {item.runId}</Badge>
-                  <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
-                    {t('runs.workflow')}: <strong>{item.workflowId}</strong>
-                  </span>
-                </div>
-
-                {/* State summary tags */}
-                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 4 }}>
-                  {item.currentState.amount !== undefined && (
-                    <Badge variant="info">{t('approvalReview.amount', 'Amount')}: {String(item.currentState.amount)}{typeof item.currentState.currency === 'string' && item.currentState.currency.trim() ? ` ${item.currentState.currency.trim()}` : ''}</Badge>
-                  )}
-                  {Boolean(item.currentState.category) && (
-                    <Badge variant="neutral">{t('approvalReview.category', 'Category')}: {String(item.currentState.category)}</Badge>
-                  )}
-                  {Boolean(item.currentState.classification) && (
-                    <Badge variant="warning">{String(item.currentState.classification)}</Badge>
-                  )}
-                  {Boolean(item.currentState.order_id) && (
-                    <Badge variant="neutral">{t('approvalReview.order', 'Order')}: {String(item.currentState.order_id)}</Badge>
-                  )}
-                </div>
-
-                <div style={{ fontSize: 12 }}>{t('approvalReview.reviewHint', 'Open Review & Decide to inspect the exact action and its expiry.')}</div>
-
-                <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
-                  {t('approvalReview.id', 'Approval ID')}: <code>{item.approvalId}</code> • {t('approvalReview.initiated', 'Initiated')}:{' '}
-                  {item.createdAt ? new Date(item.createdAt * 1000).toLocaleTimeString(locale) : t('exactAction.notRecorded', 'not recorded')}
-                </div>
-              </div>
-
-              <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-                <a href={runHref(item.runId)} data-testid="approval-open-run" style={{ fontSize: 13 }}>
-                  {t('runs.open')}
-                  <span className="sr-only" style={{ position: 'absolute', left: -9999 }}>
-                    {' '}
-                    {item.runId}
-                  </span>
-                </a>
-                {onOpenWorkflow && (
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => onOpenWorkflow(item.workflowId)}
-                  >
-                    {t('approvalReview.workflow', "View Workflow")}
-                  </Button>
-                )}
-                <Button
-                  variant="primary"
-                  size="sm"
-                  onClick={() => setSelectedItem(item)}
-                >
-                  {t('approvalReview.review', "Review & Decide")}
-                </Button>
-              </div>
-            </div>
-          </Card>
-        ))}
-      </div>
-
-      {/* Runs paused by interrupt() for an answer (P25); answered on the run page. */}
-      <WaitingForInputList reloadKey={waitingReload} />
-
-      {/* Decision Modal */}
-      <ApprovalDecisionModal
-        open={selectedItem !== null}
-        item={selectedItem}
-        onClose={() => setSelectedItem(null)}
-        onDecide={decideApproval}
-      />
-    </div>
-  );
+  const missing = t('exactAction.notRecorded');
+  const date = (value?: number | null) => typeof value === 'number' && Number.isFinite(value)
+    ? new Date(value * 1000).toLocaleString(locale, { timeZoneName: 'short' }) : missing;
+  return <PageLayout className="approval-inbox">
+    <PageHeader title={t('approvalReview.inbox')} metadata={<span ref={countRef} tabIndex={-1} role="status" aria-label={t('approvalReview.counter')}>{count} {t('approvalReview.pending')}</span>}
+      actions={<Button variant="ghost" loading={loading} onClick={() => { void refresh(); setWaitingReload(n => n + 1); }}>{t('approvalReview.refresh')}</Button>}
+      filters={approvals.length > 0 ? <input value={searchQuery} onChange={e => setSearchQuery(e.target.value)}
+        placeholder={t('approvalReview.searchPlaceholder')} aria-label={t('approvalReview.search')} /> : undefined} />
+    {loading && approvals.length === 0 && <p role="status">{t('approvalReview.loading')}</p>}
+    {error && <div role="alert" className="inspection-error"><p>{error}</p><Button onClick={refresh}>{t('approvalReview.retry')}</Button></div>}
+    {!loading && !error && filtered.length === 0 && <div className="inspection-empty">
+      <h2>{t('approvalReview.empty')}</h2>
+      <p>{approvals.length === 0 ? t('approvalReview.emptyHelp') : t('approvalReview.noMatch')}</p>
+    </div>}
+    {filtered.length > 0 && <div className="inspection-table-scroll" role="region" aria-label={t('approvalReview.inbox')} tabIndex={0}>
+      <table className="inspection-table"><thead><tr>
+        <th>{t('exactAction.name')}</th><th>{t('reviewDesign.workflowAgent')}</th><th>{t('reviewDesign.recordedSummary')}</th>
+        <th>{t('approvalReview.initiated')}</th><th>{t('exactAction.expiry')}</th><th>{t('approvalReview.review')}</th>
+      </tr></thead><tbody>{filtered.map(item => {
+        const request = item.runRecord.pending_approval as ExactApprovalRequest | undefined;
+        const agent = describeAgentToolCalls(request);
+        return <tr key={item.approvalId}>
+          <td><strong>{request?.action_name || item.nodeId || missing}</strong><br /><RunStatus status="pending_approval" /></td>
+          <td>{agent?.agentName || item.spec?.name || item.workflowId || missing}</td>
+          <td>{agent ? agent.calls.map(call => call.tool).join(', ') : missing}
+            {/* Paused state is contextual data, not a fabricated exact-action summary. */}
+            {(item.currentState.amount !== undefined || item.currentState.order_id !== undefined) && <details>
+              <summary>{t('approvalReview.state')}</summary>
+              {item.currentState.amount !== undefined && <div>{t('approvalReview.amount')}: {String(item.currentState.amount)}{typeof item.currentState.currency === 'string' ? ' ' + item.currentState.currency : ''}</div>}
+              {item.currentState.order_id !== undefined && <div>{t('approvalReview.order')}: {String(item.currentState.order_id)}</div>}
+            </details>}
+          </td>
+          <td>{date(item.createdAt)}</td><td>{date(request?.expires_at)}</td>
+          <td><div className="inspection-actions">
+            <Button variant="secondary" onClick={() => setSelectedItem(item)}>{t('approvalReview.review')}</Button>
+            <a href={runHref(item.runId)} data-testid="approval-open-run">{t('runs.open')}<span className="sr-only"> {item.runId}</span></a>
+            {onOpenWorkflow && <Button variant="ghost" onClick={() => onOpenWorkflow(item.workflowId)}>{t('approvalReview.workflow')}</Button>}
+          </div><code className="inspection-meta">{item.runId}</code></td>
+        </tr>;
+      })}</tbody></table>
+    </div>}
+    {count > approvals.length && <p>{t('reviewDesign.queueLimit').replace('{shown}', String(approvals.length)).replace('{total}', String(count))}</p>}
+    <WaitingForInputList reloadKey={waitingReload} />
+    <ApprovalDecisionModal open={selectedItem !== null} item={selectedItem} workspace={connection.workspace}
+      onClose={() => setSelectedItem(null)} onDecide={decideApproval} returnFocusTo={() => countRef.current} />
+  </PageLayout>;
 }

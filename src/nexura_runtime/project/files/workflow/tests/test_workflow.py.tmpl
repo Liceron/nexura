@@ -1,0 +1,52 @@
+"""Offline tests: the draft step runs on a scripted FakeModel and SQLite lives in tmp_path."""
+
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+
+import pytest
+
+from {{package}} import workflow as app
+
+
+@pytest.fixture(autouse=True)
+def _offline(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("NEXURA_MODEL", raising=False)
+    app.OUTBOX.clear()
+
+
+def test_pauses_before_send_and_resumes_from_a_new_engine(tmp_path: Path) -> None:
+    db = tmp_path / "workflows.sqlite3"
+    paused = asyncio.run(app.start({"order_id": "ORD-1", "customer": "Asha"}, db=db))
+    assert paused.status == "paused"
+    assert app.OUTBOX == []  # the gated step has not run
+    approval = paused.pending_approval
+    assert approval.node_id == "send"
+    assert "refund" in approval.input_state["draft"]
+
+    # A fresh store and engine on the same file, as after a restart.
+    done = asyncio.run(app.resume(paused.workflow_run_id, approval.approval_id, "approve", db=db))
+    assert done.status == "completed"
+    assert done.state["sent"] is True
+    assert [paused.state["draft"]] == app.OUTBOX
+
+
+def test_rejected_run_never_sends(tmp_path: Path) -> None:
+    db = tmp_path / "workflows.sqlite3"
+    paused = asyncio.run(app.start({"order_id": "ORD-2", "customer": "Ravi"}, db=db))
+    done = asyncio.run(
+        app.resume(paused.workflow_run_id, paused.pending_approval.approval_id, "reject", db=db)
+    )
+    assert done.status == "rejected"
+    assert app.OUTBOX == []
+
+
+def test_an_approval_is_used_once(tmp_path: Path) -> None:
+    db = tmp_path / "workflows.sqlite3"
+    paused = asyncio.run(app.start({"order_id": "ORD-1", "customer": "Asha"}, db=db))
+    run_id, approval_id = paused.workflow_run_id, paused.pending_approval.approval_id
+    asyncio.run(app.resume(run_id, approval_id, "approve", db=db))
+    with pytest.raises(Exception):  # noqa: B017 - any refusal is fine; it must not send twice
+        asyncio.run(app.resume(run_id, approval_id, "approve", db=db))
+    assert len(app.OUTBOX) == 1

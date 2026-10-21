@@ -1,0 +1,32 @@
+"""Run the agent from a terminal: python -m {{package}} "Refund ORD-1, please"."""
+
+from __future__ import annotations
+
+import sys
+
+from {{package}}.agent import build_agent, build_runner
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = sys.argv[1:] if argv is None else argv
+    message = " ".join(args) or "Please refund order ORD-1."
+    agent = build_agent()
+    runner = build_runner()
+    result = runner.run(agent, message)
+    while result.status == "paused" and result.interruption is not None:
+        for call in result.interruption.pending:
+            print(f"Approval needed: {call.name} {call.arguments}")
+        answer = input("Approve? [y/N] ").strip().lower()
+        if answer == "y":
+            result = runner.resume(agent, result.interruption, approve=True)
+        else:
+            rejected = {
+                call.id: "Rejected by the operator." for call in result.interruption.pending
+            }
+            result = runner.resume(agent, result.interruption, reject=rejected)
+    print(result.output)
+    return 0 if result.status == "completed" else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

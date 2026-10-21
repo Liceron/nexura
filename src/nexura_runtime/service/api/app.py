@@ -88,6 +88,12 @@ from nexura_runtime.service.extensions import (
     load_entry_point_extensions,
 )
 from nexura_runtime.service.repro_capture import FailedRunCapture, capture_failed_runs_enabled
+from nexura_runtime.service.run_liveness import (
+    SHUTDOWN_ERROR,
+    SHUTDOWN_REASON,
+    journal_decides,
+    reconcile_quietly,
+)
 from nexura_runtime.service.triggers.store import TriggerStore
 from nexura_runtime.service.workflow_state import (
     open_workflow_state_store,
@@ -195,6 +201,7 @@ def create_api_app(
     capture_failed_runs: bool | None = None,
     execution_store: ExecutionStore | None = None,
     workflow_state_url: str | None = None,
+    workflow_lease_ttl: float = 30.0,
 ) -> FastAPI:
     """Create a configured FastAPI application exposing the Nexura REST API.
 
@@ -277,11 +284,24 @@ def create_api_app(
             Studio run records, triggers and sessions stay in SQLite. Applies to the store
             this function creates: passing it together with ``store`` raises ``ValueError``.
             The tables are created (migrated) when the app starts.
+        workflow_lease_ttl: seconds of the run lease a workflow run's process holds (renewed
+            every third of it; default 30). A run whose lease expired, or whose owner process
+            on this host exited, is shown ``interrupted`` and can be continued with
+            ``POST /api/v1/runs/{run_id}/recover`` (A6 S9); a run another live ``serve`` or
+            ``worker`` executes is never shown interrupted.
     """
     requested_extensions = check_extensions(
         [*extensions, *load_entry_point_extensions(enabled_extensions)],
         taken=BUILTIN_EXTENSION_NAMES,
     )
+    if (
+        isinstance(workflow_lease_ttl, bool)
+        or not isinstance(workflow_lease_ttl, (int, float))
+        or not (0 < workflow_lease_ttl < float("inf"))
+    ):
+        raise ValueError(
+            f"workflow_lease_ttl must be a positive number of seconds, got {workflow_lease_ttl!r}."
+        )
     if store is not None and workflow_state_url:
         raise ValueError(
             "workflow_state_url applies to the store create_api_app creates; give the "
@@ -457,6 +477,10 @@ def create_api_app(
             or app.state.execution_store is not workflow_state_store.execution_store
         ):
             await app.state.execution_store.init_db()
+        # A6 S9: journaled runs whose lease expired (their process stopped) are interrupted;
+        # runs another live process executes are left alone. Legacy rows were swept by
+        # StudioStore when it opened (B46).
+        await reconcile_quietly(app.state)
         # Startup phase: reconcile missed schedule triggers after restart
         with contextlib.suppress(Exception):
             app_trigger_manager.reconcile_missed_runs()
@@ -501,6 +525,17 @@ def create_api_app(
         # state truthful. Do not mark a completed, paused, failed, or cancelled run as interrupted.
         for run_id, _ in running_task_items:
             with contextlib.suppress(Exception):
+                if await journal_decides(app.state, run_id):
+                    # A6 S9: its lease decides; this process released it when the task was
+                    # cancelled, so it is interrupted unless another worker holds it now.
+                    await reconcile_quietly(
+                        app.state,
+                        run_ids=[run_id],
+                        error=SHUTDOWN_ERROR,
+                        reason=SHUTDOWN_REASON,
+                        stopped_here=True,
+                    )
+                    continue
                 run_snapshot = await effective_store.get_run(run_id)
                 if run_snapshot and run_snapshot.get("status") == "running":
                     await effective_store.record_run_event(
@@ -563,6 +598,8 @@ def create_api_app(
     # Where workflow checkpoints live (SQLite on db_path, or Postgres, A6 S8).
     app.state.workflow_state_store = getattr(effective_store, "checkpoint_store", None)
     app.state.execution_store_closed = False
+    # Run lease of the service's workflow engines (A6 S9).
+    app.state.workflow_lease_ttl = float(workflow_lease_ttl)
     app.state.session_store = SQLiteSessionStore(effective_store.db_path)
     app.state.chat_models = ChatModelRegistry(chat_models)
     app.state.repro_capture = (

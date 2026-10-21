@@ -45,7 +45,13 @@ def test_ci_workflows_never_enable_live_canaries() -> None:
         text = path.read_text(encoding="utf-8")
         assert "NEXURA_LIVE_CANARY" not in text, f"{path} enables live canaries"
         assert "live_canary" not in text, f"{path} runs the live canary script"
-        for key in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "SARVAM_API_KEY"):
+        for key in (
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+            "SARVAM_API_KEY",
+        ):
             assert key not in text, f"{path} passes {key} to CI"
 
 

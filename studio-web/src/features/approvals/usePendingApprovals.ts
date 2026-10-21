@@ -159,7 +159,7 @@ export function usePendingApprovals(options: UsePendingApprovalsOptions = {}) {
         const msg = formatApiError(err);
         const raw = err instanceof Error ? err.message : String(err); // keeps "[409] CODE"
         const isConflict =
-          raw.includes('409') ||
+          raw.includes('409') || raw.includes('410') || raw.includes('APPROVAL_EXPIRED') ||
           raw.includes('APPROVAL_ALREADY_CLAIMED') ||
           raw.includes('NOT_PENDING_APPROVAL') ||
           raw.includes('RUN_ALREADY_TERMINAL');

@@ -1,0 +1,42 @@
+[project]
+name = "{{project_name}}"
+version = "0.1.0"
+description = "{{description}}"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    # nexura-runtime {{nexura_version}} is not on PyPI yet. Until it is, build the wheels in a
+    # checkout of https://github.com/Liceron/nexura (`uv build --all-packages`) and install
+    # this project with `pip install --find-links /path/to/nexura/dist -e ".[dev]"`
+    # (see README.md). Once it is published, `pip install -e ".[dev]"` is enough.
+    "nexura-agents>={{nexura_version}},<0.5",
+    "nexura-runtime[studio]>={{nexura_version}},<0.5",
+    "nexura-studio>={{nexura_version}},<0.5",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["{{package}}"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+# Read by `nexura-runtime dev`: trusted handler sources (the same format as --handlers,
+# package.module:attribute) and the workflows it registers in the local service and Studio.
+[tool.nexura]
+template = "{{template}}"
+handlers = ["{{package}}.studio:registry"]
+workflows = ["{{package}}.studio:workflows"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]

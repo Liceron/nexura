@@ -24,8 +24,9 @@ The agent SDK depends only on `httpx` and `pydantic`. The platform package
 examples on this page.
 
 The platform package installs the command `nexura-runtime` (the service, worker, workflow,
-red-team and evals CLI; run `nexura-runtime --help`); the separate `nexura-studio` package adds
-`nexura-studio`, the older built-in Studio. The bare `nexura`
+red-team and evals CLI, plus `init`, `dev` and `deploy` for
+[project templates](project-templates.md); run `nexura-runtime --help`); the separate
+`nexura-studio` package adds `nexura-studio`, the older built-in Studio. The bare `nexura`
 command belongs to the separate Nexura Cloud client package `nexura`, not to this project. See
 [Service and Studio](studio-and-service.md#run-the-service).
 

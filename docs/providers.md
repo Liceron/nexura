@@ -115,7 +115,7 @@ agent = Agent(name="Support", instructions="Be brief.", model=OpenAIResponsesPro
 print(agent.run("Summarize our refund policy in one line.").final_output)
 ```
 
-`OpenAIProvider` sends `max_completion_tokens` to api.openai.com (reasoning models reject the deprecated `max_tokens`) and `max_tokens` to any other `base_url`, such as Ollama, vLLM or LM Studio. Set the instance attribute `max_tokens_param` to override.
+`OpenAIProvider` and `OpenAIChatModel` send `max_completion_tokens` to api.openai.com (reasoning models reject the deprecated `max_tokens`) and `max_tokens` to any other `base_url`, such as Ollama, vLLM or LM Studio. Set the instance attribute `max_tokens_param` to override.
 
 ## Errors you can catch
 
@@ -255,7 +255,7 @@ print(agent.run("Summarize our refund policy in one line.").final_output)
 
 Retries are owned by the SDK. Every call passes `num_retries=0` and `max_retries=0`, so LiteLLM never retries on its own; wrap the model in `RetryModel` or `FallbackModel` (see below). LiteLLM errors are mapped by HTTP status: 401/403 to `ProviderAuthError`, 429 to `ProviderRateLimitedError` (with `retry_after` when the response has a `Retry-After` header), 5xx to `ProviderServerError`, a 4xx about the context window to `ProviderContextLengthError`, other 4xx to `ProviderClientError`, and timeouts and connection failures to `ProviderRequestError`.
 
-Both `LiteLLMModel` and `OpenAIChatModel` stream text when you ask for it: `Runner.stream_async(agent, prompt, stream_text=True)` emits real `TEXT_DELTA` events as chunks arrive, assembles tool-call arguments split across chunks, and ends with the provider's usage and finish reason. `model.generate()` is unchanged and still returns whole responses, and `stream=True` is still rejected in `LiteLLMModel(**options)`. Internally `stream()` sends `stream=True` with `stream_options={"include_usage": True}` (LiteLLM keeps `num_retries=0`). Errors, including ones raised mid-stream, map to the same typed errors as `generate()`; a stream that errors or ends early never produces a final answer (text already emitted as deltas is not committed), and closing or cancelling the run closes the HTTP stream or LiteLLM stream wrapper. Turns that send a native output schema stream too (with `PARTIAL_OUTPUT` events, see [Structured output](structured-output.md#streaming-the-output)); models without `streams_response_schema`, such as the Anthropic provider, answer them in one piece.
+Both `LiteLLMModel` and `OpenAIChatModel` stream text when you ask for it: `Runner.stream_async(agent, prompt, stream_text=True)` emits real `TEXT_DELTA` events as chunks arrive, assembles tool-call arguments split across chunks, and ends with the provider's usage and finish reason. `model.generate()` is unchanged and still returns whole responses, and `stream=True` is still rejected in `LiteLLMModel(**options)`. Internally `stream()` sends `stream=True` with `stream_options={"include_usage": True}` (LiteLLM keeps `num_retries=0`). Errors, including ones raised mid-stream, map to the same typed errors as `generate()`; a stream that errors or ends early never produces a final answer (text already emitted as deltas is not committed), and closing or cancelling the run closes the HTTP stream or LiteLLM stream wrapper. Turns that send a native output schema stream too (with `PARTIAL_OUTPUT` events, see [Structured output](structured-output.md#streaming-the-output)); models without `streams_response_schema`, such as the Anthropic provider on Claude models older than 4.5, answer them in one piece.
 
 ## Temperature, max_tokens and stop sequences
 
@@ -318,7 +318,7 @@ assert custom.merged(ModelSettings(extra={"metadata": {"t": 1}})).extra == {
 | `top_p` | `top_p` | `top_p` | `topP` | `top_p` |
 | `seed` | `seed` | `seed` | `seed` | not supported |
 | `presence_penalty`, `frequency_penalty` | same names | same names | `presencePenalty`, `frequencyPenalty` | not supported |
-| `reasoning_effort` | `reasoning_effort` | `reasoning_effort` | not supported | not supported |
+| `reasoning_effort` | `reasoning_effort` | `reasoning_effort` | not supported | `output_config.effort` (models with effort; `"minimal"` sent as `"low"`) |
 | `thinking_budget_tokens` | not supported | `thinking` | `thinkingConfig.thinkingBudget` (0 = off) | `thinking` (see below; 0 = off) |
 | `extra` | merged into the body | passed as keyword arguments | merged into the body | merged into the body |
 
@@ -439,7 +439,7 @@ assert model.calls[1]["model_settings"] is None  # reset to auto after the call
 
 Some models spend hidden "thinking" tokens before they answer. When the provider reports them, `Usage.reasoning_tokens` holds the count. It is read from OpenAI's `reasoning_tokens` and from Gemini and Vertex AI's `thoughtsTokenCount`. These tokens are already counted in `completion_tokens` (the Gemini adapter adds `thoughtsTokenCount` to the visible output count; OpenAI's completion count includes them), so do not add the two together. If the provider does not report them, the field is `None`, not zero.
 
-OpenAI (both APIs), Sarvam and LiteLLM also fill `reasoning_tokens` from `completion_tokens_details`/`output_tokens_details`. The Anthropic adapter does not: Anthropic reports thinking only inside `output_tokens`. `ModelSettings(reasoning_effort=...)` is sent as `reasoning_effort` (Chat Completions), `reasoning.effort` (Responses) and `output_config.effort` (Anthropic); `thinking_budget_tokens` sizes Gemini thinking and Anthropic extended thinking on models before Claude 4.7.
+OpenAI (both APIs), Sarvam and LiteLLM also fill `reasoning_tokens` from `completion_tokens_details`/`output_tokens_details`. The Anthropic adapter does not: Anthropic reports thinking only inside `output_tokens`. `ModelSettings(reasoning_effort=...)` is sent as `reasoning_effort` (Chat Completions), `reasoning.effort` (Responses) and `output_config.effort` (Anthropic, only on the models the effort docs list: Opus 4.5+, Sonnet 4.6+, Haiku 5.5+, Fable, Mythos; `"minimal"` becomes `"low"`; other models get a warning and nothing is sent); `thinking_budget_tokens` sizes Gemini thinking and Anthropic extended thinking on models before Claude 4.7.
 
 Cache usage follows one rule for every provider: `prompt_tokens` is the whole prompt, including the tokens read from a cache (`cached_prompt_tokens`, `cache_read_input_tokens`) and written to one (`cache_creation_input_tokens`). Anthropic reports `input_tokens` without them, so the adapter adds them back; cost settlement prices each part at its own rate.
 

@@ -1,0 +1,47 @@
+# Deploying {{project_name}} with Docker (single user)
+
+`nexura-runtime deploy --target docker` wrote `Dockerfile`, `.dockerignore` and this file.
+It did not build an image or start a container.
+
+## What runs
+
+The image installs this project and runs `nexura-runtime dev --container`: the bundled Nexura
+Studio with this project's handlers and workflows (from `[tool.nexura]` in `pyproject.toml`),
+on port {{port}}. The REST service that `studio-web` and the TypeScript client call is not
+started: the open-source service has no authentication, so it must stay on the host's
+loopback interface (`nexura-runtime dev` on your machine).
+
+Data (run history, checkpoints) is kept in `/app/.nexura`; mount a volume there to keep it.
+
+## Build and run
+
+Nexura {{nexura_version}} is not on PyPI yet. Until it is, build the wheels in a Nexura checkout
+(`uv build --all-packages`), copy the `.whl` files into `./wheels/` here, and pass
+`--build-arg PIP_FIND_LINKS=/app/wheels`:
+
+```bash
+docker build --build-arg PIP_FIND_LINKS=/app/wheels -t {{project_name}} .
+export NEXURA_STUDIO_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+docker run --rm -p 127.0.0.1:{{port}}:{{port}} -e NEXURA_STUDIO_TOKEN \
+    -v {{project_name}}-data:/app/.nexura {{project_name}}
+```
+
+Open `http://127.0.0.1:{{port}}/#token=<your token>`. Pass model and embedding keys the same
+way (`-e OPENAI_API_KEY`); never bake them into the image or commit a `.env` file.
+
+## Security caveats
+
+From Nexura's `SECURITY_MODEL.md`:
+
+- The open-source edition is **single user, this machine only**. For a team or a public
+  endpoint use the hosted or enterprise edition. There are no accounts, roles or tenant
+  isolation; whoever has the token has full authority.
+- Inside a container Studio must listen on `0.0.0.0` so the port can be published. It then
+  refuses to start without `NEXURA_STUDIO_TOKEN`, and every API request must carry the token.
+  The token is one shared secret, not a per-user login.
+- Publish the port on `127.0.0.1` only (`-p 127.0.0.1:{{port}}:{{port}}`). Never publish it on
+  `0.0.0.0` or put it behind a public proxy, and never add
+  `--insecure-allow-unauthenticated-network`.
+- The image runs as an unprivileged user (uid 10001). Workflow handlers are your own Python
+  code and run with that user's rights inside the container.
+- Nexura has not had an external security review.

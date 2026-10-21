@@ -81,7 +81,7 @@ export function RunDiagnostics({ runId, revision }: { runId: string; revision: n
           {' '}{t('ui.includeRedactedInputsAndOutputs')}
         </label>
       </div>
-      <p style={{ fontSize: 12, color: 'var(--text-secondary)', margin: 0 }}>
+      <p style={{ fontSize: 'var(--type-meta)', color: 'var(--text-secondary)', margin: 0 }}>
         {t('ui.basedOnPersistedSdkEventsContentIsHiddenByDefaultRedactionIsNotAPersonalDat')}
       </p>
       {loading && <p role="status">{t('ui.loadingDiagnostics')}</p>}
@@ -100,9 +100,9 @@ export function RunDiagnostics({ runId, revision }: { runId: string; revision: n
           {record.usage.successful_task_cost_status === 'undefined_zero_successes' && (
             <p>{t('ui.successfulTaskCostUndefined0SuccessesInCohort')}</p>
           )}
-          <p style={{ fontSize: 12 }}>{t('ui.moduleRecordsMayContainAggregateUsageThisTallyIsNotADeduplicatedProviderBill')}</p>
+          <p style={{ fontSize: 'var(--type-meta)' }}>{t('ui.moduleRecordsMayContainAggregateUsageThisTallyIsNotADeduplicatedProviderBill')}</p>
           {record.context_decisions && record.context_decisions.length > 0 && (
-            <p style={{ fontSize: 12, fontWeight: 500 }}>
+            <p style={{ fontSize: 'var(--type-meta)', fontWeight: 500 }}>
               {t('ui.contextSelectionActiveFor') + " "}{record.context_decisions.length} {t('ui.moduleCalls')}
             </p>
           )}
@@ -110,17 +110,17 @@ export function RunDiagnostics({ runId, revision }: { runId: string; revision: n
         {!record.trace_export && <p>{record.trace_export_unavailable_reason}</p>}
         {record.truncated_attempts > 0 && <p>{t('ui.showingTheLatest200Attempts') + " "}{record.truncated_attempts} {t('ui.omitted')}</p>}
         {record.attempts.length === 0 && <p>{t('ui.noNodeDiagnosticsHaveBeenRecordedYet')}</p>}
-        {record.attempts.map((attempt) => <article key={attempt.id} style={{ border: '1px solid var(--border-subtle)', padding: 10 }}>
+        {record.attempts.map((attempt) => <article key={attempt.id} style={{ borderBottom: '1px solid var(--border-subtle)', padding: '12px 0' }}>
           <button type="button" aria-expanded={expanded === attempt.id} onClick={() => setExpanded(expanded === attempt.id ? null : attempt.id)}>
             {attempt.node_id} — {t(`statusLabels.${attempt.status}`, attempt.status)}
           </button>
-          <p style={{ margin: '6px 0', fontSize: 12 }}>
+          <p style={{ margin: '6px 0', fontSize: 'var(--type-meta)' }}>
             {attempt.module_id || t('ui.legacyHandler')} · {attempt.duration_ms === null ? t('ui.timingUnavailable') : `${attempt.duration_ms} ms`}
             {' '}{t('ui.tokens2') + " "}{attempt.input_tokens ?? t('ui.unknown')} {t('ui.input3') + " "}{attempt.output_tokens ?? t('ui.unknown')} {t('ui.output')}
           </p>
           {attempt.identity_source === 'legacy_handler' && <small>{t('ui.identityIsTheRecordedHandlerLabel')}</small>}
           {attempt.context_decision && (
-            <div style={{ marginTop: 6, padding: '4px 8px', background: 'var(--bg-subtle, #f5f5f5)', borderRadius: 4, fontSize: 12 }}>
+            <div style={{ marginTop: 6, padding: '4px 8px', background: 'var(--bg-surface-elevated)', borderRadius: 4, fontSize: 'var(--type-meta)' }}>
               <span style={{ fontWeight: 600 }}>{t('ui.contextSelection')}</span>{' '}
               {t(`statusLabels.${attempt.context_decision.status}`, attempt.context_decision.status)} ({attempt.context_decision.initial_tokens} <Icon name="right" /> {attempt.context_decision.projected_tokens} {t('ui.tokens3')}{attempt.context_decision.reduction_ratio > 0 ? t('diagnostics.reduction').replace('{percent}', String(Math.round(attempt.context_decision.reduction_ratio * 100))) : ''})
               {' · '}{t('ui.policyV')}{attempt.context_decision.policy_version}
@@ -131,13 +131,13 @@ export function RunDiagnostics({ runId, revision }: { runId: string; revision: n
             {attempt.context_decision && (
               <div style={{ marginTop: 10, borderTop: '1px dashed var(--border-subtle)', paddingTop: 8 }}>
                 <h4>{t('ui.contextSelectionDecisions')}</h4>
-                <p style={{ fontSize: 12, margin: '4px 0' }}>
+                <p style={{ fontSize: 'var(--type-meta)', margin: '4px 0' }}>
                   {t('ui.status2') + " "}<strong>{t(`statusLabels.${attempt.context_decision.status}`, attempt.context_decision.status)}</strong> · {attempt.context_decision.items.length} {t('ui.itemsEvaluated')}
                 </p>
                 {attempt.context_decision.overflow_error && (
-                  <p role="alert" style={{ color: 'var(--danger, #d32f2f)', fontSize: 12 }}>{attempt.context_decision.overflow_error}</p>
+                  <p role="alert" style={{ color: 'var(--status-danger)', fontSize: 'var(--type-meta)' }}>{attempt.context_decision.overflow_error}</p>
                 )}
-                <ul style={{ fontSize: 12, paddingLeft: 18, margin: '4px 0' }}>
+                <ul style={{ fontSize: 'var(--type-meta)', paddingLeft: 18, margin: '4px 0' }}>
                   {attempt.context_decision.items.map((it, idx) => (
                     <li key={idx} style={{ margin: '2px 0' }}>
                       <code>{it.item_id}</code>: <strong>{t(`statusLabels.${it.decision}`, it.decision)}</strong> ({t(`statusLabels.${it.reason}`, it.reason)})
@@ -148,8 +148,8 @@ export function RunDiagnostics({ runId, revision }: { runId: string; revision: n
               </div>
             )}
             {includeContent ? <>
-              <h4>{t('ui.recordedInput')}</h4><pre style={{ overflow: 'auto', maxHeight: 200 }}>{JSON.stringify(attempt.input, null, 2)}</pre>
-              <h4>{t('ui.recordedOutput')}</h4><pre style={{ overflow: 'auto', maxHeight: 200 }}>{JSON.stringify(attempt.output, null, 2)}</pre>
+              <h4>{t('ui.recordedInput')}</h4><pre className="inspection-code">{JSON.stringify(attempt.input, null, 2)}</pre>
+              <h4>{t('ui.recordedOutput')}</h4><pre className="inspection-code">{JSON.stringify(attempt.output, null, 2)}</pre>
             </> : <p>{t('ui.enableContentInspectionToViewRedactedInputsAndOutputs')}</p>}
           </>}
         </article>)}

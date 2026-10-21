@@ -1,0 +1,65 @@
+"""Offline tests: the scripted FakeModel stands in for a real model."""
+
+from __future__ import annotations
+
+import asyncio
+from decimal import Decimal
+from pathlib import Path
+
+import pytest
+from nexura_agents.usage import BudgetExceededError
+from nexura_runtime.workflow import SQLiteWorkflowStore, WorkflowEngine
+
+from {{package}} import agent as app
+from {{package}}.studio import refund_request, registry, workflows
+
+
+@pytest.fixture(autouse=True)
+def _clear_refunds() -> None:
+    app.REFUNDS.clear()
+
+
+def test_write_tool_waits_for_approval_then_runs() -> None:
+    agent, runner = app.build_agent(app.demo_model()), app.build_runner()
+    paused = runner.run(agent, "Refund ORD-1, please")
+    assert paused.status == "paused"
+    assert app.REFUNDS == []  # nothing ran before the approval
+    call = paused.interruption.pending[0]
+    assert (call.name, call.arguments) == ("issue_refund", {"order_id": "ORD-1", "amount": 40})
+
+    done = runner.resume(agent, paused.interruption, approve=True)
+    assert done.status == "completed"
+    assert done.output == "Refunded 40 for ORD-1."
+    assert app.REFUNDS == [("ORD-1", 40)]
+
+
+def test_rejected_refund_never_runs() -> None:
+    agent, runner = app.build_agent(app.demo_model()), app.build_runner()
+    paused = runner.run(agent, "Refund ORD-1, please")
+    runner.resume(agent, paused.interruption, reject={"c2": "Not eligible."})
+    assert app.REFUNDS == []
+
+
+def test_budget_refuses_calls_that_do_not_fit() -> None:
+    agent = app.build_agent(app.demo_model())
+    runner = app.build_runner(max_tokens=100, max_cost_usd=Decimal("0.05"))
+    with pytest.raises(BudgetExceededError):
+        runner.run(agent, "Refund ORD-1, please")
+    assert app.REFUNDS == []
+
+
+def test_studio_workflow_gates_the_refund(tmp_path: Path) -> None:
+    assert list(workflows.values()) == [refund_request]
+
+    async def scenario() -> None:
+        async with SQLiteWorkflowStore(tmp_path / "workflows.sqlite3") as store:
+            engine = WorkflowEngine(refund_request, registry, store=store)
+            paused = await engine.run({"message": "Refund ORD-1, please"})
+            assert paused.status == "paused" and app.REFUNDS == []
+            assert paused.state["proposed"]["arguments"] == {"order_id": "ORD-1", "amount": 40}
+            approval_id = paused.pending_approval.approval_id
+            done = await engine.resume(paused.workflow_run_id, approval_id, decision="approve")
+            assert done.status == "completed"
+
+    asyncio.run(scenario())
+    assert app.REFUNDS == [("ORD-1", 40)]

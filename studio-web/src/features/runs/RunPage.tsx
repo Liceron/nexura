@@ -112,6 +112,7 @@ export function RunPage({ runId }: { runId: string }) {
         <a href={`#/traces/${encodeURIComponent(runId)}`}>{t('traces.openTrace')}</a>
       </div>
       <RunVisualizer
+        headingLevel={1}
         runId={runId}
         onClose={leave}
         onSelectRun={(id) => {

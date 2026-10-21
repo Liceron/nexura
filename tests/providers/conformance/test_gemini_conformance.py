@@ -152,7 +152,8 @@ async def test_streamed_call_signature_is_reattached_next_turn() -> None:
     out = await drain(p, ask("Check AA100", tools=[WEATHER_TOOL]))
     assert [(c.id, c.arguments) for c in out.tool_calls] == [("fc-s1", {"flight": "AA100"})]
     history = [
-        Message(role="user", content="Check AA100"),
+        # The same conversation as the streamed request (the record is per conversation).
+        *ask("Check AA100").messages,
         Message(role="assistant", tool_calls=out.tool_calls),  # streamed: no provider_data
         Message(role="tool", tool_call_id="fc-s1", name="check_flight", content='{"s": "ok"}'),
     ]
@@ -253,7 +254,9 @@ async def test_vertex_uses_the_same_wire_format() -> None:
     )
     assert req.headers["Authorization"] == "Bearer tok"
     assert replay.body()["systemInstruction"] == {"parts": [{"text": "Be brief."}]}
-    assert vertex.unsigned_call_signature is None  # the dummy is documented for the Gemini API
+    # Vertex documents the same placeholder for unsigned calls (thought-signatures page,
+    # docs.cloud.google.com/vertex-ai/generative-ai/docs/thought-signatures, 2026-10-20).
+    assert vertex.unsigned_call_signature == "skip_thought_signature_validator"
     with pytest.raises(ProviderRateLimitedError):
         await VertexAIProvider(
             MODEL,

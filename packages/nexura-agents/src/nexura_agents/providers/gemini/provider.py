@@ -37,7 +37,9 @@ from nexura_agents.providers.gemini.types import (
     GeminiThoughtMetadata,
     extract_gemini_signatures,
     extract_gemini_tool_calls,
+    history_digest,
     map_gemini_finish_reason,
+    signature_key,
     synthetic_call_id,
     to_gemini_request,
     to_gemini_tools,
@@ -200,14 +202,16 @@ class GeminiNativeProvider(BaseProvider):
         self.transport = transport
         self.extra_headers = extra_headers or {}
         self._internal_client: httpx.AsyncClient | None = None
-        # thoughtSignatures of recent function calls, by call id: streamed turns cannot carry
-        # them in Message.provider_data, so they are re-attached from here on the next call.
+        # thoughtSignatures of recent function calls, keyed by the digest of the request that
+        # produced them plus the call id (made-up ids repeat across conversations): streamed
+        # turns cannot carry them in Message.provider_data, so they are re-attached from here.
         self._signatures: OrderedDict[str, str] = OrderedDict()
 
-    def _remember_signatures(self, signatures: dict[str, str]) -> None:
+    def _remember_signatures(self, digest: str, signatures: dict[str, str]) -> None:
         for call_id, signature in signatures.items():
-            self._signatures[call_id] = signature
-            self._signatures.move_to_end(call_id)
+            key = signature_key(digest, call_id)
+            self._signatures[key] = signature
+            self._signatures.move_to_end(key)
         while len(self._signatures) > _SIGNATURE_CACHE_SIZE:
             self._signatures.popitem(last=False)
 
@@ -395,7 +399,7 @@ class GeminiNativeProvider(BaseProvider):
 
         tool_calls = extract_gemini_tool_calls(parts)
         signatures = extract_gemini_signatures(parts, tool_calls)
-        self._remember_signatures(signatures)
+        self._remember_signatures(history_digest(request.messages), signatures)
         raw_finish = first_cand.get("finishReason") or "STOP"
         finish_reason = map_gemini_finish_reason(raw_finish)
         if str(raw_finish).upper() in CONTENT_FILTER_FINISH and not text_pieces and not tool_calls:
@@ -442,6 +446,7 @@ class GeminiNativeProvider(BaseProvider):
         url = f"{self.base_url}/models/{self.model}:streamGenerateContent?alt=sse"
 
         payload = self._request_body(request)
+        digest = history_digest(request.messages)
         # Same generation options as generate(): sampling, limits, stop and schema.
         gen_config: dict[str, Any] = {}
         if request.temperature is not None:
@@ -547,7 +552,7 @@ class GeminiNativeProvider(BaseProvider):
                                     )
                                     signature = p.get("thoughtSignature")
                                     if isinstance(signature, str) and signature:
-                                        self._remember_signatures({call_id: signature})
+                                        self._remember_signatures(digest, {call_id: signature})
                                     saw_output = True
                                     yield StreamDelta(
                                         kind="tool_call_delta",

@@ -95,10 +95,6 @@ class VertexAIProvider(GeminiNativeProvider):
             to Application Default Credentials (google-auth, a dependency of this package).
     """
 
-    # Google documents the dummy thoughtSignature for the Gemini API; third-party reports say
-    # Vertex rejects it, so Vertex sends no signature when the real one is unknown.
-    unsigned_call_signature = None
-
     def __init__(
         self,
         model: str = "gemini-2.5-flash",

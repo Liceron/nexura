@@ -13,7 +13,18 @@ from pathlib import Path
 import pytest
 
 COMMANDS = tuple(entry_points(group="nexura.commands"))
-RUNTIME_NAMES = {"serve", "worker", "workflow", "repro", "redteam", "evals", "sandbox"}
+RUNTIME_NAMES = {
+    "serve",
+    "worker",
+    "workflow",
+    "repro",
+    "redteam",
+    "evals",
+    "sandbox",
+    # P37 B5: `init` and `deploy` are client built-ins, so they live under `project`.
+    "dev",
+    "project",
+}
 BUILTINS = {
     "doctor",
     "login",
@@ -33,7 +44,7 @@ BUILTINS = {
 
 def test_installed_command_names_and_owners() -> None:
     assert {ep.name for ep in COMMANDS} == RUNTIME_NAMES | {"studio"}
-    assert len(COMMANDS) == 8
+    assert len(COMMANDS) == 10
     for ep in COMMANDS:
         assert re.fullmatch(r"[a-z][a-z0-9-]{0,31}", ep.name)
         assert ep.name not in BUILTINS
@@ -58,7 +69,7 @@ def test_bad_option_returns_code(ep: EntryPoint, capsys: pytest.CaptureFixture[s
     assert "error:" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("name", ["serve", "studio"])
+@pytest.mark.parametrize("name", ["serve", "studio", "dev", "project"])
 def test_help_matches_console_script(name: str, capsys: pytest.CaptureFixture[str]) -> None:
     ep = next(ep for ep in COMMANDS if ep.name == name)
     assert ep.load()(["--help"]) == 0

@@ -5,6 +5,17 @@ has been published.
 
 ## Unreleased (0.4.0)
 
+### Added (P37 B5: project scaffolding)
+- `nexura-runtime init DIR --template agent|workflow|rag` (and `--list`) writes a small runnable
+  project with offline FakeModel tests, a README, `.gitignore` and `.env.example`; it refuses
+  a non-empty directory without `--force` and never overwrites a file.
+- `nexura-runtime dev` serves the REST service and the bundled Studio on 127.0.0.1 with the
+  project's handlers and workflows from `[tool.nexura]` registered.
+- `nexura-runtime deploy --target docker` writes a single-user Dockerfile, `.dockerignore` and
+  DEPLOY.md with the loopback and token caveats; it builds and runs nothing.
+- `nexura.commands` entry points `dev` and `project` (`nexura project init|dev|deploy`; `init`
+  and `deploy` are the Nexura Cloud client's built-ins). See docs/project-templates.md.
+
 ### Fixed
 - Reserve workflow run IDs atomically before dispatch, preventing concurrent starts
   from executing the same run twice. Custom checkpoint stores must provide atomic

@@ -1,0 +1,49 @@
+# {{title}}
+
+A Nexura workflow project created by `nexura-runtime init --template workflow`. An agent
+drafts a reply to a refund request, the run pauses before anything is sent, and a person
+approves or rejects it. Checkpoints are saved in SQLite after every step, so a paused run
+survives a restart and can be resumed from another process. Everything runs offline on a
+scripted `FakeModel` until you configure a model.
+
+## Install
+
+Nexura {{nexura_version}} is not on PyPI yet. Until it is, build its wheels from a checkout and
+install this project against them (Python 3.12):
+
+```bash
+git clone https://github.com/Liceron/nexura /path/to/nexura
+(cd /path/to/nexura && uv build --all-packages)
+python -m venv .venv && . .venv/bin/activate
+pip install --find-links /path/to/nexura/dist -e ".[dev]"
+```
+
+Once Nexura is published, `pip install -e ".[dev]"` is enough.
+
+## Next steps
+
+1. Run the tests (offline): `pytest`
+2. Start a run; it stops at the approval gate and prints the run and approval ids:
+   `python -m {{package}} start ORD-1 Asha`. Then, in a new shell if you like:
+   `python -m {{package}} approve RUN_ID APPROVAL_ID` (or `reject`). The database is
+   `.nexura/workflows.sqlite3`.
+3. Open the local service and Studio: `nexura-runtime dev`. It prints the URLs and registers
+   the workflow from `{{package}}/studio.py`; run it and approve the `send` step in Studio.
+4. Use a real model for the draft: copy `.env.example` to `.env`, set `NEXURA_MODEL` and the
+   provider's key, and export them in your shell. Real models cost money.
+5. Replace `send()` with your mail or chat integration. It is declared non-idempotent, so
+   after a crash Nexura never repeats it silently.
+6. Package it for one user in Docker: `nexura-runtime deploy --target docker` writes a
+   Dockerfile and DEPLOY.md (it does not build or run anything).
+
+## Layout
+
+| Path | What it is |
+| --- | --- |
+| `{{package}}/workflow.py` | The steps, the approval gate and the SQLite-backed start/resume |
+| `{{package}}/__main__.py` | The `start`, `approve` and `reject` commands |
+| `{{package}}/studio.py` | What `nexura-runtime dev` registers (read by `[tool.nexura]` in `pyproject.toml`) |
+| `tests/` | Offline tests, including a resume from a fresh engine |
+
+Nexura's open-source edition is single user, on this machine only. Keep the service and
+Studio on `127.0.0.1`.

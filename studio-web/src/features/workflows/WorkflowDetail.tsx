@@ -267,7 +267,7 @@ export function WorkflowDetail({ workflowId, runId, onRunChange, onBack, onOpenW
             actionHost={actionHost}
             feedbackHost={feedbackHost}
             active={activeTab === 'canvas' || activeTab === 'nodes'}
-            primaryAllowed={activeTab !== 'tests' && !activePanel}
+            primaryAllowed={activeTab !== 'tests' && activeTab !== 'run' && !activePanel}
             viewMode={activeTab === 'nodes' ? 'nodes' : 'graph'}
             onDirtyChange={setEditorDirty}
             moreActions={<>

@@ -68,6 +68,7 @@ export type {
   SubRunDetail,
   SubRunStep,
   ForkRunOptions,
+  RecoverRunOptions,
   RunRecord,
   RunDiagnostics,
   RunAttemptDiagnostics,

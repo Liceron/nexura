@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from 'react';
 import type { RunCheckpoint, RunRecord } from '@liceron/nexura-sdk';
 import { useApi } from '../../api/context';
 import { Button } from '../../components/Button';
-import { Badge } from '../../components/Badge';
+import { RunStatus } from './RunStatus';
 import { Spinner } from '../../components/Spinner';
 import { canForkCheckpoint, formatCheckpointTime, parseJsonObject } from './durable';
 import { useDurableT } from './useDurableT';
@@ -70,17 +70,17 @@ export function RunHistory({ runId, revision, onForked }: RunHistoryProps) {
 
   return (
     <div data-testid="tab-run-history" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-      <a href={`#/traces/${encodeURIComponent(runId)}`} data-testid="run-history-trace-link" style={{ fontSize: 12 }}>
+      <a href={`#/traces/${encodeURIComponent(runId)}`} data-testid="run-history-trace-link" style={{ fontSize: 'var(--type-ui)' }}>
         {t('ui.viewTraceWaterfall')}
       </a>
       {loading && <Spinner size={16} />}
       {error && (
-        <div role="alert" style={{ color: 'var(--status-danger)', fontSize: 12 }}>
+        <div role="alert" style={{ color: 'var(--status-danger)', fontSize: 'var(--type-ui)' }}>
           {error}
         </div>
       )}
       {!loading && !error && items.length === 0 && (
-        <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{t('ui.noCheckpointsRecorded')}</div>
+        <div style={{ fontSize: 'var(--type-ui)', color: 'var(--text-secondary)' }}>{t('ui.noCheckpointsRecorded')}</div>
       )}
       {items.map((cp, index) => (
         <div
@@ -95,7 +95,7 @@ export function RunHistory({ runId, revision, onForked }: RunHistoryProps) {
             padding: 8,
             border: `1px solid ${selected === index ? 'var(--accent, var(--border-strong, var(--border-subtle)))' : 'var(--border-subtle)'}`,
             borderRadius: 'var(--radius-sm)',
-            fontSize: 12,
+            fontSize: 'var(--type-ui)',
           }}
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
@@ -105,7 +105,7 @@ export function RunHistory({ runId, revision, onForked }: RunHistoryProps) {
             <span>
               {t('ui.node') + " "}<code>{cp.current_node_id ?? 'end'}</code>
             </span>
-            <Badge variant="neutral">{cp.status}</Badge>
+            <RunStatus status={cp.status} />
             <span style={{ color: 'var(--text-secondary)' }} data-testid="run-history-time">
               {formatCheckpointTime(cp.updated_at, t)}
             </span>
@@ -132,27 +132,28 @@ export function RunHistory({ runId, revision, onForked }: RunHistoryProps) {
         </div>
       ))}
 
+      <p className="inspection-meta">{t('reviewDesign.forkHelp')}</p>
       {selectedCp && selected !== null && (
         <div
           data-testid="run-history-detail"
           style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: 10, border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)' }}
         >
-          <div style={{ fontSize: 12, fontWeight: 600 }}>
+          <div style={{ fontSize: 'var(--type-ui)', fontWeight: 600 }}>
             {t('durable.history.stateAt', 'State at checkpoint')} {selected} {t('ui.step3') + " "}{selectedCp.step_count},{' '}
             {selectedCp.current_node_id ?? t('ui.end')})
           </div>
-          <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+          <div style={{ fontSize: 'var(--type-meta)', color: 'var(--text-muted)' }}>
             {t('durable.history.redacted', 'Shown as the API returns it: secrets are redacted.')}
           </div>
           <pre
             data-testid="run-history-state"
-            style={{ margin: 0, padding: 8, borderRadius: 'var(--radius-sm)', backgroundColor: 'var(--bg-canvas)', fontFamily: 'var(--font-mono)', fontSize: 12, overflow: 'auto', maxHeight: 240 }}
+            style={{ margin: 0, padding: 8, borderRadius: 'var(--radius-sm)', backgroundColor: 'var(--bg-canvas)', fontFamily: 'var(--font-mono)', fontSize: 'var(--type-ui)', overflow: 'auto', maxHeight: 240 }}
           >
             {JSON.stringify(selectedCp.state, null, 2)}
           </pre>
           {canForkCheckpoint(selectedCp) ? (
             <>
-              <label htmlFor="fork-state-update" style={{ fontSize: 12, fontWeight: 600 }}>
+              <label htmlFor="fork-state-update" style={{ fontSize: 'var(--type-ui)', fontWeight: 600 }}>
                 {t('durable.fork.label', 'Fork state edits (JSON object, merged over the checkpoint state)')}
               </label>
               <textarea
@@ -164,7 +165,7 @@ export function RunHistory({ runId, revision, onForked }: RunHistoryProps) {
                 placeholder='{ "region": "EU" }'
                 style={{
                   fontFamily: 'var(--font-mono)',
-                  fontSize: 12,
+                  fontSize: 'var(--type-ui)',
                   padding: 8,
                   borderRadius: 'var(--radius-sm)',
                   border: `1px solid ${parsed.error ? 'var(--status-danger)' : 'var(--border-subtle)'}`,
@@ -173,7 +174,7 @@ export function RunHistory({ runId, revision, onForked }: RunHistoryProps) {
                 }}
               />
               {parsed.error && (
-                <div data-testid="fork-state-error" style={{ fontSize: 12, color: 'var(--status-danger)' }}>
+                <div data-testid="fork-state-error" style={{ fontSize: 'var(--type-ui)', color: 'var(--status-danger)' }}>
                   {parsed.error}
                 </div>
               )}
@@ -190,7 +191,7 @@ export function RunHistory({ runId, revision, onForked }: RunHistoryProps) {
               </div>
             </>
           ) : (
-            <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+            <div style={{ fontSize: 'var(--type-ui)', color: 'var(--text-secondary)' }}>
               {t('durable.fork.atEnd', 'This checkpoint is the end of the run; pick an earlier checkpoint to fork.')}
             </div>
           )}

@@ -163,11 +163,12 @@ test.describe('Run Console, Replay, and Debugging (F07)', () => {
     await expect(approvalBanner).toContainText('approval_gate');
 
     // Click Approve & Resume
-    const approveBtn = approvalBanner.getByRole('button', { name: /Approve & Resume/i });
+    await approvalBanner.getByRole('button', { name: 'Review action', exact: true }).click();
+    const approveBtn = page.getByRole('dialog', { name: 'Review action', exact: true }).getByRole('button', { name: 'Approve action', exact: true });
     await expect(approveBtn).toBeVisible();
     await approveBtn.click();
 
     // Verify run resumes and reaches Completed
-    await expect(page.getByText(/^\s*Completed$/i)).toBeVisible({ timeout: 10000 });
+    await expect(page.getByLabel('Run status badge')).toContainText('Completed', { timeout: 10000 });
   });
 });

@@ -7,6 +7,7 @@
 import type {
   ExecutionEffect,
   ResolveEffectOptions,
+  RecoverRunOptions,
   AgentListResponse,
   AgentOptions,
   AgentRecord,
@@ -607,6 +608,20 @@ export class RunsClient {
       `/runs/${encodeURIComponent(runId)}/effects/${encodeURIComponent(effectId)}/resolve`,
       { body: options }
     );
+  }
+
+  /**
+   * Continue a run whose process stopped (`interrupted`), or a `paused` run whose unknown
+   * effect was resolved (`POST /runs/{id}/recover`). A step whose outcome is unknown and that
+   * must not repeat pauses the run again (`pause_reason` `effect_unknown`). Fails with 409
+   * `RUN_LEASE_HELD` while another live process executes the run.
+   */
+  public async recover(runId: string, options: RecoverRunOptions = {}): Promise<RunRecord> {
+    const body: Record<string, unknown> = {};
+    if (options.onUncertain !== undefined) {
+      body.on_uncertain = options.onUncertain;
+    }
+    return this.client.request<RunRecord>("POST", `/runs/${encodeURIComponent(runId)}/recover`, { body });
   }
 
   /** One child run (status, steps, redacted history); `childKey` is `child_key` from `subruns()`. */

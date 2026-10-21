@@ -161,7 +161,12 @@ export interface RunRecord {
   run_id: string;
   workflow_id?: string | null;
   spec_hash: string;
-  status: "running" | "pending_approval" | "waiting_for_input" | "completed" | "failed" | "cancelled" | "rejected" | "interrupted" | "pending";
+  /**
+   * `interrupted`: the process executing the run stopped (its run lease expired); continue it
+   * with `runs.recover()`. `paused`: a step's outcome is unknown after a crash
+   * (`pause_reason` `effect_unknown`); resolve `pending_effect`, then `runs.recover()`.
+   */
+  status: "running" | "pending_approval" | "waiting_for_input" | "completed" | "failed" | "cancelled" | "rejected" | "interrupted" | "paused" | "pending";
   current_node_id?: string | null;
   step_count: number;
   input_state: Record<string, any>;
@@ -176,6 +181,19 @@ export interface RunRecord {
   spec?: WorkflowSpec;
   /** True when the run's spec has a sub-workflow node (derived server-side). */
   has_subworkflows?: boolean;
+  /** `effect_unknown` while `status` is `paused`; null otherwise. */
+  pause_reason?: "effect_unknown" | null;
+  /** The effect a paused run waits on (`effect_id`, `node_id`, `step_key`, ...). */
+  pending_effect?: Record<string, any> | null;
+}
+
+/** Options of `runs.recover()` (`POST /runs/{id}/recover`). */
+export interface RecoverRunOptions {
+  /**
+   * A non-idempotent step dispatched without a recorded outcome: `pause` the run
+   * (`pause_reason` `effect_unknown`, the default) or `fail` it.
+   */
+  onUncertain?: "pause" | "fail";
 }
 
 /** Per-run limits accepted by the service's BudgetConfig. Decimal fields accept JSON strings. */

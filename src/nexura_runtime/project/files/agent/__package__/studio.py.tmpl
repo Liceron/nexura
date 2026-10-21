@@ -1,0 +1,55 @@
+"""What `nexura-runtime dev` registers in the local service and Studio.
+
+Studio runs workflows, so the agent is wrapped in a two-step workflow: ``propose`` runs the
+agent until it asks to call ``issue_refund`` (nothing is refunded), and ``refund`` performs that
+exact call after a person approves the step in Studio.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from nexura_runtime.workflow import ModuleRegistry, WorkflowNode, WorkflowSpec
+
+from {{package}}.agent import build_agent, build_runner, refund
+
+#: Handler names are prefixed with the package so they never clash with built-ins.
+PREFIX = "{{package}}"
+registry = ModuleRegistry()
+
+
+@registry.register_handler(f"{PREFIX}.propose", effect="pure")
+async def propose(state: dict[str, Any]) -> dict[str, Any]:
+    """Run the agent; stop at its first write and record what it wants to do."""
+    agent = build_agent()
+    result = await build_runner().run_async(agent, state.get("message", "Refund ORD-1."))
+    if result.status == "paused" and result.interruption is not None:
+        call = result.interruption.pending[0]
+        return {"proposed": {"tool": call.name, "arguments": dict(call.arguments)}}
+    return {"proposed": None, "reply": result.output}
+
+
+@registry.register_handler(f"{PREFIX}.refund")
+def run_refund(state: dict[str, Any]) -> dict[str, Any]:
+    """Perform the approved refund (only the call the agent proposed)."""
+    proposed = state.get("proposed")
+    if not proposed or proposed.get("tool") != "issue_refund":
+        return {"refund": None}
+    arguments = proposed["arguments"]
+    return {"refund": refund(str(arguments["order_id"]), int(arguments["amount"]))}
+
+
+refund_request = WorkflowSpec(
+    name="{{title}}: refund request",
+    entry_node="propose",
+    nodes={
+        "propose": WorkflowNode(
+            id="propose", handler=f"{PREFIX}.propose", default_transition="refund"
+        ),
+        "refund": WorkflowNode(id="refund", handler=f"{PREFIX}.refund", requires_approval=True),
+    },
+    terminal_nodes=["refund"],
+)
+
+#: Workflow id -> spec. `nexura-runtime dev` creates or updates these in Studio.
+workflows = {"{{slug}}-refund-request": refund_request}

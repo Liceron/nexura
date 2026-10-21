@@ -1,0 +1,10 @@
+"""What `nexura-runtime dev` registers in the local service and Studio."""
+
+from __future__ import annotations
+
+from {{package}}.workflow import registry, spec
+
+__all__ = ["registry", "workflows"]
+
+#: Workflow id -> spec. `nexura-runtime dev` creates or updates these in Studio.
+workflows = {"{{slug}}-refund-reply": spec}

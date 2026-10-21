@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import subprocess
 import sys
 from contextlib import redirect_stderr, redirect_stdout
 from typing import Any
@@ -137,15 +138,26 @@ def test_two_installed_plugin_versions_resolve_explicitly() -> None:
 
 
 def test_importing_core_does_not_import_heavyweight_libraries() -> None:
-    """Importing core SDK contracts and registry does not import unneeded modules."""
-    import nexura_runtime.contracts  # noqa: F401
+    """Importing core SDK contracts and registry does not import unneeded modules.
 
-    import nexura_runtime.modules  # noqa: F401
-
-    # Ensure heavy external modules were not imported
-    assert "asyncpg" not in sys.modules
-    assert "anthropic" not in sys.modules
-    assert "google.genai" not in sys.modules
+    Checked in a fresh interpreter: any earlier test in the session (a Postgres test loads
+    asyncpg) would otherwise decide the outcome.
+    """
+    script = (
+        "import sys\n"
+        "import nexura_runtime.contracts  # noqa: F401\n"
+        "import nexura_runtime.modules  # noqa: F401\n"
+        "# Ensure heavy external modules were not imported\n"
+        "assert 'asyncpg' not in sys.modules\n"
+        "assert 'anthropic' not in sys.modules\n"
+        "assert 'google.genai' not in sys.modules\n"
+        "print('ok')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=120, check=False
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.strip() == "ok"
 
 
 @pytest.mark.asyncio

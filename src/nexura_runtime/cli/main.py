@@ -642,6 +642,153 @@ def sandbox_install_runtime_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def init_command(args: argparse.Namespace) -> int:
+    """Create a runnable project from a template (never overwrites an existing file)."""
+    from nexura_runtime.project.scaffold import TEMPLATES, ScaffoldError, scaffold_project
+
+    if args.list:
+        width = max(len(name) for name in TEMPLATES)
+        for name, template in TEMPLATES.items():
+            print(f"{name:<{width}}  {template.summary}")
+        return 0
+    if not args.directory:
+        print(
+            "Error: name the project directory, e.g. 'nexura-runtime init my-agent'.",
+            file=sys.stderr,
+        )
+        return 2
+    directory = Path(args.directory)
+    try:
+        result = scaffold_project(
+            directory,
+            args.template,
+            package=args.name,
+            force=args.force,
+            env_example=not args.no_env_example,
+        )
+    except (ScaffoldError, OSError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    print(f"Created a '{result.template}' project in {result.root} (package {result.package}):")
+    for path in result.written:
+        print(f"  {path.relative_to(result.root)}")
+    for path in result.skipped:
+        print(f"  kept existing {path.relative_to(result.root)} (not overwritten)", file=sys.stderr)
+    print(
+        "\nNext steps (see README.md):\n"
+        f"  cd {args.directory}\n"
+        '  pip install -e ".[dev]"    # until Nexura is on PyPI, add --find-links to its wheels\n'
+        "  pytest                     # offline tests\n"
+        "  nexura-runtime dev         # local service and Studio with this project registered"
+    )
+    return 0
+
+
+def dev_command(args: argparse.Namespace) -> int:
+    """Serve the local REST service and the bundled Studio for the project in a directory."""
+    from nexura_runtime.project.dev import run_dev
+
+    return run_dev(
+        Path(args.project),
+        data_dir=Path(args.data_dir) if args.data_dir else None,
+        port=args.port,
+        studio_port=args.studio_port,
+        studio=not args.no_studio,
+        container=args.container,
+    )
+
+
+def deploy_command(args: argparse.Namespace) -> int:
+    """Write deployment files for a project. Nothing is built, pushed or run."""
+    from nexura_runtime.project.deploy import (
+        SUPPORTED_TARGETS,
+        DeployError,
+        supported_targets_text,
+        write_deploy_files,
+    )
+
+    if args.target not in SUPPORTED_TARGETS:
+        print(f"Error: unsupported target '{args.target}'.", file=sys.stderr)
+        print(supported_targets_text(), file=sys.stderr)
+        return 2
+    project = Path(args.project)
+    try:
+        result = write_deploy_files(project, args.target, port=args.port, force=args.force)
+    except (DeployError, OSError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    for path in result.replaced:
+        print(f"replaced {path.relative_to(project)}", file=sys.stderr)
+    for path in result.written:
+        print(f"wrote {path.relative_to(project)}")
+    print("Nothing was built or run. Read DEPLOY.md for the build and run commands.")
+    return 0
+
+
+def _add_init_arguments(parser: argparse.ArgumentParser) -> None:
+    from nexura_runtime.project.scaffold import DEFAULT_TEMPLATE, TEMPLATES
+
+    parser.add_argument("directory", nargs="?", help="Project directory (created if missing)")
+    parser.add_argument(
+        "--template",
+        "-t",
+        choices=tuple(TEMPLATES),
+        default=DEFAULT_TEMPLATE,
+        help=f"Project template (default: {DEFAULT_TEMPLATE}); see --list",
+    )
+    parser.add_argument("--list", action="store_true", help="List the templates and exit")
+    parser.add_argument(
+        "--name", help="Python package name (default: derived from the directory name)"
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Write into a non-empty directory; existing files are kept, never overwritten",
+    )
+    parser.add_argument("--no-env-example", action="store_true", help="Do not write .env.example")
+    parser.set_defaults(func=init_command)
+
+
+def _add_dev_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--project", default=".", help="Project directory (default: the current directory)"
+    )
+    parser.add_argument("--port", type=int, default=8765, help="REST service port (default: 8765)")
+    parser.add_argument("--studio-port", type=int, default=8000, help="Studio port (default: 8000)")
+    parser.add_argument(
+        "--data-dir", help="Where the run databases live (default: PROJECT/.nexura)"
+    )
+    parser.add_argument("--no-studio", action="store_true", help="Start the REST service only")
+    parser.add_argument(
+        "--container",
+        action="store_true",
+        help=(
+            "Inside a container only (the Dockerfile from 'deploy' uses it): Studio alone on "
+            "0.0.0.0; refused unless NEXURA_STUDIO_TOKEN is set"
+        ),
+    )
+    parser.set_defaults(func=dev_command)
+
+
+def _add_deploy_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--target", required=True, help="Deployment target; 'docker' is supported")
+    parser.add_argument(
+        "--project", default=".", help="Project directory (default: the current directory)"
+    )
+    parser.add_argument(
+        "--port", type=int, default=8000, help="Port Studio listens on in the container"
+    )
+    parser.add_argument(
+        "--force", action="store_true", help="Replace deployment files written earlier"
+    )
+    parser.set_defaults(func=deploy_command)
+
+
+INIT_HELP = "Create a runnable project from a template (agent, workflow, rag)"
+DEV_HELP = "Serve the local service and Studio for the project in this directory"
+DEPLOY_HELP = "Write deployment files for the project (docker); builds and runs nothing"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="nexura-runtime",
@@ -841,6 +988,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     oai_p.add_argument("--workspace", help="Workspace id header for --url (X-Workspace-Id)")
     oai_p.set_defaults(func=evals_import_openai_command)
+
+    # Project scaffolding and the local workflow. `project` repeats them under one name for
+    # the `nexura` command, whose own `init` and `deploy` belong to the Nexura Cloud client.
+    _add_init_arguments(subparsers.add_parser("init", help=INIT_HELP, description=INIT_HELP))
+    _add_dev_arguments(subparsers.add_parser("dev", help=DEV_HELP, description=DEV_HELP))
+    _add_deploy_arguments(
+        subparsers.add_parser("deploy", help=DEPLOY_HELP, description=DEPLOY_HELP)
+    )
+    project_p = subparsers.add_parser(
+        "project", help="Project scaffolding and local workflow: init, dev, deploy"
+    )
+    project_subs = project_p.add_subparsers(dest="project_action", required=True)
+    _add_init_arguments(project_subs.add_parser("init", help=INIT_HELP, description=INIT_HELP))
+    _add_dev_arguments(project_subs.add_parser("dev", help=DEV_HELP, description=DEV_HELP))
+    _add_deploy_arguments(
+        project_subs.add_parser("deploy", help=DEPLOY_HELP, description=DEPLOY_HELP)
+    )
 
     return parser
 

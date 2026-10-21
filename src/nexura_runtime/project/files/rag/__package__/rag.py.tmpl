@@ -1,0 +1,157 @@
+"""Ingest a folder of documents, then answer questions with numbered citations.
+
+The index uses the embedder named by ``NEXURA_EMBEDDINGS`` (for example
+``openai:text-embedding-3-small``). Unset, it uses Nexura's deterministic test embedder,
+which is labelled non-semantic: it makes tests reproducible but does not understand meaning,
+so with it the search uses keyword (BM25) ranking only. Configure a real embedder for hybrid
+keyword and semantic search; see README.md.
+
+The answering agent runs on ``demo_model()``, a scripted ``FakeModel`` that searches and then
+quotes the best hit, unless ``NEXURA_MODEL`` names a real model.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import sqlite3
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from nexura_agents import Agent, FakeModel, Message, Tool, ToolCall
+from nexura_runtime.knowledge import (
+    DeterministicEmbeddingProvider,
+    HybridKnowledgeIndex,
+    IngestOutcome,
+)
+from nexura_runtime.knowledge.embeddings.config import configured_embedder
+
+#: The sample documents shipped with the project. Put your own files here.
+DOCS_DIR = Path(__file__).resolve().parent.parent / "docs"
+WORKSPACE = "default"
+NOT_FOUND = "I could not find this in the documents."
+SUPPORTED = {".md", ".txt", ".html"}
+
+INSTRUCTIONS = (
+    "Answer only from the search_knowledge results. Cite each fact with its number, such as "
+    f"[1]. If the results do not answer the question, reply exactly: {NOT_FOUND}"
+)
+
+
+@dataclass
+class Answer:
+    text: str
+    citations: list[dict[str, Any]] = field(default_factory=list)
+
+
+def build_index(db_path: Path | None = None, embeddings: str | None = None) -> HybridKnowledgeIndex:
+    """An index in ``db_path`` (default: in memory) with the configured embedder.
+
+    ``embeddings`` overrides ``NEXURA_EMBEDDINGS``; pass ``"fixture"`` for the test embedder.
+    Changing the embedder of an existing index needs a reindex (the index refuses to mix them).
+    """
+    connection = sqlite3.connect(str(db_path) if db_path else ":memory:", check_same_thread=False)
+    return HybridKnowledgeIndex(connection, embedder=configured_embedder(embeddings))
+
+
+async def ingest_folder(
+    index: HybridKnowledgeIndex, folder: Path = DOCS_DIR
+) -> list[IngestOutcome]:
+    """Ingest every supported file in ``folder``. Unchanged files are deduplicated."""
+    outcomes = []
+    for path in sorted(folder.iterdir()):
+        if path.is_file() and path.suffix.lower() in SUPPORTED:
+            outcomes.append(
+                await index.ingest(
+                    workspace_id=WORKSPACE,
+                    filename=path.name,
+                    data=path.read_bytes(),
+                    source_uri=path.as_uri(),
+                )
+            )
+    return outcomes
+
+
+def uses_test_embedder(index: HybridKnowledgeIndex) -> bool:
+    return isinstance(index.embedder.provider, DeterministicEmbeddingProvider)
+
+
+def search_tool(index: HybridKnowledgeIndex, top_k: int = 3) -> Tool:
+    """The agent's search tool. Output: JSON ``{"context", "citations"}`` (Studio's format).
+
+    With the non-semantic test embedder the vector ranker would only add noise, so the
+    search is keyword-only until a real embedder is configured.
+    """
+    vector_weight = 0.0 if uses_test_embedder(index) else 1.0
+
+    async def search_knowledge(query: str) -> str:
+        hits = await index.search(
+            workspace_id=WORKSPACE, query=query, top_k=top_k, vector_weight=vector_weight
+        )
+        context = "\n\n".join(f"{h.citation.citation_id} {h.title}: {h.snippet}" for h in hits)
+        citations = [h.citation.model_dump() for h in hits]
+        return json.dumps({"context": context, "citations": citations}, ensure_ascii=False)
+
+    return Tool(
+        name="search_knowledge",
+        fn=search_knowledge,
+        description="Search the project's documents; returns context with numbered citations.",
+    )
+
+
+_STOP = {"the", "and", "are", "for", "how", "what", "when", "where", "which", "who", "why", "does"}
+
+
+def _words(text: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z0-9]+", text.lower()) if len(w) > 2} - _STOP
+
+
+def demo_model() -> FakeModel:
+    """A scripted model: search for the question, then quote the best sentence of the top hit."""
+
+    def respond(messages: list[Message], tools: list[dict[str, Any]] | None) -> Any:
+        question = next(m.content or "" for m in reversed(messages) if m.role == "user")
+        results = [m for m in messages if m.role == "tool"]
+        if not results:
+            return [ToolCall(id="search", name="search_knowledge", arguments={"query": question})]
+        payload = json.loads(results[-1].content or "{}")
+        found = payload.get("citations", [])
+        if not found:
+            return NOT_FOUND
+        # The context is "[1] title: snippet", one block per hit; quote from the first hit.
+        first = re.split(r"\n\n(?=\[\d+\] )", payload.get("context", ""))[0].split(": ", 1)[-1]
+        prose = " ".join(line for line in first.splitlines() if not line.startswith("#"))
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", prose) if s.strip()]
+        best = max(sentences, key=lambda s: len(_words(s) & _words(question)), default="")
+        if not _words(best) & _words(question):
+            return NOT_FOUND  # the hit shares no meaningful word with the question
+        return f"{best} {found[0]['citation_id']}"
+
+    return FakeModel(handler=respond)
+
+
+def build_agent(index: HybridKnowledgeIndex, model: object | None = None) -> Agent:
+    chosen = model or os.environ.get("NEXURA_MODEL") or demo_model()
+    return Agent(
+        name="librarian",
+        instructions=INSTRUCTIONS,
+        model=chosen,  # type: ignore[arg-type]
+        tools=[search_tool(index)],
+    )
+
+
+async def answer(index: HybridKnowledgeIndex, question: str, model: object | None = None) -> Answer:
+    """Answer ``question`` from the index; citations come from the search tool's output."""
+    result = await build_agent(index, model).run_async(question)
+    citations: list[dict[str, Any]] = []
+    for message in result.messages:
+        if message.role == "tool" and message.content:
+            try:
+                citations.extend(json.loads(message.content).get("citations", []))
+            except (ValueError, AttributeError):
+                continue
+    text = str(result.output)
+    cited = [c for c in citations if c.get("citation_id") and c["citation_id"] in text]
+    return Answer(text=text, citations=cited)

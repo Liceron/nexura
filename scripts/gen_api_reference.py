@@ -90,6 +90,11 @@ SECTIONS: list[tuple[str, str, list[str] | None]] = [
     ),
     ("nexura_runtime.codegen", "Code generation (`nexura_runtime.codegen`)", None),
     (
+        "nexura_runtime.project",
+        "Project scaffolding (`nexura_runtime.project`, `nexura-runtime init/dev/deploy`)",
+        None,
+    ),
+    (
         "nexura_runtime.integrations.nexura_v2",
         "Nexura V2 integration (`nexura_runtime.integrations.nexura_v2`)",
         None,

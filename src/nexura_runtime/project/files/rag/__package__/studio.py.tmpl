@@ -1,0 +1,45 @@
+"""What `nexura-runtime dev` registers in the local service and Studio.
+
+The ``answer`` step ingests docs/ into an in-memory index (once per process) and answers
+``state["question"]`` with citations. Studio's own Knowledge page is separate: upload files
+there to use them in the chat playground.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from nexura_runtime.knowledge import HybridKnowledgeIndex
+from nexura_runtime.workflow import ModuleRegistry, WorkflowNode, WorkflowSpec
+
+from {{package}}.rag import answer, build_index, ingest_folder
+
+#: Handler names are prefixed with the package so they never clash with built-ins.
+PREFIX = "{{package}}"
+registry = ModuleRegistry()
+_index: HybridKnowledgeIndex | None = None
+
+
+async def _shared_index() -> HybridKnowledgeIndex:
+    global _index
+    if _index is None:
+        _index = build_index()
+        await ingest_folder(_index)
+    return _index
+
+
+@registry.register_handler(f"{PREFIX}.answer", effect="read")
+async def answer_step(state: dict[str, Any]) -> dict[str, Any]:
+    reply = await answer(await _shared_index(), str(state.get("question", "")))
+    return {"answer": reply.text, "citations": reply.citations}
+
+
+ask = WorkflowSpec(
+    name="{{title}}: ask the documents",
+    entry_node="answer",
+    nodes={"answer": WorkflowNode(id="answer", handler=f"{PREFIX}.answer")},
+    terminal_nodes=["answer"],
+)
+
+#: Workflow id -> spec. `nexura-runtime dev` creates or updates these in Studio.
+workflows = {"{{slug}}-ask": ask}

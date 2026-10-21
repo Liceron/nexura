@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class PaginationParams(BaseModel):
@@ -138,6 +138,19 @@ class RunEventModel(BaseModel):
     timestamp: float = Field(description="Unix timestamp in seconds")
 
 
+class RecoverRunRequest(BaseModel):
+    """Options of ``POST /runs/{run_id}/recover`` (A6 S9)."""
+
+    model_config = ConfigDict(extra="forbid")
+    on_uncertain: Literal["pause", "fail"] = Field(
+        default="pause",
+        description=(
+            "What to do when a non_idempotent step dispatched but its outcome is unknown: "
+            "pause the run (pause_reason effect_unknown) or fail it"
+        ),
+    )
+
+
 class RunResponse(BaseModel):
     """Execution run snapshot representation."""
 
@@ -177,6 +190,16 @@ class RunResponse(BaseModel):
     )
     has_subworkflows: bool = Field(
         default=False, description="True when the run's spec has a sub-workflow node"
+    )
+    pause_reason: str | None = Field(
+        default=None,
+        description=(
+            "effect_unknown while status is paused: a step's outcome is unknown after a crash "
+            "(resolve pending_effect, then POST /runs/{run_id}/recover); null otherwise"
+        ),
+    )
+    pending_effect: dict[str, Any] | None = Field(
+        default=None, description="The effect a paused run waits on (effect_id, node_id, ...)"
     )
 
 

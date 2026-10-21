@@ -184,7 +184,7 @@ test.describe('Durable runs (P13)', () => {
     await expect(rows.first()).toContainText('Step');
     await expect(rows.first()).toContainText('Node: ask');
     await expect(rows.first().getByTestId('run-history-time')).toContainText('UTC');
-    await expect(rows.last()).toContainText('completed');
+    await expect(rows.last()).toContainText(/completed/i);
     await page.getByRole('button', { name: 'View state 0' }).click();
     await expect(page.getByTestId('run-history-state')).toContainText('"ticket": "T-1"');
     await expect(page.getByTestId('run-history-state')).toContainText('"prepared": true');
@@ -320,7 +320,8 @@ test.describe('Durable runs (P13)', () => {
     await page.reload();
     const banner = page.getByRole('region', { name: 'Pending approval banner' });
     await expect(banner).toBeVisible({ timeout: 15000 });
-    await banner.getByRole('button', { name: /Approve & Resume/i }).click();
+    await banner.getByRole('button', { name: 'Review action', exact: true }).click();
+    await page.getByRole('dialog', { name: 'Review action', exact: true }).getByRole('button', { name: 'Approve action', exact: true }).click();
     await expect(page.getByLabel('Run status badge')).toContainText(/completed/i, { timeout: 15000 });
   });
 
@@ -343,7 +344,7 @@ test.describe('Durable runs (P13)', () => {
     await expect(page.getByRole('region', { name: 'Pending approval banner' })).toBeVisible({ timeout: 15000 });
 
     // From the Run Console.
-    await page.getByRole('button', { name: 'Review Details' }).click();
+    await page.getByRole('button', { name: 'Review action' }).click();
     const dialog = page.getByRole('dialog');
     const details = dialog.getByTestId('approval-details');
     await expect(details).toBeVisible();
@@ -354,11 +355,12 @@ test.describe('Durable runs (P13)', () => {
     await expect(details.getByTestId('approval-more')).toHaveText('and 5 more');
     await expect(details.getByTestId('approval-edit-note')).toContainText('pauses again');
     await expect(details.getByTestId('approval-edit-note')).toContainText('fresh approval');
-    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    await dialog.getByRole('button', { name: 'Close dialog', exact: true }).click();
 
+    const pendingRunId = await page.getByLabel('Run identifier badge').innerText();
     // And from the Approval Inbox.
     await page.goto(`${cluster.frontendUrl}#/approvals`);
-    await page.getByRole('button', { name: 'Review & Decide' }).first().click();
+    await page.getByRole('row').filter({ has: page.locator('a[data-testid="approval-open-run"][href="#/runs/' + pendingRunId + '"]') }).getByRole('button', { name: 'Review action', exact: true }).click();
     await expect(page.getByRole('dialog').getByTestId('approval-item-count')).toContainText('25');
     await expect(page.getByRole('dialog').getByTestId('approval-more')).toHaveText('and 5 more');
   });

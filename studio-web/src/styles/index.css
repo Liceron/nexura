@@ -10,6 +10,58 @@
   unicode-range: U+0900-097F, U+1CD0-1CFF, U+200C-200D, U+20B9, U+25CC, U+A830-A83F, U+A8E0-A8FF;
 }
 
+/* Inspection surfaces: one evidence hierarchy and one review-body scroller. */
+.inspection-meta { display: flex; flex-wrap: wrap; gap: 4px 16px; color: var(--text-secondary); font-size: var(--type-meta); overflow-wrap: anywhere; }
+.inspection-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.inspection-code { margin: 8px 0; padding: 12px; background: var(--bg-surface-elevated); border: 1px solid var(--border-subtle); border-radius: 4px; font-size: var(--type-code); line-height: var(--leading-code); white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; max-width: 100%; }
+.inspection-evidence-heading { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.inspection-error { color: var(--status-danger); overflow-wrap: anywhere; }
+.inspection-empty { padding: 16px 0 24px; color: var(--text-secondary); }
+.inspection-empty h2 { color: var(--text-primary); margin-bottom: 8px; }
+.inspection-table-scroll { min-width: 0; max-width: 100%; overflow-x: auto; margin-bottom: 24px; }
+.inspection-table { width: 100%; border-collapse: collapse; font-size: var(--type-ui); }
+.inspection-table th, .inspection-table td { padding: 8px 12px; border-bottom: 1px solid var(--border-subtle); text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+.inspection-table th { font-weight: 500; color: var(--text-secondary); }
+.approval-inbox .inspection-table { min-width: 720px; }
+.approval-review-content, .exact-action { display: flex; flex-direction: column; gap: 16px; min-width: 0; font-size: var(--type-body); line-height: var(--leading-body); overflow-wrap: anywhere; }
+.approval-review summary { cursor: pointer; font-weight: 500; padding: 8px 0; }
+.approval-action-name { font-size: 1.25rem; line-height: 1.5; font-weight: 600; }
+.request-details { border-top: 1px solid var(--border-subtle); color: var(--text-secondary); font-size: var(--type-meta); }
+.request-details code { overflow-wrap: anywhere; }
+.approval-input-editor { display: grid; gap: 8px; margin-top: 8px; }
+.approval-input-editor textarea { width: 100%; font-family: var(--font-mono); }
+.approval-decision-footer { width: 100%; display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+.approval-decision-footer > p { flex: 1 1 240px; font-size: var(--type-ui); color: var(--text-secondary); }
+.approval-review .studio-modal-body { flex: 1 1 auto; }
+.approval-review .studio-modal-footer { background: var(--bg-surface); }
+.run-status { display: inline-flex; align-items: center; gap: 4px; font-size: var(--type-ui); white-space: normal; }
+.run-status--success { color: var(--status-success); }
+.run-status--danger { color: var(--status-danger); }
+.run-status--warning { color: var(--status-warning); }
+.run-status--neutral, .run-status--info { color: var(--text-secondary); }
+.run-console { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.run-console-header { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 16px; padding-bottom: 16px; border-bottom: 1px solid var(--border-subtle); }
+.run-console-header h2 { margin-bottom: 8px; }
+.run-review-banner { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--border-subtle); }
+.inspection-items { padding-left: 24px; overflow-wrap: anywhere; }
+.trace-panes { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 38%); gap: 20px; min-width: 0; }
+.trace-detail { min-width: 0; border-left: 1px solid var(--border-subtle); padding-left: 16px; }
+.trace-row { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) minmax(40px, 25%) auto; gap: 8px; padding: 10px 0; text-align: left; align-items: center; font-size: var(--type-ui); }
+.trace-back { display: none !important; }
+@media (max-width: 767px) {
+  .studio-modal-overlay.approval-review { padding: 0; }
+  .approval-review .studio-modal-surface { max-height: 100vh; max-height: 100dvh; border-radius: 0; }
+  .approval-review .studio-modal-header, .approval-review .studio-modal-footer { padding: 12px; }
+  .approval-review .studio-modal-body { padding: 16px; }
+  .approval-decision-footer > p { flex-basis: 100%; }
+  .approval-decision-footer .inspection-actions { width: 100%; }
+  .approval-decision-footer button { flex: 1; }
+  .trace-panes { display: block; }
+  .trace-panes--selected > .trace-waterfall { display: none !important; }
+  .trace-detail { border: 0; padding: 0; }
+  .trace-back { display: inline-flex !important; }
+}
+
 /* Workflow working surfaces. Menus portal above scroll containers. */
 .studio-disclosure-trigger { min-height: 32px; padding: 4px 10px; color: var(--text-secondary); font-size: var(--type-ui); border-radius: 4px; white-space: nowrap; }
 .studio-disclosure-trigger:hover, .studio-disclosure-trigger[aria-expanded="true"] { background: var(--bg-muted); }

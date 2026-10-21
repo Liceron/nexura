@@ -9,6 +9,7 @@ Every Python example in the docs runs offline with `FakeModel`, a scripted model
 - [Documentation index](https://github.com/Liceron/nexura/blob/main/docs/README.md): every guide, grouped by task.
 - [Quickstart in 10 minutes](https://github.com/Liceron/nexura/blob/main/docs/quickstart-10-minutes.md): install, an agent, an approval, a budget and an approval-gated workflow resumed after a restart.
 - [Getting started](https://github.com/Liceron/nexura/blob/main/docs/getting-started.md): install, first agent and first tool.
+- [Project templates](https://github.com/Liceron/nexura/blob/main/docs/project-templates.md): `nexura-runtime init` (agent, workflow, rag), `dev` (local service and Studio) and `deploy --target docker`.
 - [Packages and installation](https://github.com/Liceron/nexura/blob/main/docs/packages.md): the Python packages, source and wheel installs, supported versions.
 - [Agents](https://github.com/Liceron/nexura/blob/main/docs/agents.md): instructions, dependencies, sessions, agents as tools, handoffs, streaming, cancelling.
 - [Testing your agents](https://github.com/Liceron/nexura/blob/main/docs/testing.md): `FakeModel`, scripted tool calls, assertions, `agent.override(model=...)`.

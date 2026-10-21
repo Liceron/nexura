@@ -283,7 +283,7 @@ describe('Localized shell controls and recovery', () => {
       <ExactAction request={{ expires_at: expiry }} />
     </I18nProvider>);
     expect(screen.getByTestId('locale')).toHaveTextContent(locale);
-    expect(format).toHaveBeenCalledWith(locale);
-    expect(within(screen.getByTestId('exact-action')).getByText(new Date(expiry * 1000).toLocaleString(locale))).toBeInTheDocument();
+    expect(format).toHaveBeenCalledWith(locale, { timeZoneName: 'short' });
+    expect(within(screen.getByTestId('exact-action')).getByText(new Date(expiry * 1000).toLocaleString(locale, { timeZoneName: 'short' }))).toBeInTheDocument();
   });
 });

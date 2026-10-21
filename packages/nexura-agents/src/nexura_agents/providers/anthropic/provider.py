@@ -8,6 +8,7 @@ import asyncio
 import json
 import os
 import re
+import warnings
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -115,6 +116,47 @@ def supports_output_format(model: str) -> bool:
     return family in ("fable", "mythos") or (major, minor) >= (4, 5)
 
 
+def supports_effort(model: str) -> bool:
+    """True for models the effort docs list (``output_config.effort``): Claude Opus 4.5 and
+    later, Sonnet 4.6 and later, Haiku 5.5 and later, and every Fable and Mythos model."""
+    match = _OUTPUT_FORMAT_MODEL.search(model.lower())
+    if match is None:
+        return False
+    family, major, minor = match.group(1), int(match.group(2)), int(match.group(3) or 0)
+    floor = {"opus": (4, 5), "sonnet": (4, 6), "haiku": (5, 5)}.get(family)
+    return floor is None or (major, minor) >= floor
+
+
+# Anthropic effort levels; Nexura's "minimal" is sent as the lowest one.
+_EFFORT_LEVELS = frozenset({"low", "medium", "high", "xhigh", "max"})
+_EFFORT_ALIASES = {"minimal": "low"}
+
+# Models that reject forced tool use (errors page, "Forced tool use not supported").
+_NO_FORCED_TOOL = ("claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1", "claude-mythos-5-1")
+
+
+def _native_schema_ok(schema: Any) -> bool:
+    """False when JSON outputs cannot express the schema without losing data: an object whose
+    ``additionalProperties`` is a schema or ``true`` (a map), or a free-form object with no
+    ``properties`` (structured-outputs docs: only ``additionalProperties: false``)."""
+    if isinstance(schema, list):
+        return all(_native_schema_ok(item) for item in schema)
+    if not isinstance(schema, dict):
+        return True
+    extra = schema.get("additionalProperties", False)
+    declared = schema.get("type")
+    is_object = declared == "object" or (isinstance(declared, list) and "object" in declared)
+    if extra is not False and (is_object or "properties" in schema):
+        return False
+    if is_object and not schema.get("properties"):
+        return False
+    return all(
+        _native_schema_ok(value)
+        for key, value in schema.items()
+        if key not in ("enum", "const", "default", "examples")
+    )
+
+
 def _wrapped_schema(schema: dict[str, Any]) -> dict[str, Any]:
     """An object schema for ``output_config.format`` (non-object answers go under "value")."""
     wrapped: dict[str, Any] = _structured_output_tool(schema)["input_schema"]
@@ -159,6 +201,43 @@ class AnthropicNativeProvider(BaseProvider):
         if self._structured_output == "auto":
             return "native" if supports_output_format(self.model) else "tool"
         return self._structured_output
+
+    def _schema_mode(self, schema: dict[str, Any]) -> str:
+        """The structured-output path for this schema: ``"native"`` or ``"tool"``.
+
+        A schema JSON outputs cannot express (a map or free-form object) uses the forced tool
+        instead of being rewritten to an empty object; on models that reject forced tools it
+        fails loudly.
+        """
+        mode = self.structured_output_mode
+        if mode != "native" or _native_schema_ok(schema):
+            return mode
+        if any(name in self.model.lower() for name in _NO_FORCED_TOOL):
+            raise CapabilityError(
+                f"Anthropic JSON outputs cannot express this schema (an object with "
+                f"additionalProperties other than false, or without properties), and "
+                f"'{self.model}' does not allow the forced-tool fallback. Give every object "
+                "fixed properties.",
+                provider_name=self.model,
+                capability="structured_output_schema",
+            )
+        return "tool"
+
+    def _effort(self, value: str | None) -> str | None:
+        """``reasoning_effort`` as ``output_config.effort``, or ``None`` (warned) when the model
+        or the level is not supported."""
+        if value is None:
+            return None
+        level = _EFFORT_ALIASES.get(value, value)
+        if not supports_effort(self.model) or level not in _EFFORT_LEVELS:
+            warnings.warn(
+                f"Anthropic model '{self.model}' does not support reasoning_effort={value!r} "
+                "(output_config.effort); not sent.",
+                RuntimeWarning,
+                stacklevel=4,
+            )
+            return None
+        return level
 
     @property
     def response_schema_with_tools(self) -> bool:
@@ -298,7 +377,8 @@ class AnthropicNativeProvider(BaseProvider):
             else:
                 payload["system"] = system_prompt
         output_config: dict[str, Any] = {}
-        if request.schema and self.structured_output_mode == "native":
+        mode = self._schema_mode(request.schema) if request.schema else None
+        if request.schema and mode == "native":
             output_config["format"] = {
                 "type": "json_schema",
                 "schema": to_anthropic_output_schema(_wrapped_schema(request.schema)),
@@ -313,9 +393,10 @@ class AnthropicNativeProvider(BaseProvider):
                 )
             tools = [_structured_output_tool(request.schema)]
             payload["tool_choice"] = {"type": "tool", "name": STRUCTURED_OUTPUT_TOOL}
-        if request.reasoning_effort is not None:
-            # Claude 4.6+ steer adaptive thinking with output_config.effort.
-            output_config["effort"] = request.reasoning_effort
+        effort = self._effort(request.reasoning_effort)
+        if effort is not None:
+            # Models on the effort page steer thinking with output_config.effort.
+            output_config["effort"] = effort
         if output_config:
             payload["output_config"] = output_config
         if tools:
@@ -390,7 +471,8 @@ class AnthropicNativeProvider(BaseProvider):
             ) from exc
 
         msg, usage, finish_reason, metadata = extract_anthropic_response(data)
-        if request.schema and self.structured_output_mode == "tool":
+        mode = self._schema_mode(request.schema) if request.schema else None
+        if request.schema and mode == "tool":
             msg, finish_reason = _structured_output_message(msg, finish_reason, request.schema)
         elif request.schema and _is_wrapped(request.schema) and not msg.tool_calls:
             msg.content = _unwrap_output_text(msg.content)
@@ -401,6 +483,46 @@ class AnthropicNativeProvider(BaseProvider):
         )
 
     async def _stream_internal(
+        self,
+        request: GenerationRequest,
+        context: ExecutionContext | None,
+    ) -> AsyncIterator[StreamDelta]:
+        mode = self._schema_mode(request.schema) if request.schema else None
+        if mode == "tool":
+            # A forced tool call cannot be streamed as answer text: send one whole response.
+            whole = await self._generate_internal(request, context)
+            if whole.message.content:
+                yield StreamDelta(kind="text_delta", text=whole.message.content)
+            for index, call in enumerate(whole.message.tool_calls or []):
+                yield StreamDelta(
+                    kind="tool_call_delta",
+                    tool_call_index=index,
+                    tool_call_id=call.id,
+                    tool_name=call.name,
+                    tool_arguments_delta=json.dumps(call.arguments, ensure_ascii=False),
+                )
+            yield StreamDelta(kind="finish", finish_reason=whole.finish_reason, usage=whole.usage)
+            return
+        # A non-object schema is sent wrapped as {"value": X}: hold the text and send the
+        # unwrapped JSON of X once the answer is complete, as generate() returns it.
+        wrapped = mode == "native" and request.schema is not None and _is_wrapped(request.schema)
+        held: list[str] | None = [] if wrapped else None
+        async for delta in self._stream_events(request, context):
+            if held is not None and delta.kind == "text_delta":
+                held.append(delta.text or "")
+                continue
+            if held is not None and delta.kind == "finish" and delta.finish_reason:
+                text = _unwrap_output_text("".join(held))
+                held = None
+                if text:
+                    yield StreamDelta(kind="text_delta", text=text)
+            yield delta
+        if held:
+            text = _unwrap_output_text("".join(held))
+            if text:
+                yield StreamDelta(kind="text_delta", text=text)
+
+    async def _stream_events(
         self,
         request: GenerationRequest,
         context: ExecutionContext | None,

@@ -536,9 +536,9 @@ graph reads; the journal records the lease and what was dispatched. User guide a
   `WorkflowCheckpoint` has `pending_effect`, `revision` and a `pause_reason` property.
 
 Limits: `SQLiteWorkflowStore` is single-host (for several hosts use
-`PostgresWorkflowStore`, S8 below); the service still marks runs interrupted with its startup sweep and has no recover
-endpoint (S9); trigger reclaim still starts a new run (S10); budgets are not yet linked to
-intents (S11).
+`PostgresWorkflowStore`, S8 below); trigger reclaim still starts a new run (S10); budgets
+are not yet linked to intents (S11). The service side (lease-based "interrupted" and
+`POST /runs/{id}/recover`) is S9 below.
 
 ## Composite workflow steps and module keys (S7)
 
@@ -666,9 +666,70 @@ Tests: one contract suite runs against memory, SQLite and Postgres
 `tests/durability` run on Postgres when `NEXURA_TEST_POSTGRES_URI` names a disposable
 database.
 
-Limits: the service's startup sweep and Studio run records are still SQLite-only (S9),
-so two service hosts sharing one Postgres workflow state are not yet supported; the
-trigger worker keeps its SQLite job store (S10b).
+Limits: Studio run records (`nexura_studio_runs`) stay in the SQLite file, so two service
+hosts sharing one Postgres workflow state each keep their own run list; that is not yet
+supported. The trigger worker keeps its SQLite job store (S10b).
+
+## The service on the journal (S9)
+
+The service (`nexura-runtime serve`, `nexura-runtime worker`, `create_api_app`) decides
+whether a workflow run is interrupted from the run's lease in the execution journal, not
+from which process opened the database last:
+
+- **Recording.** A run the service starts (or forks) on a journaling workflow store (the
+  default SQLite store, or Postgres with `workflow_state_url`) records the journal's
+  workspace on its Studio row (`journal_workspace`). The engine holds the run lease from
+  its first journal write and renews it every `lease_ttl / 3`
+  (`create_api_app(workflow_lease_ttl=30.0)`).
+- **Interrupted means the lease is gone.** A journaled `running` run is marked
+  `interrupted` (with a `RUN_INTERRUPTED` event and the error "the process executing it
+  stopped (its run lease expired)") when the journal lists it as recoverable
+  (`list_recoverable`: free or expired lease, store clock) or its lease owner is a process
+  on this host that has exited. The service checks at startup, when a run is read
+  (`GET /runs/{id}`) and when runs are listed (`GET /runs`, before the status filter). A
+  run whose lease another live `serve` or `worker` holds, on this host or another, is
+  never shown interrupted; an `interrupted` row whose lease is live again (a recover in
+  progress elsewhere) is shown `running`. When the journal cannot tell (no journal row
+  yet, or the journal already finished while the row still says `running`) the B46
+  owner-process rule decides.
+- **Shutdown.** A clean shutdown cancels this process's run tasks; the engine gives the
+  lease back, so those runs are `interrupted` ("Run was interrupted by server shutdown.")
+  unless another worker holds the lease by then.
+- **Legacy rows.** Runs recorded before S9 (no `journal_workspace`), or by a caller that
+  does not journal, keep the B46 behaviour: `StudioStore` marks them `interrupted` when it
+  opens if their owner process on this host has exited. Journaled runs are never swept
+  on open.
+- **`POST /api/v1/runs/{run_id}/recover`** (body `{"on_uncertain": "pause" | "fail"}`,
+  optional) calls `WorkflowEngine.recover` with the same ownership, resource-scope and
+  `run` permission checks as the other run routes. It continues an `interrupted` run, a
+  `running` run whose lease is gone, or a `paused` run (`pause_reason` `effect_unknown`)
+  whose effect was resolved. A step that dispatched without a recorded outcome follows
+  the effect-class rules above; a `non_idempotent` one sets the run `paused` with
+  `pause_reason: "effect_unknown"` and `pending_effect` (new Studio run fields), which
+  you resolve with `POST /runs/{id}/effects/{effect_id}/resolve` and then recover again.
+  Refusals: `409 RUN_LEASE_HELD` (a live process executes it; the run keeps its status),
+  `409 RUN_WAITING_FOR_PERSON` (pending approval or input: decide or answer it),
+  `409 RUN_ALREADY_TERMINAL`, `409 RUN_NOT_JOURNALED` (no execution journal, so what its
+  last step did is unknown: fork it from a checkpoint) and `409 SPEC_MISMATCH`. Clients:
+  `NexuraClient.runs.recover(run_id, on_uncertain=None)` and the TypeScript
+  `client.runs.recover(runId, { onUncertain })`.
+- **Stale owners.** A process whose lease was taken over gets `LeaseLostError` on its next
+  journal write; the service records `RUN_LEASE_LOST` on the run and leaves its status to
+  the process that took it over.
+- **Service handlers keep their effect class.** The service wraps the registry to record
+  node events; that wrapper now passes `register(..., effect=...)` through, so a handler
+  declared `pure` writes no intent and an `idempotent` one is re-run with its key (before,
+  every handler in a service run was journaled `non_idempotent`).
+
+Tests: `tests/p35/test_a6_s9_service_recovery.py` (in-process) and
+`tests/durability/test_durability_service.py` (two service processes on one database, real
+SIGKILL, SQLite and Postgres: the second service starting leaves the live run alone; after
+the owner is killed and its lease expired, `recover` from another process continues it).
+
+Limits: Studio does not show a Recover button or the `effect_unknown` pause yet (the API
+and both clients have them; the Studio UI is being redesigned). Trigger reclaim still
+starts a new run (S10). A run killed before its first journal write has no journal and is
+refused with `RUN_NOT_JOURNALED`.
 
 ## See also
 

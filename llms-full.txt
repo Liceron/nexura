@@ -31,6 +31,9 @@ one owner's projects. They do not add accounts or tenant isolation.
 - [Getting started](getting-started.md): install, first agent, first tool, in five minutes.
 - [Quickstart in 10 minutes](quickstart-10-minutes.md): from install to an approval-gated
   workflow with a budget, resumed after a restart, all offline.
+- [Project templates](project-templates.md): `nexura-runtime init` (agent, workflow and RAG
+  templates with offline tests), `dev` (local service and Studio with the project registered)
+  and `deploy --target docker` (writes a single-user Dockerfile).
 - [Agents](agents.md): instructions (sync or async), sessions and history trimming,
   handoffs with structured input, agents as tools, streaming, cancelling runs, `clone`,
   diagrams.
@@ -137,7 +140,7 @@ with a local REST service, a TypeScript API client and a browser Studio.
 > (`pip install nexura-agents`): the standalone agent SDK, two dependencies, offline-testable.
 > This repository's `nexura-runtime` is the full platform built on top of it.
 
-> **Guides:** [docs/](README.md) has 39 guides (agents, teams, tools, MCP and OpenAPI,
+> **Guides:** [docs/](README.md) has 40 guides (agents, teams, tools, MCP and OpenAPI,
 > A2A, memory, prompts, structured output, approvals, workflows, providers, tracing and
 > more) plus an index and a generated [API reference](api-reference.md). Every
 > offline example on those pages is run by the test suite; blocks needing a real model or
@@ -285,8 +288,9 @@ The agent SDK depends only on `httpx` and `pydantic`. The platform package
 examples on this page.
 
 The platform package installs the command `nexura-runtime` (the service, worker, workflow,
-red-team and evals CLI; run `nexura-runtime --help`); the separate `nexura-studio` package adds
-`nexura-studio`, the older built-in Studio. The bare `nexura`
+red-team and evals CLI, plus `init`, `dev` and `deploy` for
+[project templates](project-templates.md); run `nexura-runtime --help`); the separate
+`nexura-studio` package adds `nexura-studio`, the older built-in Studio. The bare `nexura`
 command belongs to the separate Nexura Cloud client package `nexura`, not to this project. See
 [Service and Studio](studio-and-service.md#run-the-service).
 
@@ -489,6 +493,10 @@ need no API key and no network after the install. The test suite runs each block
 
 Related: [Getting started](getting-started.md), [Human approval](approvals.md),
 [Budgets and usage](budgets-and-usage.md), [Workflows](workflows.md).
+
+To start from a generated project instead, run `nexura-runtime init my-app --template workflow`
+(or `agent`, `rag`): it writes a runnable project with offline tests, and `nexura-runtime dev`
+opens it in the local Studio. See [Project templates](project-templates.md).
 
 ## 1. Install (2 minutes)
 
@@ -772,6 +780,8 @@ The budget object above lives in memory. To keep spending across restarts, creat
 
 ## Next steps
 
+- [Project templates](project-templates.md): `nexura-runtime init`, `dev` and
+  `deploy --target docker` for a project of your own.
 - [Testing your agents](testing.md): script tool calls and assert on results.
 - [Workflows](workflows.md): branches, retries, `interrupt()` for free-form human input,
   history and fork, sub-workflows and parallel steps.
@@ -781,6 +791,138 @@ The budget object above lives in memory. To keep spending across restarts, creat
 - Coming from another framework: [LangGraph](migrating-from-langgraph.md),
   [Pydantic AI](migrating-from-pydantic-ai.md), [CrewAI](migrating-from-crewai.md),
   [OpenAI Agent Builder](migrating-from-openai.md).
+
+---
+
+Source: https://github.com/Liceron/nexura/blob/main/docs/project-templates.md
+
+# Project templates: init, dev and deploy
+
+Three commands take you from an empty folder to a running local Studio and a Docker recipe:
+
+```bash
+nexura-runtime init my-agent --template agent   # write a small, runnable project
+cd my-agent && pytest                            # its offline tests
+nexura-runtime dev                               # local service + Studio, project registered
+nexura-runtime deploy --target docker            # write Dockerfile, .dockerignore, DEPLOY.md
+```
+
+Every generated project runs offline on a scripted `FakeModel` until you configure a model, and
+ships tests that prove it. Related: [Quickstart in 10 minutes](quickstart-10-minutes.md),
+[Service and Studio](studio-and-service.md), [Starter templates](templates.md) (workflow
+templates you instantiate inside Studio, a different thing).
+
+## `nexura-runtime init`
+
+```bash
+nexura-runtime init --list
+nexura-runtime init DIR [--template agent|workflow|rag] [--name PACKAGE] [--force] [--no-env-example]
+```
+
+| Template | What you get |
+| --- | --- |
+| `agent` (default) | A support agent with a read tool (`lookup_order`), a write tool (`issue_refund`) that pauses for approval before every call, and a token and cost budget. A terminal loop asks you to approve or reject. |
+| `workflow` | A two-step workflow: an agent drafts a reply, the run pauses before `send`, and a person approves or rejects. Checkpoints are in SQLite, so a paused run resumes from a new process (`python -m PACKAGE start` / `approve`). |
+| `rag` | Ingests `docs/` into the hybrid knowledge index and answers with numbered citations; replies "I could not find this in the documents." when nothing matches. |
+
+Each project has:
+
+- `pyproject.toml` depending on `nexura-runtime[studio]`, `nexura-studio` and `nexura-agents`.
+  Nexura is not on PyPI yet; a comment there and the README explain how to install from the
+  repository's wheels (`uv build --all-packages`, then `pip install --find-links DIST -e ".[dev]"`).
+- The package (named after the directory: `my-agent` gives `my_agent`; `--name` overrides
+  it), a `__main__.py` you can run with `python -m`, and `studio.py`, which `dev` registers.
+- `tests/` with offline tests on the scripted model. Nexura's own test suite generates every
+  template and runs these tests in a subprocess.
+- `README.md` with next steps, `.gitignore` (keeps `.env` and `.nexura/` out of Git) and
+  `.env.example` with empty values (skip it with `--no-env-example`).
+
+`init` refuses a directory that is not empty. With `--force` it adds the template's files next
+to what is there, but an existing file is never overwritten: it is listed as kept on stderr.
+Files are created exclusively, and nothing is written through a symbolic link that leaves the
+project.
+
+The same thing from Python:
+
+```python
+import tempfile
+from pathlib import Path
+
+from nexura_runtime.project import TEMPLATES, scaffold_project
+
+print(sorted(TEMPLATES))
+with tempfile.TemporaryDirectory() as tmp:
+    result = scaffold_project(Path(tmp) / "refund-bot", "workflow")
+    assert result.package == "refund_bot"
+    assert (result.root / "refund_bot" / "workflow.py").is_file()
+    assert (result.root / "tests" / "test_workflow.py").is_file()
+```
+
+### The RAG template's embedder
+
+The `rag` project uses Nexura's deterministic **test embedder** unless `NEXURA_EMBEDDINGS` is
+set. It is labelled non-semantic: reproducible for tests, but it does not understand meaning,
+so the project's search tool uses keyword (BM25) ranking only while it is in use. Set
+`NEXURA_EMBEDDINGS` (for example `openai:text-embedding-3-small` with `OPENAI_API_KEY`) for
+hybrid keyword and semantic search; see [Knowledge](knowledge.md). An index remembers its
+embedder, so build a fresh index after changing it.
+
+## `nexura-runtime dev`
+
+Run it in the project directory (or pass `--project DIR`). It starts, in one process:
+
+- the REST service from `nexura-runtime serve` on `http://127.0.0.1:8765` (`--port`), which
+  `studio-web` and the TypeScript client call, and
+- the bundled Studio from the `nexura-studio` package on `http://127.0.0.1:8000`
+  (`--studio-port`); open this one in your browser. `--no-studio` starts the service alone,
+  and without `nexura-studio` installed only the service starts, with a note.
+
+Both are bound to `127.0.0.1`; `dev` has no `--host` option. Data lives in `.nexura/` in the
+project (`--data-dir`). Ctrl-C stops both.
+
+When `pyproject.toml` has a `[tool.nexura]` table (every template writes one), `dev` imports the
+handler sources and workflows it names and registers them in both servers:
+
+```toml
+[tool.nexura]
+template = "workflow"
+handlers = ["my_app.studio:registry"]     # same format as --handlers
+workflows = ["my_app.studio:workflows"]   # dict of workflow id -> WorkflowSpec
+```
+
+A workflow is created under its id the first time and updated when its spec changes, so the
+Studio list never fills with copies. These entries name the project's own trusted code;
+workflow JSON never chooses what is imported. Without the table, `dev` starts with the
+built-in demo modules and says so.
+
+The agent template's agent appears in Studio as a two-step workflow: `propose` runs the agent
+until it asks to call `issue_refund` (nothing is refunded), and `refund` performs exactly that
+call after you approve the step.
+
+## `nexura-runtime deploy --target docker`
+
+Writes `Dockerfile`, `.dockerignore` and `DEPLOY.md` into the project. It never runs Docker.
+Other targets (Kubernetes, Helm, serverless) print the supported list and exit with code 2:
+the open-source edition is single user on one machine. Existing files are not replaced
+without `--force`, and each replaced file is listed.
+
+The image installs the project as an unprivileged user and runs
+`nexura-runtime dev --container`: the bundled Studio alone, listening on `0.0.0.0` inside the
+container. That mode refuses to start without `NEXURA_STUDIO_TOKEN`, and every request must
+then carry the token. The REST service is not started in the container, because the
+open-source service has no authentication. `DEPLOY.md` repeats the caveats from
+`SECURITY_MODEL.md`: publish the port on `127.0.0.1` only
+(`docker run -p 127.0.0.1:8000:8000 -e NEXURA_STUDIO_TOKEN ...`), never add
+`--insecure-allow-unauthenticated-network`, and treat the token as one shared secret with
+full authority. Until Nexura is on PyPI, build with the wheels copied into `./wheels/` and
+`--build-arg PIP_FIND_LINKS=/app/wheels`. The generated Dockerfile has not been built in this
+project's tests (they check its content only).
+
+## With the `nexura` command
+
+The `nexura` command belongs to the Nexura Cloud client, whose own `init` and `deploy`
+always win. With both installed, these commands are `nexura project init|dev|deploy` and
+`nexura dev` (the same parser and options as `nexura-runtime`).
 
 ---
 
@@ -1680,7 +1822,7 @@ pip install "nexura-agents[otel]"    # + OpenTelemetry tracing
 > OpenAI, Anthropic, Gemini or Sarvam with your own key; the OpenAI, Anthropic and Sarvam checks have not run.
 > LiteLLM is checked offline only, against the real library's mock mode.
 >
-> Full guides live in the repository's `docs/` folder: 39 guides (getting started,
+> Full guides live in the repository's `docs/` folder: 40 guides (getting started,
 > agents, teams, tools, MCP and OpenAPI, A2A, memory, prompts, structured output,
 > approvals, guardrails, multimodal, providers, tracing, testing and more) plus a
 > generated API reference.
@@ -4508,7 +4650,7 @@ model keeps the prompt-based schema, so existing models do not change.
 | `OpenAIChatModel` | yes, without tools | same payload as above |
 | `LiteLLMModel` | yes, without tools | `response_format` passed to `litellm.acompletion` |
 | `GeminiNativeProvider`, `VertexAIProvider` | yes, without tools | `responseMimeType: application/json` plus `responseSchema` |
-| `AnthropicNativeProvider` | yes, without tools | forced synthetic tool `structured_output` |
+| `AnthropicNativeProvider` | Claude 4.5 and later, Fable, Mythos: yes, also with tools; older models: without tools | `output_config.format` (JSON outputs); older models a forced synthetic tool `structured_output` |
 | `SarvamProvider`, `FakeModel`, your own models | no (prompt) | `FakeModel(native_schema=True)` opts in for tests |
 
 Rules:
@@ -4526,9 +4668,11 @@ Rules:
   so constraints a provider dialect cannot express are still enforced.
 - **Streaming.** With `stream_text=True`, a turn that sends a schema streams when the
   model declares `streams_response_schema = True`. That covers `OpenAIChatModel`,
-  `LiteLLMModel`, and the OpenAI and Gemini providers; the schema is still sent. Other
-  models, including the Anthropic provider (whose structured output is a forced tool
-  call), answer typed turns in one piece. See [Streaming the output](#streaming-the-output).
+  `LiteLLMModel`, the OpenAI and Gemini providers, and the Anthropic provider on models with
+  JSON outputs; the schema is still sent. Other models, including older Claude models (whose
+  structured output is a forced tool call), answer typed turns in one piece. A non-object root
+  on Anthropic arrives as one text chunk after unwrapping. See
+  [Streaming the output](#streaming-the-output).
 - **Root type.** Providers expect an object at the root. Anthropic wraps other root types
   (`{"type": "array", ...}`) in `{"value": ...}` and unwraps the answer; OpenAI may reject
   non-object roots.
@@ -4548,10 +4692,16 @@ Pydantic models with defaulted fields therefore go out non-strict.
 `type: [X, "null"]` or `anyOf` with null into `nullable: true`, and turns `const` into a
 one-value `enum`. Dropped constraints are checked by the runner's own validation instead.
 
-**Anthropic.** There is no JSON-schema response mode, so Nexura adds a synthetic tool
-`structured_output` whose input schema is the output schema, forces it with `tool_choice`, and
-returns the tool call's arguments as the reply text. This is only done when the agent has no
-other tools.
+**Anthropic.** Models with JSON outputs (Claude Opus, Sonnet and Haiku 4.5 and later, Fable,
+Mythos) get `output_config.format`: every object is sent with `additionalProperties: false` and
+constraint keywords Anthropic rejects (`minimum`, `maxLength`, ...) are dropped and checked by the
+runner instead. A schema JSON outputs cannot express without losing data (an object whose
+`additionalProperties` is a schema, such as `dict[str, int]`, or an object with no properties)
+uses the forced tool below; Claude Opus 5.5, Sonnet 5.5, Fable 5.1 and Mythos 5.1 reject forced
+tools, so there it raises `CapabilityError`. Older models get a synthetic tool
+`structured_output` whose input schema is the output schema, forced with `tool_choice`, and the
+tool call's arguments become the reply text. This is only done when the agent has no other
+tools. Pass `AnthropicNativeProvider(..., structured_output="tool")` or `"native"` to choose.
 
 ```python
 from pydantic import BaseModel
@@ -4834,7 +4984,7 @@ assert result.output.number == "INV-7"
 `output_type` accepts a Pydantic model or a JSON-schema dict (a supported subset, checked
 when you create the agent). Providers that support it receive the schema natively: OpenAI
 `response_format`, Gemini and Vertex `responseSchema`, LiteLLM `response_format`, and
-Anthropic through a forced tool. Other models get the schema in the prompt. The runner
+Anthropic `output_config.format` (a forced tool on older Claude models). Other models get the schema in the prompt. The runner
 validates the reply in every case and sends path-level errors back to the model, so
 constraints a provider ignores are still enforced. See `docs/structured-output.md`.
 
@@ -8037,9 +8187,9 @@ graph reads; the journal records the lease and what was dispatched. User guide a
   `WorkflowCheckpoint` has `pending_effect`, `revision` and a `pause_reason` property.
 
 Limits: `SQLiteWorkflowStore` is single-host (for several hosts use
-`PostgresWorkflowStore`, S8 below); the service still marks runs interrupted with its startup sweep and has no recover
-endpoint (S9); trigger reclaim still starts a new run (S10); budgets are not yet linked to
-intents (S11).
+`PostgresWorkflowStore`, S8 below); trigger reclaim still starts a new run (S10); budgets
+are not yet linked to intents (S11). The service side (lease-based "interrupted" and
+`POST /runs/{id}/recover`) is S9 below.
 
 ## Composite workflow steps and module keys (S7)
 
@@ -8167,9 +8317,70 @@ Tests: one contract suite runs against memory, SQLite and Postgres
 `tests/durability` run on Postgres when `NEXURA_TEST_POSTGRES_URI` names a disposable
 database.
 
-Limits: the service's startup sweep and Studio run records are still SQLite-only (S9),
-so two service hosts sharing one Postgres workflow state are not yet supported; the
-trigger worker keeps its SQLite job store (S10b).
+Limits: Studio run records (`nexura_studio_runs`) stay in the SQLite file, so two service
+hosts sharing one Postgres workflow state each keep their own run list; that is not yet
+supported. The trigger worker keeps its SQLite job store (S10b).
+
+## The service on the journal (S9)
+
+The service (`nexura-runtime serve`, `nexura-runtime worker`, `create_api_app`) decides
+whether a workflow run is interrupted from the run's lease in the execution journal, not
+from which process opened the database last:
+
+- **Recording.** A run the service starts (or forks) on a journaling workflow store (the
+  default SQLite store, or Postgres with `workflow_state_url`) records the journal's
+  workspace on its Studio row (`journal_workspace`). The engine holds the run lease from
+  its first journal write and renews it every `lease_ttl / 3`
+  (`create_api_app(workflow_lease_ttl=30.0)`).
+- **Interrupted means the lease is gone.** A journaled `running` run is marked
+  `interrupted` (with a `RUN_INTERRUPTED` event and the error "the process executing it
+  stopped (its run lease expired)") when the journal lists it as recoverable
+  (`list_recoverable`: free or expired lease, store clock) or its lease owner is a process
+  on this host that has exited. The service checks at startup, when a run is read
+  (`GET /runs/{id}`) and when runs are listed (`GET /runs`, before the status filter). A
+  run whose lease another live `serve` or `worker` holds, on this host or another, is
+  never shown interrupted; an `interrupted` row whose lease is live again (a recover in
+  progress elsewhere) is shown `running`. When the journal cannot tell (no journal row
+  yet, or the journal already finished while the row still says `running`) the B46
+  owner-process rule decides.
+- **Shutdown.** A clean shutdown cancels this process's run tasks; the engine gives the
+  lease back, so those runs are `interrupted` ("Run was interrupted by server shutdown.")
+  unless another worker holds the lease by then.
+- **Legacy rows.** Runs recorded before S9 (no `journal_workspace`), or by a caller that
+  does not journal, keep the B46 behaviour: `StudioStore` marks them `interrupted` when it
+  opens if their owner process on this host has exited. Journaled runs are never swept
+  on open.
+- **`POST /api/v1/runs/{run_id}/recover`** (body `{"on_uncertain": "pause" | "fail"}`,
+  optional) calls `WorkflowEngine.recover` with the same ownership, resource-scope and
+  `run` permission checks as the other run routes. It continues an `interrupted` run, a
+  `running` run whose lease is gone, or a `paused` run (`pause_reason` `effect_unknown`)
+  whose effect was resolved. A step that dispatched without a recorded outcome follows
+  the effect-class rules above; a `non_idempotent` one sets the run `paused` with
+  `pause_reason: "effect_unknown"` and `pending_effect` (new Studio run fields), which
+  you resolve with `POST /runs/{id}/effects/{effect_id}/resolve` and then recover again.
+  Refusals: `409 RUN_LEASE_HELD` (a live process executes it; the run keeps its status),
+  `409 RUN_WAITING_FOR_PERSON` (pending approval or input: decide or answer it),
+  `409 RUN_ALREADY_TERMINAL`, `409 RUN_NOT_JOURNALED` (no execution journal, so what its
+  last step did is unknown: fork it from a checkpoint) and `409 SPEC_MISMATCH`. Clients:
+  `NexuraClient.runs.recover(run_id, on_uncertain=None)` and the TypeScript
+  `client.runs.recover(runId, { onUncertain })`.
+- **Stale owners.** A process whose lease was taken over gets `LeaseLostError` on its next
+  journal write; the service records `RUN_LEASE_LOST` on the run and leaves its status to
+  the process that took it over.
+- **Service handlers keep their effect class.** The service wraps the registry to record
+  node events; that wrapper now passes `register(..., effect=...)` through, so a handler
+  declared `pure` writes no intent and an `idempotent` one is re-run with its key (before,
+  every handler in a service run was journaled `non_idempotent`).
+
+Tests: `tests/p35/test_a6_s9_service_recovery.py` (in-process) and
+`tests/durability/test_durability_service.py` (two service processes on one database, real
+SIGKILL, SQLite and Postgres: the second service starting leaves the live run alone; after
+the owner is killed and its lease expired, `recover` from another process continues it).
+
+Limits: Studio does not show a Recover button or the `effect_unknown` pause yet (the API
+and both clients have them; the Studio UI is being redesigned). Trigger reclaim still
+starts a new run (S10). A run killed before its first journal write has no journal and is
+refused with `RUN_NOT_JOURNALED`.
 
 ## See also
 
@@ -9958,7 +10169,7 @@ agent = Agent(name="Support", instructions="Be brief.", model=OpenAIResponsesPro
 print(agent.run("Summarize our refund policy in one line.").final_output)
 ```
 
-`OpenAIProvider` sends `max_completion_tokens` to api.openai.com (reasoning models reject the deprecated `max_tokens`) and `max_tokens` to any other `base_url`, such as Ollama, vLLM or LM Studio. Set the instance attribute `max_tokens_param` to override.
+`OpenAIProvider` and `OpenAIChatModel` send `max_completion_tokens` to api.openai.com (reasoning models reject the deprecated `max_tokens`) and `max_tokens` to any other `base_url`, such as Ollama, vLLM or LM Studio. Set the instance attribute `max_tokens_param` to override.
 
 ## Errors you can catch
 
@@ -10098,7 +10309,7 @@ print(agent.run("Summarize our refund policy in one line.").final_output)
 
 Retries are owned by the SDK. Every call passes `num_retries=0` and `max_retries=0`, so LiteLLM never retries on its own; wrap the model in `RetryModel` or `FallbackModel` (see below). LiteLLM errors are mapped by HTTP status: 401/403 to `ProviderAuthError`, 429 to `ProviderRateLimitedError` (with `retry_after` when the response has a `Retry-After` header), 5xx to `ProviderServerError`, a 4xx about the context window to `ProviderContextLengthError`, other 4xx to `ProviderClientError`, and timeouts and connection failures to `ProviderRequestError`.
 
-Both `LiteLLMModel` and `OpenAIChatModel` stream text when you ask for it: `Runner.stream_async(agent, prompt, stream_text=True)` emits real `TEXT_DELTA` events as chunks arrive, assembles tool-call arguments split across chunks, and ends with the provider's usage and finish reason. `model.generate()` is unchanged and still returns whole responses, and `stream=True` is still rejected in `LiteLLMModel(**options)`. Internally `stream()` sends `stream=True` with `stream_options={"include_usage": True}` (LiteLLM keeps `num_retries=0`). Errors, including ones raised mid-stream, map to the same typed errors as `generate()`; a stream that errors or ends early never produces a final answer (text already emitted as deltas is not committed), and closing or cancelling the run closes the HTTP stream or LiteLLM stream wrapper. Turns that send a native output schema stream too (with `PARTIAL_OUTPUT` events, see [Structured output](structured-output.md#streaming-the-output)); models without `streams_response_schema`, such as the Anthropic provider, answer them in one piece.
+Both `LiteLLMModel` and `OpenAIChatModel` stream text when you ask for it: `Runner.stream_async(agent, prompt, stream_text=True)` emits real `TEXT_DELTA` events as chunks arrive, assembles tool-call arguments split across chunks, and ends with the provider's usage and finish reason. `model.generate()` is unchanged and still returns whole responses, and `stream=True` is still rejected in `LiteLLMModel(**options)`. Internally `stream()` sends `stream=True` with `stream_options={"include_usage": True}` (LiteLLM keeps `num_retries=0`). Errors, including ones raised mid-stream, map to the same typed errors as `generate()`; a stream that errors or ends early never produces a final answer (text already emitted as deltas is not committed), and closing or cancelling the run closes the HTTP stream or LiteLLM stream wrapper. Turns that send a native output schema stream too (with `PARTIAL_OUTPUT` events, see [Structured output](structured-output.md#streaming-the-output)); models without `streams_response_schema`, such as the Anthropic provider on Claude models older than 4.5, answer them in one piece.
 
 ## Temperature, max_tokens and stop sequences
 
@@ -10161,7 +10372,7 @@ assert custom.merged(ModelSettings(extra={"metadata": {"t": 1}})).extra == {
 | `top_p` | `top_p` | `top_p` | `topP` | `top_p` |
 | `seed` | `seed` | `seed` | `seed` | not supported |
 | `presence_penalty`, `frequency_penalty` | same names | same names | `presencePenalty`, `frequencyPenalty` | not supported |
-| `reasoning_effort` | `reasoning_effort` | `reasoning_effort` | not supported | not supported |
+| `reasoning_effort` | `reasoning_effort` | `reasoning_effort` | not supported | `output_config.effort` (models with effort; `"minimal"` sent as `"low"`) |
 | `thinking_budget_tokens` | not supported | `thinking` | `thinkingConfig.thinkingBudget` (0 = off) | `thinking` (see below; 0 = off) |
 | `extra` | merged into the body | passed as keyword arguments | merged into the body | merged into the body |
 
@@ -10282,7 +10493,7 @@ assert model.calls[1]["model_settings"] is None  # reset to auto after the call
 
 Some models spend hidden "thinking" tokens before they answer. When the provider reports them, `Usage.reasoning_tokens` holds the count. It is read from OpenAI's `reasoning_tokens` and from Gemini and Vertex AI's `thoughtsTokenCount`. These tokens are already counted in `completion_tokens` (the Gemini adapter adds `thoughtsTokenCount` to the visible output count; OpenAI's completion count includes them), so do not add the two together. If the provider does not report them, the field is `None`, not zero.
 
-OpenAI (both APIs), Sarvam and LiteLLM also fill `reasoning_tokens` from `completion_tokens_details`/`output_tokens_details`. The Anthropic adapter does not: Anthropic reports thinking only inside `output_tokens`. `ModelSettings(reasoning_effort=...)` is sent as `reasoning_effort` (Chat Completions), `reasoning.effort` (Responses) and `output_config.effort` (Anthropic); `thinking_budget_tokens` sizes Gemini thinking and Anthropic extended thinking on models before Claude 4.7.
+OpenAI (both APIs), Sarvam and LiteLLM also fill `reasoning_tokens` from `completion_tokens_details`/`output_tokens_details`. The Anthropic adapter does not: Anthropic reports thinking only inside `output_tokens`. `ModelSettings(reasoning_effort=...)` is sent as `reasoning_effort` (Chat Completions), `reasoning.effort` (Responses) and `output_config.effort` (Anthropic, only on the models the effort docs list: Opus 4.5+, Sonnet 4.6+, Haiku 5.5+, Fable, Mythos; `"minimal"` becomes `"low"`; other models get a warning and nothing is sent); `thinking_budget_tokens` sizes Gemini thinking and Anthropic extended thinking on models before Claude 4.7.
 
 Cache usage follows one rule for every provider: `prompt_tokens` is the whole prompt, including the tokens read from a cache (`cached_prompt_tokens`, `cache_read_input_tokens`) and written to one (`cache_creation_input_tokens`). Anthropic reports `input_tokens` without them, so the adapter adds them back; cost settlement prices each part at its own rate.
 
@@ -13021,7 +13232,9 @@ The platform package `nexura-runtime` includes a local REST service and a browse
 ## One `nexura` command
 
 The runtime declares `nexura.commands` entry points for `serve`, `worker`, `workflow`,
-`repro`, `redteam`, `evals` and `sandbox`; the `nexura-studio` package declares `studio`.
+`repro`, `redteam`, `evals`, `sandbox`, `dev` and `project` (`nexura project init|dev|deploy`,
+because `init` and `deploy` are the client's own commands; see
+[Project templates](project-templates.md)); the `nexura-studio` package declares `studio`.
 Once the Nexura Cloud client supports this group, `nexura serve` and the other
 subcommands work through that single command. Until then, use `nexura-runtime`
 (or `nexura-studio` for Studio).
@@ -13203,7 +13416,8 @@ curl -s http://127.0.0.1:8765/api/v1/runs/RUN_ID/subruns/CHILD_KEY
 - `GET /runs/{run_id}/subruns` returns `{"items": [...]}`: the latest checkpoint of every child run whose id starts with `<run_id>/`, in natural id order (numbers inside an id compare as numbers, so `[2]` comes before `[10]`). It takes `limit` (default 50, 1 to 200) and `offset` and also returns `total`, `limit`, `offset` and `has_more`, like `GET /runs`. A run without sub-workflows returns an empty list. An unknown `child_key` is `404 RUN_NOT_FOUND` naming the key.
 - `GET /runs/{run_id}/trace` returns a span tree for the run: `run_id`, `status`, `include_content`, `truncated`, `span_count`, `duration_ms` and a flat `spans` list linked by `parent_id` (a root `run` span, one `node` span per workflow node attempt with status, timing, tokens, cost, model and module, and child spans for model calls, tool calls, retries and handoffs inside agent nodes). The only query parameter is `include_content` (default `false`); inputs, outputs and errors are included, redacted, only when it is `true`, and are always dropped for runs older than the diagnostic retention window. An unknown run returns `404 RUN_NOT_FOUND`. Studio shows it under Run Traces.
 - All of these return `403 CROSS_WORKSPACE_ACCESS_DENIED` for a run owned by another workspace and `404 RUN_NOT_FOUND` for an unknown run.
-- `GET /runs/{run_id}/effects` returns `{"effects": [...]}`: the run's journaled external effects (`effect_id`, `intent` with its `idempotency_key` and `effect_class`, `status` `pending`/`confirmed`/`indeterminate`/`resolved`, `resolution`, `result` with credential-like fields redacted, `resolved_by`). Only executors that write the execution journal record effects (today `DurableExecutionEngine` sharing the service database); other runs return an empty list. `POST /runs/{run_id}/effects/{effect_id}/resolve` with `{"resolution": "confirmed" | "not_applied" | "failed", "result": ...}` settles an `indeterminate` effect once. It needs the `approve` permission and records the authenticated caller as `resolved_by` (the body cannot name an actor). It returns `409 EFFECT_ALREADY_RESOLVED` the second time, `409 EFFECT_NOT_INDETERMINATE` for another status, `409 RUN_LEASE_HELD` while a worker holds the run and `409 RUN_FINISHED` for a finished run; an unknown effect is `404 EFFECT_NOT_FOUND`. Resolving runs nothing: the run continues when its executor next claims it. A journaled run is looked up in the caller's workspace, so another workspace's run is `404 RUN_NOT_FOUND`. See [Durable execution](durable-execution.md).
+- `GET /runs/{run_id}/effects` returns `{"effects": [...]}`: the run's journaled external effects (`effect_id`, `intent` with its `idempotency_key` and `effect_class`, `status` `pending`/`confirmed`/`indeterminate`/`resolved`, `resolution`, `result` with credential-like fields redacted, `resolved_by`). Only executors that write the execution journal record effects (the service's workflow runs, and `DurableExecutionEngine` sharing the service database); other runs return an empty list. `POST /runs/{run_id}/effects/{effect_id}/resolve` with `{"resolution": "confirmed" | "not_applied" | "failed", "result": ...}` settles an `indeterminate` effect once. It needs the `approve` permission and records the authenticated caller as `resolved_by` (the body cannot name an actor). It returns `409 EFFECT_ALREADY_RESOLVED` the second time, `409 EFFECT_NOT_INDETERMINATE` for another status, `409 RUN_LEASE_HELD` while a worker holds the run and `409 RUN_FINISHED` for a finished run; an unknown effect is `404 EFFECT_NOT_FOUND`. Resolving runs nothing: continue the run with `POST /runs/{run_id}/recover`. A journaled run is looked up in the caller's workspace, so another workspace's run is `404 RUN_NOT_FOUND`. See [Durable execution](durable-execution.md).
+- `POST /runs/{run_id}/recover` (optional body `{"on_uncertain": "pause" | "fail"}`, `run` permission) continues a run whose process stopped (`interrupted`) or a `paused` run whose unknown effect was resolved, through `WorkflowEngine.recover`. A step that dispatched without a recorded outcome runs again only if it is `pure` or `idempotent` (same idempotency key) or a `reconcilable` probe says it did not happen; otherwise the run becomes `paused` with `pause_reason: "effect_unknown"` and `pending_effect` (run fields), and you resolve it as above. Refusals: `409 RUN_LEASE_HELD` while a live process executes it, `409 RUN_WAITING_FOR_PERSON` for a run waiting for an approval or an answer, `409 RUN_ALREADY_TERMINAL`, `409 RUN_NOT_JOURNALED` for a run without an execution journal (fork it instead) and `409 SPEC_MISMATCH`. See [Durable execution: the service on the journal](durable-execution.md#the-service-on-the-journal-s9).
 
 The TypeScript client has matching methods:
 
@@ -13236,7 +13450,7 @@ nexura-runtime serve --db ./nexura_service.sqlite3 --worker --poll-interval 1
 nexura-runtime worker --db ./nexura_service.sqlite3 --poll-interval 1
 ```
 
-Each run in `running` records the process executing it (host name, process id and the process start time). When a `serve` or `worker` process opens the database it marks a `running` run `interrupted` ("Run was interrupted by server restart or shutdown.") only if that process is on the same machine and has exited. A process id reused by a newer process, or one from before a reboot, counts as exited. Runs of a process that is still alive are left alone, so starting a worker, or restarting `serve` while a worker runs, does not interrupt another process's runs. Runs recorded by a database from before this change have no owner and are still marked `interrupted` on open. Runs owned by another machine are never marked, so share a SQLite file between processes on one machine only. On systems without `/proc` the check is weaker: macOS checks only the process id, so a reused process id keeps a dead run in `running`, and Windows treats every owning process as alive, so runs there are marked `interrupted` only by a clean shutdown. A service that shuts down cleanly still marks its own unfinished runs `interrupted` ("Run was interrupted by server shutdown.").
+A workflow run the service starts is journaled (see [Durable execution: the service on the journal](durable-execution.md#the-service-on-the-journal-s9)): the process executing it holds a run lease and renews it every 10 seconds (`create_api_app(workflow_lease_ttl=30.0)`). Such a run is shown `interrupted` only when its lease is gone: it expired, or its owner was a process on this machine that has exited. The service checks when it starts, when a run is read and when runs are listed, on SQLite and on Postgres workflow state. A run another live `serve` or `worker` executes, on this machine or another, is never shown `interrupted`. Continue an interrupted run with `POST /api/v1/runs/{run_id}/recover` (Python `client.runs.recover(run_id)`, TypeScript `client.runs.recover(runId)`): a step that may have run but must not repeat pauses the run (`status` `paused`, `pause_reason` `effect_unknown`) until you resolve its effect. The rest of this paragraph describes runs recorded before this change (legacy rows): each run in `running` records the process executing it (host name, process id and the process start time). When a `serve` or `worker` process opens the database it marks a legacy `running` run `interrupted` ("Run was interrupted by server restart or shutdown.") only if that process is on the same machine and has exited. A process id reused by a newer process, or one from before a reboot, counts as exited. Runs of a process that is still alive are left alone, so starting a worker, or restarting `serve` while a worker runs, does not interrupt another process's runs. Runs recorded by a database from before this change have no owner and are still marked `interrupted` on open. Runs owned by another machine are never marked, so share a SQLite file between processes on one machine only. On systems without `/proc` the check is weaker: macOS checks only the process id, so a reused process id keeps a dead run in `running`, and Windows treats every owning process as alive, so runs there are marked `interrupted` only by a clean shutdown. A service that shuts down cleanly still marks its own unfinished runs `interrupted` ("Run was interrupted by server shutdown."), unless another worker holds a journaled run's lease by then.
 
 Create a schedule that fires every 60 seconds (`cron_expr` with `timezone` also works). `release_id` pins what may run: `current` (default, no pin), a revision such as `rev:3`, or the workflow's spec hash. If the workflow has changed since, the job fails with a clear error and no run starts. Jobs whose workflow is missing or belongs to another workspace fail the same way.
 
@@ -17857,6 +18071,129 @@ Handlers stay names (strings); the generated ``__main__`` block runs the module 
 registry: ``registry_import="package.module:attribute"`` names yours, otherwise the
 built-in registry is used. Every spec field is kept, so ``exec`` of the module gives a
 ``spec`` whose ``to_dict()`` equals ``spec.to_dict()``.
+~~~
+
+## Project scaffolding (`nexura_runtime.project`, `nexura-runtime init/dev/deploy`)
+
+### `DEFAULT_TEMPLATE`
+
+Constant: `'agent'`
+
+### `SUPPORTED_TARGETS`
+
+Constant: `{'docker': 'Dockerfile, .dockerignore and DEPLOY.md for a single-user container (Studio on a loopback-published port, token required).'}`
+
+### `TEMPLATES`
+
+Constant: `{'agent': ProjectTemplate(name='agent', summary='Tool-using agent with an approval-gated write tool and a token and cost budget.'), 'workflow': ProjectTemplate(name='workflow', summary='Approval-gated workflow with durable SQLite checkpoints, resumable after a restart.'), 'rag': ProjectTemplate(name='rag', summary='Knowledge ingestion and answers with citations (test embedder; real one optional).')}`
+
+### `DeployError`
+
+class `DeployError`
+
+~~~text
+Deployment files cannot be written as asked.
+~~~
+
+
+### `DeployResult`
+
+class `DeployResult(target: 'str', written: 'list[Path]' = <factory>, replaced: 'list[Path]' = <factory>) -> None`
+
+~~~text
+The files ``write_deploy_files`` wrote, and those it replaced (``force=True``).
+~~~
+
+
+### `ProjectConfig`
+
+class `ProjectConfig(root: 'Path', name: 'str', template: 'str | None', handlers: 'tuple[str, ...]', workflows: 'tuple[str, ...]') -> None`
+
+~~~text
+A project's ``[tool.nexura]`` settings: its root, name, template and code sources.
+~~~
+
+
+### `ProjectError`
+
+class `ProjectError`
+
+~~~text
+The project's ``[tool.nexura]`` table or the code it names cannot be used.
+~~~
+
+
+### `ProjectTemplate`
+
+class `ProjectTemplate(name: 'str', summary: 'str') -> None`
+
+~~~text
+A template ``nexura-runtime init --template NAME`` can write, with its one-line summary.
+~~~
+
+
+### `ScaffoldError`
+
+class `ScaffoldError`
+
+~~~text
+A project cannot be written as asked (bad name, non-empty directory, unknown template).
+~~~
+
+
+### `ScaffoldResult`
+
+class `ScaffoldResult(root: 'Path', template: 'str', package: 'str', written: 'list[Path]' = <factory>, skipped: 'list[Path]' = <factory>) -> None`
+
+~~~text
+What ``scaffold_project`` wrote, and the existing files it kept (``force=True``).
+~~~
+
+
+### `find_project`
+
+function `find_project(root: 'Path') -> 'ProjectConfig | None'`
+
+~~~text
+The project in ``root``, or None when it has no ``[tool.nexura]`` table.
+~~~
+
+### `project_registry`
+
+function `project_registry(config: 'ProjectConfig | None') -> 'ModuleRegistry'`
+
+~~~text
+Studio's built-in handlers plus the project's handler sources.
+~~~
+
+### `project_workflows`
+
+function `project_workflows(config: 'ProjectConfig | None') -> 'dict[str, WorkflowSpec]'`
+
+~~~text
+Workflow id -> spec for every ``workflows`` source of the project.
+~~~
+
+### `scaffold_project`
+
+function `scaffold_project(directory: 'Path', template: 'str' = 'agent', *, package: 'str | None' = None, force: 'bool' = False, env_example: 'bool' = True) -> 'ScaffoldResult'`
+
+~~~text
+Write a runnable project from ``template`` into ``directory``.
+
+``directory`` must be missing or empty unless ``force``; even with ``force`` an existing
+file is kept and listed in ``ScaffoldResult.skipped``, never overwritten.
+~~~
+
+### `write_deploy_files`
+
+function `write_deploy_files(project_dir: 'Path', target: 'str', *, port: 'int' = 8000, force: 'bool' = False) -> 'DeployResult'`
+
+~~~text
+Write the target's files into ``project_dir``.
+
+Existing files are never overwritten silently: without ``force`` the call is refused and
+nothing is written; with ``force`` the listed files are replaced.
 ~~~
 
 ## Nexura V2 integration (`nexura_runtime.integrations.nexura_v2`)

@@ -46,6 +46,7 @@ test.describe('Run traces (P3)', () => {
 
     // Filter by status: failed only, then completed only.
     const rows = page.getByTestId('trace-run-row');
+    await expect(page.getByRole('table')).toBeVisible();
     await expect(rows).toHaveCount(2);
     await page.getByLabel('Run status').selectOption('failed');
     await expect(rows).toHaveCount(1);
@@ -80,6 +81,11 @@ test.describe('Run traces (P3)', () => {
     await expect(details).toContainText('Internal key [REDACTED]');
     expect(await page.content()).not.toContain(FAKE_SECRET);
     expect(await page.locator('body').innerText()).not.toContain(FAKE_SECRET);
+    // Reload restores the selected event; payload visibility still requires fresh opt-in.
+    await page.reload();
+    await expect(page.getByRole('region', { name: 'Span details for lookup_policy' })).toBeVisible();
+    await expect(page.getByRole('checkbox', { name: 'Include redacted inputs and outputs' })).not.toBeChecked();
+    await expect(page.getByRole('region', { name: 'Span details for lookup_policy' })).not.toContainText('refunds');
   });
 
   test('highlights errors in a failed run and filters to error spans', async ({ page }) => {

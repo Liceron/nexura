@@ -183,7 +183,7 @@ test.describe('Accessibility, Bilingual UX & Performance (F14)', () => {
     await navigationButton.click();
     await navigation.getByRole('button', { name: 'Approvals', exact: true }).click();
     await expect(navigation).not.toBeVisible();
-    await expect(page.getByRole('heading', { name: 'Approval Inbox' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Approvals' })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   });
 

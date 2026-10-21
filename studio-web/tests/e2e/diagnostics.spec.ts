@@ -20,6 +20,8 @@ test('Studio shows persisted diagnostics and downloads a content-free SDK trace'
   await expect(page.getByLabel('Run status badge')).toContainText('Completed');
   await page.getByRole('tab', { name: 'Diagnostics', exact: true }).click();
   const diagnostics = page.getByRole('region', { name: 'SDK run diagnostics' });
+  await expect(page.getByRole('tab', { name: 'Diagnostics', exact: true })).toHaveAttribute('aria-selected', 'true');
+  await expect(page.getByRole('tabpanel', { name: 'Run evidence', exact: true }).getByRole('region', { name: 'SDK run diagnostics' })).toBeVisible();
   await expect(diagnostics.getByLabel('Run usage summary')).toBeVisible();
   await expect(diagnostics).toContainText('Cost: not reported');
   await expect(diagnostics).toContainText('unknown');

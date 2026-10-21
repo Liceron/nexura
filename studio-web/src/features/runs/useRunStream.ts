@@ -25,7 +25,8 @@ export interface UseRunStreamResult {
   cancelRun: (reason?: string) => Promise<RunRecord | null>;
   decideApproval: (
     decision: 'approve' | 'reject',
-    stateUpdate?: Record<string, unknown>
+    stateUpdate?: Record<string, unknown>,
+    reviewedApprovalId?: string
   ) => Promise<RunRecord | null>;
   provideInput: (interruptId: string, value: unknown) => Promise<RunRecord>;
   refetchSnapshot: () => Promise<void>;
@@ -249,12 +250,13 @@ export function useRunStream(runId: string | null): UseRunStreamResult {
   const decideApproval = useCallback(
     async (
       decision: 'approve' | 'reject',
-      stateUpdate?: Record<string, unknown>
+      stateUpdate?: Record<string, unknown>,
+      reviewedApprovalId?: string
     ): Promise<RunRecord | null> => {
-      if (!runId || !run?.pending_approval?.approval_id) return null;
+      if (!runId || (!reviewedApprovalId && !run?.pending_approval?.approval_id)) return null;
       try {
         const updated = await manager.client.runs.decide(runId, {
-          approval_id: run.pending_approval.approval_id,
+          approval_id: reviewedApprovalId ?? run!.pending_approval!.approval_id,
           decision,
           state_update: stateUpdate,
         });
@@ -274,6 +276,7 @@ export function useRunStream(runId: string | null): UseRunStreamResult {
         return updated;
       } catch (err: unknown) {
         setError(formatApiError(err, t));
+        if (reviewedApprovalId) throw err;
         return null;
       }
     },

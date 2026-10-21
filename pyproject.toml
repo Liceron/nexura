@@ -58,6 +58,10 @@ repro = "nexura_runtime.cli.commands:repro"
 redteam = "nexura_runtime.cli.commands:redteam"
 evals = "nexura_runtime.cli.commands:evals"
 sandbox = "nexura_runtime.cli.commands:sandbox"
+# `init` and `deploy` are built-ins of the Nexura Cloud client's `nexura` command, which always
+# win, so they are offered as `nexura project init|dev|deploy`; `dev` does not clash.
+dev = "nexura_runtime.cli.commands:dev"
+project = "nexura_runtime.cli.commands:project"
 
 [build-system]
 requires = ["hatchling"]

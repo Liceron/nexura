@@ -1,0 +1,37 @@
+"""Command line for the workflow.
+
+python -m {{package}} start ORD-1 Asha          # runs until the approval gate
+python -m {{package}} approve RUN_ID APPROVAL_ID
+python -m {{package}} reject RUN_ID APPROVAL_ID
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import sys
+
+from {{package}}.workflow import resume, start
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = sys.argv[1:] if argv is None else argv
+    if len(args) == 3 and args[0] == "start":
+        result = asyncio.run(start({"order_id": args[1], "customer": args[2]}))
+    elif len(args) == 3 and args[0] in ("approve", "reject"):
+        result = asyncio.run(resume(args[1], args[2], decision=args[0]))
+    else:
+        print(__doc__, file=sys.stderr)
+        return 2
+    print(f"run {result.workflow_run_id}: {result.status}")
+    if result.pending_approval is not None:
+        approval = result.pending_approval
+        print(f"waiting for approval {approval.approval_id} of step '{approval.node_id}'")
+        print(f"draft: {approval.input_state.get('draft')}")
+    else:
+        print(json.dumps(result.state, indent=2))
+    return 0 if result.status in ("paused", "completed", "rejected") else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

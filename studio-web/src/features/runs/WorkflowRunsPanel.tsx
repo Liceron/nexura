@@ -5,13 +5,13 @@ import { useCallback, useEffect, useRef, useState, type CSSProperties } from 're
 import type { RunRecord } from '@liceron/nexura-sdk';
 import { useApi } from '../../api/context';
 import { formatApiError } from '../../api/errors';
-import { Badge } from '../../components/Badge';
+import { RunStatus } from './RunStatus';
 import { Button } from '../../components/Button';
 import { Card } from '../../components/Card';
 import { Spinner } from '../../components/Spinner';
 import { useI18n } from '../../i18n';
 import { runHref } from '../../app/routes';
-import { RUN_STATUSES, pageRange, runStatusLabel, runStatusVariant } from './runStatus';
+import { RUN_STATUSES, pageRange, runStatusLabel } from './runStatus';
 
 export const WORKFLOW_RUNS_PAGE_SIZE = 20;
 
@@ -128,7 +128,7 @@ export function WorkflowRunsPanel({ workflowId }: { workflowId: string }) {
                 style={{ borderTop: '1px solid var(--border-subtle)' }}
               >
                 <td style={cell}>
-                  <Badge variant={runStatusVariant(run.status)}>{runStatusLabel(t, run.status)}</Badge>
+                  <RunStatus status={run.status} />
                 </td>
                 <td style={cell}>
                   <code>{run.run_id}</code>

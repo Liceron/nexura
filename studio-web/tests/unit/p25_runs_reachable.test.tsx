@@ -261,7 +261,7 @@ describe('WorkflowDetail keeps the open run in the URL', () => {
     wrap(<WorkflowDetail workflowId="wf-1" runId="run-9" onBack={() => {}} onOpenWorkflow={() => {}} />);
     await user.click(await screen.findByTestId('tab-runs'));
     const row = await screen.findByTestId('workflow-run-row');
-    expect(row).toHaveTextContent('Waiting for approval');
+    expect(row).toHaveTextContent('Pending approval');
     expect(runs.list).toHaveBeenCalledWith(expect.objectContaining({ workflowId: 'wf-1' }));
   });
 });

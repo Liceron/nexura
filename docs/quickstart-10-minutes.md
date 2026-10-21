@@ -8,6 +8,10 @@ need no API key and no network after the install. The test suite runs each block
 Related: [Getting started](getting-started.md), [Human approval](approvals.md),
 [Budgets and usage](budgets-and-usage.md), [Workflows](workflows.md).
 
+To start from a generated project instead, run `nexura-runtime init my-app --template workflow`
+(or `agent`, `rag`): it writes a runnable project with offline tests, and `nexura-runtime dev`
+opens it in the local Studio. See [Project templates](project-templates.md).
+
 ## 1. Install (2 minutes)
 
 Once Nexura is published, the install will be:
@@ -290,6 +294,8 @@ The budget object above lives in memory. To keep spending across restarts, creat
 
 ## Next steps
 
+- [Project templates](project-templates.md): `nexura-runtime init`, `dev` and
+  `deploy --target docker` for a project of your own.
 - [Testing your agents](testing.md): script tool calls and assert on results.
 - [Workflows](workflows.md): branches, retries, `interrupt()` for free-form human input,
   history and fork, sub-workflows and parallel steps.

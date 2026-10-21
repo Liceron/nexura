@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Liceron
+import { useState } from 'react';
 import type { ExactApprovalRequest } from './types';
 import { ExactAction } from './ExactAction';
 import { describeApprovalDetails } from '../runs/durable';
@@ -22,9 +23,9 @@ function AgentToolCallsDetails({ view }: { view: AgentToolCallsView }) {
       <div style={{ fontSize: 13, fontWeight: 600 }}>
         {t('agents.approvalTitle', 'Tool calls this agent wants to run')}
       </div>
-      <div style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'flex', gap: 14, flexWrap: 'wrap' }}>
+      <div style={{ fontSize: 'var(--type-ui)', color: 'var(--text-secondary)', display: 'flex', gap: 14, flexWrap: 'wrap' }}>
         <span data-testid="approval-agent-name">
-          {t('agents.approvalAgent', 'Agent')}: <strong>{view.agentName || view.agentId || '?'}</strong>
+          {t('agents.approvalAgent', 'Agent')}: <strong>{view.agentName || view.agentId || t('exactAction.notRecorded')}</strong>
         </span>
         {view.agentRevision !== null && (
           <span data-testid="approval-agent-revision">
@@ -35,21 +36,21 @@ function AgentToolCallsDetails({ view }: { view: AgentToolCallsView }) {
           {t('agents.approvalCalls', 'Calls')}: <strong>{view.calls.length}</strong>
         </span>
       </div>
-      <ol style={{ margin: 0, paddingLeft: 22, display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 260, overflowY: 'auto' }}>
+      <ol style={{ margin: 0, paddingLeft: 22, display: 'flex', flexDirection: 'column', gap: 6 }}>
         {view.calls.map((call, i) => (
-          <li key={i} data-testid="approval-agent-call" style={{ fontSize: 12 }}>
+          <li key={i} data-testid="approval-agent-call" style={{ fontSize: 'var(--type-ui)' }}>
             <div>
               {t('agents.approvalTool', 'Tool')}: <code data-testid="approval-agent-call-tool">{call.tool}</code>
             </div>
             <pre
-              data-testid="approval-agent-call-arguments"
+              className="inspection-code" data-testid="approval-agent-call-arguments"
               style={{
                 margin: '2px 0 0',
                 padding: 8,
                 whiteSpace: 'pre-wrap',
                 wordBreak: 'break-word',
                 fontFamily: 'var(--font-mono)',
-                fontSize: 12,
+                fontSize: 'var(--type-ui)',
                 backgroundColor: 'var(--bg-canvas)',
                 borderRadius: 'var(--radius-sm)',
               }}
@@ -59,7 +60,7 @@ function AgentToolCallsDetails({ view }: { view: AgentToolCallsView }) {
           </li>
         ))}
       </ol>
-      <div data-testid="approval-agent-note" style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+      <div data-testid="approval-agent-note" style={{ fontSize: 'var(--type-ui)', color: 'var(--text-secondary)' }}>
         {t(
           'agents.approvalNote',
           'Approve to run exactly these calls; reject to stop the run without running them. If the agent is edited before you decide, the run fails instead of running old calls.'
@@ -75,13 +76,15 @@ function AgentToolCallsDetails({ view }: { view: AgentToolCallsView }) {
  */
 export function ApprovalDetailsPanel({ pendingApproval, previousApproval, workflowHandler }: ApprovalDetailsPanelProps) {
   return <>
-    <ExactAction request={pendingApproval} previous={previousApproval} workflowHandler={workflowHandler} />
-    <LegacyApprovalDetails pendingApproval={pendingApproval} />
+    <ExactAction request={pendingApproval} previous={previousApproval} workflowHandler={workflowHandler}>
+      <LegacyApprovalDetails pendingApproval={pendingApproval} />
+    </ExactAction>
   </>;
 }
 
 function LegacyApprovalDetails({ pendingApproval }: ApprovalDetailsPanelProps) {
   const t = useDurableT();
+  const [showRemaining, setShowRemaining] = useState(false);
   const agentCalls = describeAgentToolCalls(pendingApproval);
   if (agentCalls) return <AgentToolCallsDetails view={agentCalls} />;
   const view = describeApprovalDetails(pendingApproval);
@@ -92,7 +95,7 @@ function LegacyApprovalDetails({ pendingApproval }: ApprovalDetailsPanelProps) {
       <div style={{ fontSize: 13, fontWeight: 600 }}>
         {t('durable.approval.detailsTitle', 'What this approval covers')}
       </div>
-      <div style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'flex', gap: 14, flexWrap: 'wrap' }}>
+      <div style={{ fontSize: 'var(--type-ui)', color: 'var(--text-secondary)', display: 'flex', gap: 14, flexWrap: 'wrap' }}>
         {view.mapOver && (
           <span>
             {t('approvalReview.mapped', 'Mapped over')}: <code>{view.mapOver}</code>
@@ -106,29 +109,36 @@ function LegacyApprovalDetails({ pendingApproval }: ApprovalDetailsPanelProps) {
         )}
       </div>
       {overCap && (
-        <div role="alert" style={{ fontSize: 12, color: 'var(--status-danger)' }}>
+        <div role="alert" style={{ fontSize: 'var(--type-ui)', color: 'var(--status-danger)' }}>
           {t('durable.approval.overCap', 'This is more items than one approval may cover; the run will fail rather than write them.')}
         </div>
       )}
       <ol
         data-testid="approval-items"
-        style={{ margin: 0, paddingLeft: 22, fontFamily: 'var(--font-mono)', fontSize: 12, maxHeight: 200, overflowY: 'auto' }}
+        style={{ margin: 0, paddingLeft: 22, fontFamily: 'var(--font-mono)', fontSize: 'var(--type-code)', overflowWrap: 'anywhere' }}
       >
         {view.shownItems.map((item, i) => (
           <li key={i} data-testid="approval-item">{JSON.stringify(item)}</li>
         ))}
       </ol>
+      {view.moreCount > 0 && <details onToggle={e => setShowRemaining(e.currentTarget.open)}>
+        <summary>{t('reviewDesign.remainingItems')}</summary>
+        <ol start={view.shownItems.length + 1} className="inspection-items">
+          {(Array.isArray(pendingApproval?.details?.items) ? pendingApproval.details.items.slice(view.shownItems.length) : []).map((item, index) =>
+            <li key={index}><pre className="inspection-code">{JSON.stringify(item)}</pre></li>)}
+        </ol>
+      </details>}
       {view.moreCount > 0 && (
-        <div data-testid="approval-more" style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+        <div data-testid="approval-more" style={{ fontSize: 'var(--type-ui)', color: 'var(--text-secondary)' }}>
           {t('approvalReview.more', 'and {count} more').replace('{count}', String(view.moreCount))}
         </div>
       )}
       {view.itemCount > view.listedCount && (
-        <div data-testid="approval-server-truncated" style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
-          {t('approvalReview.truncated', 'showing {listed} of {count} items (the server listed {listed})').replaceAll('{listed}', String(view.listedCount)).replace('{count}', String(view.itemCount))}
+        <div data-testid="approval-server-truncated" style={{ fontSize: 'var(--type-ui)', color: 'var(--text-secondary)' }}>
+          {t('approvalReview.truncated', 'Showing {shown} of {count} items. The server returned {listed}; other items were not returned.').replaceAll('{listed}', String(view.listedCount)).replace('{shown}', String(showRemaining ? view.listedCount : view.shownItems.length)).replace('{count}', String(view.itemCount))}
         </div>
       )}
-      <div data-testid="approval-edit-note" style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+      <div data-testid="approval-edit-note" style={{ fontSize: 'var(--type-ui)', color: 'var(--text-secondary)' }}>
         {t(
           'durable.approval.editNote',
           'If you edit the inputs before approving, the run pauses again and asks for a fresh approval of the edited items. An approval only covers the inputs you reviewed.'

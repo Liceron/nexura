@@ -27,7 +27,7 @@ from nexura_agents.json_schema import openai_response_format
 from nexura_agents.limits import ModelSettings, merge_extra, settings_from_request, warn_unsupported
 from nexura_agents.models._streaming import ChatChunkDecoder
 from nexura_agents.models.base import ModelProtocol
-from nexura_agents.providers.errors import http_status_error, response_excerpt
+from nexura_agents.providers.errors import error_body_codes, http_status_error, response_excerpt
 from nexura_agents.providers.multimodal import openai_content_parts
 from nexura_agents.providers.types import GenerationRequest, ProviderCapabilities, StreamDelta
 from nexura_agents.types import Message, ModelResponse, ToolCall, Usage
@@ -130,6 +130,22 @@ class OpenAIChatModel(ModelProtocol):
         can_stream=True, can_tools=True, can_structured_output=True, reports_usage=True
     )
 
+    # Same rule as OpenAIProvider: ``max_completion_tokens`` for api.openai.com (reasoning
+    # models reject the deprecated ``max_tokens``), ``max_tokens`` for other servers. Set the
+    # instance attribute to override.
+    max_tokens_param: str | None = None
+
+    def _settings_params(self, model_settings: ModelSettings) -> dict[str, Any]:
+        from nexura_agents.providers.openai.provider import _is_official_openai
+
+        params = model_settings.to_openai_params()
+        field = self.max_tokens_param or (
+            "max_completion_tokens" if _is_official_openai(self.base_url) else "max_tokens"
+        )
+        if "max_tokens" in params and field != "max_tokens":
+            params[field] = params.pop("max_tokens")
+        return params
+
     def __init__(
         self,
         model: str,
@@ -227,7 +243,7 @@ class OpenAIChatModel(ModelProtocol):
         if response_schema is not None:
             payload["response_format"] = openai_response_format(response_schema)
         if model_settings is not None:
-            payload.update(model_settings.to_openai_params())
+            payload.update(self._settings_params(model_settings))
             warn_unsupported("OpenAIChatModel", model_settings, ("thinking_budget_tokens",))
             if model_settings.extra:
                 merge_extra(payload, model_settings.extra)
@@ -267,6 +283,7 @@ class OpenAIChatModel(ModelProtocol):
                 else f"Provider returned error HTTP {response.status_code}",
                 retry_after=response.headers.get("Retry-After"),
                 detail=response_excerpt(response),
+                codes=error_body_codes(response),
             )
 
         # Parse response body
@@ -411,7 +428,7 @@ class OpenAIChatModel(ModelProtocol):
         if response_schema is not None:
             payload["response_format"] = openai_response_format(response_schema)
         if model_settings is not None:
-            payload.update(model_settings.to_openai_params())
+            payload.update(self._settings_params(model_settings))
             warn_unsupported("OpenAIChatModel", model_settings, ("thinking_budget_tokens",))
             if model_settings.extra:
                 merge_extra(payload, model_settings.extra)
@@ -436,9 +453,9 @@ class OpenAIChatModel(ModelProtocol):
                         "Provider authentication failed (HTTP 401: Invalid API Key)"
                     )
                 if response.status_code >= 400:
-                    if response.status_code != 429:
-                        with contextlib.suppress(Exception):
-                            await response.aread()
+                    # Read the body for every error (a 429's code tells a quota error apart).
+                    with contextlib.suppress(Exception):
+                        await response.aread()
                     raise http_status_error(
                         response.status_code,
                         "Rate limit exceeded or provider quota exhausted (HTTP 429)"
@@ -446,6 +463,7 @@ class OpenAIChatModel(ModelProtocol):
                         else f"Provider returned error HTTP {response.status_code}",
                         retry_after=response.headers.get("Retry-After"),
                         detail=response_excerpt(response),
+                        codes=error_body_codes(response),
                     )
                 data_lines: list[str] = []
 

@@ -3,15 +3,15 @@
 import { useEffect, useState } from 'react';
 import type { RunRecord } from '@liceron/nexura-sdk';
 import { useApi } from '../../api/context';
-import { Badge } from '../../components/Badge';
+import { RunStatus } from '../runs/RunStatus';
 import { Button } from '../../components/Button';
 import { selectStyle } from '../../components/Input';
-import { Card } from '../../components/Card';
+import { PageHeader, PageLayout } from '../../components/PageHeader';
 import { Spinner } from '../../components/Spinner';
 import { useI18n } from '../../i18n';
 import { RunTraceView } from './RunTraceView';
 import { runHref } from '../../app/routes';
-import { RUN_STATUSES, pageRange, runStatusVariant } from '../runs/runStatus';
+import { RUN_STATUSES, pageRange } from '../runs/runStatus';
 
 // Every status the service stores ('' = all), so paused and stopped runs can be found too.
 const STATUSES = ['', ...RUN_STATUSES];
@@ -19,7 +19,7 @@ export const TRACES_PAGE_SIZE = 50;
 
 export function TracesView({ runId }: { runId?: string | null }) {
   const { manager, connection } = useApi();
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const [status, setStatus] = useState('');
   const [offset, setOffset] = useState(0);
   const [runs, setRuns] = useState<RunRecord[]>([]);
@@ -54,24 +54,17 @@ export function TracesView({ runId }: { runId?: string | null }) {
 
   if (runId) {
     return (
-      <Card>
-        <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 12 }}>
-          <Button size="sm" onClick={() => (window.location.hash = '#/traces')}>
-            {t('traces.back')}
-          </Button>
-          <h2 style={{ fontSize: 16, margin: 0 }}>
-            {t('traces.title')}: <code data-testid="trace-run-id">{runId}</code>
-          </h2>
-        </div>
+      <PageLayout width="full">
+        <PageHeader title={t('traces.title')} metadata={<code data-testid="trace-run-id">{runId}</code>}
+          breadcrumbs={<a href="#/traces">{t('traces.back')}</a>} />
         <RunTraceView runId={runId} showOpenRun />
-      </Card>
+      </PageLayout>
     );
   }
 
   return (
-    <Card>
-      <h2 style={{ fontSize: 16, marginTop: 0 }}>{t('traces.title')}</h2>
-      <p style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{t('traces.subtitle')}</p>
+    <PageLayout width="full">
+      <PageHeader title={t('traces.title')} />
       <label style={{ fontSize: 13 }}>
         {t('traces.filterStatus')}{' '}
         <select
@@ -97,42 +90,21 @@ export function TracesView({ runId }: { runId?: string | null }) {
       )}
       {error && <p role="alert">{error}</p>}
       {!loading && !error && runs.length === 0 && <p>{t('traces.noRuns')}</p>}
-      <ul aria-label={t('traces.runList')} style={{ listStyle: 'none', padding: 0, display: 'grid', gap: 6 }}>
-        {runs.map((run) => (
-          <li
-            key={run.run_id}
-            data-testid="trace-run-row"
-            data-status={run.status}
-            style={{
-              display: 'flex',
-              gap: 12,
-              alignItems: 'center',
-              padding: 8,
-              border: '1px solid var(--border-subtle)',
-              borderRadius: 'var(--radius-sm)',
-              fontSize: 13,
-            }}
-          >
-            <Badge variant={runStatusVariant(run.status)}>{run.status}</Badge>
-            <code>{run.run_id}</code>
-            <span style={{ color: 'var(--text-secondary)', flex: 1 }}>{run.workflow_id ?? ''}</span>
-            <a href={`#/traces/${encodeURIComponent(run.run_id)}`}>
-              {t('traces.openTrace')}
-              <span className="sr-only" style={{ position: 'absolute', left: -9999 }}>
-                {' '}
-                {run.run_id}
-              </span>
-            </a>
-            <a href={runHref(run.run_id)} data-testid="trace-run-open">
-              {t('runs.open')}
-              <span className="sr-only" style={{ position: 'absolute', left: -9999 }}>
-                {' '}
-                {run.run_id}
-              </span>
-            </a>
-          </li>
-        ))}
-      </ul>
+      <div className="inspection-table-scroll" role="region" aria-label={t('traces.runList')} tabIndex={0}>
+        <table className="inspection-table"><thead><tr>
+          <th>{t('exactAction.run')}</th><th>{t('runs.workflow')}</th><th>{t('traces.status')}</th><th>{t('reviewDesign.updated')}</th><th>{t('traces.openTrace')}</th>
+        </tr></thead><tbody>
+          {runs.map(run => <tr key={run.run_id} data-testid="trace-run-row" data-status={run.status}>
+            <td><code>{run.run_id}</code></td><td>{run.workflow_id || t('exactAction.notRecorded')}</td>
+            <td><RunStatus status={run.status} /></td>
+            <td>{new Date(run.updated_at * 1000).toLocaleString(locale)}</td>
+            <td><div className="inspection-actions">
+              <a href={'#/traces/' + encodeURIComponent(run.run_id)}>{t('traces.openTrace')}<span className="sr-only"> {run.run_id}</span></a>
+              <a href={runHref(run.run_id)} data-testid="trace-run-open">{t('runs.open')}<span className="sr-only"> {run.run_id}</span></a>
+            </div></td>
+          </tr>)}
+        </tbody></table>
+      </div>
       {(offset > 0 || hasMore) && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 12 }}>
           <Button
@@ -154,6 +126,6 @@ export function TracesView({ runId }: { runId?: string | null }) {
           </Button>
         </div>
       )}
-    </Card>
+    </PageLayout>
   );
 }

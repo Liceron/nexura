@@ -1,15 +1,19 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Liceron
 import { Icon } from '../../components/Icon';
-import { useState } from 'react';
+import { useState, useId, useRef } from 'react';
 import { Card } from '../../components/Card';
 import { Button } from '../../components/Button';
-import { Badge } from '../../components/Badge';
+import { RunStatus } from './RunStatus';
+import { WorkflowTabs } from '../../components/WorkflowTabs';
+import { useApi } from '../../api/context';
+import type { PendingApprovalItem } from '../approvals/types';
 import { Spinner } from '../../components/Spinner';
 import { useRunStream } from './useRunStream';
 import { RunTimeline } from './RunTimeline';
 import { StateReplayer } from './StateReplayer';
 import { RunDiagnostics } from './RunDiagnostics';
+import { JsonText } from '../approvals/ExactAction';
 import { ApprovalDecisionModal } from '../approvals/ApprovalDecisionModal';
 import { PendingInputBanner } from './PendingInputBanner';
 import { RunCancelReasonNotice } from './RunCancelReasonNotice';
@@ -23,6 +27,7 @@ import type { NodeExecutionStatus } from './types';
 
 interface RunVisualizerProps {
   runId: string;
+  headingLevel?: 1 | 2;
   onClose: () => void;
   onSelectRun?: (runId: string) => void;
   onSelectNode?: (nodeId: string) => void;
@@ -34,6 +39,7 @@ interface RunVisualizerProps {
 
 export function RunVisualizer({
   runId,
+  headingLevel = 2,
   onClose,
   onSelectRun,
   onSelectNode,
@@ -57,8 +63,11 @@ export function RunVisualizer({
   const [activeTab, setActiveTab] = useState<'timeline' | 'replay' | 'snapshot' | 'diagnostics' | 'history' | 'subruns' | 'traces'>('timeline');
   const [currentStepIndex, setCurrentStepIndex] = useState<number>(0);
   const [isCancelling, setIsCancelling] = useState(false);
-  const [isDeciding, setIsDeciding] = useState(false);
-  const [approvalModalOpen, setApprovalModalOpen] = useState(false);
+  const [reviewItem, setReviewItem] = useState<PendingApprovalItem | null>(null);
+  const { connection } = useApi();
+  const panelId = useId();
+  const titleRef = useRef<HTMLHeadingElement>(null);
+  const Heading = headingLevel === 1 ? 'h1' : 'h2';
 
   const forkedFrom = describeForkedFrom(run?.forked_from);
   const showSubRuns = showSubRunsTab(run);
@@ -84,24 +93,6 @@ export function RunVisualizer({
       await cancelRun('Cancelled from Studio Run Console');
     } finally {
       setIsCancelling(false);
-    }
-  };
-
-  const handleApprove = async () => {
-    setIsDeciding(true);
-    try {
-      await decideApproval('approve');
-    } finally {
-      setIsDeciding(false);
-    }
-  };
-
-  const handleReject = async () => {
-    setIsDeciding(true);
-    try {
-      await decideApproval('reject');
-    } finally {
-      setIsDeciding(false);
     }
   };
 
@@ -138,27 +129,6 @@ export function RunVisualizer({
     run.status === 'pending_approval' ||
     run.status === 'waiting_for_input';
 
-  const getStatusBadge = (status: string) => {
-    switch (status) {
-      case 'running':
-        return <Badge variant="info"><Icon name="workflows" /> {t('ui.running')}</Badge>;
-      case 'completed':
-        return <Badge variant="success"><Icon name="check" /> {t('ui.completed')}</Badge>;
-      case 'failed':
-        return <Badge variant="danger"><Icon name="close" /> {t('ui.failed')}</Badge>;
-      case 'cancelled':
-        return <Badge variant="neutral">{t('ui.cancelled')}</Badge>;
-      case 'pending_approval':
-        return <Badge variant="warning"><Icon name="pause" /> {t('ui.approvalPending')}</Badge>;
-      case 'waiting_for_input':
-        return <Badge variant="warning"><Icon name="pause" /> {t('ui.inputRequired')}</Badge>;
-      case 'interrupted':
-        return <Badge variant="warning"><Icon name="warning" /> {t('ui.interrupted')}</Badge>;
-      default:
-        return <Badge variant="neutral">{status}</Badge>;
-    }
-  };
-
   const getStreamBadge = () => {
     switch (streamStatus) {
       case 'connected':
@@ -175,113 +145,37 @@ export function RunVisualizer({
   };
 
   return (
-    <Card elevated style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 14 }}>
-      {/* Header Bar */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          flexWrap: 'wrap',
-          gap: 12,
-          borderBottom: '1px solid var(--border-subtle)',
-          paddingBottom: 12,
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <span style={{ fontWeight: 700, fontSize: 15 }}>{t('ui.runConsole')}</span>
-          <Badge variant="neutral" aria-label={t('ui.runIdentifierBadge')}>
-            {run.run_id}
-          </Badge>
-          <span aria-label={t('ui.runStatusBadge')}>{getStatusBadge(run.status)}</span>
-          <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
-            {t('ui.steps') + " "}<strong>{run.step_count}</strong>
-          </span>
-          <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
-            {t('ui.events') + " "}<strong>{events.length}</strong>
-          </span>
+    <section className="run-console">
+      <header className="run-console-header">
+        <div>
+          <Heading ref={titleRef} tabIndex={-1}>{t('ui.runConsole')}</Heading>
+          <div className="inspection-meta">
+            <code aria-label={t('ui.runIdentifierBadge')}>{run.run_id}</code>
+            <span aria-label={t('ui.runStatusBadge')}><RunStatus status={run.status} /></span>
+            <span>{t('ui.steps')} {run.step_count}</span>
+            <span>{t('ui.events')} {events.length}</span>
+          </div>
         </div>
-
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <div className="inspection-actions">
           {getStreamBadge()}
-          {/* A fork starts from a checkpoint, so its input does not replay it; the server refuses. */}
-          {!forkedFrom && (
-            <SaveAsTestButton runId={run.run_id} workflowId={run.workflow_id} status={run.status} />
-          )}
-          {isActive && (
-            <Button
-              variant="danger"
-              size="sm"
-              loading={isCancelling}
-              onClick={handleCancel}
-              title={t('ui.haltActiveWorkflowRunOnServer')}
-            >
-              {t('ui.cancelRun')}
-            </Button>
-          )}
-          <Button variant="secondary" size="sm" onClick={refetchSnapshot} title={t('ui.fetchLatestDatabaseSnapshot')}>
-            {t('ui.refresh')}
-          </Button>
-          <Button variant="secondary" size="sm" onClick={onClose} aria-label={t('ui.closeRunConsole')}>
-            <Icon name="close" />
-          </Button>
+          {!forkedFrom && <SaveAsTestButton runId={run.run_id} workflowId={run.workflow_id} status={run.status} />}
+          {isActive && <Button variant="ghost" className="workflow-danger-action" size="sm" loading={isCancelling}
+            onClick={handleCancel} title={t('ui.haltActiveWorkflowRunOnServer')}>{t('ui.cancelRun')}</Button>}
+          <Button variant="ghost" size="sm" onClick={refetchSnapshot} title={t('ui.fetchLatestDatabaseSnapshot')}>{t('ui.refresh')}</Button>
+          <Button variant="ghost" size="sm" onClick={onClose} aria-label={t('ui.closeRunConsole')}><Icon name="close" /></Button>
         </div>
-      </div>
-
-      {/* Pending Approval Gate Banner */}
-      {run.status === 'pending_approval' && run.pending_approval && (
-        <div
-          role="region"
-          aria-label={t('ui.pendingApprovalBanner')}
-          style={{
-            padding: 12,
-            backgroundColor: 'var(--status-warning-bg)',
-            borderRadius: 'var(--radius-sm)',
-            border: '1px solid var(--status-warning)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            flexWrap: 'wrap',
-            gap: 10,
-          }}
-        >
-          <div>
-            <div style={{ fontWeight: 600, fontSize: 13, color: 'var(--text-primary)' }}>
-              <Icon name="pause" /> {t('ui.workflowGateApprovalRequired')}
-            </div>
-            <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 2 }}>
-              {t('ui.pausedAtNode') + " "}<strong>{run.pending_approval.node_id}</strong> (ID:{' '}
-              <code>{run.pending_approval.approval_id}</code>)
-            </div>
-          </div>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => setApprovalModalOpen(true)}
-            >
-              {t('ui.reviewDetails')}
-            </Button>
-            <Button
-              variant="danger"
-              size="sm"
-              loading={isDeciding}
-              onClick={handleReject}
-            >
-              {t('ui.rejectExecution')}
-            </Button>
-            <Button
-              variant="primary"
-              size="sm"
-              loading={isDeciding}
-              onClick={handleApprove}
-            >
-              {t('ui.approveResume')}
-            </Button>
-          </div>
+      </header>
+      {error && <p role="alert" className="inspection-error">{error}</p>}
+      {run.status === 'pending_approval' && run.pending_approval && <div role="region" aria-label={t('ui.pendingApprovalBanner')} className="run-review-banner">
+        <div><strong>{t('ui.workflowGateApprovalRequired')}</strong>
+          <p className="inspection-meta">{t('ui.pausedAtNode')} {run.pending_approval.node_id}</p>
         </div>
-      )}
-
+        <Button variant="primary" onClick={() => setReviewItem({
+          approvalId: run.pending_approval!.approval_id, runId: run.run_id, workflowId: run.workflow_id || '',
+          nodeId: run.pending_approval!.node_id, createdAt: run.created_at, currentState: run.current_state,
+          spec: run.spec, runRecord: run,
+        })}>{t('approvalReview.review')}</Button>
+      </div>}
       {/* Pending Input Banner */}
       <PendingInputBanner
         run={run}
@@ -290,30 +184,14 @@ export function RunVisualizer({
         }}
       />
 
-      {/* Full Approval Decision Modal */}
-      {run.status === 'pending_approval' && run.pending_approval && (
-        <ApprovalDecisionModal
-          open={approvalModalOpen}
-          item={{
-            approvalId: run.pending_approval.approval_id,
-            runId: run.run_id,
-            workflowId: run.workflow_id || '',
-            nodeId: run.pending_approval.node_id,
-            createdAt: run.created_at,
-            currentState: run.current_state,
-            spec: run.spec,
-            runRecord: run,
-          }}
-          onClose={() => setApprovalModalOpen(false)}
-          onDecide={async (_rId, _aId, decision, stateUpdate) => {
-            const updated = await decideApproval(decision, stateUpdate);
-            if (updated) {
-              return { success: true, run: updated };
-            }
-            return { success: false, error: 'Failed to submit decision.' };
-          }}
-        />
-      )}
+      <ApprovalDecisionModal open={reviewItem !== null} item={reviewItem} workspace={connection.workspace}
+        returnFocusTo={() => titleRef.current}
+        stale={run.status !== 'pending_approval'}
+        onClose={() => setReviewItem(null)}
+        onDecide={async (_runId, approvalId, decision, stateUpdate) => {
+          const updated = await decideApproval(decision, stateUpdate, approvalId);
+          return updated ? { success: true, run: updated } : { success: false, error: t('approvalReview.submitError') };
+        }} />
 
       {/* Fork lineage */}
       {forkedFrom && (
@@ -356,75 +234,15 @@ export function RunVisualizer({
       {/* Cancelled because access ended (member removed, key or publication revoked) */}
       <RunCancelReasonNotice run={run} />
 
-      {/* Tab Navigation */}
-      <div role="tablist" style={{ display: 'flex', gap: 8, borderBottom: '1px solid var(--border-subtle)', paddingBottom: 6 }}>
-        <Button
-          variant={activeTab === 'diagnostics' ? 'primary' : 'secondary'}
-          size="sm"
-          role="tab"
-          aria-selected={activeTab === 'diagnostics'}
-          onClick={() => setActiveTab('diagnostics')}
-        >
-          {t('ui.diagnostics')}
-        </Button>
-        <Button
-          variant={activeTab === 'traces' ? 'primary' : 'secondary'}
-          size="sm"
-          role="tab"
-          aria-selected={activeTab === 'traces'}
-          onClick={() => setActiveTab('traces')}
-        >
-          {t('traces.tab')}
-        </Button>
-        <Button
-          variant={activeTab === 'timeline' ? 'primary' : 'secondary'}
-          size="sm"
-          role="tab"
-          aria-selected={activeTab === 'timeline'}
-          onClick={() => setActiveTab('timeline')}
-        >
-          {t('ui.eventTimeline')}{events.length})
-        </Button>
-        <Button
-          variant={activeTab === 'replay' ? 'primary' : 'secondary'}
-          size="sm"
-          role="tab"
-          aria-selected={activeTab === 'replay'}
-          onClick={() => setActiveTab('replay')}
-        >
-          {t('ui.stateReplay')}{replaySteps.length} {t('ui.steps2')}
-        </Button>
-        <Button
-          variant={activeTab === 'snapshot' ? 'primary' : 'secondary'}
-          size="sm"
-          role="tab"
-          aria-selected={activeTab === 'snapshot'}
-          onClick={() => setActiveTab('snapshot')}
-        >
-          {t('ui.stateSnapshot')}
-        </Button>
-        <Button
-          variant={activeTab === 'history' ? 'primary' : 'secondary'}
-          size="sm"
-          role="tab"
-          aria-selected={activeTab === 'history'}
-          onClick={() => setActiveTab('history')}
-        >
-          {t('ui.history')}
-        </Button>
-        {showSubRuns && (
-          <Button
-            variant={activeTab === 'subruns' ? 'primary' : 'secondary'}
-            size="sm"
-            role="tab"
-            aria-selected={activeTab === 'subruns'}
-            onClick={() => setActiveTab('subruns')}
-          >
-            {t('durable.subruns.tab', 'Sub-runs')}
-          </Button>
-        )}
-      </div>
-
+      <WorkflowTabs active={activeTab} onChange={id => setActiveTab(id as typeof activeTab)} label={t('reviewDesign.runViews')} panelId={panelId}
+        tabs={[
+          { id: 'diagnostics', label: t('ui.diagnostics') }, { id: 'traces', label: t('traces.tab') },
+          { id: 'timeline', label: t('ui.eventTimeline') + events.length + ')' },
+          { id: 'replay', label: t('ui.stateReplay') + replaySteps.length + ' ' + t('ui.steps2') },
+          { id: 'snapshot', label: t('ui.stateSnapshot') }, { id: 'history', label: t('ui.history') },
+          ...(showSubRuns ? [{ id: 'subruns', label: t('durable.subruns.tab') }] : []),
+        ]} />
+      <div role="tabpanel" id={panelId} aria-label={t('reviewDesign.runEvidence')} tabIndex={0} style={{ minWidth: 0 }}>
       {/* Tab Content */}
       {activeTab === 'traces' && <RunTraceView runId={runId} revision={events.length} />}
       {activeTab === 'diagnostics' && <RunDiagnostics runId={runId} revision={events.length} />}
@@ -443,34 +261,15 @@ export function RunVisualizer({
       {activeTab === 'subruns' && showSubRuns && <SubRunsPanel runId={runId} revision={events.length} />}
 
       {activeTab === 'replay' && (
-        <StateReplayer
+        <><p className="inspection-meta">{t('reviewDesign.replayMode')}</p><StateReplayer
           steps={replaySteps}
           currentStepIndex={currentStepIndex}
           onSelectStepIndex={handleSelectStep}
-        />
+        /></>
       )}
 
-      {activeTab === 'snapshot' && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)' }}>
-            {t('ui.currentWorkflowState')}
-          </div>
-          <pre
-            style={{
-              margin: 0,
-              padding: 12,
-              borderRadius: 'var(--radius-sm)',
-              backgroundColor: 'var(--bg-canvas)',
-              fontFamily: 'var(--font-mono)',
-              fontSize: 12,
-              overflowX: 'auto',
-              maxHeight: 340,
-            }}
-          >
-            {JSON.stringify(run.current_state, null, 2)}
-          </pre>
-        </div>
-      )}
-    </Card>
+      {activeTab === 'snapshot' && <JsonText label={t('ui.currentWorkflowState')} text={JSON.stringify(run.current_state, null, 2)} />}
+      </div>
+    </section>
   );
 }

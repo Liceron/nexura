@@ -1,0 +1,90 @@
+"""A refund-reply workflow: an agent drafts, a person approves, then the reply is sent.
+
+The engine saves a checkpoint to SQLite after every step. A run paused at the approval gate
+survives a restart: any process that opens the same database can resume it.
+
+The ``draft`` step runs an agent on a scripted ``FakeModel`` unless ``NEXURA_MODEL`` names a
+real model (see README.md).
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from typing import Any
+
+from nexura_agents import Agent, FakeModel, ModelSettings, Usage
+from nexura_runtime.workflow import (
+    ModuleRegistry,
+    SQLiteWorkflowStore,
+    WorkflowEngine,
+    WorkflowNode,
+    WorkflowRunResult,
+    WorkflowSpec,
+)
+
+#: Default database for checkpoints (`nexura-runtime dev` keeps its own under .nexura/ too).
+DEFAULT_DB = Path(".nexura") / "workflows.sqlite3"
+
+#: Messages "sent" so far. Stands in for an email or chat API; tests read it.
+OUTBOX: list[str] = []
+
+#: Handler names are prefixed with the package so they never clash with built-ins.
+PREFIX = "{{package}}"
+registry = ModuleRegistry()
+
+
+def writer() -> Agent:
+    model = os.environ.get("NEXURA_MODEL") or FakeModel(
+        responses=["Your refund is on its way and should arrive within five business days."],
+        default_usage=Usage(prompt_tokens=40, completion_tokens=20, total_tokens=60),
+    )
+    return Agent(
+        name="writer",
+        instructions="Draft a short, polite reply to the customer's refund request.",
+        model=model,  # type: ignore[arg-type]
+        model_settings=ModelSettings(max_tokens=200),
+    )
+
+
+@registry.register_handler(f"{PREFIX}.draft", effect="pure")
+async def draft(state: dict[str, Any]) -> dict[str, Any]:
+    """Draft the reply. Pure: running it again after a crash has no side effect."""
+    result = await writer().run_async(
+        f"Customer {state['customer']} asks about {state['order_id']}"
+    )
+    return {"draft": result.output}
+
+
+@registry.register_handler(f"{PREFIX}.send")
+def send(state: dict[str, Any]) -> dict[str, Any]:
+    """Send the approved draft. Not idempotent: never repeated silently after a crash."""
+    OUTBOX.append(state["draft"])
+    return {"sent": True}
+
+
+spec = WorkflowSpec(
+    name="{{title}}: refund reply",
+    entry_node="draft",
+    nodes={
+        "draft": WorkflowNode(id="draft", handler=f"{PREFIX}.draft", default_transition="send"),
+        "send": WorkflowNode(id="send", handler=f"{PREFIX}.send", requires_approval=True),
+    },
+    terminal_nodes=["send"],
+)
+
+
+async def start(state: dict[str, Any], db: Path = DEFAULT_DB) -> WorkflowRunResult:
+    """Start a run; it pauses before ``send`` and waits for a decision."""
+    db.parent.mkdir(parents=True, exist_ok=True)
+    async with SQLiteWorkflowStore(db) as store:
+        return await WorkflowEngine(spec, registry, store=store).run(state)
+
+
+async def resume(
+    run_id: str, approval_id: str, decision: str, db: Path = DEFAULT_DB
+) -> WorkflowRunResult:
+    """Approve or reject a paused run, possibly from another process."""
+    async with SQLiteWorkflowStore(db) as store:
+        engine = WorkflowEngine(spec, registry, store=store)
+        return await engine.resume(run_id, approval_id, decision=decision)

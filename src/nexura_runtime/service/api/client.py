@@ -310,6 +310,21 @@ class RunsClient:
             json_data=payload,
         )
 
+    async def recover(self, run_id: str, on_uncertain: str | None = None) -> dict[str, Any]:
+        """Continue a run whose process stopped (status ``interrupted``), or a ``paused`` run
+        whose unknown effect was resolved (``POST /runs/{id}/recover``).
+
+        A step whose outcome is unknown and that must not repeat pauses the run again
+        (``pause_reason`` ``effect_unknown``); ``on_uncertain="fail"`` fails it instead. 409
+        ``RUN_LEASE_HELD`` while another live process executes the run.
+        """
+        payload: dict[str, Any] = {}
+        if on_uncertain is not None:
+            payload["on_uncertain"] = on_uncertain
+        return await self._root._request(
+            "POST", f"/runs/{_safe_quote(run_id)}/recover", json_data=payload
+        )
+
     async def stream_events(
         self, run_id: str, cursor: int = 0, live: bool = False
     ) -> AsyncIterator[dict[str, Any]]:
@@ -1351,6 +1366,7 @@ class NexuraClient:
         ("GET", "/api/v1/runs/{run_id}/repro"): ("runs", "repro_bundle"),
         ("GET", "/api/v1/runs/{run_id}/effects"): ("runs", "effects"),
         ("POST", "/api/v1/runs/{run_id}/effects/{effect_id}/resolve"): ("runs", "resolve_effect"),
+        ("POST", "/api/v1/runs/{run_id}/recover"): ("runs", "recover"),
         # Descriptors & Capabilities
         ("GET", "/api/v1/modules"): ("modules", "list"),
         ("GET", "/api/v1/modules/{module_id}"): ("modules", "get"),

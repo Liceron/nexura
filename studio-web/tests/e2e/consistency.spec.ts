@@ -106,8 +106,9 @@ test.describe('SDK, API and Studio consistency (O07)', () => {
     await expect(approvalBanner).toBeVisible({ timeout: 15000 });
     await expect.poll(() => eventRequests, { timeout: 10000 }).toBeGreaterThanOrEqual(2);
 
-    await approvalBanner.getByRole('button', { name: /Approve & Resume/i }).click();
-    await expect(page.getByText(/^\s*Completed$/i)).toBeVisible({ timeout: 15000 });
+    await approvalBanner.getByRole('button', { name: 'Review action', exact: true }).click();
+    await page.getByRole('dialog', { name: 'Review action', exact: true }).getByRole('button', { name: 'Approve action', exact: true }).click();
+    await expect(page.getByLabel('Run status badge')).toContainText('Completed', { timeout: 15000 });
 
     // Cursor-based resume must not replay already-delivered events.
     await expect(page.getByText('RUN STARTED')).toHaveCount(1);

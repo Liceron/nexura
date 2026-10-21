@@ -23,6 +23,9 @@ one owner's projects. They do not add accounts or tenant isolation.
 - [Getting started](getting-started.md): install, first agent, first tool, in five minutes.
 - [Quickstart in 10 minutes](quickstart-10-minutes.md): from install to an approval-gated
   workflow with a budget, resumed after a restart, all offline.
+- [Project templates](project-templates.md): `nexura-runtime init` (agent, workflow and RAG
+  templates with offline tests), `dev` (local service and Studio with the project registered)
+  and `deploy --target docker` (writes a single-user Dockerfile).
 - [Agents](agents.md): instructions (sync or async), sessions and history trimming,
   handoffs with structured input, agents as tools, streaming, cancelling runs, `clone`,
   diagrams.

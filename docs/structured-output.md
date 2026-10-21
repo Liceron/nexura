@@ -132,7 +132,7 @@ model keeps the prompt-based schema, so existing models do not change.
 | `OpenAIChatModel` | yes, without tools | same payload as above |
 | `LiteLLMModel` | yes, without tools | `response_format` passed to `litellm.acompletion` |
 | `GeminiNativeProvider`, `VertexAIProvider` | yes, without tools | `responseMimeType: application/json` plus `responseSchema` |
-| `AnthropicNativeProvider` | yes, without tools | forced synthetic tool `structured_output` |
+| `AnthropicNativeProvider` | Claude 4.5 and later, Fable, Mythos: yes, also with tools; older models: without tools | `output_config.format` (JSON outputs); older models a forced synthetic tool `structured_output` |
 | `SarvamProvider`, `FakeModel`, your own models | no (prompt) | `FakeModel(native_schema=True)` opts in for tests |
 
 Rules:
@@ -150,9 +150,11 @@ Rules:
   so constraints a provider dialect cannot express are still enforced.
 - **Streaming.** With `stream_text=True`, a turn that sends a schema streams when the
   model declares `streams_response_schema = True`. That covers `OpenAIChatModel`,
-  `LiteLLMModel`, and the OpenAI and Gemini providers; the schema is still sent. Other
-  models, including the Anthropic provider (whose structured output is a forced tool
-  call), answer typed turns in one piece. See [Streaming the output](#streaming-the-output).
+  `LiteLLMModel`, the OpenAI and Gemini providers, and the Anthropic provider on models with
+  JSON outputs; the schema is still sent. Other models, including older Claude models (whose
+  structured output is a forced tool call), answer typed turns in one piece. A non-object root
+  on Anthropic arrives as one text chunk after unwrapping. See
+  [Streaming the output](#streaming-the-output).
 - **Root type.** Providers expect an object at the root. Anthropic wraps other root types
   (`{"type": "array", ...}`) in `{"value": ...}` and unwraps the answer; OpenAI may reject
   non-object roots.
@@ -172,10 +174,16 @@ Pydantic models with defaulted fields therefore go out non-strict.
 `type: [X, "null"]` or `anyOf` with null into `nullable: true`, and turns `const` into a
 one-value `enum`. Dropped constraints are checked by the runner's own validation instead.
 
-**Anthropic.** There is no JSON-schema response mode, so Nexura adds a synthetic tool
-`structured_output` whose input schema is the output schema, forces it with `tool_choice`, and
-returns the tool call's arguments as the reply text. This is only done when the agent has no
-other tools.
+**Anthropic.** Models with JSON outputs (Claude Opus, Sonnet and Haiku 4.5 and later, Fable,
+Mythos) get `output_config.format`: every object is sent with `additionalProperties: false` and
+constraint keywords Anthropic rejects (`minimum`, `maxLength`, ...) are dropped and checked by the
+runner instead. A schema JSON outputs cannot express without losing data (an object whose
+`additionalProperties` is a schema, such as `dict[str, int]`, or an object with no properties)
+uses the forced tool below; Claude Opus 5.5, Sonnet 5.5, Fable 5.1 and Mythos 5.1 reject forced
+tools, so there it raises `CapabilityError`. Older models get a synthetic tool
+`structured_output` whose input schema is the output schema, forced with `tool_choice`, and the
+tool call's arguments become the reply text. This is only done when the agent has no other
+tools. Pass `AnthropicNativeProvider(..., structured_output="tool")` or `"native"` to choose.
 
 ```python
 from pydantic import BaseModel
@@ -458,6 +466,6 @@ assert result.output.number == "INV-7"
 `output_type` accepts a Pydantic model or a JSON-schema dict (a supported subset, checked
 when you create the agent). Providers that support it receive the schema natively: OpenAI
 `response_format`, Gemini and Vertex `responseSchema`, LiteLLM `response_format`, and
-Anthropic through a forced tool. Other models get the schema in the prompt. The runner
+Anthropic `output_config.format` (a forced tool on older Claude models). Other models get the schema in the prompt. The runner
 validates the reply in every case and sends path-level errors back to the model, so
 constraints a provider ignores are still enforced. See `docs/structured-output.md`.

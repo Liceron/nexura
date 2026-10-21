@@ -1,0 +1,30 @@
+"""Ask about the documents in docs/.
+
+python -m {{package}} "How long do refunds take?"
+"""
+
+from __future__ import annotations
+
+import asyncio
+import sys
+
+from {{package}}.rag import answer, build_index, ingest_folder
+
+
+async def _ask(question: str) -> int:
+    index = build_index()
+    await ingest_folder(index)
+    reply = await answer(index, question)
+    print(reply.text)
+    for citation in reply.citations:
+        print(f"  {citation['citation_id']} {citation['title']} (chunk {citation['chunk_index']})")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = sys.argv[1:] if argv is None else argv
+    return asyncio.run(_ask(" ".join(args) or "How long do refunds take?"))
+
+
+if __name__ == "__main__":
+    sys.exit(main())

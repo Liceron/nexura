@@ -1,0 +1,62 @@
+"""Offline tests: the deterministic test embedder and a scripted FakeModel, no network."""
+
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+
+import pytest
+from nexura_runtime.workflow import WorkflowEngine
+
+from {{package}} import rag
+from {{package}}.studio import ask, registry
+
+
+@pytest.fixture(autouse=True)
+def _offline(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("NEXURA_MODEL", raising=False)
+    monkeypatch.delenv("NEXURA_EMBEDDINGS", raising=False)
+
+
+async def _index(tmp_path: Path) -> rag.HybridKnowledgeIndex:
+    index = rag.build_index(tmp_path / "knowledge.sqlite3", embeddings="fixture")
+    outcomes = await rag.ingest_folder(index)
+    assert len(outcomes) == 2
+    return index
+
+
+def test_answers_with_a_citation_to_the_source(tmp_path: Path) -> None:
+    async def scenario() -> rag.Answer:
+        return await rag.answer(await _index(tmp_path), "How many business days do refunds take?")
+
+    reply = asyncio.run(scenario())
+    assert "five business days" in reply.text
+    assert "[1]" in reply.text
+    assert reply.citations[0]["title"] == "refunds.md"
+    assert reply.citations[0]["source_uri"].endswith("/docs/refunds.md")
+
+
+@pytest.mark.parametrize("question", ["zygote quasar", "What is the capital of Mars?"])
+def test_says_so_when_nothing_matches(tmp_path: Path, question: str) -> None:
+    async def scenario() -> rag.Answer:
+        return await rag.answer(await _index(tmp_path), question)
+
+    reply = asyncio.run(scenario())
+    assert reply.text == rag.NOT_FOUND
+    assert reply.citations == []
+
+
+def test_reingesting_unchanged_files_deduplicates(tmp_path: Path) -> None:
+    async def scenario() -> list[bool]:
+        index = await _index(tmp_path)
+        return [o.deduplicated for o in await rag.ingest_folder(index)]
+
+    assert asyncio.run(scenario()) == [True, True]
+
+
+def test_studio_workflow_answers() -> None:
+    result = asyncio.run(
+        WorkflowEngine(ask, registry).run({"question": "How fast is express shipping?"})
+    )
+    assert result.status == "completed"
+    assert "next" in result.state["answer"] and result.state["citations"]

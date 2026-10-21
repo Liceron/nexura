@@ -3222,6 +3222,129 @@ built-in registry is used. Every spec field is kept, so ``exec`` of the module g
 ``spec`` whose ``to_dict()`` equals ``spec.to_dict()``.
 ~~~
 
+## Project scaffolding (`nexura_runtime.project`, `nexura-runtime init/dev/deploy`)
+
+### `DEFAULT_TEMPLATE`
+
+Constant: `'agent'`
+
+### `SUPPORTED_TARGETS`
+
+Constant: `{'docker': 'Dockerfile, .dockerignore and DEPLOY.md for a single-user container (Studio on a loopback-published port, token required).'}`
+
+### `TEMPLATES`
+
+Constant: `{'agent': ProjectTemplate(name='agent', summary='Tool-using agent with an approval-gated write tool and a token and cost budget.'), 'workflow': ProjectTemplate(name='workflow', summary='Approval-gated workflow with durable SQLite checkpoints, resumable after a restart.'), 'rag': ProjectTemplate(name='rag', summary='Knowledge ingestion and answers with citations (test embedder; real one optional).')}`
+
+### `DeployError`
+
+class `DeployError`
+
+~~~text
+Deployment files cannot be written as asked.
+~~~
+
+
+### `DeployResult`
+
+class `DeployResult(target: 'str', written: 'list[Path]' = <factory>, replaced: 'list[Path]' = <factory>) -> None`
+
+~~~text
+The files ``write_deploy_files`` wrote, and those it replaced (``force=True``).
+~~~
+
+
+### `ProjectConfig`
+
+class `ProjectConfig(root: 'Path', name: 'str', template: 'str | None', handlers: 'tuple[str, ...]', workflows: 'tuple[str, ...]') -> None`
+
+~~~text
+A project's ``[tool.nexura]`` settings: its root, name, template and code sources.
+~~~
+
+
+### `ProjectError`
+
+class `ProjectError`
+
+~~~text
+The project's ``[tool.nexura]`` table or the code it names cannot be used.
+~~~
+
+
+### `ProjectTemplate`
+
+class `ProjectTemplate(name: 'str', summary: 'str') -> None`
+
+~~~text
+A template ``nexura-runtime init --template NAME`` can write, with its one-line summary.
+~~~
+
+
+### `ScaffoldError`
+
+class `ScaffoldError`
+
+~~~text
+A project cannot be written as asked (bad name, non-empty directory, unknown template).
+~~~
+
+
+### `ScaffoldResult`
+
+class `ScaffoldResult(root: 'Path', template: 'str', package: 'str', written: 'list[Path]' = <factory>, skipped: 'list[Path]' = <factory>) -> None`
+
+~~~text
+What ``scaffold_project`` wrote, and the existing files it kept (``force=True``).
+~~~
+
+
+### `find_project`
+
+function `find_project(root: 'Path') -> 'ProjectConfig | None'`
+
+~~~text
+The project in ``root``, or None when it has no ``[tool.nexura]`` table.
+~~~
+
+### `project_registry`
+
+function `project_registry(config: 'ProjectConfig | None') -> 'ModuleRegistry'`
+
+~~~text
+Studio's built-in handlers plus the project's handler sources.
+~~~
+
+### `project_workflows`
+
+function `project_workflows(config: 'ProjectConfig | None') -> 'dict[str, WorkflowSpec]'`
+
+~~~text
+Workflow id -> spec for every ``workflows`` source of the project.
+~~~
+
+### `scaffold_project`
+
+function `scaffold_project(directory: 'Path', template: 'str' = 'agent', *, package: 'str | None' = None, force: 'bool' = False, env_example: 'bool' = True) -> 'ScaffoldResult'`
+
+~~~text
+Write a runnable project from ``template`` into ``directory``.
+
+``directory`` must be missing or empty unless ``force``; even with ``force`` an existing
+file is kept and listed in ``ScaffoldResult.skipped``, never overwritten.
+~~~
+
+### `write_deploy_files`
+
+function `write_deploy_files(project_dir: 'Path', target: 'str', *, port: 'int' = 8000, force: 'bool' = False) -> 'DeployResult'`
+
+~~~text
+Write the target's files into ``project_dir``.
+
+Existing files are never overwritten silently: without ``force`` the call is refused and
+nothing is written; with ``force`` the listed files are replaced.
+~~~
+
 ## Nexura V2 integration (`nexura_runtime.integrations.nexura_v2`)
 
 ### `NexuraV2TraceExporter`

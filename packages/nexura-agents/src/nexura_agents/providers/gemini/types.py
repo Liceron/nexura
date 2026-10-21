@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Mapping, Sequence
@@ -41,6 +42,35 @@ def _is_gemini_id(call_id: str | None) -> bool:
     return bool(call_id) and not _SYNTHETIC_CALL_ID.match(call_id or "")
 
 
+def _canonical(msg: Message | ProviderMessage) -> bytes:
+    """A stable byte form of one message for conversation digests (no provider_data)."""
+    if isinstance(msg, ProviderMessage):
+        msg = msg.to_legacy()
+    data = {
+        "role": msg.role,
+        "content": msg.content,
+        "tool_calls": [[tc.id, tc.name, tc.arguments] for tc in msg.tool_calls or []],
+        "tool_call_id": msg.tool_call_id,
+        "name": msg.name,
+        "attachments": [a.to_dict() for a in msg.attachments or []],
+    }
+    return json.dumps(data, sort_keys=True, ensure_ascii=False, default=str).encode() + b"\n"
+
+
+def history_digest(messages: Sequence[Message | ProviderMessage]) -> str:
+    """Digest of a conversation prefix. Signatures recorded for streamed calls are keyed by the
+    digest of the request that produced them plus the call id, so a call id that repeats (made-up
+    ids such as ``call_get_weather_0``) never picks up another conversation's signature."""
+    running = hashlib.sha256()
+    for msg in messages:
+        running.update(_canonical(msg))
+    return running.hexdigest()
+
+
+def signature_key(digest: str, call_id: str) -> str:
+    return f"{digest}:{call_id}"
+
+
 def to_gemini_request(
     messages: Sequence[Message | ProviderMessage],
     signatures: Mapping[str, str] | None = None,
@@ -53,7 +83,8 @@ def to_gemini_request(
     - A model turn's ``functionCall`` parts carry the ``id`` Gemini gave them and the
       ``thoughtSignature`` it returned (Gemini 3 and later reject a turn whose first function
       call lost its signature). Signatures come from ``Message.provider_data`` or from
-      ``signatures`` (the provider's record of recent calls). When the first call of a turn has
+      ``signatures`` (the provider's record of recent calls, keyed by
+      :func:`signature_key` of the conversation before that turn). When the first call of a turn has
       no known signature, ``unsigned_call_signature`` is used if set (Google documents
       ``"skip_thought_signature_validator"`` for calls it did not generate).
     - Consecutive tool results are sent as one user turn holding every ``functionResponse``,
@@ -62,8 +93,11 @@ def to_gemini_request(
     system_texts: list[str] = []
     contents: list[dict[str, Any]] = []
     known = dict(signatures or {})
+    running = hashlib.sha256()
 
     for msg in messages:
+        prefix_digest = running.hexdigest()
+        running.update(_canonical(msg))
         if isinstance(msg, ProviderMessage):
             msg = msg.to_legacy()
 
@@ -118,7 +152,7 @@ def to_gemini_request(
                     function_call["id"] = tc.id
                 call_part: dict[str, Any] = {"functionCall": function_call}
                 signature = own.get(tc.id) if isinstance(own, dict) else None
-                signature = signature or known.get(tc.id)
+                signature = signature or known.get(signature_key(prefix_digest, tc.id))
                 if signature is None and position == 0 and role == "model":
                     signature = unsigned_call_signature
                 if signature:

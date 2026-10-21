@@ -114,24 +114,32 @@ def test_kill_after_run_completed_before_complete_job_does_not_rerun(
     assert job["run_id"] == first_run
 
 
-def test_studio_store_open_spares_a_live_owner_and_sweeps_a_dead_one(harness: Harness) -> None:
-    """B46 (commit 1e47d0a): opening ``StudioStore`` from another process (as
-    ``nexura-runtime worker`` does next to a live ``serve``) leaves a live process's
-    running run alone; once that process is killed, the next open marks it interrupted.
+def test_service_start_spares_a_live_owner_and_interrupts_a_dead_one(harness: Harness) -> None:
+    """Starting another service on the database (as ``nexura-runtime worker`` does next to
+    a live ``serve``) leaves a live process's running run alone; once that process is
+    killed, the next start marks it interrupted.
 
-    SQLite only: ``StudioStore`` has no other backend. A6 S9 retires this sweep in favour
-    of lease expiry; this test then moves to the service's two-process test.
+    B46 (commit 1e47d0a) did this with the ``StudioStore`` open-time sweep. A6 S9: the run
+    is journaled, so the service decides from its run lease (the killed worker's lease
+    owner is a process of this host that has exited). SQLite only here (trigger jobs);
+    the two-process service test in ``test_durability_service.py`` also runs on Postgres.
     """
-    from nexura_runtime.studio.store import StudioStore
+    from fastapi.testclient import TestClient
+
+    from nexura_runtime.service.api.app import create_api_app
 
     def status(run_id: str) -> str | None:
-        import asyncio
-
-        store = StudioStore(harness.db_path)  # the open-time sweep runs here
+        app = create_api_app(db_path=harness.db_path, profile="local-owner")
+        with TestClient(app):  # startup: run statuses are reconciled with the journal
+            pass
+        db = sqlite3.connect(str(harness.db_path))
         try:
-            return asyncio.run(store.get_run_status(run_id))
+            row = db.execute(
+                "SELECT status FROM nexura_studio_runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
         finally:
-            store._close_sync()
+            db.close()
+        return None if row is None else str(row[0])
 
     worker = harness.spawn(
         "trigger", "worker-1", setup=True, lease_seconds=LEASE, block={"in_pay": "forever"}
@@ -139,8 +147,8 @@ def test_studio_store_open_spares_a_live_owner_and_sweeps_a_dead_one(harness: Ha
     worker.wait_marker("in_pay", timeout=30)
     run_id = _job_run_id(harness)
     assert run_id is not None
-    assert status(run_id) == "running"  # live owner: not swept
+    assert status(run_id) == "running"  # live owner: not interrupted
     assert worker.alive()
 
     worker.kill()
-    assert status(run_id) == "interrupted"  # owner gone: swept
+    assert status(run_id) == "interrupted"  # owner gone: interrupted

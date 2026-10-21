@@ -186,7 +186,13 @@ async def test_openai_chat_model_sends_settings() -> None:
         model_settings=ModelSettings(temperature=0.4, max_tokens=99, stop_sequences=["##"]),
     )
     await Runner().run_async(agent, "hi")
-    assert (seen[0]["temperature"], seen[0]["max_tokens"], seen[0]["stop"]) == (0.4, 99, ["##"])
+    # api.openai.com (the default base_url) takes max_completion_tokens (P37 B3 review R7).
+    assert (seen[0]["temperature"], seen[0]["max_completion_tokens"], seen[0]["stop"]) == (
+        0.4,
+        99,
+        ["##"],
+    )
+    assert "max_tokens" not in seen[0]
 
 
 async def test_openai_chat_model_streaming_sends_settings() -> None:
@@ -199,7 +205,8 @@ async def test_openai_chat_model_streaming_sends_settings() -> None:
     )
     events = [e async for e in Runner().stream_async(agent, "hi", stream_text=True)]
     assert events
-    assert seen[0]["stream"] is True and seen[0]["max_tokens"] == 12
+    assert seen[0]["stream"] is True and seen[0]["max_completion_tokens"] == 12
+    assert "max_tokens" not in seen[0]
 
 
 async def test_openai_chat_model_without_settings_sends_no_extra_fields() -> None:

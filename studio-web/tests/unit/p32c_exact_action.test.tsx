@@ -103,26 +103,28 @@ describe('P32c exact action', () => {
     render(<ApprovalDecisionModal open item={pendingItem} onClose={vi.fn()} onDecide={vi.fn()} />);
     expect(screen.getByTestId('approval-paused-state').textContent).toBe(JSON.stringify(pendingItem.currentState, null, 2));
     expect(screen.getByTestId('approval-paused-state')).toHaveStyle({ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' });
-    const badge = screen.getByText('Pending Approval');
-    expect(badge.querySelector('svg')).toHaveAttribute('aria-hidden', 'true');
-    expect(badge.textContent).not.toMatch(/\p{Extended_Pictographic}/u);
+    const status = screen.getByText('Pending approval');
+    expect(status.querySelector('[aria-hidden="true"]')).toBeInTheDocument();
+    expect(status.textContent).not.toMatch(/\p{Extended_Pictographic}/u);
   });
 
   it('shows identity, all canonical arguments, digests and absolute local expiry as text', () => {
     const { container } = render(<ApprovalDetailsPanel pendingApproval={request} />);
     expect(screen.getByTestId('exact-action')).toHaveTextContent('tool_call');
-    for (const value of ['refund', 'run-exact', 'node-exact']) expect(screen.getByText(value)).toBeInTheDocument();
+    fireEvent.click(screen.getByText('Request details'));
+    for (const value of ['refund', 'run-exact', 'node-exact']) expect(screen.getByText(value, { exact: true })).toBeInTheDocument();
     expect(container.querySelector('pre')?.textContent).toBe(request.canonical_payload_json);
     expect(container.querySelector('script')).toBeNull();
-    expect(screen.getByTitle(digest)).toHaveTextContent('0123456789ab…cdef');
+    expect(screen.getByTitle(digest)).toHaveTextContent(digest);
     expect(screen.getByTitle(request.spec_digest!)).toBeInTheDocument();
-    expect(container.querySelector('time')?.textContent).toBe(new Date(request.expires_at! * 1000).toLocaleString('en-IN'));
+    expect(container.querySelector('time')?.textContent).toBe(new Date(request.expires_at! * 1000).toLocaleString('en-IN', { timeZoneName: 'short' }));
   });
 
   it('copies the full digest rather than the shortened display', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
     render(<ApprovalDetailsPanel pendingApproval={request} />);
+    fireEvent.click(screen.getByText('Request details'));
     expect(screen.getByRole('button', { name: 'Copy Payload digest' })).toHaveStyle({
       color: 'var(--text-primary)', backgroundColor: 'var(--bg-surface-elevated)', border: '1px solid var(--border-strong)',
     });
@@ -134,6 +136,7 @@ describe('P32c exact action', () => {
   it('reports clipboard failures without throwing', async () => {
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: vi.fn().mockRejectedValue(new Error('denied')) } });
     render(<ApprovalDetailsPanel pendingApproval={request} />);
+    fireEvent.click(screen.getByText('Request details'));
     fireEvent.click(screen.getByRole('button', { name: 'Copy Payload digest' }));
     expect(await screen.findByText('Copy failed')).toBeInTheDocument();
   });
@@ -149,11 +152,11 @@ describe('P32c exact action', () => {
   it('disables Approve for an expired request and explains why', () => {
     const decide = vi.fn();
     render(<ApprovalDecisionModal open item={item({ ...request, expires_at: 1 })} onClose={vi.fn()} onDecide={decide} />);
-    expect(screen.getByRole('button', { name: 'Approve & Resume' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Approve action' })).toBeDisabled();
     expect(screen.getByRole('alert')).toHaveTextContent('This request has expired');
-    fireEvent.click(screen.getByRole('button', { name: 'Approve & Resume' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Approve action' }));
     expect(decide).not.toHaveBeenCalled();
-    expect(screen.getByRole('button', { name: 'Reject Execution' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Reject' })).toBeEnabled();
   });
 
   it('ticks the countdown and disables approval on expiry, then clears timers on unmount', () => {
@@ -164,14 +167,14 @@ describe('P32c exact action', () => {
     act(() => vi.advanceTimersByTime(1000));
     expect(screen.getByTestId('exact-action')).toHaveTextContent('0:00:01');
     act(() => vi.advanceTimersByTime(1000));
-    expect(screen.getByRole('button', { name: 'Approve & Resume' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Approve action' })).toBeDisabled();
     unmount();
     expect(vi.getTimerCount()).toBe(0);
   });
 
   it('honors an explicitly expired server status even without a timestamp', () => {
     render(<ApprovalDecisionModal open item={item({ ...request, expires_at: undefined, status: 'expired' })} onClose={vi.fn()} onDecide={vi.fn()} />);
-    expect(screen.getByRole('button', { name: 'Approve & Resume' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Approve action' })).toBeDisabled();
   });
 
   it('keeps a re-gated request open with previous and new API inputs and submits its new id', async () => {
@@ -179,15 +182,16 @@ describe('P32c exact action', () => {
     const fresh = { ...request, approval_id: 'approval-fresh', input_state: { amount: 4 }, action_payload: { amount: 4 }, canonical_payload_json: '{"amount":4}' };
     const decide = vi.fn().mockResolvedValueOnce({ success: true, run: item(fresh).runRecord }).mockResolvedValueOnce({ success: true });
     render(<ApprovalDecisionModal open item={item()} onClose={close} onDecide={decide} />);
-    fireEvent.change(screen.getByLabelText('Optional State Adjustments (Applied on Approval)'), { target: { value: '{"amount":4}' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Approve & Resume' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Edit inputs' }));
+    fireEvent.change(screen.getByLabelText('Edited inputs (JSON object)'), { target: { value: '{"amount":4}' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Submit edited inputs' }));
     expect(await screen.findByTestId('approval-edited-inputs')).toHaveTextContent('new request for edited inputs');
     expect(close).not.toHaveBeenCalled();
     expect(screen.getByText('{"amount":12}')).toBeInTheDocument();
     expect(screen.getAllByText('{"amount":4}')).toHaveLength(2);
-    expect(screen.getByLabelText('Optional State Adjustments (Applied on Approval)')).toHaveValue('');
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Approve & Resume' })).toBeEnabled());
-    fireEvent.click(screen.getByRole('button', { name: 'Approve & Resume' }));
+    expect(screen.queryByLabelText('Edited inputs (JSON object)')).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Approve action' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Approve action' }));
     await waitFor(() => expect(decide).toHaveBeenLastCalledWith('run-exact', 'approval-fresh', 'approve', undefined));
   });
 
@@ -197,14 +201,13 @@ describe('P32c exact action', () => {
     expect(screen.getByTestId('approval-edited-inputs').querySelectorAll('pre')).toHaveLength(0);
   });
 
-  it('makes long argument values collapsible without truncating their text', () => {
+  it('shows long arguments by default without truncating their text', () => {
     const full = JSON.stringify({ text: 'long'.repeat(150) });
     const { container } = render(<ApprovalDetailsPanel pendingApproval={{ canonical_payload_json: full }} />);
-    const details = container.querySelector('details')!;
-    expect(details.open).toBe(false);
-    expect(details.querySelector('pre')?.textContent).toBe(full);
-    fireEvent.click(screen.getByText(/Expand JSON/));
-    expect(details.open).toBe(true);
+    const pre = container.querySelector('pre')!;
+    expect(pre.textContent).toBe(full);
+    expect(pre.closest('details')).toBeNull();
+    expect(pre).toBeVisible();
   });
 
   it('sorts available JSON without losing integer-like or prototype keys and flags missing server canonical text', () => {
@@ -218,7 +221,7 @@ describe('P32c exact action', () => {
     localStorage.setItem('nexura_locale', 'hi');
     render(<I18nProvider><ApprovalDecisionModal open item={item({ approval_id: 'old', expires_at: 1 })} onClose={vi.fn()} onDecide={vi.fn()} /></I18nProvider>);
     expect(screen.getByText('सटीक कार्रवाई')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'अनुमोदन करें और फिर शुरू करें' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'कार्रवाई अनुमोदित करें' })).toBeDisabled();
     expect(screen.getByRole('alert')).toHaveTextContent('समय सीमा समाप्त');
   });
 });

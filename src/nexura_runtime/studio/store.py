@@ -46,7 +46,11 @@ from nexura_runtime.workflow import (
 # before a reboot) does not count as the original process. Without /proc only pid
 # liveness is checked (POSIX) or the owner is assumed alive (Windows). Runs owned by
 # another host are never swept: SQLite is single-host.
-# A full lease-based design replaces this sweep later (P35 A6 step S9).
+#
+# A6 S9: a run the service journals (``journal_workspace`` set when it was recorded) is
+# never swept here. Whether it is interrupted is decided from its execution-journal lease
+# by the service (``nexura_runtime.service.run_liveness``), on any backend. The sweep below
+# stays for legacy rows: runs recorded before S9 or by a caller that does not journal.
 # ---------------------------------------------------------------------------
 
 _PROC = Path("/proc")
@@ -135,6 +139,20 @@ def _owner_is_gone(owner: str | None) -> bool:
     return bool(marker and current and marker != current)
 
 
+def this_process_owner() -> str:
+    """The ``owner_process`` value runs started or resumed by this process record."""
+    return _process_owner()
+
+
+def owner_process_is_gone(owner: str | None) -> bool:
+    """True when a run row's ``owner_process`` is known to be gone (the B46 rule).
+
+    The A6 S9 service falls back to it for a journaled run whose journal cannot tell (no
+    journal row yet, or the journal moved on while the run row still says ``running``).
+    """
+    return _owner_is_gone(owner)
+
+
 class StudioStore:
     """Manages SQLite storage for Studio definitions, runs, and event streams."""
 
@@ -200,6 +218,11 @@ class StudioStore:
                 "started_by_json",
                 # owner_process: "<host>:<pid>:<start marker>" of the process running it (B46).
                 "owner_process",
+                # journal_workspace: the workspace the run's execution journal is keyed by
+                # (A6 S9); NULL for legacy runs, which the open-time sweep still handles.
+                "journal_workspace",
+                # pending_effect_json: the effect a run paused on (pause_reason effect_unknown).
+                "pending_effect_json",
             ):
                 with contextlib.suppress(sqlite3.OperationalError):
                     self._conn.execute(f"ALTER TABLE nexura_studio_runs ADD COLUMN {column} TEXT;")
@@ -223,12 +246,14 @@ class StudioStore:
                 """
             )
 
-            # Startup recovery: a run left in 'running' by a process that is gone was
-            # interrupted by a restart. Runs of live processes (another `serve` or
-            # `worker` on this database) and of other hosts are left alone (B46).
+            # Startup recovery of legacy runs: a run left in 'running' by a process that is
+            # gone was interrupted by a restart. Runs of live processes (another `serve` or
+            # `worker` on this database) and of other hosts are left alone (B46). Journaled
+            # runs are decided by their run lease instead (A6 S9, see the module comment).
             now = time.time()
             cursor = self._conn.execute(
-                "SELECT run_id, owner_process FROM nexura_studio_runs WHERE status = 'running'"
+                "SELECT run_id, owner_process FROM nexura_studio_runs "
+                "WHERE status = 'running' AND journal_workspace IS NULL"
             )
             interrupted_ids: list[str] = []
             for r_id, owner in cursor.fetchall():
@@ -242,6 +267,7 @@ class StudioStore:
                         error = 'Run was interrupted by server restart or shutdown.',
                         updated_at = ?
                     WHERE run_id = ? AND status = 'running' AND owner_process IS ?
+                      AND journal_workspace IS NULL
                     """,
                     (now, r_id, owner),
                 )
@@ -470,6 +496,7 @@ class StudioStore:
         initial_state: dict[str, Any],
         forked_from: dict[str, Any] | None = None,
         started_by: dict[str, Any] | None = None,
+        journal_workspace: str | None = None,
     ) -> None:
         with self._lock:
             conn = self._ensure_open()
@@ -487,8 +514,8 @@ class StudioStore:
                         run_id, workflow_id, spec_hash, spec_json, status,
                         current_node_id, input_state_json, current_state_json,
                         step_count, created_at, updated_at, forked_from_json, started_by_json,
-                        owner_process
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        owner_process, journal_workspace
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         run_id,
@@ -505,6 +532,7 @@ class StudioStore:
                         forked_json,
                         started_json,
                         _process_owner(),
+                        journal_workspace,
                     ),
                 )
                 conn.execute(
@@ -565,11 +593,17 @@ class StudioStore:
         pending_input: dict[str, Any] | None = None,
         cancel_reason: str | None = None,
         unless_status: Collection[str] = (),
+        pending_effect: dict[str, Any] | None = None,
     ) -> bool:
         with self._lock:
             conn = self._ensure_open()
             now = time.time()
             state_json = json.dumps(current_state, ensure_ascii=False)
+            effect_json = (
+                json.dumps(pending_effect, ensure_ascii=False)
+                if pending_effect is not None
+                else None
+            )
             app_id = pending_approval.approval_id if pending_approval else None
             app_json = (
                 json.dumps(pending_approval.to_dict(), ensure_ascii=False)
@@ -590,6 +624,7 @@ class StudioStore:
                     SET status = ?, current_node_id = ?, current_state_json = ?,
                         step_count = ?, approval_id = ?, approval_json = ?,
                         error = ?, updated_at = ?, pending_input_json = ?,
+                        pending_effect_json = ?,
                         cancel_reason = COALESCE(?, cancel_reason),
                         owner_process = COALESCE(?, owner_process)
                     WHERE run_id = ?{guard_sql}
@@ -604,6 +639,7 @@ class StudioStore:
                         error,
                         now,
                         input_json,
+                        effect_json,
                         cancel_reason,
                         # The process setting a run (back) to running now executes it.
                         _process_owner() if status == "running" else None,
@@ -673,7 +709,8 @@ class StudioStore:
         sql = (
             "SELECT run_id, workflow_id, spec_hash, status, current_node_id, "
             "step_count, error, created_at, updated_at, current_state_json, "
-            "approval_json, pending_input_json, forked_from_json, cancel_reason "
+            "approval_json, pending_input_json, forked_from_json, cancel_reason, "
+            "pending_effect_json "
             "FROM nexura_studio_runs" + where + " ORDER BY created_at DESC, run_id DESC "
             "LIMIT ? OFFSET ?"
         )
@@ -698,7 +735,9 @@ class StudioStore:
                 input_json,
                 forked_json,
                 cancel_reason,
+                effect_json,
             ) in rows:
+                pending_effect = json.loads(effect_json) if effect_json else None
                 results.append(
                     {
                         "run_id": r_id,
@@ -715,6 +754,8 @@ class StudioStore:
                         "pending_input": json.loads(input_json) if input_json else None,
                         "forked_from": json.loads(forked_json) if forked_json else None,
                         "cancel_reason": cancel_reason,
+                        "pending_effect": pending_effect,
+                        "pause_reason": "effect_unknown" if pending_effect else None,
                     }
                 )
             return results
@@ -727,7 +768,8 @@ class StudioStore:
                 SELECT run_id, workflow_id, spec_hash, spec_json, status,
                        current_node_id, input_state_json, current_state_json,
                        step_count, approval_json, error, created_at, updated_at,
-                       pending_input_json, forked_from_json, cancel_reason
+                       pending_input_json, forked_from_json, cancel_reason,
+                       pending_effect_json
                 FROM nexura_studio_runs
                 WHERE run_id = ?
                 """,
@@ -754,7 +796,9 @@ class StudioStore:
                 input_json,
                 forked_json,
                 cancel_reason,
+                effect_json,
             ) = row
+            pending_effect = json.loads(effect_json) if effect_json else None
 
             in_state = json.loads(in_state_json)
             curr_state = json.loads(curr_state_json)
@@ -798,10 +842,78 @@ class StudioStore:
                 "forked_from": json.loads(forked_json) if forked_json else None,
                 "error": err,
                 "cancel_reason": cancel_reason,
+                "pending_effect": pending_effect,
+                "pause_reason": "effect_unknown" if pending_effect else None,
                 "events": events,
                 "created_at": c_at,
                 "updated_at": u_at,
             }
+
+    def _list_journaled_runs_sync(
+        self,
+        statuses: Sequence[str],
+        workspace_id: str | None,
+        run_ids: Sequence[str] | None,
+    ) -> list[dict[str, Any]]:
+        clauses = [
+            "journal_workspace IS NOT NULL",
+            f"status IN ({', '.join('?' for _ in statuses)})",
+        ]
+        params: list[Any] = list(statuses)
+        if workspace_id is not None:
+            clauses.append("journal_workspace = ?")
+            params.append(workspace_id)
+        if run_ids is not None:
+            clauses.append("run_id IN (SELECT value FROM json_each(?))")
+            params.append(json.dumps(list(run_ids)))
+        with self._lock:
+            conn = self._ensure_open()
+            rows = conn.execute(
+                "SELECT run_id, status, journal_workspace, owner_process "
+                "FROM nexura_studio_runs WHERE " + " AND ".join(clauses),
+                params,
+            ).fetchall()
+        return [
+            {"run_id": r[0], "status": r[1], "journal_workspace": r[2], "owner_process": r[3]}
+            for r in rows
+        ]
+
+    def _mark_interrupted_sync(self, run_id: str, error: str, reason: str) -> bool:
+        with self._lock:
+            conn = self._ensure_open()
+            now = time.time()
+            with conn:
+                cur = conn.execute(
+                    """
+                    UPDATE nexura_studio_runs
+                    SET status = 'interrupted', error = ?, updated_at = ?
+                    WHERE run_id = ? AND status = 'running'
+                    """,
+                    (error, now, run_id),
+                )
+                if cur.rowcount == 0:
+                    return False
+                next_seq = conn.execute(
+                    "SELECT COALESCE(MAX(event_seq), 0) + 1 "
+                    "FROM nexura_studio_run_events WHERE run_id = ?",
+                    (run_id,),
+                ).fetchone()[0]
+                conn.execute(
+                    """
+                    INSERT INTO nexura_studio_run_events (
+                        run_id, event_seq, event_type, node_id, data_json, timestamp
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        next_seq,
+                        "RUN_INTERRUPTED",
+                        None,
+                        json.dumps({"reason": reason}, ensure_ascii=False),
+                        now,
+                    ),
+                )
+            return True
 
     def _close_connection(self) -> None:
         with self._lock:
@@ -848,7 +960,14 @@ class StudioStore:
         initial_state: dict[str, Any],
         forked_from: dict[str, Any] | None = None,
         started_by: dict[str, Any] | None = None,
+        journal_workspace: str | None = None,
     ) -> None:
+        """Record a new ``running`` run owned by this process.
+
+        ``journal_workspace``: the workspace its execution journal is keyed by, when the
+        engine journals it (A6 S9). Such a run is never swept when a store opens; the
+        service decides from its run lease whether it is interrupted.
+        """
         await asyncio.to_thread(
             self._record_run_start_sync,
             run_id,
@@ -857,6 +976,7 @@ class StudioStore:
             initial_state,
             forked_from,
             started_by,
+            journal_workspace,
         )
 
     async def record_run_event(
@@ -880,8 +1000,12 @@ class StudioStore:
         pending_input: dict[str, Any] | None = None,
         cancel_reason: str | None = None,
         unless_status: Collection[str] = (),
+        pending_effect: dict[str, Any] | None = None,
     ) -> bool:
         """Replace the run row's live fields; ``cancel_reason`` is kept once set.
+
+        ``pending_effect``: the effect a ``paused`` run waits on (``pause_reason``
+        ``effect_unknown``); cleared by any write without it.
 
         With ``unless_status`` the write is a compare-and-set: it is skipped when the stored
         status is one of those (B40: a cancelled run never becomes paused or completed again).
@@ -899,7 +1023,27 @@ class StudioStore:
             pending_input,
             cancel_reason,
             unless_status,
+            pending_effect,
         )
+
+    async def list_journaled_runs(
+        self,
+        statuses: Sequence[str] = ("running", "interrupted"),
+        *,
+        workspace_id: str | None = None,
+        run_ids: Sequence[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Journaled runs (A6 S9) in ``statuses``: run id, status, journal workspace, owner."""
+        return await asyncio.to_thread(
+            self._list_journaled_runs_sync, tuple(statuses), workspace_id, run_ids
+        )
+
+    async def mark_interrupted(self, run_id: str, *, error: str, reason: str) -> bool:
+        """Compare-and-set ``running`` -> ``interrupted`` plus a ``RUN_INTERRUPTED`` event.
+
+        Returns False (nothing written) when the run is no longer ``running``.
+        """
+        return await asyncio.to_thread(self._mark_interrupted_sync, run_id, error, reason)
 
     async def get_run_status(self, run_id: str) -> str | None:
         """The run's status without loading its events, or None if unknown."""

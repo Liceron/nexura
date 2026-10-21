@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Liceron
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { useLocale } from '../../i18n';
 import { Button } from '../../components/Button';
 import { useDurableT } from '../runs/useDurableT';
@@ -37,19 +37,26 @@ export function useApprovalClock(request: ExactApprovalRequest | null | undefine
   return { now, expired: isApprovalExpired(request, now) };
 }
 
-function JsonText({ label, text }: { label: string; text?: string }) {
+export function JsonText({ label, text }: { label: string; text?: string }) {
   const t = useDurableT();
-  const pre = <pre style={{ fontFamily: 'var(--font-mono)', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 260, overflowY: 'auto', margin: '6px 0' }}>{text ?? t('exactAction.notRecorded', 'not recorded')}</pre>;
-  return text && text.length > 300
-    ? <details><summary>{label} — {t('exactAction.expand', 'Expand JSON')}</summary>{pre}</details>
-    : <div><strong>{label}</strong>{pre}</div>;
+  const [copyState, setCopyState] = useState('');
+  return <section aria-label={label} className="inspection-evidence">
+    <div className="inspection-evidence-heading"><strong>{label}</strong>
+      {text !== undefined && <Button size="sm" aria-label={t('exactAction.copy') + ' ' + label} onClick={async () => {
+        try { await navigator.clipboard.writeText(text); setCopyState(t('exactAction.copied')); }
+        catch { setCopyState(t('exactAction.copyFailed')); }
+      }}>{t('exactAction.copy')}</Button>}
+      <span role="status">{copyState}</span>
+    </div>
+    <pre className="inspection-code">{text ?? t('exactAction.notRecorded')}</pre>
+  </section>;
 }
 
 function Digest({ label, value }: { label: string; value?: string }) {
   const t = useDurableT();
   const [copyState, setCopyState] = useState('');
   return <div>{label}: {value ? <>
-    <code title={value}>{value.length > 16 ? `${value.slice(0, 12)}…${value.slice(-4)}` : value}</code>{' '}
+    <code title={value}>{value}</code>{' '}
     <Button size="sm" type="button" aria-label={`${t('exactAction.copy', 'Copy')} ${label}`} onClick={async () => {
       try {
         await navigator.clipboard.writeText(value);
@@ -61,10 +68,11 @@ function Digest({ label, value }: { label: string; value?: string }) {
   </> : t('exactAction.notRecorded', 'not recorded')}</div>;
 }
 
-export function ExactAction({ request, previous: observed, workflowHandler }: {
+export function ExactAction({ request, previous: observed, workflowHandler, children }: {
   request?: ExactApprovalRequest | null;
   previous?: ExactApprovalRequest;
   workflowHandler?: string;
+  children?: ReactNode;
 }) {
   const t = useDurableT();
   const locale = useLocale();
@@ -85,20 +93,26 @@ export function ExactAction({ request, previous: observed, workflowHandler }: {
   const workflowName = request?.node_id
     ? `${request.node_id}${handler ? ` (${handler})` : ''}`
     : undefined;
-  return <section aria-label={t('exactAction.title', 'Exact action')} data-testid="exact-action" style={{ display: 'flex', flexDirection: 'column', gap: 8, fontSize: 12 }}>
+  return <section aria-label={t('exactAction.title', 'Exact action')} data-testid="exact-action" className="exact-action">
     <strong>{t('exactAction.title', 'Exact action')}</strong>
-    <div>{t('exactAction.kind', 'Action kind')}: <code>{text(request?.action_kind || (workflowStep ? t('exactAction.workflowStep', 'Workflow step') : undefined))}</code></div>
-    <div>{t('exactAction.name', 'Action name')}: <code>{text(request?.action_name || (workflowStep ? workflowName : undefined))}</code></div>
-    <div>{t('exactAction.run', 'Run')}: <code>{text(request?.run_id || request?.workflow_run_id)}</code></div>
-    <div>{t('exactAction.node', 'Node')}: <code>{text(request?.node_id)}</code></div>
+    <div className="approval-action-name">{t('exactAction.name', 'Action name')}: <code>{text(request?.action_name || (workflowStep ? workflowName : undefined))}</code></div>
+    {request?.canonical_payload_json !== undefined && <p className="inspection-meta">{t('reviewDesign.canonical')}</p>}
     <JsonText label={t('exactAction.arguments', 'Arguments (positional and named)')} text={request?.canonical_payload_json ?? payloadJson(request?.action_payload)} />
     {!request?.canonical_payload_json && <div>{t('exactAction.canonicalMissing', 'Server canonical JSON: not recorded. Available arguments are shown as sorted JSON; exact numeric formatting requires the server canonical text.')}</div>}
-    <Digest label={t('exactAction.payloadDigest', 'Payload digest')} value={request?.payload_digest} />
-    <Digest label={t('exactAction.specDigest', 'Agent spec digest')} value={request?.spec_digest} />
     <div>{t('exactAction.expiry', 'Expires')}: {expiry === null ? missing : <>
-      <time dateTime={new Date(expiry).toISOString()}>{new Date(expiry).toLocaleString(locale)}</time>{' · '}
+      <time dateTime={new Date(expiry).toISOString()}>{new Date(expiry).toLocaleString(locale, { timeZoneName: 'short' })}</time>{' · '}
       {expired ? t('exactAction.expired', 'Expired') : `${Math.floor(seconds / 3600)}:${String(Math.floor(seconds / 60) % 60).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`}
     </>}</div>
+    <p>{t('reviewDesign.scope')}</p>
+    {children}
+    <details className="request-details"><summary>{t('reviewDesign.requestDetails')}</summary>
+    <div>{t('approvalReview.id')}: <span>{text(request?.approval_id)}</span></div>
+    <div>{t('exactAction.kind')}: <code>{text(request?.action_kind || (workflowStep ? t('exactAction.workflowStep') : undefined))}</code></div>
+    <div>{t('exactAction.run', 'Run')}: <code>{text(request?.run_id || request?.workflow_run_id)}</code></div>
+    <div>{t('exactAction.node', 'Node')}: <code>{text(request?.node_id)}</code></div>
+    <Digest label={t('exactAction.payloadDigest', 'Payload digest')} value={request?.payload_digest} />
+    <Digest label={t('exactAction.specDigest', 'Agent spec digest')} value={request?.spec_digest} />
+    </details>
     {expired && <p role="alert">{t('exactAction.expiredReason', 'This request has expired. Approval is disabled; a fresh request is required.')}</p>}
     {previous && <div data-testid="approval-edited-inputs">
       <p>{t('exactAction.edited', 'This is a new request for edited inputs. Review it again before approving.')}</p>

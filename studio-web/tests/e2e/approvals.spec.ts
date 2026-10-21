@@ -61,47 +61,51 @@ test.describe('Approval Inbox and Restart-Safe Resume (F08)', () => {
     // Verify Run Console opens and pauses at approval gate
     await expect(page.getByRole('tab', { name: /^Run Console/i })).toBeVisible({ timeout: 10000 });
     await expect(page.getByRole('region', { name: 'Pending approval banner' })).toBeVisible({ timeout: 10000 });
+    const pendingRunId = await page.getByLabel('Run identifier badge').innerText();
 
     // Simulate browser restart / navigation to Approval Inbox
     await page.goto(`${cluster.frontendUrl}#/approvals`);
 
     // Verify Approval Inbox discovered the pending approval
-    await expect(page.getByRole('heading', { name: 'Approval Inbox' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Approvals' })).toBeVisible();
     await expect(page.getByLabel('Pending approvals counter')).toContainText('1 Pending');
-    await expect(page.getByText('Approval Gate: approval_gate')).toBeVisible();
+    const approvalRow = page.getByRole('row').filter({ has: page.locator('a[data-testid="approval-open-run"][href="#/runs/' + pendingRunId + '"]') });
+    await expect(approvalRow).toContainText('approval_gate');
+    await approvalRow.getByText('Paused workflow state', { exact: true }).click();
     await expect(page.getByText('Amount: 5000')).toBeVisible();
 
     // Click Review & Decide
-    const reviewBtn = page.getByRole('button', { name: 'Review & Decide' });
+    const reviewBtn = approvalRow.getByRole('button', { name: 'Review action', exact: true });
     await expect(reviewBtn).toBeVisible();
     await reviewBtn.click();
 
     // Verify Decision Modal renders immutable state review and consequences
     const decisionModal = page.getByRole('dialog');
     await expect(decisionModal).toBeVisible();
-    await expect(decisionModal.getByText('Review Approval Decision')).toBeVisible();
+    await expect(decisionModal.getByRole('heading', { name: 'Review action', exact: true })).toBeVisible();
     // P32c: the dialog shows the exact action first, then the paused workflow state.
     await expect(decisionModal.getByTestId('exact-action')).toBeVisible();
     await expect(decisionModal.getByText('Paused workflow state')).toBeVisible();
 
     // Verify the paused state content (the last <pre> is the state; earlier ones are the action)
-    const statePre = decisionModal.locator('pre').last();
+    await decisionModal.getByText('Paused workflow state', { exact: true }).click();
+    const statePre = decisionModal.getByTestId('approval-paused-state');
     await expect(statePre).toBeVisible();
     const preText = await statePre.innerText();
     expect(preText).toContain('ORD-DISCOVER-801');
     expect(preText).toContain('5000');
 
     // Verify consequence explanation
-    await expect(decisionModal.getByText(/Approval resumes the reviewed action/i)).toBeVisible();
-    await expect(decisionModal.getByText(/Rejection stops this workflow/i)).toBeVisible();
+    await expect(decisionModal.getByText('Approval covers only this action and these arguments.', { exact: true })).toBeVisible();
+    await expect(decisionModal.getByText('Reject stops this run. Closing leaves it waiting.', { exact: true })).toBeVisible();
 
     // Click Approve & Resume
-    const approveBtn = decisionModal.getByRole('button', { name: /Approve & Resume/i });
+    const approveBtn = decisionModal.getByRole('button', { name: 'Approve action', exact: true });
     await approveBtn.click();
 
     // Modal closes and Approval Inbox clears
     await expect(decisionModal).not.toBeVisible();
-    await expect(page.getByText('No Pending Approvals')).toBeVisible({ timeout: 10000 });
+    await expect(page.getByText('No actions waiting for approval.', { exact: true })).toBeVisible({ timeout: 10000 });
     await expect(page.getByLabel('Pending approvals counter')).toContainText('0 Pending');
   });
 
@@ -150,15 +154,15 @@ test.describe('Approval Inbox and Restart-Safe Resume (F08)', () => {
     await expect(page.getByLabel('Pending approvals counter')).toContainText('1 Pending');
 
     // Click Review & Decide -> Reject
-    await page.getByRole('button', { name: 'Review & Decide' }).click();
+    await page.getByRole('button', { name: 'Review action' }).click();
     const decisionModal = page.getByRole('dialog');
     await expect(decisionModal).toBeVisible();
 
-    const rejectBtn = decisionModal.getByRole('button', { name: /Reject Execution/i });
+    const rejectBtn = decisionModal.getByRole('button', { name: 'Reject', exact: true });
     await rejectBtn.click();
 
     // Modal closes and inbox clears
     await expect(decisionModal).not.toBeVisible();
-    await expect(page.getByText('No Pending Approvals')).toBeVisible({ timeout: 10000 });
+    await expect(page.getByText('No actions waiting for approval.', { exact: true })).toBeVisible({ timeout: 10000 });
   });
 });

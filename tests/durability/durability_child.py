@@ -408,6 +408,89 @@ async def scenario_trigger(config: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+# ------------------------------------------------------------------- service (A6 S9)
+
+
+def service_registry(config: dict[str, Any]) -> Any:
+    """``note`` then ``pay`` for the service: sync handlers (they run in a thread, so the
+    run lease heartbeat keeps going while one blocks at a point). Each performs one effect,
+    sending the step's idempotency key when it is declared idempotent."""
+    from nexura_runtime.workflow import ModuleRegistry, step_idempotency_key
+
+    registry = ModuleRegistry()
+
+    def handler(name: str, effect: str | None) -> Any:
+        def run(state: dict[str, Any]) -> dict[str, Any]:
+            key = step_idempotency_key() if effect == "idempotent" else None
+            h.effect(name, key=key)
+            h.point(f"in_{name}")
+            return {f"{name}d": True}
+
+        return run
+
+    for name in ("note", "pay"):
+        effect = config.get(f"{name}_effect")
+        registry.register(name, handler(name, effect), effect=effect)
+    return registry
+
+
+async def scenario_service(config: dict[str, Any]) -> dict[str, Any]:
+    """One ``serve`` process on the shared database (and Postgres workflow state).
+
+    Modes: ``start`` runs the workflow (the test kills it at a point), ``observe`` only
+    starts the service and reads the run, ``recover`` and ``resolve`` continue it over REST.
+    """
+    from fastapi.testclient import TestClient
+
+    from nexura_runtime.service.api.app import create_api_app
+
+    backend = config["backend"]
+    app = create_api_app(
+        registry=service_registry(config),
+        db_path=config["db"],
+        profile="local-owner",
+        workflow_state_url=backend["dsn"] if backend["name"] == "postgres" else "",
+        workflow_lease_ttl=float(config["lease_seconds"]),
+    )
+    api = "/api/v1/runs"
+    # A local client as Studio is: loopback host and the server's session token.
+    headers = {"X-Workspace-ID": "default", "X-Nexura-Session": app.state.session_token}
+    mode = config["mode"]
+    result: dict[str, Any] = {"mode": mode}
+    with TestClient(
+        app,
+        base_url="http://127.0.0.1",
+        client=("127.0.0.1", 50000),
+        raise_server_exceptions=False,
+    ) as client:  # lifespan: startup
+        if mode == "start":
+            response = client.post(
+                api, json={"spec": workflow_spec(gated=False).to_dict()}, headers=headers
+            )
+            result["response"] = response.json()
+            return result
+        run_id = config["run_id"]
+        result["seen_status"] = client.get(f"{api}/{run_id}", headers=headers).json()["status"]
+        if mode == "resolve":
+            effect_id = config["effect_id"]
+            resolved = client.post(
+                f"{api}/{run_id}/effects/{effect_id}/resolve",
+                json={"resolution": config["resolution"], "result": config.get("result")},
+                headers=headers,
+            )
+            result["resolved"] = resolved.status_code
+        if mode in ("recover", "resolve"):
+            response = client.post(f"{api}/{run_id}/recover", headers=headers)
+            body = response.json()
+            result["code"] = response.status_code
+            result["status"] = body.get("status")
+            result["pause_reason"] = body.get("pause_reason")
+            result["effect_id"] = (body.get("pending_effect") or {}).get("effect_id")
+            result["state"] = body.get("current_state")
+            result["detail"] = body.get("detail")
+    return result
+
+
 # ---------------------------------------------------- legacy DurableExecutionEngine
 
 
@@ -487,6 +570,7 @@ SCENARIOS: dict[str, Callable[[dict[str, Any]], Coroutine[Any, Any, dict[str, An
     "agent": scenario_agent,
     "workflow": scenario_workflow,
     "trigger": scenario_trigger,
+    "service": scenario_service,
     "legacy": scenario_legacy,
     "selftest": scenario_selftest,
 }
