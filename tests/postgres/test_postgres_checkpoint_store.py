@@ -7,6 +7,7 @@ calls and tools are local fakes.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
 from collections.abc import AsyncIterator
@@ -56,6 +57,7 @@ async def test_store_contract_matches_sqlite(store: PostgresCheckpointStore) -> 
     await store.delete("x", "o1", fenced=True)
     assert await store.load("x") is None
     assert await store.claim("z", "gone", 0.001)
+    await asyncio.sleep(0.05)  # let the 1 ms lease expire on the database clock
     assert await store.claim("z", "next", 60)  # an expired claim is taken over
     await store.release("z", "next")
     assert await store.claim("z", "third", 60)
