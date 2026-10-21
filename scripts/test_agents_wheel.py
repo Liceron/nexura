@@ -2,9 +2,10 @@
 
     uv run python scripts/test_agents_wheel.py --python 3.11
 
-Builds the wheel, installs it (with the ``otel`` and ``signing`` extras, the OpenTelemetry SDK used by the
-tracing tests and mypy for the static typing tests) into a fresh virtual environment for
-the given Python, copies the agent test suite to a temporary directory and runs it there.
+Builds the wheel, installs it (with the ``otel`` and ``signing`` extras, the OpenTelemetry
+SDK used by the tracing tests and mypy for the static typing tests) into a fresh virtual
+environment for the given Python, copies the agent test suite to a temporary directory and
+runs it there.
 Test files that need the platform package (``nexura_runtime``) are skipped, since the
 wheel does not contain it.
 Exit status is pytest's. Used by CI for Python 3.11, 3.12 and 3.13.
