@@ -105,6 +105,7 @@ async def test_sessions_are_capped_lru_and_expire_when_idle() -> None:
     expiring = AgentMCPServer("d", tools=[echo]).http_app(session_ttl_seconds=0)
     async with _client(expiring) as c:
         sid = (await c.post("/mcp", json=_INIT)).headers["mcp-session-id"]
-        await asyncio.sleep(0.01)
+        # Longer than one Windows clock tick (~15.6 ms), so the idle time is never read as 0.
+        await asyncio.sleep(0.05)
         r = await c.post("/mcp", headers={"mcp-session-id": sid}, json=ping)
         assert r.status_code == 404
