@@ -1415,27 +1415,34 @@ def _budget_manager(app_state: Any) -> Any:
 def _build_engine(
     request: Request, spec: WorkflowSpec, run_id: str, workspace_id: str
 ) -> tuple[WorkflowEngine, RunStoreEventSink]:
-    store: StudioStore = request.app.state.store
+    return _engine_for(request.app.state, spec, run_id, workspace_id)
+
+
+def _engine_for(
+    app_state: Any, spec: WorkflowSpec, run_id: str, workspace_id: str
+) -> tuple[WorkflowEngine, RunStoreEventSink]:
+    """The engine (and its event sink) that continues an existing service run."""
+    store: StudioStore = app_state.store
     approval_handlers: frozenset[str] = getattr(
-        request.app.state, "approval_required_handlers", frozenset()
+        app_state, "approval_required_handlers", frozenset()
     )
     event_sink = RunStoreEventSink(store, run_id)
-    budget_mgr = _budget_manager(request.app.state)
+    budget_mgr = _budget_manager(app_state)
     run_budget = budget_mgr.get_run_budget(run_id) if budget_mgr is not None else None
     engine = WorkflowEngine(
         spec=spec,
         registry=RunEventRegistry(
-            request.app.state.registry,
+            app_state.registry,
             store,
             run_id,
-            stop_requested=_stop_check(request.app.state, run_id),
+            stop_requested=_stop_check(app_state, run_id),
         ),
         store=store.checkpoint_store,
         workspace_id=workspace_id,
         budget=run_budget,
         event_sink=event_sink,
         approval_required_handlers=approval_handlers,
-        lease_ttl=workflow_lease_ttl(request.app.state),
+        lease_ttl=workflow_lease_ttl(app_state),
     )
     return engine, event_sink
 
@@ -1559,6 +1566,113 @@ def _conflict(code: str, message: str) -> HTTPException:
     )
 
 
+async def _recover_execution(
+    app_state: Any,
+    run_id: str,
+    engine: WorkflowEngine,
+    event_sink: RunStoreEventSink,
+    on_uncertain: Literal["pause", "fail"],
+) -> None:
+    """Continue ``run_id`` through ``engine.recover`` and record the result on its row.
+
+    Shared by ``POST /runs/{id}/recover`` and the trigger worker (A6 S10). Refusals raised
+    before anything ran (lease held, spec or definition mismatch) restore the row's status.
+    """
+    store: StudioStore = app_state.store
+    current = await _settled_run(app_state, run_id)
+    if current is None or current["status"] not in _RECOVERABLE_STATUSES:
+        if current is not None:
+            _refuse_if_revoked(current)
+        raise _conflict(
+            "RUN_STATUS_CHANGED",
+            f"Run '{run_id}' changed while recovering "
+            f"(status: '{current['status'] if current else 'missing'}').",
+        )
+    # This process executes the run from now on (its owner for the B46 fallback).
+    await store.update_run(
+        run_id=run_id,
+        status="running",
+        current_node_id=current["current_node_id"],
+        current_state=current["current_state"],
+        step_count=current["step_count"],
+        unless_status=_CANCEL_TERMINAL_STATUSES,
+    )
+    try:
+        res = await engine.recover(run_id, on_uncertain=on_uncertain)
+    except (_LeaseBusyError, WorkflowSpecMismatchError, DefinitionMismatchError):
+        # Refused before anything ran: the run keeps the status it had.
+        await store.update_run(
+            run_id=run_id,
+            status=current["status"],
+            current_node_id=current["current_node_id"],
+            current_state=current["current_state"],
+            step_count=current["step_count"],
+            error=current.get("error"),
+            pending_effect=current.get("pending_effect"),
+            unless_status=_CANCEL_TERMINAL_STATUSES,
+        )
+        raise
+    except WorkflowTerminalError:
+        # The checkpoint finished before the process stopped; only the run row lagged.
+        checkpoint = await store.checkpoint_store.get(run_id)
+        if checkpoint is None:
+            raise
+        res = engine._result_from_checkpoint(checkpoint)
+    await event_sink.flush()
+    await _persist_result(store, run_id, res)
+
+
+async def recover_workflow_run(
+    app_state: Any,
+    *,
+    run_id: str,
+    workspace_id: str,
+    on_uncertain: Literal["pause", "fail"] = "pause",
+    event_data: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Continue a journaled service run whose process stopped; return the updated run row.
+
+    Used by the trigger worker when it reclaims a job (A6 S10): the job's run continues
+    under its run lease with the run's own bound spec, exactly as
+    ``POST /runs/{id}/recover`` does. The caller checks first that the run is ``running``
+    or ``interrupted``, has an execution journal and that its lease is not live. Raises
+    ``_LeaseBusyError`` while another worker holds the run lease, and
+    ``WorkflowSpecMismatchError`` / ``DefinitionMismatchError`` when the stored run does not
+    match its spec; any other failure is recorded on the run (``failed``), like the route.
+    """
+    store: StudioStore = app_state.store
+    run = await store.get_run(run_id)
+    if run is None:
+        raise WorkflowError(f"Run '{run_id}' not found.")
+    bound_spec = WorkflowSpec.from_dict(run["spec"])
+    engine, event_sink = _engine_for(app_state, bound_spec, run_id, workspace_id)
+    await _record_event(
+        store,
+        run_id,
+        "RUN_RECOVERY_STARTED",
+        node_id=run.get("current_node_id"),
+        data={
+            "previous_status": run["status"],
+            "on_uncertain": on_uncertain,
+            **dict(event_data or {}),
+        },
+    )
+
+    async def recover() -> None:
+        await _recover_execution(app_state, run_id, engine, event_sink, on_uncertain)
+
+    try:
+        await run_in_request(app_state, run_id, recover)
+    except (_LeaseBusyError, WorkflowSpecMismatchError, DefinitionMismatchError, HTTPException):
+        raise
+    except Exception as exc:
+        await event_sink.flush()
+        await _record_execution_failure(store, run_id, exc)
+    updated = await store.get_run(run_id)
+    assert updated is not None
+    return _redact_events(updated, app_state)
+
+
 @router.post("/{run_id}/recover")
 async def recover_run(
     request: Request, run_id: str, payload: RecoverRunRequest | None = None
@@ -1630,47 +1744,7 @@ async def recover_run(
     )
 
     async def recover() -> None:
-        current = await _settled_run(app_state, run_id)
-        if current is None or current["status"] not in _RECOVERABLE_STATUSES:
-            if current is not None:
-                _refuse_if_revoked(current)
-            raise _conflict(
-                "RUN_STATUS_CHANGED",
-                f"Run '{run_id}' changed while recovering "
-                f"(status: '{current['status'] if current else 'missing'}').",
-            )
-        # This process executes the run from now on (its owner for the B46 fallback).
-        await store.update_run(
-            run_id=run_id,
-            status="running",
-            current_node_id=current["current_node_id"],
-            current_state=current["current_state"],
-            step_count=current["step_count"],
-            unless_status=_CANCEL_TERMINAL_STATUSES,
-        )
-        try:
-            res = await engine.recover(run_id, on_uncertain=on_uncertain)
-        except (_LeaseBusyError, WorkflowSpecMismatchError, DefinitionMismatchError):
-            # Refused before anything ran: the run keeps the status it had.
-            await store.update_run(
-                run_id=run_id,
-                status=current["status"],
-                current_node_id=current["current_node_id"],
-                current_state=current["current_state"],
-                step_count=current["step_count"],
-                error=current.get("error"),
-                pending_effect=current.get("pending_effect"),
-                unless_status=_CANCEL_TERMINAL_STATUSES,
-            )
-            raise
-        except WorkflowTerminalError:
-            # The checkpoint finished before the process stopped; only the run row lagged.
-            checkpoint = await store.checkpoint_store.get(run_id)
-            if checkpoint is None:
-                raise
-            res = engine._result_from_checkpoint(checkpoint)
-        await event_sink.flush()
-        await _persist_result(store, run_id, res)
+        await _recover_execution(app_state, run_id, engine, event_sink, on_uncertain)
 
     try:
         await run_in_request(app_state, run_id, recover)

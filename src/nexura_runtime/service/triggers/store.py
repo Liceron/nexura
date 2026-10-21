@@ -95,7 +95,12 @@ class TriggerStore(Protocol):
         ...
 
     def set_job_run(self, job_id: str, worker_id: str, run_id: str) -> bool:
-        """Record the latest run for a claimed job; False when ``worker_id`` lost ownership."""
+        """Record the run of a claimed job; False when ``worker_id`` lost ownership.
+
+        A job owns one run for its life (A6 S10). If the job already records a different run
+        (a run without an execution journal was replaced, or ``retry_mode="new_run"``), that
+        run id moves to the deprecated ``previous_run_ids``.
+        """
         ...
 
     def reclaim_expired_jobs(
@@ -107,12 +112,18 @@ class TriggerStore(Protocol):
         limit: int = 20,
         now: float | None = None,
         exclude_job_ids: Collection[str] = (),
+        keep_run: bool = True,
     ) -> list[DurableTriggerJob]:
         """Atomically take over claimed jobs whose lease expired.
 
-        Jobs with attempts left are re-claimed by ``worker_id`` (status ``claimed``, the previous
-        run id moved to ``previous_run_ids``); at most ``limit`` are retried per call. Jobs out
-        of attempts become ``failed``. Only the caller whose compare-and-swap wins gets a job.
+        Jobs with attempts left are re-claimed by ``worker_id`` (status ``claimed``); at most
+        ``limit`` are retried per call. Jobs out of attempts become ``failed``. Only the caller
+        whose compare-and-swap wins gets a job. ``now`` defaults to the store's clock (the
+        database clock for Postgres).
+
+        ``keep_run`` (default, A6 S10): the job keeps its ``run_id`` and the new owner
+        continues that run. ``keep_run=False`` is the deprecated ``retry_mode="new_run"``
+        behaviour: the run id moves to ``previous_run_ids`` and ``run_id`` is cleared.
         """
         ...
 
@@ -323,6 +334,8 @@ class MemoryTriggerStore:
             job = self._jobs.get(job_id)
             if not job or job.status != "claimed" or job.claimed_by != worker_id:
                 return False
+            if job.run_id and job.run_id != run_id:
+                job.previous_run_ids.append(job.run_id)
             job.run_id = run_id
             return True
 
@@ -335,6 +348,7 @@ class MemoryTriggerStore:
         limit: int = 20,
         now: float | None = None,
         exclude_job_ids: Collection[str] = (),
+        keep_run: bool = True,
     ) -> list[DurableTriggerJob]:
         current = time.time() if now is None else now
         results: list[DurableTriggerJob] = []
@@ -360,7 +374,7 @@ class MemoryTriggerStore:
                     continue
                 else:
                     retried += 1
-                    if job.run_id:
+                    if job.run_id and not keep_run:
                         job.previous_run_ids.append(job.run_id)
                         job.run_id = None
                     job.claimed_by = worker_id
@@ -619,22 +633,14 @@ class SqliteTriggerStore:
         job: DurableTriggerJob,
     ) -> tuple[bool, DurableTriggerJob]:
         with self._lock, self._conn:
+            # Insert-or-ignore is atomic across connections (another process delivering the
+            # same event concurrently): a check-then-insert would fail on the unique key.
             cur = self._conn.execute(
-                "SELECT job_id FROM webhook_receipts WHERE endpoint_id = ? AND event_id = ?",
-                (receipt.endpoint_id, receipt.event_id),
-            )
-            existing_row = cur.fetchone()
-            if existing_row:
-                existing_job = self.get_job(existing_row["job_id"])
-                assert existing_job is not None
-                return False, existing_job
-
-            # Atomically insert receipt and job
-            self._conn.execute(
                 """
                 INSERT INTO webhook_receipts
                 (event_id, endpoint_id, workspace_id, job_id, received_at)
                 VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT (endpoint_id, event_id) DO NOTHING
                 """,
                 (
                     receipt.event_id,
@@ -644,6 +650,16 @@ class SqliteTriggerStore:
                     receipt.received_at,
                 ),
             )
+            if cur.rowcount == 0:
+                existing_row = self._conn.execute(
+                    "SELECT job_id FROM webhook_receipts WHERE endpoint_id = ? AND event_id = ?",
+                    (receipt.endpoint_id, receipt.event_id),
+                ).fetchone()
+                existing_job = self.get_job(existing_row["job_id"])
+                assert existing_job is not None
+                return False, existing_job
+
+            # The receipt and its job commit together.
             self._conn.execute(
                 """
                 INSERT INTO durable_trigger_jobs
@@ -887,12 +903,22 @@ class SqliteTriggerStore:
 
     def set_job_run(self, job_id: str, worker_id: str, run_id: str) -> bool:
         with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT run_id, previous_run_ids_json FROM durable_trigger_jobs "
+                "WHERE job_id = ? AND status = 'claimed' AND claimed_by = ?",
+                (job_id, worker_id),
+            ).fetchone()
+            if row is None:
+                return False
+            previous = json.loads(row["previous_run_ids_json"] or "[]")
+            if row["run_id"] and row["run_id"] != run_id:
+                previous.append(row["run_id"])
             cur = self._conn.execute(
                 """
-                UPDATE durable_trigger_jobs SET run_id = ?
+                UPDATE durable_trigger_jobs SET run_id = ?, previous_run_ids_json = ?
                 WHERE job_id = ? AND status = 'claimed' AND claimed_by = ?
                 """,
-                (run_id, job_id, worker_id),
+                (run_id, json.dumps(previous), job_id, worker_id),
             )
             return cur.rowcount == 1
 
@@ -905,6 +931,7 @@ class SqliteTriggerStore:
         limit: int = 20,
         now: float | None = None,
         exclude_job_ids: Collection[str] = (),
+        keep_run: bool = True,
     ) -> list[DurableTriggerJob]:
         current = time.time() if now is None else now
         results: list[DurableTriggerJob] = []
@@ -948,14 +975,16 @@ class SqliteTriggerStore:
                     continue
                 else:
                     previous = list(job.previous_run_ids)
-                    if job.run_id:
-                        previous.append(job.run_id)
+                    run_id = job.run_id
+                    if run_id and not keep_run:
+                        previous.append(run_id)
+                        run_id = None
                     with self._conn:
                         cur = self._conn.execute(
                             """
                             UPDATE durable_trigger_jobs
                             SET claimed_by = ?, claimed_at = ?, lease_expires_at = ?,
-                                attempts = attempts + 1, run_id = NULL,
+                                attempts = attempts + 1, run_id = ?,
                                 previous_run_ids_json = ?
                             WHERE job_id = ? AND status = 'claimed' AND claimed_by IS ?
                               AND claimed_at IS ? AND lease_expires_at IS ? AND attempts = ?
@@ -964,6 +993,7 @@ class SqliteTriggerStore:
                                 worker_id,
                                 current,
                                 current + lease_seconds,
+                                run_id,
                                 json.dumps(previous),
                                 *guard,
                             ),

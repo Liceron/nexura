@@ -6,7 +6,9 @@ By default workflow checkpoints, their history and the execution journal of work
 runs live in the service's SQLite database. A ``postgresql://`` URI, given to
 ``create_api_app(workflow_state_url=...)``, ``nexura-runtime serve --workflow-state-url``
 or ``NEXURA_WORKFLOW_STATE_URL``, keeps them in Postgres instead
-(``nexura_postgres.PostgresWorkflowStore``, from the ``nexura-postgres`` package).
+(``nexura_postgres.PostgresWorkflowStore``, from the ``nexura-postgres`` package), together
+with the trigger job queue, webhooks and schedules (``nexura_postgres.PostgresTriggerStore``,
+A6 S10b), so workers on several hosts share one queue.
 """
 
 from __future__ import annotations
@@ -48,3 +50,10 @@ def open_workflow_state_store(url: str) -> Any:
     ``pip install nexura-postgres`` when that package is not installed)."""
     postgres = require_package(POSTGRES_PACKAGE, "PostgreSQL workflow state")
     return postgres.PostgresWorkflowStore(url)
+
+
+def open_trigger_state_store(url: str, *, secret_key_file: str | os.PathLike[str]) -> Any:
+    """A ``PostgresTriggerStore`` for ``url``; webhook secrets are encrypted with
+    ``NEXURA_TRIGGER_SECRET_KEY`` or else the key in ``secret_key_file``."""
+    postgres = require_package(POSTGRES_PACKAGE, "PostgreSQL trigger state")
+    return postgres.PostgresTriggerStore(url, secret_key_file=secret_key_file)

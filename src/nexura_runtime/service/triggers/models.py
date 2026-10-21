@@ -82,7 +82,12 @@ class DurableTriggerJob(BaseModel):
     created_at: float = Field(default_factory=time.time)
     completed_at: float | None = None
     error_message: str | None = None
-    run_id: str | None = None  # latest run started for this job
-    lease_expires_at: float | None = None  # claim lease; None when not claimed
-    attempts: int = 0  # number of claims (initial claim plus lease-expiry retries)
-    previous_run_ids: list[str] = Field(default_factory=list)  # runs of earlier attempts
+    # The run this job owns. A6 S10: a job owns one run for its life; a worker that reclaims
+    # the job after its lease expired continues this run (WorkflowEngine.recover).
+    run_id: str | None = None
+    lease_expires_at: float | None = None  # queue lease; None when not claimed
+    attempts: int = 0  # number of claims (initial claim plus lease-expiry reclaims)
+    # Deprecated (A6 S10, removed in 0.6): runs this job replaced. Only filled by the
+    # deprecated TriggerWorker(retry_mode="new_run") or when a run without an execution
+    # journal could not be continued and a new run was started instead.
+    previous_run_ids: list[str] = Field(default_factory=list)

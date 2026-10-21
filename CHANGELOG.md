@@ -16,6 +16,21 @@ has been published.
 - `nexura.commands` entry points `dev` and `project` (`nexura project init|dev|deploy`; `init`
   and `deploy` are the Nexura Cloud client's built-ins). See docs/project-templates.md.
 
+### Changed (P35 A6 S10/S10b: trigger jobs on the execution journal)
+- A reclaimed trigger job continues the run it owns (`WorkflowEngine.recover`) instead of
+  starting a new run: a completed run is never run again, and a step whose outcome is unknown
+  follows its effect class (an undeclared one pauses the run `effect_unknown`). The job lease
+  only coordinates the queue; the run lease decides who executes the run.
+- Deprecated (removed in 0.6): `TriggerWorker(retry_mode="new_run")` /
+  `nexura-runtime worker --retry-mode new_run` (the old behaviour) and
+  `DurableTriggerJob.previous_run_ids`. `TriggerStore.reclaim_expired_jobs` gains
+  `keep_run=True`.
+- Added `nexura_postgres.PostgresTriggerStore` (webhooks, receipts, schedules and the job queue
+  on Postgres, leases on the database clock); the service uses it when `workflow_state_url`
+  names Postgres.
+- Fixed: concurrent deliveries of the same webhook event to two processes on one SQLite file
+  could fail with a unique-constraint error instead of being de-duplicated.
+
 ### Fixed
 - Reserve workflow run IDs atomically before dispatch, preventing concurrent starts
   from executing the same run twice. Custom checkpoint stores must provide atomic

@@ -349,15 +349,30 @@ async def _workflow_scenario(config: dict[str, Any], store: Any) -> dict[str, An
 
 async def scenario_trigger(config: dict[str, Any]) -> dict[str, Any]:
     from nexura_runtime.service.api.app import create_api_app
+
+    backend = config["backend"]
+    registry = workflow_registry()
+    # Postgres: the workflow state, its journal and (A6 S10b) the trigger queue live there.
+    app = create_api_app(
+        registry=registry,
+        db_path=config["db"],
+        profile="local-owner",
+        workflow_state_url=backend["dsn"] if backend["name"] == "postgres" else "",
+    )
+    store = app.state.trigger_manager.store
+    try:
+        return await _trigger_scenario(config, app, store)
+    finally:
+        await app.state.store.close()
+        close = getattr(store, "close", None)
+        if close is not None:
+            await asyncio.to_thread(close)
+
+
+async def _trigger_scenario(config: dict[str, Any], app: Any, store: Any) -> dict[str, Any]:
     from nexura_runtime.service.triggers.models import DurableTriggerJob
     from nexura_runtime.service.triggers.worker import TriggerWorker
 
-    if config["backend"]["name"] != "sqlite":
-        # A6 S10b: wire PostgresTriggerStore (and the Postgres workflow store) in here.
-        raise h.HarnessError("trigger scenarios support SQLite only until A6 S10b")
-    registry = workflow_registry()
-    app = create_api_app(registry=registry, db_path=config["db"], profile="local-owner")
-    store = app.state.trigger_manager.store
     if config.get("setup"):
         workflow = await app.state.store.create_workflow(workflow_spec(gated=False))
         store.enqueue_trigger_job(

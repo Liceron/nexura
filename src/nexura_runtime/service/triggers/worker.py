@@ -11,20 +11,33 @@ import logging
 import math
 import re
 import socket
-import time
 import uuid
+import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import HTTPException
 
 from nexura_runtime.service.triggers.manager import TriggerManager
 from nexura_runtime.service.triggers.models import DurableTriggerJob
 from nexura_runtime.service.triggers.store import DEFAULT_LEASE_SECONDS, DEFAULT_MAX_ATTEMPTS
-from nexura_runtime.workflow import WorkflowSpec
+from nexura_runtime.workflow import WorkflowSpec, _LeaseBusyError
 
 logger = logging.getLogger("nexura_runtime.triggers.worker")
+
+#: How a reclaimed job is retried. ``"continue"`` (default, A6 S10): the job's run continues
+#: under its run lease. ``"new_run"`` (deprecated, removed in 0.6): a new run starts from the
+#: entry node and the old one is marked interrupted.
+RetryMode = Literal["continue", "new_run"]
+RETRY_MODES: tuple[str, ...] = ("continue", "new_run")
+
+#: Run statuses that end a job's work: the run finished, or waits for a person.
+_HANDED_OFF = frozenset({"completed", "pending_approval", "waiting_for_input", "paused"})
+_ENDED_BADLY = frozenset({"failed", "rejected", "cancelled"})
+_CONTINUABLE = frozenset({"running", "interrupted"})
+_ABANDONED = "Worker lease expired; run abandoned."
+_MAX_UNFINISHED_RECOVERIES = 5
 
 _HEX_RE = re.compile(r"^[0-9a-f]{12,64}$")
 _REV_RE = re.compile(r"^(?:rev(?:ision)?[:=-]?)?(\d+)$")
@@ -88,9 +101,22 @@ class TriggerWorker:
     """Ticks schedules and executes trigger jobs through the shared run path.
 
     Each claimed job runs as its own asyncio task (at most ``max_concurrent_jobs`` at once), so a
-    long run never blocks schedule ticks. A claim carries a lease that a heartbeat renews every
-    ``lease_seconds / 3`` while the run executes. If the worker dies hard, another worker
-    reclaims the expired job and retries it as a NEW run (up to ``max_attempts`` claims).
+    long run never blocks schedule ticks. A claim carries a queue lease that a heartbeat renews
+    every ``lease_seconds / 3`` while the run executes. If the worker dies hard, another worker
+    reclaims the expired job (up to ``max_attempts`` claims).
+
+    A job owns one run for its life (Execution Contract v1, A6 S10). A reclaimed job continues
+    that run with ``WorkflowEngine.recover``: completed steps are not run again, a step whose
+    outcome is unknown follows its effect class (a ``non_idempotent`` one pauses the run
+    ``effect_unknown`` for a person), and a run that already finished is never run again (the
+    job is completed or failed from it). The job lease only coordinates the queue; the run
+    lease in the execution journal decides who executes the run, so the worker waits while
+    another live process still holds it. ``retry_mode="new_run"`` keeps the old behaviour
+    (deprecated, removed in 0.6): the old run is marked interrupted and a new run starts from
+    the entry node.
+
+    ``clock``: a time source for leases (tests). By default each store uses its own clock
+    (the database clock for ``PostgresTriggerStore``).
     """
 
     def __init__(
@@ -104,7 +130,8 @@ class TriggerWorker:
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
         max_concurrent_jobs: int = 4,
         shutdown_grace_seconds: float = 20.0,
-        clock: Callable[[], float] = time.time,
+        clock: Callable[[], float] | None = None,
+        retry_mode: RetryMode = "continue",
     ) -> None:
         if not math.isfinite(lease_seconds) or lease_seconds <= 0:
             raise ValueError("lease_seconds must be a positive finite number")
@@ -112,6 +139,17 @@ class TriggerWorker:
             raise ValueError("max_attempts must be at least 1")
         if max_concurrent_jobs < 1:
             raise ValueError("max_concurrent_jobs must be at least 1")
+        if retry_mode not in RETRY_MODES:
+            raise ValueError("retry_mode must be 'continue' or 'new_run'")
+        if retry_mode == "new_run":
+            warnings.warn(
+                'TriggerWorker(retry_mode="new_run") is deprecated and will be removed in 0.6: '
+                "a reclaimed job then starts a new run from the entry node, repeating effects "
+                "that already happened. The default continues the job's run.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        self.retry_mode: RetryMode = retry_mode
         self.app_state = app_state
         self.worker_id = worker_id or f"worker-{socket.gethostname()}-{uuid.uuid4().hex[:8]}"
         self.poll_interval = poll_interval
@@ -125,6 +163,10 @@ class TriggerWorker:
         self._lease_lost: set[str] = set()
         self._reclaimed_backlog: list[DurableTriggerJob] = []
         self._background = False
+
+    def _now(self) -> float | None:
+        """The injected clock's time, or None to let the store use its own clock."""
+        return self._clock() if self._clock is not None else None
 
     @property
     def manager(self) -> TriggerManager:
@@ -169,7 +211,7 @@ class TriggerWorker:
         return await self._reclaim_expired()
 
     async def _reclaim_expired(self) -> list[DurableTriggerJob]:
-        """Take over jobs whose lease expired; mark the dead worker's runs interrupted."""
+        """Take over jobs whose queue lease expired (to continue their runs, or retry them)."""
         store = self.manager.store
         slots = max(0, self.max_concurrent_jobs - len(self._active))
         # Reclaimed retries get no heartbeat until spawned, so never reclaim more than the next
@@ -177,40 +219,58 @@ class TriggerWorker:
         budget = min(self.max_jobs_per_tick, slots) - len(self._reclaimed_backlog)
         if budget <= 0:
             return []
+        new_run = self.retry_mode == "new_run"
         reclaimed = store.reclaim_expired_jobs(
             self.worker_id,
             lease_seconds=self.lease_seconds,
             max_attempts=self.max_attempts,
             limit=budget,
-            now=self._clock(),
+            now=self._now(),
             exclude_job_ids=set(self._active),
+            keep_run=not new_run,
         )
         retries: list[DurableTriggerJob] = []
         for job in reclaimed:
-            # A retried job moved its old run to previous_run_ids; an exhausted job keeps it.
             if job.status == "failed":
+                # Out of attempts: the job fails and keeps its run. That run is marked
+                # interrupted only once nobody executes it (journaled runs: its run lease).
                 dead_run = job.run_id
-            else:
+            elif new_run:
+                # Deprecated: the old run moved to previous_run_ids; a new run starts.
                 dead_run = job.previous_run_ids[-1] if job.previous_run_ids else None
+                retries.append(job)
+            else:
+                dead_run = None  # the job's run is continued when the job is processed
                 retries.append(job)
             logger.warning(
                 "Trigger job %s lease expired (attempt %s); %s",
                 job.job_id,
                 job.attempts,
-                "failed" if job.status == "failed" else "retrying",
+                "failed"
+                if job.status == "failed"
+                else ("retrying as a new run" if new_run else "continuing its run"),
             )
             if dead_run:
-                await self._interrupt_run(dead_run, "Worker lease expired; run abandoned.")
+                await self._interrupt_run(dead_run, _ABANDONED)
         # Retried jobs are already claimed by this worker; start them with the next batch.
         self._reclaimed_backlog.extend(retries)
         return retries
 
     async def _interrupt_run(self, run_id: str, reason: str) -> None:
-        """Mark a run left 'running' by a dead worker as interrupted (other states untouched)."""
+        """Mark a run left 'running' by a dead worker as interrupted (other states untouched).
+
+        A journaled run is marked only when its run lease says nobody executes it (A6 S9);
+        a legacy run (no journal) is marked at once, as before.
+        """
+        from nexura_runtime.service.run_liveness import journal_decides, reconcile_quietly
+
         try:
             store = self.app_state.store
             run = await store.get_run(run_id)
             if run is None or run.get("status") != "running":
+                return
+            if await journal_decides(self.app_state, run_id):
+                await reconcile_quietly(self.app_state, run_ids=[run_id])
                 return
             await store.record_run_event(run_id, "RUN_INTERRUPTED", data={"reason": reason})
             await store.update_run(
@@ -230,22 +290,28 @@ class TriggerWorker:
         slots = self.max_concurrent_jobs - len(self._active)
         budget = min(limit, slots)
         claimed: list[DurableTriggerJob] = []
+        reclaimed: set[str] = set()
         while self._reclaimed_backlog and len(claimed) < budget:
-            claimed.append(self._reclaimed_backlog.pop(0))
+            backlogged = self._reclaimed_backlog.pop(0)
+            reclaimed.add(backlogged.job_id)
+            claimed.append(backlogged)
         if len(claimed) < budget:
             for pending in store.list_pending_jobs(limit=budget - len(claimed)):
                 job = store.claim_pending_job(
                     pending.job_id,
                     self.worker_id,
                     lease_seconds=self.lease_seconds,
-                    now=self._clock(),
+                    now=self._now(),
                 )
                 if job is None:
                     continue  # another worker won the claim
                 claimed.append(job)
         tasks: list[asyncio.Task[JobOutcome]] = []
         for job in claimed:
-            task = asyncio.create_task(self._run_job(job), name=f"trigger-job-{job.job_id}")
+            task = asyncio.create_task(
+                self._run_job(job, reclaimed=job.job_id in reclaimed),
+                name=f"trigger-job-{job.job_id}",
+            )
             self._active[job.job_id] = task
             task.add_done_callback(self._make_release(job.job_id))
             task.add_done_callback(_log_task_result)
@@ -258,12 +324,12 @@ class TriggerWorker:
 
         return _release
 
-    async def _run_job(self, job: DurableTriggerJob) -> JobOutcome:
+    async def _run_job(self, job: DurableTriggerJob, *, reclaimed: bool = False) -> JobOutcome:
         """Run one claimed job while a heartbeat keeps its lease alive."""
         job_task = asyncio.current_task()
         heartbeat = asyncio.create_task(self._heartbeat(job.job_id, job_task))
         try:
-            return await self._process(job)
+            return await self._process(job, reclaimed=reclaimed)
         finally:
             heartbeat.cancel()
             await asyncio.gather(heartbeat, return_exceptions=True)
@@ -276,7 +342,7 @@ class TriggerWorker:
             await asyncio.sleep(interval)
             try:
                 owned = self.manager.store.renew_job_lease(
-                    job_id, self.worker_id, lease_seconds=self.lease_seconds, now=self._clock()
+                    job_id, self.worker_id, lease_seconds=self.lease_seconds, now=self._now()
                 )
             except Exception:
                 logger.exception("Lease renewal for job %s failed", job_id)
@@ -288,10 +354,14 @@ class TriggerWorker:
                     job_task.cancel()
                 return
 
-    async def _process(self, job: DurableTriggerJob) -> JobOutcome:
+    async def _process(self, job: DurableTriggerJob, *, reclaimed: bool = False) -> JobOutcome:
         started: list[str] = []
         try:
-            run_id, run_error = await self._start(job, started)
+            # A reclaimed job continues the run it owns; a newly claimed one starts its run.
+            if reclaimed and job.run_id and self.retry_mode == "continue":
+                run_id, run_error = await self._continue(job, started)
+            else:
+                run_id, run_error = await self._start(job, started)
         except asyncio.CancelledError:
             if job.job_id in self._lease_lost:
                 # Another worker owns the job now; it must not be failed from here.
@@ -385,6 +455,106 @@ class TriggerWorker:
             err = snapshot.get("error") or "run failed"
             return run_id, f"Run {run_id} failed: {err}"
         return run_id, None
+
+    async def _continue(self, job: DurableTriggerJob, started: list[str]) -> tuple[str, str | None]:
+        """Finish a reclaimed job from the run it already owns (A6 S10).
+
+        A finished run is never run again: the job is completed (or failed) from it. A run
+        waiting for a person (approval, input, or an ``effect_unknown`` pause) counts as
+        started, as on the first attempt. A ``running`` / ``interrupted`` run is continued
+        with ``WorkflowEngine.recover`` once its run lease is free; while another live
+        process holds that lease, this worker waits (its job heartbeat keeps the job).
+        A run without an execution journal cannot be continued safely: it is marked
+        interrupted and a new run is started, as before A6 S10.
+        """
+        from nexura_runtime.service.api.runs import recover_workflow_run
+
+        run_id = str(job.run_id)
+        started.append(run_id)
+        state = self.app_state
+        run = await state.store.get_run(run_id)
+        if run is None:
+            raise _JobRefused(f"Run '{run_id}' of job '{job.job_id}' was not found.")
+        unfinished_recoveries = 0
+        while True:
+            status = str(run.get("status"))
+            if status in _HANDED_OFF:
+                return run_id, None
+            if status in _ENDED_BADLY:
+                err = run.get("error") or f"run {status}"
+                return run_id, f"Run {run_id} {status}: {err}"
+            if status not in _CONTINUABLE:
+                raise _JobRefused(f"Run '{run_id}' has status '{status}' and cannot continue.")
+            verdict = await self._run_lease(run_id, job.workspace_id)
+            if verdict is None:
+                logger.warning(
+                    "Trigger job %s: run %s has no execution journal; starting a new run.",
+                    job.job_id,
+                    run_id,
+                )
+                await self._interrupt_run(run_id, _ABANDONED)
+                started.clear()
+                return await self._start(job, started)
+            if verdict == "recoverable":
+                try:
+                    run = await recover_workflow_run(
+                        state,
+                        run_id=run_id,
+                        workspace_id=job.workspace_id,
+                        event_data={
+                            "job_id": job.job_id,
+                            "attempt": job.attempts,
+                            "trigger_type": job.trigger_type,
+                            "trigger_source_id": job.trigger_source_id,
+                        },
+                    )
+                except _LeaseBusyError:
+                    pass  # another worker took the run lease first: wait for it
+                else:
+                    if str(run.get("status")) not in _CONTINUABLE:
+                        continue  # finished, failed or waiting for a person
+                    # The run lease was lost to another process meanwhile: wait for it.
+                    unfinished_recoveries += 1
+                    if unfinished_recoveries >= _MAX_UNFINISHED_RECOVERIES:
+                        raise _JobRefused(
+                            f"Run '{run_id}' did not finish after "
+                            f"{unfinished_recoveries} recover attempts."
+                        )
+            # The run lease is live: another process executes the run. Wait for it.
+            await asyncio.sleep(self._lease_wait)
+            fresh = await state.store.get_run(run_id)
+            if fresh is None:
+                raise _JobRefused(f"Run '{run_id}' of job '{job.job_id}' was not found.")
+            run = fresh
+
+    @property
+    def _lease_wait(self) -> float:
+        return max(0.05, min(self.poll_interval, self.lease_seconds / 3.0))
+
+    async def _run_lease(self, run_id: str, workspace_id: str) -> str | None:
+        """``"live"`` / ``"recoverable"`` from the run's lease; None without a journal."""
+        from nexura_agents.contracts.execution import ExecutionId
+
+        from nexura_runtime.service.run_liveness import run_journal, run_liveness
+
+        state = self.app_state
+        journal = await run_journal(state)
+        if journal is None:
+            return None
+        rows = await state.store.list_journaled_runs(("running", "interrupted"), run_ids=[run_id])
+        workspace = str(rows[0]["journal_workspace"]) if rows else workspace_id
+        try:
+            snapshot = await journal.get(ExecutionId(workspace, run_id))
+        except KeyError:
+            return None
+        if snapshot.run.status not in ("running", "interrupted"):
+            # Paused or finished in the journal while the run row lags: nobody holds the run
+            # lease, and recover() only projects the stored result (nothing runs again).
+            return "recoverable"
+        if not rows:
+            rows = [{"run_id": run_id, "journal_workspace": workspace, "owner_process": None}]
+        verdict: str = (await run_liveness(journal, rows)).get(run_id, "live")
+        return verdict
 
     async def run_forever(self, stop: asyncio.Event) -> None:
         """Process jobs until ``stop`` is set; per-iteration errors are logged, not fatal.

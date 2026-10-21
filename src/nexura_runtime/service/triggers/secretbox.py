@@ -8,7 +8,9 @@ provides a small one. Key material comes from, in order:
 1. ``NEXURA_TRIGGER_SECRET_KEY`` (any string; recommended for shared deployments, keeps the key
    off the database host's disk), else
 2. a random key file ``<db_path>.trigger.key`` created with mode 0600 next to the database
-   (so the key is not inside the SQLite file, its WAL or a plain copy of them), else
+   (so the key is not inside the SQLite file, its WAL or a plain copy of them), or an
+   explicit ``key_file`` (``PostgresTriggerStore`` in the service uses the key file of the
+   service's SQLite database), else
 3. a random per-process key for in-memory databases.
 
 Ciphertext is ``enc:v1:<token>`` using Fernet (``cryptography``) when installed, otherwise an
@@ -30,14 +32,19 @@ ENV_KEY = "NEXURA_TRIGGER_SECRET_KEY"
 _PREFIX = "enc:"
 
 
-def _load_master_key(db_path: str) -> bytes:
+def key_file_for(db_path: str | os.PathLike[str]) -> Path:
+    """The key file used for the SQLite database at ``db_path``: ``<db_path>.trigger.key``."""
+    return Path(f"{db_path}.trigger.key")
+
+
+def _load_master_key(db_path: str, key_file: str | os.PathLike[str] | None = None) -> bytes:
     db_path = str(db_path)
     env = os.environ.get(ENV_KEY)
     if env:
         return sha256(env.encode("utf-8")).digest()
-    if db_path in ("", ":memory:") or db_path.startswith("file:"):
+    if key_file is None and (db_path in ("", ":memory:") or db_path.startswith("file:")):
         return secrets.token_bytes(32)
-    key_path = Path(f"{db_path}.trigger.key")
+    key_path = Path(key_file) if key_file is not None else key_file_for(db_path)
     try:
         return base64.urlsafe_b64decode(key_path.read_bytes().strip())
     except FileNotFoundError:
@@ -65,8 +72,10 @@ def _stream(key: bytes, nonce: bytes, length: int) -> bytes:
 class SecretBox:
     """Encrypt/decrypt short secrets with a key bound to one database."""
 
-    def __init__(self, db_path: str) -> None:
-        master = _load_master_key(db_path)
+    def __init__(self, db_path: str, *, key_file: str | os.PathLike[str] | None = None) -> None:
+        """Key from ``NEXURA_TRIGGER_SECRET_KEY``, else ``key_file`` (created 0600 when absent),
+        else ``<db_path>.trigger.key`` (a random per-process key for in-memory databases)."""
+        master = _load_master_key(db_path, key_file)
         self._enc_key = hmac.new(master, b"nexura-trigger-enc", sha256).digest()
         self._mac_key = hmac.new(master, b"nexura-trigger-mac", sha256).digest()
         self._fernet = None

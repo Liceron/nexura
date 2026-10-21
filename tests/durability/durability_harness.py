@@ -13,7 +13,8 @@ sends one side effect to the effect service. No production hooks are used: point
 reached through handlers and store subclasses defined by the tests.
 
 Postgres: a :class:`Backend` named ``postgres`` carries ``NEXURA_TEST_POSTGRES_URI``.
-Paths without a Postgres store today are reported by :meth:`Backend.require`.
+:meth:`Backend.require` checks that a path has its Postgres store (all four do since A6
+S10b).
 """
 
 from __future__ import annotations
@@ -37,7 +38,7 @@ from typing import Any
 CHILD_SCRIPT = Path(__file__).with_name("durability_child.py")
 POSTGRES_ENV = "NEXURA_TEST_POSTGRES_URI"
 
-# Postgres stores of each path (design §5 "API changes"); the trigger one is still absent.
+# Postgres stores of each path (design §5 "API changes").
 POSTGRES_STORES: dict[str, tuple[str, str]] = {
     "agent": ("PostgresCheckpointStore", "A6 S5: no Postgres SDK checkpoint store yet"),
     "workflow": ("PostgresWorkflowStore", "A6 S8: no PostgresWorkflowStore yet"),

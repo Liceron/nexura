@@ -30,7 +30,9 @@ print(type(repository).__name__, repository.dsn)
 `PostgresWorkflowStore(dsn)` is the workflow checkpoint store for `WorkflowEngine` on several
 hosts (revisioned checkpoints, history, single-use approvals and the execution journal on the
 same pool); `nexura-runtime serve --workflow-state-url postgresql://...` uses it for the
-service. `PostgresCheckpointStore(dsn)` does the same for SDK agent runs. See
+service, together with `PostgresTriggerStore(dsn)`, the trigger job queue (webhooks, receipts,
+schedules and job leases on the database clock). `PostgresCheckpointStore(dsn)` does the same
+for SDK agent runs. See
 [Durable execution](https://github.com/Liceron/nexura/blob/main/docs/durable-execution.md).
 
 ## Status and limits

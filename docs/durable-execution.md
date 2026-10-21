@@ -11,8 +11,10 @@ and [Resolving an unknown effect](#resolving-an-unknown-effect-s4)). S5 puts the
 `Runner` on the journal (see [SDK agents on the journal](#sdk-agents-on-the-journal-s5)).
 S6 puts top-level `WorkflowEngine` runs on it (see
 [Workflows on the journal](#workflows-on-the-journal-s6)), and S8 adds a Postgres workflow
-store (see [Workflows on Postgres](#workflows-on-postgres-s8)). The trigger worker does not use
-the journal yet, so its retry behavior is unchanged. The A6 design report
+store (see [Workflows on Postgres](#workflows-on-postgres-s8)). S9 puts the service on the
+journal, and S10 makes a reclaimed trigger job continue its run, with a Postgres trigger
+queue in S10b (see [Trigger jobs on the journal](#trigger-jobs-on-the-journal-s10)). The A6
+design report
 (`P35_A6_DURABLE_EXECUTION_DESIGN.md`, an internal planning record that is not part of
 the public repository) gives today's behavior per path in §1 and the implementation
 sequence in §3. Teams and
@@ -25,8 +27,8 @@ The founder approved these defaults:
 - **Unknown outcomes pause the run:** status `paused`,
   `pause_reason="effect_unknown"`. A person resolves the outcome before it continues.
 - **A reclaimed trigger job continues the same run.** A completed run is never
-  executed again. The planned `retry_mode="new_run"` compatibility option preserves
-  the old behavior for one release.
+  executed again. The `retry_mode="new_run"` compatibility option (deprecated, removed
+  in 0.6) preserves the old behavior for one release.
 
 ## Execution identity
 
@@ -536,8 +538,8 @@ graph reads; the journal records the lease and what was dispatched. User guide a
   `WorkflowCheckpoint` has `pending_effect`, `revision` and a `pause_reason` property.
 
 Limits: `SQLiteWorkflowStore` is single-host (for several hosts use
-`PostgresWorkflowStore`, S8 below); trigger reclaim still starts a new run (S10); budgets
-are not yet linked to intents (S11). The service side (lease-based "interrupted" and
+`PostgresWorkflowStore`, S8 below); budgets are not yet linked to intents (S11). Trigger
+reclaim continues the run (S10 below). The service side (lease-based "interrupted" and
 `POST /runs/{id}/recover`) is S9 below.
 
 ## Composite workflow steps and module keys (S7)
@@ -654,7 +656,8 @@ or the environment variable `NEXURA_WORKFLOW_STATE_URL` keep workflow checkpoint
 history and the workflow runs' journal in Postgres. Unset (the default), they stay in the
 SQLite database given by `--db`. The tables are migrated when the app starts. Unless
 `execution_store=` is passed, the effects API reads the same Postgres journal. Studio run
-records, triggers, sessions and the other service tables stay in SQLite. A URL that is not
+records, sessions and the other service tables stay in SQLite; the trigger queue, webhooks
+and schedules move to Postgres with it (S10b below). A URL that is not
 `postgresql://` is refused at startup (exit code 2 from the CLI) without echoing it, and a
 missing `nexura-postgres` package raises `MissingDependencyError` naming
 `pip install nexura-postgres`. An explicit empty `workflow_state_url=""` keeps SQLite even
@@ -668,7 +671,7 @@ database.
 
 Limits: Studio run records (`nexura_studio_runs`) stay in the SQLite file, so two service
 hosts sharing one Postgres workflow state each keep their own run list; that is not yet
-supported. The trigger worker keeps its SQLite job store (S10b).
+supported. The trigger queue moves to Postgres with the workflow state (S10b below).
 
 ## The service on the journal (S9)
 
@@ -727,9 +730,87 @@ SIGKILL, SQLite and Postgres: the second service starting leaves the live run al
 the owner is killed and its lease expired, `recover` from another process continues it).
 
 Limits: Studio does not show a Recover button or the `effect_unknown` pause yet (the API
-and both clients have them; the Studio UI is being redesigned). Trigger reclaim still
-starts a new run (S10). A run killed before its first journal write has no journal and is
-refused with `RUN_NOT_JOURNALED`.
+and both clients have them; the Studio UI is being redesigned). A run killed before its
+first journal write has no journal and is refused with `RUN_NOT_JOURNALED`.
+
+## Trigger jobs on the journal (S10)
+
+A trigger job (a schedule fire or a webhook delivery) owns one workflow run for its whole
+life. The job's queue lease (`TriggerWorker(lease_seconds=...)`, `--lease-seconds`) only
+decides which worker handles the job; the run lease in the execution journal decides who
+executes the run.
+
+When a worker dies (SIGKILL, power loss) its job lease expires and another worker reclaims
+the job (up to `max_attempts` claims). The reclaiming worker then looks at the run the job
+already owns:
+
+| The job's run | What the worker does | Job |
+|---|---|---|
+| `completed` | nothing runs again | `completed` |
+| `failed`, `rejected`, `cancelled` | nothing runs again | `failed`, with the run's error |
+| waiting for a person (`pending_approval`, `waiting_for_input`, `paused` `effect_unknown`) | nothing; a person decides, answers or resolves it | `completed` (the run was started) |
+| `running` / `interrupted`, run lease free or expired (or its owner on this host exited) | `WorkflowEngine.recover` on the same run, with the run's own spec | from the result, as above |
+| `running`, run lease live (another process still executes it) | waits (its job heartbeat keeps the job) until the run finishes or its lease frees | from the result |
+| no execution journal (a legacy run, or one killed before its first journal write) | marks it `interrupted` and starts a new run (nothing journaled could repeat) | from the new run |
+
+Recovering follows the effect-class rules above: completed steps are not run again, a
+`pure` or `idempotent` step that dispatched without a recorded outcome runs again (an
+`idempotent` one with the same key), and a `non_idempotent` one pauses the run
+`effect_unknown` until a person resolves it (`POST /runs/{id}/effects/{effect_id}/resolve`,
+then `POST /runs/{id}/recover`). The run records `RUN_RECOVERY_STARTED` with the job id and
+attempt. A job whose attempts ran out becomes `failed` (`worker lease expired N times`) and
+keeps its run; that run is marked `interrupted` only once its run lease is gone, and it can
+still be recovered over REST.
+
+API changes:
+
+- `TriggerWorker(retry_mode="continue")` is the default. `retry_mode="new_run"` (and
+  `nexura-runtime worker --retry-mode new_run`) keeps the old behaviour: the old run is
+  marked interrupted and a new run starts from the entry node, so effects that already
+  happened repeat. It raises a `DeprecationWarning` and is removed in 0.6.
+- `TriggerStore.reclaim_expired_jobs(..., keep_run=True)`: the reclaimed job keeps its
+  `run_id`; `keep_run=False` is the old behaviour (the id moves to `previous_run_ids`).
+  `DurableTriggerJob.previous_run_ids` is deprecated; it is only filled by the
+  deprecated mode or the no-journal fallback (`set_job_run` moves a replaced run id there).
+- `TriggerWorker(clock=None)`: without an injected clock each store times leases itself,
+  so `PostgresTriggerStore` uses the database clock.
+- `nexura_runtime.service.api.runs.recover_workflow_run(app_state, run_id=...,
+  workspace_id=...)` is the recover step `POST /runs/{id}/recover` and the worker share.
+
+**Postgres trigger queue (S10b).** `nexura_postgres.PostgresTriggerStore(dsn,
+secret_key_file=None)` has the same contract as `SqliteTriggerStore`: webhooks and
+schedules owned by one workspace, de-duplicated receipts, the schedule compare-and-swap,
+and the job queue (`claim_pending_job`, `renew_job_lease`, `reclaim_expired_jobs` with
+rows locked `FOR UPDATE SKIP LOCKED`, owner-guarded `complete_job`). Each call is one
+transaction; lease times come from the database clock (`clock_timestamp()`) unless the
+caller passes `now`. Tables (`nexura_trigger_webhooks`, `nexura_trigger_receipts`,
+`nexura_trigger_schedules`, `nexura_trigger_jobs`) are created by versioned migrations
+(`nexura_trigger_migrations`) on first use or `init_db()`. The store's protocol is
+synchronous, so it runs its asyncpg pool on a private event loop in a daemon thread;
+`close()` stops it (it reopens on next use). Webhook signing secrets are encrypted with
+`NEXURA_TRIGGER_SECRET_KEY`, else with the key in `secret_key_file`; without either,
+webhooks are refused (schedules and jobs still work). The service uses it whenever
+`workflow_state_url` (or `--workflow-state-url`, `NEXURA_WORKFLOW_STATE_URL`) names
+Postgres, with the key file of its SQLite database (`<db>.trigger.key`); set
+`NEXURA_TRIGGER_SECRET_KEY` when workers on several hosts share the queue.
+
+Tests: `tests/backend/test_trigger_store_contract.py` (one contract suite over memory,
+SQLite and Postgres, including two-instance races), `tests/postgres/test_postgres_trigger_store.py`
+(secrets at rest, migrations, the service end to end on Postgres),
+`tests/p35/test_a6_s10_trigger_continuation.py` (in-process: crash mid-run, completed,
+failed and waiting runs, a live run lease, the deprecated mode) and the trigger rows of
+`tests/durability` (real SIGKILL on SQLite and Postgres: a worker killed inside `pay`, or
+after its run completed but before `complete_job`; the second worker continues the same
+run and no effect repeats).
+
+Limits: Studio run records stay in SQLite. A reclaimed job's run row is in the Studio
+database of the process that started it; a worker with another Studio database cannot
+find it and fails the job ("Run ... was not found"), without running anything. Until Studio
+run records move to Postgres, share a Postgres queue only between processes that share one
+Studio database (one host); leases themselves work across hosts.
+A worker that loses its job lease cancels its local run task; the reclaiming worker then
+recovers the run under the run lease, so a `non_idempotent` step that was mid-flight
+pauses `effect_unknown`.
 
 ## See also
 

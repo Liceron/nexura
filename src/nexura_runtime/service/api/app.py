@@ -94,8 +94,10 @@ from nexura_runtime.service.run_liveness import (
     journal_decides,
     reconcile_quietly,
 )
+from nexura_runtime.service.triggers.secretbox import key_file_for
 from nexura_runtime.service.triggers.store import TriggerStore
 from nexura_runtime.service.workflow_state import (
+    open_trigger_state_store,
     open_workflow_state_store,
     resolve_workflow_state_url,
 )
@@ -281,7 +283,11 @@ def create_api_app(
             A ``postgresql://`` URI keeps them in Postgres
             (``nexura_postgres.PostgresWorkflowStore``, ``pip install nexura-postgres``);
             unless ``execution_store`` is given, the effects API then reads that journal.
-            Studio run records, triggers and sessions stay in SQLite. Applies to the store
+            The trigger job queue, webhooks and schedules then live in Postgres too
+            (``nexura_postgres.PostgresTriggerStore``, A6 S10b; webhook secrets are encrypted
+            with ``NEXURA_TRIGGER_SECRET_KEY`` or the ``<db_path>.trigger.key`` file, so set
+            the variable when several hosts share the queue). Studio run records and
+            sessions stay in SQLite. Applies to the store
             this function creates: passing it together with ``store`` raises ``ValueError``.
             The tables are created (migrated) when the app starts.
         workflow_lease_ttl: seconds of the run lease a workflow run's process holds (renewed
@@ -309,6 +315,7 @@ def create_api_app(
         )
     # Checked before any file is created: an unusable URL fails fast.
     workflow_state_store: Any = None
+    state_url: str | None = None
     if store is None:
         state_url = resolve_workflow_state_url(workflow_state_url)
         if state_url is not None:
@@ -370,12 +377,19 @@ def create_api_app(
     db_file = getattr(effective_store, "db_path", None)
     app_trigger_store: TriggerStore
     app_channel_store: ChannelStore
+    # A6 S10b: with Postgres workflow state the trigger queue lives next to it, so workers on
+    # several hosts share it (webhook secrets keep the key file of the SQLite database).
+    postgres_trigger_store: Any = None
+    if workflow_state_store is not None and state_url is not None:
+        postgres_trigger_store = open_trigger_state_store(
+            state_url, secret_key_file=key_file_for(db_file or "./nexura_service.sqlite3")
+        )
     if db_file and db_file != ":memory:":
         from nexura_runtime.evaluation.store import SqliteEvaluationStore
         from nexura_runtime.integrations.channels.outbox import SqliteChannelStore
         from nexura_runtime.service.triggers.store import SqliteTriggerStore
 
-        app_trigger_store = SqliteTriggerStore(db_file)
+        app_trigger_store = postgres_trigger_store or SqliteTriggerStore(db_file)
         app_channel_store = SqliteChannelStore(db_file)
         app_eval_store = SqliteEvaluationStore(db_file)
     else:
@@ -383,15 +397,18 @@ def create_api_app(
         from nexura_runtime.integrations.channels.outbox import MemoryChannelStore
         from nexura_runtime.service.triggers.store import MemoryTriggerStore
 
-        app_trigger_store = MemoryTriggerStore()
+        app_trigger_store = postgres_trigger_store or MemoryTriggerStore()
         app_channel_store = MemoryChannelStore()
         app_eval_store = SqliteEvaluationStore(":memory:")
 
     from nexura_runtime.service.triggers.manager import TriggerManager
 
     app_trigger_manager = TriggerManager(store=app_trigger_store)
-    with contextlib.suppress(Exception):
-        app_trigger_manager.reconcile_missed_runs()
+    if postgres_trigger_store is None:
+        # A Postgres queue is not touched before the app starts (its pool opens on first
+        # use); the startup phase and the worker's schedule ticks catch up instead.
+        with contextlib.suppress(Exception):
+            app_trigger_manager.reconcile_missed_runs()
 
     # Restore persisted integration tools into registries
     if db_file and db_file != ":memory:" and Path(db_file).exists():
@@ -472,6 +489,8 @@ def create_api_app(
         if workflow_state_store is not None:
             # Migrate the Postgres workflow tables and their journal before serving.
             await workflow_state_store.init_db()
+        if postgres_trigger_store is not None:
+            await asyncio.to_thread(postgres_trigger_store.init_db)
         if (
             workflow_state_store is None
             or app.state.execution_store is not workflow_state_store.execution_store
@@ -570,6 +589,10 @@ def create_api_app(
 
         if store is None:
             await effective_store.close()
+        if postgres_trigger_store is not None:
+            # Reopened on next use, so a restarted app keeps working.
+            with suppress(Exception):
+                await asyncio.to_thread(postgres_trigger_store.close)
         if execution_store is None:
             await app.state.execution_store.close()
             app.state.execution_store_closed = True

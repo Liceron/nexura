@@ -137,8 +137,13 @@ async def test_heartbeat_renewal_keeps_long_job_owned(env: Env) -> None:
     assert env.slow_started == 1  # never retried
 
 
+@pytest.mark.parametrize("keep_run", [False, True])
 @pytest.mark.parametrize("kind", ["memory", "sqlite"])
-def test_expired_lease_reclaimed_exactly_once_by_racing_workers(kind: str, tmp_path: Path) -> None:
+def test_expired_lease_reclaimed_exactly_once_by_racing_workers(
+    kind: str, keep_run: bool, tmp_path: Path
+) -> None:
+    """``keep_run`` (A6 S10 default): the job keeps its run for the new owner to continue;
+    ``keep_run=False`` is the deprecated ``retry_mode="new_run"`` store behaviour."""
     path = str(tmp_path / "race.sqlite3")
     stores: list[TriggerStore]
     if kind == "memory":
@@ -157,7 +162,9 @@ def test_expired_lease_reclaimed_exactly_once_by_racing_workers(kind: str, tmp_p
 
     def race(name: str, store: TriggerStore) -> None:
         barrier.wait()
-        results[name] = store.reclaim_expired_jobs(name, lease_seconds=10, now=2000.0)
+        results[name] = store.reclaim_expired_jobs(
+            name, lease_seconds=10, now=2000.0, keep_run=keep_run
+        )
 
     threads = [
         threading.Thread(target=race, args=("w1", stores[0])),
@@ -173,7 +180,10 @@ def test_expired_lease_reclaimed_exactly_once_by_racing_workers(kind: str, tmp_p
     job = results[winners[0]][0]
     assert job.claimed_by == winners[0] and job.attempts == 2 and job.status == "claimed"
     assert job.lease_expires_at == 2010.0
-    assert job.run_id is None and job.previous_run_ids == ["run-old"]
+    if keep_run:
+        assert job.run_id == "run-old" and job.previous_run_ids == []
+    else:
+        assert job.run_id is None and job.previous_run_ids == ["run-old"]
     stored = stores[0].get_job("j1")
     assert stored is not None and stored.claimed_by == winners[0]
     # A non-expired claim is never taken.

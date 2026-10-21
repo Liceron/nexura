@@ -217,7 +217,7 @@ if (waiting.status === "waiting_for_input" && waiting.pending_input) {
 
 Schedules and signed webhooks enqueue durable trigger jobs. A trigger worker turns each job into a normal workflow run: same engine, approval policy, workspace ownership and events as `POST /runs`, with the schedule payload or webhook body as the initial state. The run is owned by the job's workspace and started by the principal `trigger:<schedule|webhook>:<id>`. Without a worker, jobs stay `pending` and nothing runs.
 
-Start the worker inside the service, or as separate processes that share the same SQLite file. Claims are atomic, so `nexura-runtime serve --worker` and any number of `nexura-runtime worker` processes can run together and each job runs once.
+Start the worker inside the service, or as separate processes that share the same SQLite file. Claims are atomic, so `nexura-runtime serve --worker` and any number of `nexura-runtime worker` processes can run together and each job runs once. With `--workflow-state-url postgresql://...` (or `NEXURA_WORKFLOW_STATE_URL`) the job queue, webhooks and schedules live in Postgres next to the workflow state (`nexura_postgres.PostgresTriggerStore`); webhook secrets are then encrypted with `NEXURA_TRIGGER_SECRET_KEY`, or else the `<database>.trigger.key` file. Studio run records stay in the SQLite file, so processes sharing a Postgres queue must also share that file (one machine) for now.
 
 ```bash
 nexura-runtime serve --db ./nexura_service.sqlite3 --worker --poll-interval 1
@@ -262,11 +262,19 @@ curl -s -X POST http://127.0.0.1:8765/api/v1/triggers/webhooks/orders/deliver \
 
 ### Job leases and crash recovery
 
-A claimed job carries a lease: `lease_expires_at = claimed_at + lease_seconds` (default 300, set with `TriggerWorker(lease_seconds=...)` or `nexura-runtime worker --lease-seconds`). While a run executes, the worker renews the lease every `lease_seconds / 3` and stops when the run finishes. If a worker dies hard (SIGKILL, power loss), its lease expires. At the start of each `run_once`, any worker reclaims expired jobs with an atomic compare-and-swap (SQLite `UPDATE ... WHERE` on the observed owner and lease; a lock in the memory store), so two workers racing on the same job produce exactly one new owner.
+A claimed job carries a lease: `lease_expires_at = claimed_at + lease_seconds` (default 300, set with `TriggerWorker(lease_seconds=...)` or `nexura-runtime worker --lease-seconds`). While a run executes, the worker renews the lease every `lease_seconds / 3` and stops when the run finishes. If a worker dies hard (SIGKILL, power loss), its lease expires. At the start of each `run_once`, any worker reclaims expired jobs with an atomic compare-and-swap (SQLite `UPDATE ... WHERE` on the observed owner and lease; Postgres rows locked `FOR UPDATE SKIP LOCKED`, timed by the database clock; a lock in the memory store), so two workers racing on the same job produce exactly one new owner. This job lease only coordinates the queue: the run's own lease in the execution journal decides who executes the run (see [Durable execution: trigger jobs on the journal](durable-execution.md#trigger-jobs-on-the-journal-s10)).
 
-A reclaimed job is retried up to `max_attempts` claims in total (default 3, `--max-attempts`; the counter is the persisted `attempts` field). When the attempts are used up the job becomes `failed` with `worker lease expired N times`. The run record the dead worker left in `running` is marked `interrupted` before the retry starts. The retry creates a NEW run: the job's `run_id` is the latest run and `previous_run_ids` lists earlier attempts.
+A job owns one run for its whole life. A reclaimed job (up to `max_attempts` claims in total, default 3, `--max-attempts`; the counter is the persisted `attempts` field) continues that run instead of starting a new one:
 
-Idempotency: a retried job starts again from the beginning of the workflow, not from the point of failure. Side effects that ran before the crash may run again; approval gates still stop gated handlers until a human approves, so they protect side effects. Design handlers that call external systems to tolerate repeats. A worker that loses its lease (for example after a long stall) cancels its local run and can no longer complete or fail the job. Its run may have produced partial side effects.
+- a run that already `completed` is not run again; the job is `completed`. A `failed`, `rejected` or `cancelled` run fails the job with the run's error;
+- a run waiting for a person (`pending_approval`, `waiting_for_input`, or `paused` with `pause_reason` `effect_unknown`) counts as started: the job is `completed`;
+- a `running` or `interrupted` run whose run lease is gone is continued with `WorkflowEngine.recover` (the same step as `POST /runs/{run_id}/recover`): completed steps do not run again, a step declared `pure` or `idempotent` that may have run is run again (an `idempotent` one with the same idempotency key), and an undeclared (`non_idempotent`) one pauses the run `effect_unknown` until you resolve its effect; the event `RUN_RECOVERY_STARTED` names the job and attempt;
+- while another live process still holds the run lease, the worker waits for that run instead of starting anything;
+- a run without an execution journal (recorded before this change, or killed before its first journal write) is marked `interrupted` and the job starts a new run; the old id moves to the deprecated `previous_run_ids`.
+
+When the attempts are used up the job becomes `failed` with `worker lease expired N times` and keeps its run, which is marked `interrupted` once its run lease is gone and can still be recovered over the API. A worker that loses its job lease (for example after a long stall) cancels its local run and can no longer complete or fail the job; the worker that took the job over continues the run.
+
+`TriggerWorker(retry_mode="new_run")` (or `nexura-runtime worker --retry-mode new_run`) keeps the behaviour from before: the old run is marked `interrupted` and a NEW run starts from the beginning of the workflow, so side effects that ran before the crash may run again. It is deprecated (it raises a `DeprecationWarning`) and will be removed in 0.6.
 
 Each claimed job runs as its own asyncio task, at most `--max-concurrent-jobs` at a time (default 4), so a long run does not delay schedule ticks or lease recovery. On shutdown the worker waits a grace period (default 20 seconds) for running jobs, then cancels them; a cancelled job is failed with `worker cancelled`. Databases created before leases are migrated by adding nullable columns on open; an old `claimed` job without a lease is treated as expiring one lease period after `claimed_at`, so it is recovered rather than stuck. `nexura-runtime serve --worker` uses the default lease settings.
 
@@ -413,8 +421,9 @@ profile and binds to `127.0.0.1`; do not expose it on a network as is.
 Schedules and webhooks only enqueue jobs; a worker runs them. Start one with
 `nexura-runtime serve --worker` or a standalone `nexura-runtime worker --db ... [--once]`. Claimed jobs
 hold a lease the worker renews (`--lease-seconds`, default 300); if a worker dies, the
-job is reclaimed and retried up to `--max-attempts`, and the dead run is marked
-`interrupted`. Release pins are enforced and several workers never double-fire a schedule.
+job is reclaimed (up to `--max-attempts` claims) and continues the run it owns, which is
+never run again once it completed. Release pins are enforced and several workers never
+double-fire a schedule.
 
 Chat in the service and Studio is offline by default. An operator can allow real models
 with `nexura-runtime serve --chat-model NAME=PROVIDER:MODEL` (or `NEXURA_CHAT_MODELS`); API keys

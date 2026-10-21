@@ -294,6 +294,7 @@ def worker_command(args: argparse.Namespace) -> int:
             lease_seconds=args.lease_seconds,
             max_attempts=args.max_attempts,
             max_concurrent_jobs=args.max_concurrent_jobs,
+            retry_mode=getattr(args, "retry_mode", "continue"),
         )
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -313,6 +314,9 @@ def worker_command(args: argparse.Namespace) -> int:
                 await worker.run_forever(stop)
         finally:
             await app.state.store.close()
+            close_triggers = getattr(app.state.trigger_store, "close", None)
+            if close_triggers is not None:
+                await asyncio.to_thread(close_triggers)
 
     with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(_main())
@@ -927,6 +931,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     worker_p.add_argument(
         "--max-concurrent-jobs", type=int, default=4, help="Jobs this worker runs at once"
+    )
+    worker_p.add_argument(
+        "--retry-mode",
+        choices=("continue", "new_run"),
+        default="continue",
+        help=(
+            "What a reclaimed job does: continue its run (default) or, deprecated until 0.6, "
+            "start a new run from the entry node"
+        ),
     )
     worker_p.add_argument("--once", action="store_true", help="Process due jobs once and exit")
     worker_p.add_argument("--handlers", action="append", metavar="MODULE:ATTR", help=HANDLERS_HELP)
