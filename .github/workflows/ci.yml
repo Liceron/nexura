@@ -54,9 +54,8 @@ jobs:
         run: uv run --frozen python scripts/test_agents_wheel.py --python ${{ matrix.python }}
 
   platform-smoke:
-    # macOS and Windows checks (P37 B1). Informational until they have passed on GitHub's
-    # runners; Linux remains the verified platform (README).
-    continue-on-error: true
+    # macOS and Windows checks (P37 B1); required since they first passed on GitHub's runners
+    # (2026-10-21). Linux remains the platform the full suite runs on.
     strategy:
       fail-fast: false
       matrix:
