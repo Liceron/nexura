@@ -798,16 +798,20 @@ litellm = [
 otel = [
     { name = "opentelemetry-api" },
 ]
+signing = [
+    { name = "cryptography" },
+]
 
 [package.metadata]
 requires-dist = [
+    { name = "cryptography", marker = "extra == 'signing'", specifier = ">=46" },
     { name = "httpx", specifier = ">=0.27.0,<1.0.0" },
     { name = "litellm", marker = "extra == 'litellm'", specifier = ">=1.104,<2" },
     { name = "opentelemetry-api", marker = "extra == 'otel'", specifier = ">=1.20,<2" },
     { name = "pydantic", specifier = ">=2.7.0,<3.0.0" },
     { name = "typing-extensions", specifier = ">=4.12" },
 ]
-provides-extras = ["litellm", "otel"]
+provides-extras = ["litellm", "otel", "signing"]
 
 [[package]]
 name = "nexura-connectors"
