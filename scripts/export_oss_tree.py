@@ -41,6 +41,7 @@ ALLOW: tuple[str, ...] = (
     "scripts/test_agents_wheel.py",
     "scripts/export_oss_tree.py",
     "scripts/generate_sbom.py",
+    "scripts/live_canary.py",
     # Clients and Studio (sources and their own configs only; no build output)
     "clients/typescript/**",
     "studio-web/LICENSE",
