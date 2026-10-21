@@ -12,6 +12,7 @@ import sqlite3
 import tarfile
 import tempfile
 import time
+from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -235,7 +236,7 @@ class BackupEngine:
                 result_manifest = BackupManifest(**manifest_data)
             except (TypeError, ValueError) as exc:
                 raise BackupIntegrityError("Invalid backup manifest schema") from exc
-            with sqlite3.connect(f"file:{staged_db}?mode=ro", uri=True) as conn:
+            with closing(sqlite3.connect(f"file:{staged_db}?mode=ro", uri=True)) as conn, conn:
                 check_result = conn.execute("PRAGMA integrity_check").fetchone()
                 if not check_result or check_result[0] != "ok":
                     raise BackupIntegrityError("Backup SQLite database failed integrity check")
@@ -256,7 +257,7 @@ class BackupEngine:
                         shutil.copy2(src_file, dest_file)
 
             # 5. Verify restored database opens
-            with sqlite3.connect(str(dest_db), timeout=5.0) as conn:
+            with closing(sqlite3.connect(str(dest_db), timeout=5.0)) as conn, conn:
                 cursor = conn.cursor()
                 cursor.execute("PRAGMA integrity_check;")
                 check_result = cursor.fetchone()

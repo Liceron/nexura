@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
@@ -222,7 +223,12 @@ async def update_workspace_policy(
     previous = ws.metadata.get("require_promotion_approval") is True
     ws.metadata["require_promotion_approval"] = payload.require_promotion_approval
     if repo.db_path is not None:
-        with sqlite3.connect(str(repo.db_path), check_same_thread=False, timeout=10.0) as conn:
+        with (
+            closing(
+                sqlite3.connect(str(repo.db_path), check_same_thread=False, timeout=10.0)
+            ) as conn,
+            conn,
+        ):
             conn.execute(
                 "UPDATE nexura_service_workspaces SET metadata_json = ? WHERE workspace_id = ?",
                 (json.dumps(ws.metadata), workspace_id),

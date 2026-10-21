@@ -107,10 +107,19 @@ class SqliteChannelStore:
 
     def __init__(self, db_path: str = ":memory:") -> None:
         self.db_path = db_path
-        self._lock = threading.Lock()
-        self._conn = sqlite3.connect(db_path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
+        self._lock = threading.RLock()
+        self._connection: sqlite3.Connection | None = None
         self._init_db()
+
+    @property
+    def _conn(self) -> sqlite3.Connection:
+        # Opened on first use and again after close(), so an app restarted after its
+        # shutdown closed the store keeps working.
+        with self._lock:
+            if self._connection is None:
+                self._connection = sqlite3.connect(self.db_path, check_same_thread=False)
+                self._connection.row_factory = sqlite3.Row
+            return self._connection
 
     def _init_db(self) -> None:
         with self._lock:
@@ -255,4 +264,9 @@ class SqliteChannelStore:
 
     def close(self) -> None:
         with self._lock:
-            self._conn.close()
+            if self._connection is not None:
+                self._connection.close()
+                # A file database reopens on next use; an in-memory one is gone, so later
+                # use still fails instead of silently starting empty.
+                if self.db_path != ":memory:":
+                    self._connection = None

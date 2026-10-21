@@ -16,6 +16,7 @@ import os
 import sqlite3
 import threading
 import time
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -87,7 +88,10 @@ class WorkspaceRepository:
         ensure_private_file(self.db_path)
         with (
             self._lock,
-            sqlite3.connect(str(self.db_path), check_same_thread=False, timeout=10.0) as conn,
+            closing(
+                sqlite3.connect(str(self.db_path), check_same_thread=False, timeout=10.0)
+            ) as conn,
+            conn,
         ):
             conn.execute(
                 """
@@ -172,7 +176,12 @@ class WorkspaceRepository:
             self.db_path = Path(db_path).resolve()
             self._init_sqlite()
             # Flush any unwritten workspaces/ownership that were in memory
-            with sqlite3.connect(str(self.db_path), check_same_thread=False, timeout=10.0) as conn:
+            with (
+                closing(
+                    sqlite3.connect(str(self.db_path), check_same_thread=False, timeout=10.0)
+                ) as conn,
+                conn,
+            ):
                 for ws in self._workspaces.values():
                     conn.execute(
                         """
@@ -210,9 +219,12 @@ class WorkspaceRepository:
         with self._lock:
             self._ownership[(resource_type, resource_id)] = (workspace_id, owner_id)
             if self.db_path is not None:
-                with sqlite3.connect(
-                    str(self.db_path), check_same_thread=False, timeout=10.0
-                ) as conn:
+                with (
+                    closing(
+                        sqlite3.connect(str(self.db_path), check_same_thread=False, timeout=10.0)
+                    ) as conn,
+                    conn,
+                ):
                     conn.execute(
                         """
                         INSERT OR REPLACE INTO nexura_service_resource_ownership
@@ -284,9 +296,12 @@ class WorkspaceRepository:
         with self._lock:
             removed = self._ownership.pop((resource_type, resource_id), None)
             if self.db_path is not None:
-                with sqlite3.connect(
-                    str(self.db_path), check_same_thread=False, timeout=10.0
-                ) as conn:
+                with (
+                    closing(
+                        sqlite3.connect(str(self.db_path), check_same_thread=False, timeout=10.0)
+                    ) as conn,
+                    conn,
+                ):
                     conn.execute(
                         """
                         DELETE FROM nexura_service_resource_ownership
@@ -320,9 +335,12 @@ class WorkspaceRepository:
             self._workspaces[workspace_id] = ws
 
             if self.db_path is not None:
-                with sqlite3.connect(
-                    str(self.db_path), check_same_thread=False, timeout=10.0
-                ) as conn:
+                with (
+                    closing(
+                        sqlite3.connect(str(self.db_path), check_same_thread=False, timeout=10.0)
+                    ) as conn,
+                    conn,
+                ):
                     conn.execute(
                         """
                         INSERT OR REPLACE INTO nexura_service_workspaces

@@ -8,6 +8,7 @@ import os
 import sqlite3
 import sys
 import time
+from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -80,7 +81,7 @@ class HealthChecker:
         t0 = time.perf_counter()
         try:
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
-            with sqlite3.connect(str(self.db_path), timeout=3.0) as conn:
+            with closing(sqlite3.connect(str(self.db_path), timeout=3.0)) as conn, conn:
                 cursor = conn.cursor()
                 cursor.execute("SELECT 1;")
                 res = cursor.fetchone()

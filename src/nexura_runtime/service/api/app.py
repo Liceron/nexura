@@ -11,7 +11,7 @@ import shutil
 import tempfile
 import time
 from collections.abc import AsyncIterator, Callable, Iterable, Mapping
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager, closing, suppress
 from pathlib import Path
 from typing import Any
 
@@ -415,7 +415,7 @@ def create_api_app(
         import sqlite3
 
         try:
-            with sqlite3.connect(str(db_file), timeout=5.0) as conn:
+            with closing(sqlite3.connect(str(db_file), timeout=5.0)) as conn, conn:
                 cur = conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' AND "
                     "name='nexura_service_integration_registrations'"
@@ -589,6 +589,15 @@ def create_api_app(
 
         if store is None:
             await effective_store.close()
+        if db_file and db_file != ":memory:":
+            # Release the database file (Windows cannot delete one that is still open); these
+            # stores reopen it on next use, so a restarted app keeps working.
+            sqlite_stores: list[Any] = [app_channel_store, app_eval_store]
+            if postgres_trigger_store is None:
+                sqlite_stores.append(app_trigger_store)
+            for sqlite_store in sqlite_stores:
+                with suppress(Exception):
+                    sqlite_store.close()
         if postgres_trigger_store is not None:
             # Reopened on next use, so a restarted app keeps working.
             with suppress(Exception):
