@@ -14,6 +14,7 @@ Exit status is pytest's. Used by CI for Python 3.11, 3.12 and 3.13.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -55,7 +56,8 @@ def main() -> int:
         (wheel,) = (work / "dist").glob("nexura_agents-*.whl")
         venv = work / "venv"
         run(["uv", "venv", "--python", args.python, str(venv)])
-        py = str(venv / "bin" / "python")
+        # Windows venvs keep the interpreter in Scripts\, everything else in bin/.
+        py = str(venv / "Scripts" / "python.exe" if os.name == "nt" else venv / "bin" / "python")
         run(
             [
                 "uv",

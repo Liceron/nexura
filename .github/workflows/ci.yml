@@ -53,6 +53,35 @@ jobs:
         # that does not need the platform package (see the script's docstring).
         run: uv run --frozen python scripts/test_agents_wheel.py --python ${{ matrix.python }}
 
+  platform-smoke:
+    # macOS and Windows checks (P37 B1). Informational until they have passed on GitHub's
+    # runners; Linux remains the verified platform (README).
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          python-version: "3.12"
+      - name: Standalone nexura-agents wheel and its test suite
+        run: uv run --frozen python scripts/test_agents_wheel.py --python 3.12
+      - name: Runtime install and an offline workflow example
+        run: |
+          uv sync --frozen --extra studio
+          uv run --frozen python examples/oss/o07.py
+      - name: A generated project passes its own tests
+        run: |
+          uv run --frozen nexura-runtime init "$RUNNER_TEMP/smoke" --template workflow
+          cd "$RUNNER_TEMP/smoke"
+          uv run --project "$GITHUB_WORKSPACE" --frozen python -m pytest -q -p no:cacheprovider
+
   vector-stores:
     runs-on: ubuntu-24.04
     services:
