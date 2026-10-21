@@ -99,7 +99,7 @@ test('agents: create with the offline model, run it in a workflow node, chat wit
   await expect(inspector.getByTestId('agent-node-input-key')).toHaveValue('q');
   await inspector.getByTestId('agent-node-output-key').fill('answer');
   await page.getByRole('button', { name: 'Save', exact: true }).click();
-  await expect(page.getByLabel('Authoritative revision badge')).toContainText('Revision: 2');
+  await expect(page.getByLabel('Workflow revision')).toContainText('Revision: 2');
   const spec = (await (await page.request.get(`${cluster.backendUrl}/api/v1/workflows/${workflowId}`)).json()).spec;
   expect(spec.nodes.ask.config).toEqual({ agent_id: agentId, input_key: 'q', output_key: 'answer' });
 

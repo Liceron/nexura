@@ -124,7 +124,7 @@ test('agent node inspector: pick skills and a label, saved on the node config', 
   await inspector.getByTestId('skills-label-input').fill('staging');
 
   await page.getByRole('button', { name: 'Save', exact: true }).click();
-  await expect(page.getByLabel('Authoritative revision badge')).toContainText('Revision: 2');
+  await expect(page.getByLabel('Workflow revision')).toContainText('Revision: 2');
   const spec = (await (await page.request.get(`${cluster.backendUrl}/api/v1/workflows/${wf}`)).json()).spec;
   expect(spec.nodes.start.config.skills).toEqual(['alpha']);
   expect(spec.nodes.start.config.skills_label).toBe('staging');

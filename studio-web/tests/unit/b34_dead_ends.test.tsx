@@ -220,7 +220,7 @@ describe('B34 create-workflow modal', () => {
   it('does not list the incompatible test fixture to users', () => {
     mockFetch(() => undefined);
     render(wrap(<CreateWorkflowModal open onClose={vi.fn()} onCreated={vi.fn()} />));
-    expect(screen.getByText('Customer Order Triage & Support')).toBeInTheDocument();
+    expect(screen.getByText('Order support with refund approval')).toBeInTheDocument();
     expect(screen.queryByText('Incompatible Billing Workflow (Test Fixture)')).toBeNull();
   });
 
@@ -311,6 +311,9 @@ describe('B34 templates missing-credentials link', () => {
           suggested_trigger: null,
         });
       }
+      if (url.endsWith('/templates/support-desk')) {
+        return json({ ...summary, spec: { name: 'Support desk', entry_node: 'start', nodes: { start: { id: 'start', handler: 'synthetic_order_lookup' } } }, mermaid: 'graph TD; start', sample_input: {}, suggested_trigger: null });
+      }
       if (url.includes('/templates')) {
         return json({ items: [summary], total: 1, categories: ['support'], tags: [] });
       }
@@ -319,6 +322,7 @@ describe('B34 templates missing-credentials link', () => {
     const user = userEvent.setup();
     render(wrap(<TemplatesView />));
     await user.click(await screen.findByTestId('template-use-support-desk'));
+    await user.click(await screen.findByTestId('template-preview-use'));
     expect(await screen.findByTestId('template-missing-credentials')).toHaveTextContent('model_api_key');
     const link = screen.getByTestId('template-credentials-link');
     expect(link).toHaveAttribute('href', '#/credentials');

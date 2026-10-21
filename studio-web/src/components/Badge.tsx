@@ -20,27 +20,22 @@ export function Badge({
     success: {
       backgroundColor: 'var(--status-success-bg)',
       color: 'var(--status-success)',
-      border: '1px solid rgba(16, 185, 129, 0.2)',
     },
     warning: {
       backgroundColor: 'var(--status-warning-bg)',
       color: 'var(--status-warning)',
-      border: '1px solid rgba(245, 158, 11, 0.2)',
     },
     danger: {
       backgroundColor: 'var(--status-danger-bg)',
       color: 'var(--status-danger)',
-      border: '1px solid rgba(239, 68, 68, 0.2)',
     },
     info: {
       backgroundColor: 'var(--status-info-bg)',
       color: 'var(--status-info)',
-      border: '1px solid rgba(14, 165, 233, 0.2)',
     },
     neutral: {
       backgroundColor: 'var(--bg-muted)',
       color: 'var(--text-secondary)',
-      border: '1px solid var(--border-subtle)',
     },
   };
 
@@ -52,7 +47,8 @@ export function Badge({
         gap: 4,
         padding: '2px 8px',
         borderRadius: 'var(--radius-sm)',
-        fontSize: 12,
+        fontSize: 'var(--type-meta)',
+        lineHeight: 'var(--leading-meta)',
         fontWeight: 500,
         ...variantStyles[variant],
         ...style,

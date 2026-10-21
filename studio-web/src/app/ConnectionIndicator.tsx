@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Liceron
-import React, { useState } from 'react';
+import React, { useId, useState } from 'react';
 import { useApi } from '../api/context';
-import { Badge, BadgeVariant } from '../components/Badge';
 import { Modal } from '../components/Modal';
 import { Input } from '../components/Input';
 import { Button } from '../components/Button';
@@ -14,18 +13,18 @@ export function ConnectionIndicator() {
   const [modalOpen, setModalOpen] = useState(false);
   const [editUrl, setEditUrl] = useState(connection.baseUrl);
   const [editToken, setEditToken] = useState('');
+  const descriptionId = useId();
+  const close = () => { setEditToken(''); setModalOpen(false); };
 
-  const statusVariant: Record<string, BadgeVariant> = {
-    connected: 'success',
-    connecting: 'warning',
-    offline: 'danger',
-    unauthorized: 'danger',
+  const statusColour: Record<string, string> = {
+    connected: 'var(--text-secondary)',
+    connecting: 'var(--status-warning)',
+    offline: 'var(--status-danger)',
+    unauthorized: 'var(--status-danger)',
   };
 
   const statusLabel: Record<string, string> = {
-    connected: connection.profile
-      ? `${connection.profile} (${connection.latencyMs ?? 0}ms)`
-      : t('connection.connected'),
+    connected: t('connection.connected'),
     connecting: t('connection.connecting'),
     offline: t('connection.offline'),
     unauthorized: t('connection.unauthorized'),
@@ -37,7 +36,7 @@ export function ConnectionIndicator() {
     if (editToken.trim()) {
       changeAuthToken(editToken.trim());
     }
-    setModalOpen(false);
+    close();
   };
 
   return (
@@ -45,34 +44,36 @@ export function ConnectionIndicator() {
       <button
         onClick={() => {
           setEditUrl(connection.baseUrl);
+          setEditToken('');
           setModalOpen(true);
         }}
         aria-label={`${t('header.connection')}: ${t(`connection.${connection.status}`)}`}
-        style={{
-          display: 'inline-flex',
-          minWidth: 0,
-          maxWidth: '100%',
-          overflowWrap: 'anywhere',
-          alignItems: 'center',
-          gap: 6,
-          padding: '4px 8px',
-          borderRadius: 'var(--radius-md)',
-          backgroundColor: 'var(--bg-surface-elevated)',
-          border: '1px solid var(--border-subtle)',
-          cursor: 'pointer',
-        }}
+        aria-describedby={descriptionId}
+        aria-haspopup="dialog"
+        type="button"
+        className="studio-utility-button studio-connection"
+        style={{ color: statusColour[connection.status] }}
       >
-        <Badge variant={statusVariant[connection.status] || 'neutral'}>
-          {statusLabel[connection.status] || connection.status}
-        </Badge>
+        <span className="studio-status-dot" aria-hidden="true" />
+        {statusLabel[connection.status] || connection.status}
       </button>
+      <span id={descriptionId} className="studio-sr-only">
+        {t('system.activeProfile')}: {connection.profile || t('common.notAvailable')}.{' '}
+        {t('connection.serverUrl')}: {connection.baseUrl}.{' '}
+        {t('shell.latency')}: {connection.latencyMs == null ? t('common.notAvailable') : `${connection.latencyMs} ms`}.
+      </span>
 
       <Modal
         open={modalOpen}
-        onClose={() => setModalOpen(false)}
+        onClose={close}
         title={t('connection.settings')}
       >
         <form onSubmit={handleSave}>
+          <dl className="studio-connection-details">
+            <dt>{t('shell.connectionStatus')}</dt><dd>{statusLabel[connection.status]}</dd>
+            <dt>{t('system.activeProfile')}</dt><dd>{connection.profile || t('common.notAvailable')}</dd>
+            <dt>{t('shell.latency')}</dt><dd>{connection.latencyMs == null ? t('common.notAvailable') : `${connection.latencyMs} ms`}</dd>
+          </dl>
           <Input
             label={t('connection.serverUrl')}
             value={editUrl}

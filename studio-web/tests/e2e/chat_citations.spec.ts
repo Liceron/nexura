@@ -105,7 +105,8 @@ test.describe('Chat citation footnotes (P11)', () => {
     ]);
 
     await page.goto(cluster.frontendUrl);
-    await expect(page.getByLabel(/^Service connection status:/)).toContainText(/local-owner/i);
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveText('Connected');
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveAccessibleDescription(/local-owner/i);
     await page.getByRole('button', { name: /Playground/i }).click();
     await expect(page.locator('[data-testid="chat-playground"]')).toBeVisible();
 

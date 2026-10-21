@@ -27,7 +27,8 @@ test.describe('Credential References, Ownership and Role UX (F11)', () => {
 
     // 1. Navigate to Studio and open Credentials tab
     await page.goto(cluster.frontendUrl);
-    await expect(page.getByLabel(/^Service connection status:/)).toContainText(/local-owner/i);
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveText('Connected');
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveAccessibleDescription(/local-owner/i);
 
     const credsNavBtn = page.getByRole('button', { name: /Credentials/i });
     await credsNavBtn.click();

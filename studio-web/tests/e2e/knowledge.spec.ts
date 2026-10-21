@@ -25,9 +25,10 @@ test.describe('Knowledge Ingestion, Scoped Retrieval and Citations (F10)', () =>
   }) => {
     // 1. Navigate to Studio and open Knowledge Base
     await page.goto(cluster.frontendUrl);
-    await expect(page.getByLabel(/^Service connection status:/)).toContainText(/local-owner/i);
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveText('Connected');
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveAccessibleDescription(/local-owner/i);
 
-    const knowledgeTab = page.getByRole('button', { name: /Knowledge Base/i });
+    const knowledgeTab = page.getByRole('button', { name: 'Knowledge', exact: true });
     await knowledgeTab.click();
     await expect(page).toHaveURL(/#\/knowledge/);
 
@@ -129,7 +130,7 @@ test.describe('Knowledge Ingestion, Scoped Retrieval and Citations (F10)', () =>
     page,
   }) => {
     await page.goto(cluster.frontendUrl);
-    await page.getByRole('button', { name: /Knowledge Base/i }).click();
+    await page.getByRole('button', { name: 'Knowledge', exact: true }).click();
     await expect(page.locator('[data-testid="knowledge-view"]')).toBeVisible();
 
     // Size limit is displayed next to the drop zone

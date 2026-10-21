@@ -93,7 +93,7 @@ test.describe('Accessibility, Bilingual UX & Performance (F14)', () => {
     await page.goto(cluster.frontendUrl);
 
     // Create a workflow with Hindi/Devanagari title and descriptions
-    const createBtn = page.getByRole('button', { name: /\+ New Workflow|नया कार्यप्रवाह/i });
+    const createBtn = page.getByRole('button', { name: /New workflow|नया कार्यप्रवाह/i });
     await expect(createBtn).toBeVisible();
     await createBtn.click();
 
@@ -103,7 +103,13 @@ test.describe('Accessibility, Bilingual UX & Performance (F14)', () => {
     await submitBtn.click();
 
     // Workflow detail is loaded
-    await expect(page.getByText('अभिगम्यता परीक्षण कार्यप्रवाह')).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'अभिगम्यता परीक्षण कार्यप्रवाह', level: 1, exact: true })).toBeVisible();
+    // The same name must remain visible and navigable in the workflow list.
+    const detailUrl = page.url();
+    await page.getByRole('link', { name: 'Workflows', exact: true }).click();
+    await page.getByRole('link', { name: 'अभिगम्यता परीक्षण कार्यप्रवाह', exact: true }).click();
+    await expect(page).toHaveURL(detailUrl);
+    await expect(page.getByRole('heading', { name: 'अभिगम्यता परीक्षण कार्यप्रवाह', level: 1, exact: true })).toBeVisible();
 
     // Check accessible tab buttons
     const tabCanvas = page.getByTestId('tab-canvas');
@@ -122,11 +128,11 @@ test.describe('Accessibility, Bilingual UX & Performance (F14)', () => {
     // Check that nodes are rendered in accessible list
     await expect(page.getByTestId('accessible-node-lookup')).toBeVisible();
 
-    // Switch to Raw Specification tab
+    // Switch to Specification tab
     await tabJson.click();
     await expect(page.locator('pre')).toContainText('lookup');
 
-    // Return to Visual Graph
+    // Return to Graph
     await tabCanvas.click();
     await expect(tabCanvas).toBeVisible();
   });
@@ -151,15 +157,34 @@ test.describe('Accessibility, Bilingual UX & Performance (F14)', () => {
     await page.setViewportSize({ width: 375, height: 667 });
     await page.goto(cluster.frontendUrl);
 
-    // Header and navigation should still be interactive and visible
-    await expect(page.getByRole('heading', { name: 'Nexura Studio' })).toBeVisible();
-    await expect(page.getByTestId('toggle-theme-btn')).toBeVisible();
-    await expect(page.getByTestId('toggle-language-btn')).toBeVisible();
+    // Compact header retains workspace and exposes preferences in a labelled dialog.
+    await expect(page.getByRole('heading', { name: 'Workflows' })).toBeVisible();
+    await expect(page.getByLabel('Active workspace selector: default')).toBeVisible();
+    const settingsButton = page.getByRole('button', { name: 'Studio settings', exact: true });
+    await settingsButton.click();
+    const settings = page.getByRole('dialog', { name: 'Studio settings' });
+    await expect(settings.getByTestId('toggle-theme-btn')).toBeVisible();
+    await expect(settings.getByTestId('toggle-language-btn')).toBeVisible();
+    await settings.getByTestId('toggle-theme-btn').click();
+    await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+    await settings.getByTestId('toggle-language-btn').click();
+    await expect(page.locator('html')).toHaveAttribute('lang', 'hi');
+    await page.getByTestId('toggle-language-btn').click();
+    await page.keyboard.press('Escape');
+    await expect(settingsButton).toBeFocused();
 
-    // Navigate to Approvals in narrow viewport
-    const navApprovals = page.getByTestId('nav-item-approvals');
-    await navApprovals.click();
+    // Navigation opens with labels, traps focus, restores it on Escape and closes on selection.
+    const navigationButton = page.getByRole('button', { name: 'Open navigation' });
+    await navigationButton.click();
+    const navigation = page.getByRole('dialog', { name: 'Studio navigation' });
+    await expect(navigation.getByRole('navigation').getByRole('button')).toHaveCount(14);
+    await page.keyboard.press('Escape');
+    await expect(navigationButton).toBeFocused();
+    await navigationButton.click();
+    await navigation.getByRole('button', { name: 'Approvals', exact: true }).click();
+    await expect(navigation).not.toBeVisible();
     await expect(page.getByRole('heading', { name: 'Approval Inbox' })).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   });
 
   test('verifies 100-node fixture interaction performs without main-thread lockups', async ({ page }) => {

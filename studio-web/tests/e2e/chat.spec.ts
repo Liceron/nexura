@@ -25,7 +25,8 @@ test.describe('Conversation Playground and Agent Tracing (F09)', () => {
   }) => {
     // 1. Open studio and navigate to Playground
     await page.goto(cluster.frontendUrl);
-    await expect(page.getByLabel(/^Service connection status:/)).toContainText(/local-owner/i);
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveText('Connected');
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveAccessibleDescription(/local-owner/i);
 
     const playgroundTab = page.getByRole('button', { name: /Playground/i });
     await playgroundTab.click();
@@ -88,7 +89,8 @@ test.describe('Conversation Playground and Agent Tracing (F09)', () => {
 
     // 6. Test session reload persistence
     await page.reload();
-    await expect(page.getByLabel(/^Service connection status:/)).toContainText(/local-owner/i);
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveText('Connected');
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveAccessibleDescription(/local-owner/i);
 
     await playgroundTab.click();
     await expect(playground).toBeVisible();

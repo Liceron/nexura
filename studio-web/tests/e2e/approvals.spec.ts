@@ -24,11 +24,12 @@ test.describe('Approval Inbox and Restart-Safe Resume (F08)', () => {
     page,
   }) => {
     await page.goto(cluster.frontendUrl);
-    await expect(page.getByLabel(/^Service connection status:/)).toContainText(/local-owner/i);
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveText('Connected');
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveAccessibleDescription(/local-owner/i);
 
     // Create workflow from Customer Order template
-    await page.getByRole('button', { name: /\+ New Workflow/i }).click();
-    await page.getByRole('dialog').getByText('Customer Order Triage & Support').click();
+    await page.getByRole('button', { name: /New workflow/i }).click();
+    await page.getByRole('dialog').getByText('Order support with refund approval').click();
 
     const nameInput = page.getByLabel('Workflow Name');
     await nameInput.fill('F08 Approval Discovery Workflow');
@@ -36,7 +37,7 @@ test.describe('Approval Inbox and Restart-Safe Resume (F08)', () => {
     await expect(page).toHaveURL(/#\/workflows\/wf-/);
 
     // Launch async run with high amount to pause at approval gate
-    const runBtn = page.getByRole('button', { name: 'Run', exact: true }).first();
+    const runBtn = page.getByRole('button', { name: 'Run', exact: true });
     await runBtn.click();
 
     const runModal = page.getByRole('dialog');
@@ -108,18 +109,19 @@ test.describe('Approval Inbox and Restart-Safe Resume (F08)', () => {
     page,
   }) => {
     await page.goto(cluster.frontendUrl);
-    await expect(page.getByLabel(/^Service connection status:/)).toContainText(/local-owner/i);
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveText('Connected');
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveAccessibleDescription(/local-owner/i);
 
     // Create workflow
-    await page.getByRole('button', { name: /\+ New Workflow/i }).click();
-    await page.getByRole('dialog').getByText('Customer Order Triage & Support').click();
+    await page.getByRole('button', { name: /New workflow/i }).click();
+    await page.getByRole('dialog').getByText('Order support with refund approval').click();
 
     await page.getByLabel('Workflow Name').fill('F08 Rejection Test Workflow');
     await page.getByRole('button', { name: /Validate & Create/i }).click();
     await expect(page).toHaveURL(/#\/workflows\/wf-/);
 
     // Launch async run with refund to pause at gate
-    const runBtn = page.getByRole('button', { name: 'Run', exact: true }).first();
+    const runBtn = page.getByRole('button', { name: 'Run', exact: true });
     await runBtn.click();
 
     const runModal = page.getByRole('dialog');

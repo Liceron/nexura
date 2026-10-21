@@ -5,9 +5,19 @@ import { useEffect, useState } from 'react';
 import { ConnectionIndicator } from './ConnectionIndicator';
 import { WorkspaceSelector } from './WorkspaceSelector';
 import { useI18n } from '../i18n';
+import { Modal } from '../components/Modal';
+import { useCompactLayout } from './useCompactLayout';
+import { useApi } from '../api/context';
 
-export function Header() {
+export function Header({ onOpenNavigation, navigationOpen = false }: {
+  onOpenNavigation?: () => void;
+  navigationOpen?: boolean;
+}) {
   const { language, setLanguage, t } = useI18n();
+  const { connection } = useApi();
+  const compact = useCompactLayout();
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  useEffect(() => { if (!compact) setSettingsOpen(false); }, [compact]);
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
     try {
       const saved = localStorage.getItem('nexura_theme');
@@ -34,90 +44,63 @@ export function Header() {
     });
   };
 
-  return (
-    <header
-      style={{
-        display: 'flex',
-        flexWrap: 'wrap',
-        minWidth: 0,
-        gap: 12,
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        padding: '12px 24px',
-        backgroundColor: 'var(--bg-surface)',
-        borderBottom: '1px solid var(--border-subtle)',
-        position: 'sticky',
-        top: 0,
-        zIndex: 100,
-      }}
-    >
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-        <div
-          style={{
-            width: 28,
-            height: 28,
-            borderRadius: 'var(--radius-sm)',
-            backgroundColor: 'var(--accent-primary)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            color: '#ffffff',
-            fontWeight: 700,
-            fontSize: 15,
-          }}
-        >
-          N
-        </div>
-        <div className="studio-header-title">
-          <h1 style={{ fontSize: 15, fontWeight: 600, letterSpacing: '-0.01em' }}>
-            {t('app.title')}
-          </h1>
-        </div>
-      </div>
-
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', minWidth: 0 }}>
-        <WorkspaceSelector />
-        <ConnectionIndicator />
-
-        {/* Language switcher */}
+  const preferences = <>
         <button
           onClick={() => setLanguage(language === 'en' ? 'hi' : 'en')}
           title={t(`header.language.${language}`)}
           aria-label={t(`header.language.${language}`)}
           data-testid="toggle-language-btn"
-          style={{
-            padding: '4px 8px',
-            fontSize: 12,
-            fontWeight: 600,
-            borderRadius: 'var(--radius-md)',
-            backgroundColor: 'var(--bg-surface-elevated)',
-            border: '1px solid var(--border-subtle)',
-            color: 'var(--text-secondary)',
-            cursor: 'pointer',
-          }}
+          type="button"
+          className="studio-utility-button"
         >
           {language === 'en' ? 'हिन्दी' : 'EN'}
         </button>
 
-        {/* Theme toggle */}
         <button
           onClick={toggleTheme}
           title={theme === 'dark' ? t('app.themeLight') : t('app.themeDark')}
           aria-label={t(`header.theme.${theme}`)}
           data-testid="toggle-theme-btn"
-          style={{
-            padding: '4px 8px',
-            fontSize: 14,
-            borderRadius: 'var(--radius-md)',
-            backgroundColor: 'var(--bg-surface-elevated)',
-            border: '1px solid var(--border-subtle)',
-            color: 'var(--text-secondary)',
-            cursor: 'pointer',
-          }}
+          type="button"
+          className="studio-icon-button"
         >
           {theme === 'dark' ? <Icon name="sun" /> : <Icon name="moon" />}
         </button>
+  </>;
+
+  return (
+    <header className="studio-header">
+      {compact ? (
+        <button className="studio-icon-button" type="button" onClick={onOpenNavigation}
+          aria-label={t('shell.openNavigation')} aria-expanded={navigationOpen} aria-haspopup="dialog">
+          <Icon name="menu" />
+        </button>
+      ) : (
+        <a className="studio-brand" href="#/workflows" aria-label={t('app.title')}>
+          <span className="studio-brand-mark" aria-hidden="true">N</span>
+          <span>{t('app.title')}</span>
+        </a>
+      )}
+      <div className="studio-header-controls">
+        <WorkspaceSelector />
+        {compact ? (
+          <button className="studio-icon-button" type="button" aria-label={t('shell.settings')}
+            aria-haspopup="dialog" aria-expanded={settingsOpen} onClick={() => setSettingsOpen(true)}>
+            <Icon name="system" />
+          </button>
+        ) : <><ConnectionIndicator />{preferences}</>}
       </div>
+      {compact && (connection.status === 'offline' || connection.status === 'unauthorized') && (
+        <div className="studio-connection-failure" role="status">
+          <button className="studio-utility-button" type="button" onClick={() => setSettingsOpen(true)}
+            style={{ color: 'var(--status-danger)' }}>
+            <Icon name="warning" />{t(`connection.${connection.status}`)}
+          </button>
+        </div>
+      )}
+      <Modal open={compact && settingsOpen} onClose={() => setSettingsOpen(false)} title={t('shell.settings')}>
+        <div className="studio-settings-controls"><ConnectionIndicator />{preferences}</div>
+      </Modal>
     </header>
   );
 }

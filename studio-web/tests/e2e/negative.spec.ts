@@ -18,7 +18,8 @@ test.describe('Studio Web Negative Cases & Error Recovery', () => {
     await page.goto(cluster.frontendUrl);
 
     // Initial connection to valid service is good
-    await expect(page.getByLabel(/^Service connection status:/)).toContainText(/local-owner/i);
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveText('Connected');
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveAccessibleDescription(/local-owner/i);
 
     // Open connection settings dialog
     await page.getByLabel(/^Service connection status:/).click();
@@ -39,7 +40,8 @@ test.describe('Studio Web Negative Cases & Error Recovery', () => {
     await page.getByRole('button', { name: 'Save Connection' }).click();
 
     // Successfully recovers
-    await expect(page.getByLabel(/^Service connection status:/)).toContainText(/local-owner/i);
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveText('Connected');
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveAccessibleDescription(/local-owner/i);
   });
 
   test('workspace change updates scoped header and clears previous views', async ({ page }) => {

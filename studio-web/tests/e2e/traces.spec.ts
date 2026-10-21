@@ -40,7 +40,8 @@ test.describe('Run traces (P3)', () => {
     await startRun(page.request, { topic: 'refunds', fail: true });
 
     await page.goto(`${cluster.frontendUrl}/#/traces`);
-    await expect(page.getByLabel(/^Service connection status:/)).toContainText(/local-owner/i);
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveText('Connected');
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveAccessibleDescription(/local-owner/i);
     await page.getByTestId('nav-item-traces').waitFor();
 
     // Filter by status: failed only, then completed only.
@@ -84,7 +85,8 @@ test.describe('Run traces (P3)', () => {
   test('highlights errors in a failed run and filters to error spans', async ({ page }) => {
     await startRun(page.request, { fail: true });
     await page.goto(`${cluster.frontendUrl}/#/traces`);
-    await expect(page.getByLabel(/^Service connection status:/)).toContainText(/local-owner/i);
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveText('Connected');
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveAccessibleDescription(/local-owner/i);
     await page.getByLabel('Run status').selectOption('failed');
     await page.getByTestId('trace-run-row').first().getByRole('link', { name: /Open trace/ }).click();
 
@@ -111,8 +113,9 @@ test.describe('Run traces (P3)', () => {
     expect(created.ok()).toBe(true);
     const workflow = await created.json();
     await page.goto(`${cluster.frontendUrl}/#/workflows/${workflow.workflow_id}`);
-    await expect(page.getByLabel(/^Service connection status:/)).toContainText(/local-owner/i);
-    await page.getByRole('button', { name: 'Run', exact: true }).first().click();
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveText('Connected');
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveAccessibleDescription(/local-owner/i);
+    await page.getByRole('button', { name: 'Run', exact: true }).click();
     await page.getByRole('button', { name: /Launch Run/i }).click();
     await expect(page.getByLabel('Run status badge')).toContainText('Completed');
 

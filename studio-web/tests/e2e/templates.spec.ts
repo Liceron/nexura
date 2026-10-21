@@ -61,7 +61,7 @@ test('preview draws the graph read-only and Use template creates a workflow', as
 
 test('Create Workflow links to the gallery', async ({ page }) => {
   await page.goto(`${cluster.frontendUrl}/#/workflows`);
-  await page.getByRole('button', { name: /new workflow|create/i }).first().click();
+  await page.getByRole('button', { name: 'New workflow', exact: true }).click();
   await page.getByTestId('create-browse-gallery').click();
   await expect(page).toHaveURL(/#\/templates$/);
   await expect(page.getByTestId('template-grid')).toBeVisible();

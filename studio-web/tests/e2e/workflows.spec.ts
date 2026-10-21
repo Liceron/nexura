@@ -19,22 +19,60 @@ test.beforeEach(async ({ page }) => {
   }, cluster.backendUrl);
 });
 
-test.describe('Workflow Library, Templates & Lifecycle Management (F03)', () => {
+test.describe('Workflows, Templates & Lifecycle Management (F03)', () => {
+  test('390px keeps two real workflow rows above the fold and table overflow contained', async ({ page }) => {
+    for (const name of ['Phone workflow one', 'Phone workflow two']) {
+      const response = await page.request.post(`${cluster.backendUrl}/api/v1/workflows`, {
+        headers: cluster.apiHeaders,
+        data: { name, spec: { name, entry_node: 'start', nodes: { start: { id: 'start', handler: 'synthetic_order_lookup', transitions: {} } } } },
+      });
+      expect(response.ok()).toBe(true);
+    }
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(`${cluster.frontendUrl}/#/workflows`);
+    await page.getByLabel('Search workflows input').fill('Phone workflow');
+    await page.getByRole('button', { name: 'Search', exact: true }).click();
+    const tableBox = page.getByRole('region', { name: 'Workflows', exact: true });
+    await expect(tableBox.getByRole('row')).toHaveCount(3);
+    for (const name of ['Phone workflow one', 'Phone workflow two']) {
+      const row = tableBox.getByRole('row').filter({ has: page.getByRole('link', { name, exact: true }) });
+      await expect(row).toBeVisible();
+      const bounds = await row.boundingBox();
+      expect(bounds).not.toBeNull();
+      expect(bounds!.y).toBeGreaterThanOrEqual(0);
+      expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(844);
+      await expect(row.getByRole('button', { name: 'More', exact: true })).toBeVisible();
+    }
+    await expect(tableBox).toHaveCSS('overflow-x', 'auto');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    // Exercise real horizontal scrolling without permitting the page to grow.
+    await tableBox.getByRole('table').evaluate(table => { table.style.minWidth = '640px'; });
+    await tableBox.evaluate(box => { box.scrollLeft = 100; });
+    expect(await tableBox.evaluate(box => box.scrollLeft)).toBeGreaterThan(0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await tableBox.getByRole('table').evaluate(table => { table.style.minWidth = ''; });
+    await tableBox.getByRole('row').filter({ hasText: 'Phone workflow one' }).getByRole('button', { name: 'More', exact: true }).click();
+    await expect(page.getByRole('group', { name: 'More', exact: true }).getByRole('button', { name: 'Duplicate', exact: true })).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(tableBox.getByRole('row').filter({ hasText: 'Phone workflow one' }).getByRole('button', { name: 'More', exact: true })).toBeFocused();
+  });
+
   test('creates workflow via real API, verifies authoritative revision, and preserves on reload via deep link', async ({
     page,
   }) => {
     await page.goto(cluster.frontendUrl);
 
     // Ensure connection is established
-    await expect(page.getByLabel(/^Service connection status:/)).toContainText(/local-owner/i);
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveText('Connected');
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveAccessibleDescription(/local-owner/i);
 
     // Open Create Workflow Modal
-    const newWorkflowBtn = page.getByRole('button', { name: /\+ New Workflow/i });
+    const newWorkflowBtn = page.getByRole('button', { name: /New workflow/i });
     await expect(newWorkflowBtn).toBeVisible();
     await newWorkflowBtn.click();
 
     // Click Bilingual Greeting radio option inside modal
-    await page.getByRole('dialog').getByText('Bilingual Customer Greeting').click();
+    await page.getByRole('dialog').getByText('English and Hindi greeting', { exact: true }).click();
 
     // Set custom name
     const nameInput = page.getByLabel('Workflow Name');
@@ -49,12 +87,13 @@ test.describe('Workflow Library, Templates & Lifecycle Management (F03)', () => 
     const detailUrl = page.url();
 
     // Verify Authoritative Revision badge rendered
-    const revBadge = page.getByLabel('Authoritative revision badge');
+    const revBadge = page.getByLabel('Workflow revision');
     await expect(revBadge).toBeVisible();
     await expect(revBadge).toContainText('Revision: 1');
 
     // Verify workflow name and spec hash
     await expect(page.getByRole('heading', { name: 'Bilingual Support DeepLink Spec' })).toBeVisible();
+    await page.getByText('Details', { exact: true }).click();
     await expect(page.getByText(/Hash:/i)).toBeVisible();
 
     // Reload browser and verify deep link persistence and identical authoritative revision
@@ -65,36 +104,46 @@ test.describe('Workflow Library, Templates & Lifecycle Management (F03)', () => 
     await expect(page.getByRole('heading', { name: 'Bilingual Support DeepLink Spec' })).toBeVisible();
 
     // Test Save as Copy
-    await page.getByRole('button', { name: /Save as Copy/i }).click();
-    await page.getByRole('button', { name: /Save as Copy/i }).last().click();
+    await page.getByRole('button', { name: 'More', exact: true }).click();
+    await page.getByRole('button', { name: 'Duplicate', exact: true }).click();
+    await page.getByRole('dialog').getByRole('button', { name: 'Duplicate', exact: true }).click();
 
     // Copy created and opened
     await expect(page.getByRole('heading', { name: /Copy of Bilingual Support DeepLink Spec/i })).toBeVisible();
     await expect(revBadge).toContainText('Revision: 1');
+    const copyUrl = page.url();
+    const copyName = await page.getByRole('heading', { level: 1 }).innerText();
+    await page.getByRole('link', { name: 'Workflows', exact: true }).click();
+    await expect(page.getByRole('link', { name: 'Bilingual Support DeepLink Spec', exact: true })).toBeVisible();
+    await page.getByRole('link', { name: copyName, exact: true }).click();
+    await expect(page).toHaveURL(copyUrl);
+    await expect(page.getByRole('heading', { name: copyName, level: 1, exact: true })).toBeVisible();
 
     // Test Deletion
+    await page.getByRole('button', { name: 'More', exact: true }).click();
     await page.getByRole('button', { name: /Delete Workflow/i }).click();
     await page.getByRole('button', { name: /^Delete$/i }).click();
 
     // Redirected back to library
     await expect(page).toHaveURL(/#\/workflows/);
-    await expect(page.getByRole('heading', { name: 'Workflow Library' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Workflows' })).toBeVisible();
   });
 
   test('runs template as runnable local fixture with synthetic data', async ({ page }) => {
     await page.goto(cluster.frontendUrl);
-    await expect(page.getByLabel(/^Service connection status:/)).toContainText(/local-owner/i);
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveText('Connected');
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveAccessibleDescription(/local-owner/i);
 
-    // Click "Use Template" for Bilingual Customer Greeting
-    const useTemplateButtons = page.getByRole('button', { name: /^Use Template/i });
-    await useTemplateButtons.nth(1).click();
+    // Click "Use Template" for English and Hindi greeting
+    await page.getByRole('button', { name: 'New workflow', exact: true }).click();
+    await page.getByRole('dialog').getByText('English and Hindi greeting', { exact: true }).click();
 
     // Modal opens, submit creation
     await page.getByRole('button', { name: /Validate & Create/i }).click();
     await expect(page).toHaveURL(/#\/workflows\/wf-/);
 
     // Click Run Workflow
-    const runBtn = page.getByRole('button', { name: /^Run$/i }).first();
+    const runBtn = page.getByRole('button', { name: /^Run$/i });
     await runBtn.click();
 
     // Modal opens, submit launch
@@ -118,13 +167,13 @@ test.describe('Workflow Library, Templates & Lifecycle Management (F03)', () => 
     await page.goto(cluster.frontendUrl);
 
     // Create a workflow in default workspace to test cross-tenant isolation
-    const newWorkflowBtn = page.getByRole('button', { name: /\+ New Workflow/i });
+    const newWorkflowBtn = page.getByRole('button', { name: /New workflow/i });
     await newWorkflowBtn.click();
-    await page.getByRole('dialog').getByText('Bilingual Customer Greeting').click();
+    await page.getByRole('dialog').getByText('English and Hindi greeting', { exact: true }).click();
     await page.getByLabel('Workflow Name').fill('Workspace Isolation Spec');
     await page.getByRole('button', { name: /Validate & Create/i }).click();
     await expect(page).toHaveURL(/#\/workflows\/wf-/);
-    await page.getByRole('button', { name: /Back to Workflows/i }).click();
+    await page.getByRole('link', { name: 'Workflows', exact: true }).click();
     await expect(page.getByText('Workspace Isolation Spec')).toBeVisible();
 
     // Switch workspace to tenant-isolated
@@ -160,7 +209,7 @@ test.describe('Workflow Library, Templates & Lifecycle Management (F03)', () => 
     // Clicking back to workflows recovers cleanly
     await page.getByRole('button', { name: /Back to Workflows/i }).click();
     await expect(page).toHaveURL(/#\/workflows/);
-    await expect(page.getByRole('heading', { name: 'Workflow Library' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Workflows' })).toBeVisible();
   });
 
   test('negative case: template referencing incompatible module fails validation and cannot run', async ({
@@ -169,11 +218,11 @@ test.describe('Workflow Library, Templates & Lifecycle Management (F03)', () => 
     await page.goto(cluster.frontendUrl);
 
     // Open create modal
-    await page.getByRole('button', { name: /\+ New Workflow/i }).click();
+    await page.getByRole('button', { name: /New workflow/i }).click();
 
     // B34: the incompatible test fixture is not offered to users any more (it stays a unit-test
     // fixture, passed to the modal explicitly in tests/unit/workflows.test.tsx).
-    await expect(page.getByRole('dialog').getByText('Customer Order Triage & Support')).toBeVisible();
+    await expect(page.getByRole('dialog').getByText('Order support with refund approval')).toBeVisible();
     await expect(
       page.getByRole('dialog').getByText('Incompatible Billing Workflow (Test Fixture)')
     ).toHaveCount(0);

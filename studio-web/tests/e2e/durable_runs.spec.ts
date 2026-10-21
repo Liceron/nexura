@@ -139,7 +139,7 @@ async function seed(page: Page, name: string, spec: Spec): Promise<string> {
 /** Open the workflow in Studio and launch a run with the given initial state. */
 async function launch(page: Page, workflowId: string, state: Record<string, unknown>): Promise<void> {
   await page.goto(`${cluster.frontendUrl}#/workflows/${workflowId}`);
-  await page.getByRole('button', { name: 'Run', exact: true }).first().click();
+  await page.getByRole('button', { name: 'Run', exact: true }).click();
   const modal = page.getByRole('dialog');
   await modal.getByLabel('Initial state JSON input').fill(JSON.stringify(state));
   await modal.getByRole('checkbox', { name: /Execute in background/i }).check();

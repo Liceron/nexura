@@ -25,7 +25,8 @@ test.describe('MCP & OpenAPI Tools and Runnable Export Integration (F12)', () =>
   }) => {
     // 1. Open Studio and navigate to Tools & Integrations
     await page.goto(cluster.frontendUrl);
-    await expect(page.getByLabel(/^Service connection status:/)).toContainText(/local-owner/i);
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveText('Connected');
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveAccessibleDescription(/local-owner/i);
 
     const toolsNavBtn = page.locator('[data-testid="nav-item-tools"]');
     await toolsNavBtn.click();

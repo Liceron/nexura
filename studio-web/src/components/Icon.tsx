@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Liceron
 /** Local stroke icons: no system glyphs, fonts or external assets required. */
 const paths = {
+  menu: 'M3 6h18M3 12h18M3 18h18',
   workflows: 'M13 2 4 14h7l-1 8 10-13h-7z',
   templates: 'M8 4H5v18h14V4h-3M9 2h6v4H9zM8 11h8M8 16h6',
   approvals: 'M12 2 3 6v6c0 5 9 10 9 10s9-5 9-10V6zM8 12l3 3 5-6',

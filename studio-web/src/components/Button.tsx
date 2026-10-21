@@ -16,6 +16,7 @@ export function Button({
   disabled,
   children,
   style,
+  className,
   ...props
 }: ButtonProps) {
   const baseStyle: React.CSSProperties = {
@@ -25,10 +26,11 @@ export function Button({
     gap: 8,
     borderRadius: 'var(--radius-md)',
     fontWeight: 500,
-    fontSize: size === 'sm' ? 12 : size === 'lg' ? 16 : 14,
+    fontSize: size === 'lg' ? 'var(--type-body)' : 'var(--type-ui)',
+    lineHeight: 'var(--leading-ui)',
+    minHeight: size === 'sm' ? 28 : size === 'lg' ? 40 : 'var(--control-height)',
     padding: size === 'sm' ? '4px 10px' : size === 'lg' ? '10px 20px' : '6px 14px',
-    transition: 'background-color 0.15s ease, opacity 0.15s ease',
-    opacity: disabled || loading ? 0.6 : 1,
+    transition: 'background-color var(--motion-fast) var(--motion-ease), color var(--motion-fast) var(--motion-ease)',
     cursor: disabled || loading ? 'not-allowed' : 'pointer',
     ...style,
   };
@@ -36,16 +38,16 @@ export function Button({
   const variantStyles: Record<string, React.CSSProperties> = {
     primary: {
       backgroundColor: 'var(--button-primary)',
-      color: '#ffffff',
+      color: 'var(--button-primary-text)',
     },
     secondary: {
       backgroundColor: 'var(--bg-surface-elevated)',
       color: 'var(--text-primary)',
-      border: '1px solid var(--border-subtle)',
+      border: '1px solid var(--border-strong)',
     },
     danger: {
       backgroundColor: 'var(--button-danger)',
-      color: '#ffffff',
+      color: 'var(--button-danger-text)',
     },
     ghost: {
       backgroundColor: 'transparent',
@@ -56,6 +58,8 @@ export function Button({
   return (
     <button
       disabled={disabled || loading}
+      aria-busy={loading || undefined}
+      className={['studio-button', `studio-button--${variant}`, className].filter(Boolean).join(' ')}
       style={{ ...baseStyle, ...variantStyles[variant] }}
       {...props}
     >

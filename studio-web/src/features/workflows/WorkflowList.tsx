@@ -5,11 +5,11 @@ import { useState, useEffect, useCallback } from 'react';
 import { useApi } from '../../api/context';
 import { Card } from '../../components/Card';
 import { Button } from '../../components/Button';
-import { Badge } from '../../components/Badge';
+import { PageHeader, PageLayout } from '../../components/PageHeader';
+import { ActionDisclosure } from '../../components/ActionDisclosure';
 import { Input } from '../../components/Input';
 import { Spinner } from '../../components/Spinner';
 import { useI18n } from '../../i18n';
-import { REGISTRY_TEMPLATES } from './templates';
 import { CreateWorkflowModal } from './CreateWorkflowModal';
 import type { WorkflowRecord } from '@liceron/nexura-sdk';
 import { formatApiError } from '../../api/errors';
@@ -83,7 +83,7 @@ export function WorkflowList({ onSelectWorkflow }: WorkflowListProps) {
   };
 
   const handleDelete = async (workflowId: string, e: React.MouseEvent) => {
-    e.stopPropagation();
+    e.preventDefault();
     if (!window.confirm(t('workflows.confirmDelete'))) return;
     try {
       await manager.client.workflows.delete(workflowId);
@@ -94,7 +94,7 @@ export function WorkflowList({ onSelectWorkflow }: WorkflowListProps) {
   };
 
   const handleQuickCopy = async (wf: WorkflowRecord, e: React.MouseEvent) => {
-    e.stopPropagation();
+    e.preventDefault();
     try {
       const full = await manager.client.workflows.get(wf.workflow_id);
       if (full && full.spec) {
@@ -112,84 +112,19 @@ export function WorkflowList({ onSelectWorkflow }: WorkflowListProps) {
   };
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-      {/* Top Header Card with Search & Actions */}
-      <Card elevated>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 16 }}>
-          <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <h2 style={{ fontSize: 18, fontWeight: 600 }}>{t('workflows.title')}</h2>
-              <Badge variant="neutral">
-                {t('connection.workspace')}: {connection.workspace}
-              </Badge>
-              <Badge variant="info">
-                {total} {total === 1 ? t('ui.workflow3') : t('ui.workflows')}
-              </Badge>
-            </div>
-            <p style={{ color: 'var(--text-secondary)', fontSize: 13, marginTop: 4 }}>
-              {t('ui.tenantScopedWorkflowSpecificationsRevisionsAndExecutionBlueprints')}
-            </p>
-          </div>
-
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <Button variant="primary" onClick={() => handleOpenCreateModal()}>
-              + {t('workflows.create')}
-            </Button>
-          </div>
-        </div>
-
-        {/* Search Bar */}
-        <form onSubmit={handleSearchSubmit} style={{ display: 'flex', gap: 8, marginTop: 16 }}>
-          <div style={{ flex: 1 }}>
-            <Input
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder={t('workflows.search')}
-              aria-label={t('ui.searchWorkflowsInput')}
-            />
-          </div>
-          <Button type="submit" variant="secondary">
-            {t('ui.search')}
-          </Button>
-          {searchQuery && (
-            <Button type="button" variant="secondary" onClick={handleClearSearch}>
-              {t('workflows.clearSearch')}
-            </Button>
-          )}
+    <PageLayout className="workflow-library">
+      <PageHeader title={t('workflows.title')} actions={
+        <Button variant="primary" onClick={() => handleOpenCreateModal()}>{t('workflows.create')}</Button>
+      } filters={
+        <form onSubmit={handleSearchSubmit} className="workflow-search">
+          <Input value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} placeholder={t('workflows.search')} aria-label={t('ui.searchWorkflowsInput')} />
+          <Button type="submit">{t('ui.search')}</Button>
+          {searchQuery && <Button type="button" variant="ghost" onClick={handleClearSearch}>{t('workflows.clearSearch')}</Button>}
         </form>
-      </Card>
-
-      {/* Registry Templates Quick-Pick Carousel / Cards */}
-      <div>
-        <h3 style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 10, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-          {t('workflows.templatesTitle')}
-        </h3>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 12 }}>
-          {REGISTRY_TEMPLATES.map((tmpl) => (
-            <Card key={tmpl.id} style={{ display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
-              <div>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
-                  <span style={{ fontWeight: 600, fontSize: 14 }}>{t(`examples.${tmpl.id}.title`, tmpl.title)}</span>
-                  <Badge variant="info">{t('workflows.templatesTitle')}</Badge>
-                </div>
-                <p style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.4, marginBottom: 12 }}>
-                  {t(`examples.${tmpl.id}.description`, tmpl.description)}
-                </p>
-              </div>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => handleOpenCreateModal(tmpl.id)}
-              >
-                {t('workflows.useTemplate')} <Icon name="right" />
-              </Button>
-            </Card>
-          ))}
-        </div>
-      </div>
+      } />
 
       {/* Workflows List Table / Empty States */}
-      <Card style={{ minWidth: 0, maxWidth: '100%' }}>
+      <Card style={{ minWidth: 0, maxWidth: '100%', padding: 0 }}>
         {error && (
           <div style={{ padding: 12, backgroundColor: 'var(--status-danger-bg)', color: 'var(--status-danger)', borderRadius: 'var(--radius-sm)', marginBottom: 12 }}>
             <strong>{t('ui.error2')}</strong> {error}
@@ -215,20 +150,20 @@ export function WorkflowList({ onSelectWorkflow }: WorkflowListProps) {
                 {t('workflows.clearSearch')}
               </Button>
             ) : (
-              <Button variant="primary" onClick={() => handleOpenCreateModal()}>
-                + {t('workflows.create')}
+              <Button variant="secondary" onClick={() => handleOpenCreateModal()}>
+                {t('workflows.create')}
               </Button>
             )}
           </div>
         ) : (
           <div>
-            <div tabIndex={0} style={{ width: '100%', minWidth: 0, maxWidth: '100%', overflowX: 'auto' }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: 13 }}>
+            <div role="region" aria-label={t('workflows.title')} tabIndex={0} style={{ width: '100%', minWidth: 0, maxWidth: '100%', overflowX: 'auto' }}>
+              <table className="workflow-table" style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: 13 }}>
                 <thead>
                   <tr style={{ borderBottom: '1px solid var(--border-subtle)', color: 'var(--text-secondary)' }}>
-                    <th style={{ padding: '10px 12px', fontWeight: 600 }}>{t('ui.workflowName')}</th>
-                    <th style={{ padding: '10px 12px', fontWeight: 600 }}>{t('ui.entryNode')}</th>
-                    <th style={{ padding: '10px 12px', fontWeight: 600 }}>{t('ui.nodes2')}</th>
+                    <th style={{ padding: '10px 12px', fontWeight: 600 }}>{t('workflowDesign.name')}</th>
+                    <th style={{ padding: '10px 12px', fontWeight: 600 }}>{t('workflowDesign.entryStep')}</th>
+                    <th style={{ padding: '10px 12px', fontWeight: 600 }}>{t('workflowDesign.steps')}</th>
                     <th style={{ padding: '10px 12px', fontWeight: 600 }}>{t('workflows.revision')}</th>
                     <th style={{ padding: '10px 12px', fontWeight: 600 }}>{t('workflows.lastModified')}</th>
                     <th style={{ padding: '10px 12px', fontWeight: 600, textAlign: 'right' }}>{t('ui.actions')}</th>
@@ -238,7 +173,6 @@ export function WorkflowList({ onSelectWorkflow }: WorkflowListProps) {
                   {workflows.map((wf) => (
                     <tr
                       key={wf.workflow_id}
-                      onClick={() => onSelectWorkflow(wf.workflow_id)}
                       style={{
                         borderBottom: '1px solid var(--border-subtle)',
                         cursor: 'pointer',
@@ -248,51 +182,29 @@ export function WorkflowList({ onSelectWorkflow }: WorkflowListProps) {
                       onMouseLeave={(e) => (e.currentTarget.style.backgroundColor = 'transparent')}
                     >
                       <td style={{ padding: '12px' }}>
-                        <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>
+                        <a href={`#/workflows/${encodeURIComponent(wf.workflow_id)}`} onClick={(event) => { if (!event.ctrlKey && !event.metaKey && !event.shiftKey && event.button === 0) { event.preventDefault(); onSelectWorkflow(wf.workflow_id); } }} style={{ fontWeight: 600, color: 'var(--text-primary)' }}>
                           {wf.name || (wf.spec as Record<string, unknown> | undefined)?.name as string || t('ui.untitledWorkflow')}
-                        </div>
-                        <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{wf.workflow_id}</div>
+                        </a>
+                        <div className="workflow-phone-meta">{t('workflows.revision')} {wf.revision} · {wf.updated_at ? new Date(wf.updated_at * 1000).toLocaleDateString(locale) : t('common.notAvailable')}</div>
                       </td>
                       <td style={{ padding: '12px' }}>
                         <code>{wf.entry_node || 'start'}</code>
                       </td>
                       <td style={{ padding: '12px' }}>
-                        <Badge variant="neutral">{wf.node_count ?? 1} {t('ui.nodes3')}</Badge>
+                        {wf.node_count ?? 1}
                       </td>
                       <td style={{ padding: '12px' }}>
                         {/* Authoritative revision counter */}
-                        <Badge variant="success">{t('ui.rev3') + " "}{wf.revision}</Badge>
+                        {wf.revision}
                       </td>
                       <td style={{ padding: '12px', color: 'var(--text-secondary)', fontSize: 12 }}>
                         {wf.updated_at ? new Date(wf.updated_at * 1000).toLocaleDateString(locale) : t('common.notAvailable')}
                       </td>
                       <td style={{ padding: '12px', textAlign: 'right' }}>
-                        <div style={{ display: 'inline-flex', gap: 6 }}>
-                          <Button
-                            variant="secondary"
-                            size="sm"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              onSelectWorkflow(wf.workflow_id);
-                            }}
-                          >
-                            {t('workflows.open')}
-                          </Button>
-                          <Button
-                            variant="secondary"
-                            size="sm"
-                            onClick={(e) => handleQuickCopy(wf, e)}
-                          >
-                            {t('ui.copy')}
-                          </Button>
-                          <Button
-                            variant="danger"
-                            size="sm"
-                            onClick={(e) => handleDelete(wf.workflow_id, e)}
-                          >
-                            {t('ui.delete')}
-                          </Button>
-                        </div>
+                        <ActionDisclosure label={t('workflowDesign.more')}>
+                          <Button variant="ghost" onClick={(e) => handleQuickCopy(wf, e)}>{t('workflowDesign.duplicate')}</Button>
+                          <Button variant="ghost" className="workflow-danger-action" onClick={(e) => handleDelete(wf.workflow_id, e)}>{t('ui.delete')}</Button>
+                        </ActionDisclosure>
                       </td>
                     </tr>
                   ))}
@@ -301,7 +213,7 @@ export function WorkflowList({ onSelectWorkflow }: WorkflowListProps) {
             </div>
 
             {/* Pagination Controls */}
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 16, paddingTop: 12, borderTop: '1px solid var(--border-subtle)' }}>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', justifyContent: 'space-between', padding: 12, borderTop: '1px solid var(--border-subtle)' }}>
               <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
                 {t('workflows.showing')} {total === 0 ? 0 : offset + 1} - {Math.min(offset + limit, total)} {t('workflows.of')} {total}
               </div>
@@ -335,6 +247,6 @@ export function WorkflowList({ onSelectWorkflow }: WorkflowListProps) {
         onCreated={handleCreated}
         initialTemplateId={templateToInstantiate}
       />
-    </div>
+    </PageLayout>
   );
 }

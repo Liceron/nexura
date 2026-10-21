@@ -2,15 +2,20 @@
 // Copyright (c) 2026 Liceron
 import { useLocale } from '../../i18n';
 import { Icon } from '../../components/Icon';
-import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
+import { ActionDisclosure } from '../../components/ActionDisclosure';
+import { Modal } from '../../components/Modal';
 import {
   ReactFlow,
   Background,
-  Controls,
+  useReactFlow,
   MiniMap,
   useNodesState,
   useEdgesState,
   addEdge,
+  applyNodeChanges,
+  applyEdgeChanges,
   Connection,
   Edge,
   Node,
@@ -28,9 +33,8 @@ import {
   deleteNodeAndPruneEdges,
 } from './serializer';
 import { Button } from '../../components/Button';
-import { Badge } from '../../components/Badge';
 import { useApi } from '../../api/context';
-import type { WorkflowSpec, ValidationIssue } from '@liceron/nexura-sdk';
+import type { WorkflowSpec, WorkflowRecord, ValidationIssue } from '@liceron/nexura-sdk';
 import {
   saveWorkflowDraft,
   loadWorkflowDraft,
@@ -47,6 +51,14 @@ import { formatApiError } from '../../api/errors';
 
 interface WorkflowCanvasProps {
   initialSpec: WorkflowSpec;
+  actionHost?: HTMLElement | null;
+  feedbackHost?: HTMLElement | null;
+  active?: boolean;
+  primaryAllowed?: boolean;
+  viewMode?: 'graph' | 'nodes';
+  moreActions?: ReactNode;
+  onDirtyChange?: (dirty: boolean) => void;
+  onImportedPython?: (record: WorkflowRecord) => void;
   workflowId: string;
   workflowName?: string;
   revision: number;
@@ -64,6 +76,14 @@ const nodeTypes = {
 
 export function WorkflowCanvasInner({
   initialSpec,
+  actionHost,
+  feedbackHost,
+  active = true,
+  primaryAllowed = true,
+  viewMode = 'graph',
+  moreActions,
+  onDirtyChange,
+  onImportedPython,
   workflowId,
   workflowName,
   revision,
@@ -77,6 +97,18 @@ export function WorkflowCanvasInner({
   const { manager, connection } = useApi();
   const locale = useLocale();
   const t = useBuilderT();
+  const editorRoot = useRef<HTMLDivElement>(null);
+  const flow = useReactFlow<BuilderNode, BuilderEdge>();
+  const [showMinimap, setShowMinimap] = useState(false);
+  const [interactive, setInteractive] = useState(true);
+  const [wide, setWide] = useState(() => typeof matchMedia === 'function' && matchMedia('(min-width: 1200px)').matches);
+  useEffect(() => {
+    if (typeof matchMedia !== 'function') return;
+    const query = matchMedia('(min-width: 1200px)');
+    const update = () => setWide(query.matches);
+    query.addEventListener('change', update);
+    return () => query.removeEventListener('change', update);
+  }, []);
 
   // Initialize graph from spec
   const initialDoc = useMemo(() => specToGraph(initialSpec), [initialSpec]);
@@ -124,6 +156,8 @@ export function WorkflowCanvasInner({
   const [validationSuccess, setValidationSuccess] = useState(false);
   const [isDirty, setIsDirty] = useState(false);
   const [saveStatus, setSaveStatus] = useState<'clean' | 'dirty' | 'saving' | 'conflict'>('clean');
+
+  useEffect(() => { onDirtyChange?.(isDirty); }, [isDirty, onDirtyChange]);
 
   // Draft recovery notice
   const [draftNotice, setDraftNotice] = useState<WorkflowDraft | null>(null);
@@ -562,6 +596,7 @@ export function WorkflowCanvasInner({
 
   // Authoritative Save
   const handleSave = async () => {
+    if (!isDirty || draftNotice || isSaving || isValidating) return;
     setSaveError(null);
     // Never send a spec the backend would reject: validate first and show errors inline.
     if (!(await runValidation())) {
@@ -613,6 +648,7 @@ export function WorkflowCanvasInner({
   // Keyboard accessibility & hotkeys
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (!active || document.querySelector('[role="dialog"]')) return;
       // Don't intercept when user is typing in form inputs or textareas
       const target = e.target as HTMLElement;
       if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT') {
@@ -645,179 +681,20 @@ export function WorkflowCanvasInner({
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedNodeId, handleUndo, handleRedo, handleCopy, handlePaste, handleDeleteNode, handleSave]);
+  }, [active, selectedNodeId, handleUndo, handleRedo, handleCopy, handlePaste, handleDeleteNode, handleSave]);
 
   const selectedNode = nodes.find((n) => n.id === selectedNodeId) || null;
 
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', position: 'relative' }}>
-      {/* Draft recovery banner */}
-      {draftNotice && (
-        <div
-          role="alert"
-          aria-label={t('ui.localDraftRecoveryBanner')}
-          style={{
-            padding: '8px 16px',
-            backgroundColor: 'var(--status-warning-bg)',
-            color: 'var(--text-primary)',
-            borderBottom: '1px solid var(--status-warning)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            fontSize: 12,
-            zIndex: 10,
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span><Icon name="warning" /></span>
-            <span>
-              <strong>{t('ui.unsavedLocalDraft')}</strong> {t('ui.recoveredUnsavedLocalChangesFrom')}{' '}
-              {new Date(draftNotice.savedAt).toLocaleTimeString(locale)}.
-            </span>
-          </div>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <Button variant="secondary" size="sm" onClick={handleDiscardDraft}>
-              {t('ui.discardDraft')}
-            </Button>
-            <Button variant="primary" size="sm" onClick={handleRestoreDraft}>
-              {t('ui.restoreDraft')}
-            </Button>
-          </div>
-        </div>
-      )}
-
-      {/* Canvas Top Bar */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          padding: '10px 16px',
-          backgroundColor: 'var(--bg-surface)',
-          borderBottom: '1px solid var(--border-subtle)',
-          flexWrap: 'wrap',
-          gap: 12,
-        }}
-      >
-        <div className="studio-mobile-wrap" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <Button variant="primary" size="sm" onClick={() => setDrawerOpen(true)}>
-            {t('ui.addStep')}
-          </Button>
-          <Button variant="secondary" size="sm" onClick={() => handleAddComposite('parallel')} title={t('builder.addParallelHint')}>
-            {t('builder.addParallel')}
-          </Button>
-          <Button variant="secondary" size="sm" onClick={() => handleAddComposite('map')} title={t('builder.addMapHint')}>
-            {t('builder.addMap')}
-          </Button>
-          <Button variant="secondary" size="sm" onClick={() => handleAddComposite('subworkflow')} title={t('builder.addSubworkflowHint')}>
-            {t('builder.addSubworkflow')}
-          </Button>
-          <Button variant="secondary" size="sm" onClick={handleCopy}>
-            {t('ui.copy')}
-          </Button>
-          <Button variant="secondary" size="sm" onClick={handlePaste}>
-            {t('ui.paste')}
-          </Button>
-          <div style={{ width: 1, height: 20, backgroundColor: 'var(--border-subtle)' }} />
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={handleUndo}
-            disabled={!historyRef.current.canUndo()}
-            title={t('ui.undoCtrlZ')}
-          >
-            <Icon name="undo" /> {t('ui.undo')}
-          </Button>
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={handleRedo}
-            disabled={!historyRef.current.canRedo()}
-            title={t('ui.redoCtrlY')}
-          >
-            <Icon name="redo" /> {t('ui.redo')}
-          </Button>
-          {selectedNodeId && (
-            <Button
-              variant="danger"
-              size="sm"
-              onClick={() => handleDeleteNode(selectedNodeId)}
-              title={t('ui.deleteSelectedNodeDel')}
-            >
-              {t('ui.delete')}
-            </Button>
-          )}
-        </div>
-
-        <div className="studio-mobile-wrap" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          {saveStatus === 'conflict' ? (
-            <Badge variant="danger" aria-label={t('ui.saveStatusBadge')}>
-              {t('ui.revisionConflict')}
-            </Badge>
-          ) : isSaving ? (
-            <Badge variant="info" aria-label={t('ui.saveStatusBadge')}>
-              {t('ui.saving')}
-            </Badge>
-          ) : isDirty ? (
-            <Badge variant="warning" aria-label={t('ui.saveStatusBadge')}>
-              {t('ui.unsavedChanges')}
-            </Badge>
-          ) : (
-            <Badge variant="success" aria-label={t('ui.saveStatusBadge')}>
-              {t('ui.savedRev') + " "}{revision})
-            </Badge>
-          )}
-          <Badge variant="neutral">{t('ui.rev') + " "}{revision}</Badge>
-
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => {
-              setImportExportMode('export');
-              setImportExportOpen(true);
-            }}
-          >
-            {t('ui.exportJson')}
-          </Button>
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => {
-              setImportExportMode('import');
-              setImportExportOpen(true);
-            }}
-          >
-            {t('ui.importJson')}
-          </Button>
-
-          <Button
-            variant="secondary"
-            size="sm"
-            loading={isValidating}
-            onClick={handleValidate}
-          >
-            {t('ui.validate')}
-          </Button>
-          <Button
-            variant="primary"
-            size="sm"
-            loading={isSaving}
-            onClick={handleSave}
-            title={t('ui.saveCtrlS')}
-          >
-            {t('ui.save')}
-          </Button>
-          {onRunWorkflow && (
-            <Button variant="secondary" size="sm" onClick={onRunWorkflow}>
-              {t('ui.run')}
-            </Button>
-          )}
-        </div>
-      </div>
-
+  const inspector = <NodeInspector
+    selectedNode={selectedNode} allNodes={nodes} allEdges={edges} entryNode={entryNode}
+    onUpdateNodeData={handleUpdateNodeData} onRenameNode={handleRenameNode}
+    onSetEntryNode={handleSetEntryNode} onDeleteNode={handleDeleteNode}
+    onSetDefaultTransition={handleSetDefaultTransition} onSetBranchTransition={handleSetBranchTransition}
+    onClose={() => setInspectorOpen(false)} />;
+  const feedback = <>
       {/* Validation status banners */}
       {validationSuccess && (
-        <div
+        <div role="status"
           style={{
             padding: '8px 16px',
             backgroundColor: 'var(--status-success-bg)',
@@ -855,7 +732,7 @@ export function WorkflowCanvasInner({
       )}
 
       {saveError && (
-        <div
+        <div role="alert"
           style={{
             padding: '8px 16px',
             backgroundColor: 'var(--status-danger-bg)',
@@ -868,19 +745,128 @@ export function WorkflowCanvasInner({
         </div>
       )}
 
+  </>;
+  const actions = <>
+    <span role="status" aria-label={t('ui.saveStatusBadge')} className="workflow-save-status">
+      {saveStatus === 'conflict' ? t('ui.revisionConflict') : isSaving ? t('ui.saving') : isDirty ? t('ui.unsavedChanges') : t('workflowDesign.saved')}
+    </span>
+    <Button variant="ghost" size="sm" disabled={isSaving} loading={isValidating} onClick={handleValidate}>{t('ui.validate')}</Button>
+    <Button variant={isDirty && primaryAllowed ? 'primary' : 'secondary'} size="sm" disabled={!isDirty || !!draftNotice || isValidating} loading={isSaving} onClick={handleSave} title={t('ui.saveCtrlS')}>{t('ui.save')}</Button>
+    {onRunWorkflow && <Button variant={!isDirty && primaryAllowed && !draftNotice ? 'primary' : 'secondary'} size="sm" disabled={isSaving || isValidating} onClick={onRunWorkflow}>{t('ui.run')}</Button>}
+    <ActionDisclosure label={t('workflowDesign.more')}>
+      {moreActions}
+      <Button variant="ghost" onClick={() => { setImportExportMode('export'); setImportExportOpen(true); }}>{t('workflowDesign.importExport')}</Button>
+    </ActionDisclosure>
+  </>;
+
+  return (
+    <div ref={editorRoot} style={{ display: 'flex', flexDirection: 'column', height: '100%', position: 'relative' }}>
+      {/* Draft recovery banner */}
+      {draftNotice && (
+        <div
+          role="alert"
+          aria-label={t('ui.localDraftRecoveryBanner')}
+          style={{
+            padding: '8px 16px',
+            backgroundColor: 'var(--status-warning-bg)',
+            color: 'var(--text-primary)',
+            borderBottom: '1px solid var(--status-warning)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            fontSize: 12,
+            zIndex: 10,
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span><Icon name="warning" /></span>
+            <span>
+              <strong>{t('ui.unsavedLocalDraft')}</strong> {t('ui.recoveredUnsavedLocalChangesFrom')}{' '}
+              {new Date(draftNotice.savedAt).toLocaleTimeString(locale)}.
+            </span>
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <Button variant="secondary" size="sm" onClick={handleDiscardDraft}>
+              {t('ui.discardDraft')}
+            </Button>
+            <Button variant="primary" size="sm" onClick={handleRestoreDraft}>
+              {t('ui.restoreDraft')}
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {actionHost ? createPortal(actions, actionHost) : <div className="workflow-actions">{actions}</div>}
+      <div className="workflow-canvas-toolbar">
+        <ActionDisclosure label={t('ui.addStep')}>
+          <Button variant="ghost" onClick={() => setDrawerOpen(true)}>{t('workflowDesign.standard')}</Button>
+          <Button variant="ghost" onClick={() => handleAddComposite('parallel')} title={t('builder.addParallelHint')}>{t('builder.addParallel')}</Button>
+          <Button variant="ghost" onClick={() => handleAddComposite('map')} title={t('builder.addMapHint')}>{t('builder.addMap')}</Button>
+          <Button variant="ghost" onClick={() => handleAddComposite('subworkflow')} title={t('builder.addSubworkflowHint')}>{t('builder.addSubworkflow')}</Button>
+        </ActionDisclosure>
+        <Button variant="ghost" size="sm" onClick={handleUndo} disabled={!historyRef.current.canUndo()} title={t('ui.undoCtrlZ')}><Icon name="undo" />{t('ui.undo')}</Button>
+        <Button variant="ghost" size="sm" onClick={handleRedo} disabled={!historyRef.current.canRedo()} title={t('ui.redoCtrlY')}><Icon name="redo" />{t('ui.redo')}</Button>
+        <ActionDisclosure label={t('workflowDesign.edit')}>
+          <Button variant="ghost" onClick={handleCopy} disabled={!selectedNodeId}>{t('ui.copy')}</Button>
+          <Button variant="ghost" onClick={handlePaste}>{t('ui.paste')}</Button>
+          {selectedNodeId && <Button variant="ghost" className="workflow-danger-action" onClick={() => handleDeleteNode(selectedNodeId)}>{t('ui.delete')}</Button>}
+        </ActionDisclosure>
+        {viewMode === 'graph' && <div className="workflow-viewport-controls">
+          <Button variant="ghost" size="sm" onClick={() => flow.fitView({ padding: '40px' })}>{t('flowLabels.fitView')}</Button>
+          <Button variant="ghost" size="sm" aria-label={t('flowLabels.zoomOut')} onClick={() => flow.zoomOut()}>−</Button>
+          <Button variant="ghost" size="sm" aria-label={t('flowLabels.zoomIn')} onClick={() => flow.zoomIn()}>+</Button>
+          <Button variant="ghost" size="sm" aria-pressed={showMinimap} onClick={() => setShowMinimap(!showMinimap)}>{t('workflowDesign.minimap')}</Button>
+          <Button variant="ghost" size="sm" aria-label={t('flowLabels.interactive')} aria-pressed={!interactive} onClick={() => setInteractive(!interactive)}><Icon name="lock" /></Button>
+        </div>}
+      </div>
+
+      {feedbackHost ? createPortal(feedback, feedbackHost) : feedback}
+
       {/* Main Canvas Area */}
-      <div className="studio-split" style={{ display: 'flex', flex: 1, position: 'relative', overflow: 'hidden' }}>
-        <div className="studio-split-main" style={{ flex: 1, height: '100%', position: 'relative' }}>
-          <ReactFlow
+      <div className="workflow-editor-panes" style={{ display: 'flex', flex: 1, position: 'relative', overflow: 'hidden' }}>
+        <div className="workflow-editor-main" onKeyDownCapture={(event) => {
+          if (event.key !== 'Enter') return;
+          const target = event.target as HTMLElement;
+          const id = target.closest('[data-testid^="node-"]')?.getAttribute('data-testid')?.slice(5)
+            || target.closest('.react-flow__node')?.getAttribute('data-id');
+          if (id && nodes.some((node) => node.id === id)) { event.preventDefault(); setSelectedNodeId(id); setInspectorOpen(true); }
+        }} style={{ flex: 1, height: '100%', position: 'relative' }}>
+          {viewMode === 'nodes' ? <div role="region" aria-label={t('ui.accessibleNodesList')} data-testid="accessible-nodes-list" className="workflow-node-list">
+            {nodes.map((node) => <div key={node.id} data-testid={`accessible-node-${node.id}`}>
+              <Button variant="ghost" aria-label={t('workflowDesign.editNode', { name: node.id })} onClick={() => { setSelectedNodeId(node.id); setInspectorOpen(true); }}>{node.id}</Button>
+              <code>{node.data.handler || node.data.module_id}</code>
+              {node.id === entryNode && <span>{t('ui.entryNode')}</span>}
+              {node.data.requires_approval && <span>{t('workflowDesign.needsApproval')}</span>}
+              {edges.filter((edge) => edge.source === node.id).map((edge) => <span key={edge.id}>{String(edge.label || 'default')} → {edge.target}</span>)}
+            </div>)}
+          </div> : active ? <ReactFlow
             nodes={nodes}
             edges={edges}
             nodeTypes={nodeTypes}
-            onNodesChange={onNodesChange}
-            onEdgesChange={onEdgesChange}
+            nodesDraggable={interactive}
+            nodesConnectable={interactive}
+            elementsSelectable={interactive}
+            onNodesChange={(changes) => {
+              onNodesChange(changes);
+              // Measurement and selection are presentation state. Layout edits are saved.
+              const changed = changes.some((change) => change.type === 'position' && change.position || change.type === 'remove');
+              if (changed) setIsDirty(true);
+              if (changes.some((change) => change.type === 'position' && !change.dragging || change.type === 'remove')) {
+                pushHistory(applyNodeChanges(changes, nodes), edges, entryNode);
+              }
+            }}
+            onEdgesChange={(changes) => {
+              onEdgesChange(changes);
+              if (changes.some((change) => change.type === 'remove')) {
+                pushHistory(nodes, applyEdgeChanges(changes, edges), entryNode);
+              }
+            }}
             onConnect={onConnect}
             onNodeClick={onNodeClick}
             onPaneClick={onPaneClick}
             fitView
+            fitViewOptions={{ padding: '40px' }}
+            defaultEdgeOptions={{ style: { stroke: 'var(--border-strong)', strokeWidth: 1.5 }, labelStyle: { fill: 'var(--text-primary)', fontSize: 12 }, labelBgStyle: { fill: 'var(--bg-canvas)' } }}
             aria-label={t('builder.canvasLabel', { id: workflowId })}
             ariaLabelConfig={{
               'node.a11yDescription.default': t('flowLabels.nodeDescription'),
@@ -898,17 +884,16 @@ export function WorkflowCanvasInner({
               'handle.ariaLabel': t('flowLabels.handle'),
             }}
           >
-            <Background color="var(--border-subtle)" gap={20} size={1} />
-            <Controls />
-            <MiniMap
-              nodeColor={() => 'var(--accent-primary)'}
+            <Background color="var(--border-subtle)" gap={24} size={1} />
+            {showMinimap && <MiniMap
+              nodeColor={() => 'var(--border-strong)'}
               style={{
                 backgroundColor: 'var(--bg-surface)',
                 border: '1px solid var(--border-subtle)',
                 borderRadius: 'var(--radius-sm)',
               }}
-            />
-          </ReactFlow>
+            />}
+          </ReactFlow> : null}
 
           {/* Module Palette Popover */}
           <ModulePalette
@@ -918,23 +903,12 @@ export function WorkflowCanvasInner({
           />
         </div>
 
-        {/* Node Properties Inspector */}
-        {inspectorOpen && (
-          <NodeInspector
-            selectedNode={selectedNode}
-            allNodes={nodes}
-            allEdges={edges}
-            entryNode={entryNode}
-            onUpdateNodeData={handleUpdateNodeData}
-            onRenameNode={handleRenameNode}
-            onSetEntryNode={handleSetEntryNode}
-            onDeleteNode={handleDeleteNode}
-            onSetDefaultTransition={handleSetDefaultTransition}
-            onSetBranchTransition={handleSetBranchTransition}
-            onClose={() => setInspectorOpen(false)}
-          />
-        )}
+        {wide && inspectorOpen && inspector}
       </div>
+      {!wide && <Modal open={active && inspectorOpen && !!selectedNode} onClose={() => setInspectorOpen(false)} title={t('workflowDesign.editNode', { name: selectedNode?.id || '' })} variant="drawer" maxWidth={320}
+        returnFocusTo={() => editorRoot.current?.querySelector<HTMLButtonElement>('.workflow-canvas-toolbar .studio-disclosure-trigger') ?? null}>
+        {inspector}
+      </Modal>}
 
       {/* CAS Revision Conflict Recovery Modal */}
       <ConflictModal
@@ -958,6 +932,11 @@ export function WorkflowCanvasInner({
         workflowName={workflowName || 'Workflow'}
         currentSpec={graphToSpec({ nodes, edges, entryNode }, initialSpec)}
         onClose={() => setImportExportOpen(false)}
+        onImportedPython={(record) => {
+          setImportExportOpen(false);
+          if (onImportedPython) onImportedPython(record);
+          else window.location.hash = `#/workflows/${record.workflow_id}`;
+        }}
         onApplyImportedSpec={handleApplyImportedSpec}
         onCreateFromImport={async (name, spec) => {
           if (onSaveAsCopy) {

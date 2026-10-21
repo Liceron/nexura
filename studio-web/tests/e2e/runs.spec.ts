@@ -24,11 +24,12 @@ test.describe('Run Console, Replay, and Debugging (F07)', () => {
     page,
   }) => {
     await page.goto(cluster.frontendUrl);
-    await expect(page.getByLabel(/^Service connection status:/)).toContainText(/local-owner/i);
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveText('Connected');
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveAccessibleDescription(/local-owner/i);
 
     // Create a new workflow from Customer Order template
-    await page.getByRole('button', { name: /\+ New Workflow/i }).click();
-    await page.getByRole('dialog').getByText('Customer Order Triage & Support').click();
+    await page.getByRole('button', { name: /New workflow/i }).click();
+    await page.getByRole('dialog').getByText('Order support with refund approval').click();
 
     const nameInput = page.getByLabel('Workflow Name');
     await nameInput.fill('F07 Live Execution Workflow');
@@ -37,7 +38,7 @@ test.describe('Run Console, Replay, and Debugging (F07)', () => {
     await expect(page).toHaveURL(/#\/workflows\/wf-/);
 
     // Click the top Run button
-    const runBtn = page.getByRole('button', { name: 'Run', exact: true }).first();
+    const runBtn = page.getByRole('button', { name: 'Run', exact: true });
     await expect(runBtn).toBeVisible();
     await runBtn.click();
 
@@ -76,7 +77,7 @@ test.describe('Run Console, Replay, and Debugging (F07)', () => {
     await expect(page.getByText('Node Completed').first()).toBeVisible();
 
     // Switch to visual graph to inspect execution
-    await page.getByRole('tab', { name: 'Visual Graph' }).click();
+    await page.getByRole('tab', { name: 'Graph' }).click();
     await expect(page.locator('.react-flow__node').first()).toBeVisible();
 
     // Switch back to Run Console
@@ -93,16 +94,17 @@ test.describe('Run Console, Replay, and Debugging (F07)', () => {
     page,
   }) => {
     await page.goto(cluster.frontendUrl);
-    await expect(page.getByLabel(/^Service connection status:/)).toContainText(/local-owner/i);
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveText('Connected');
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveAccessibleDescription(/local-owner/i);
 
     // Create workflow
-    await page.getByRole('button', { name: /\+ New Workflow/i }).click();
-    await page.getByRole('dialog').getByText('Bilingual Customer Greeting').click();
+    await page.getByRole('button', { name: /New workflow/i }).click();
+    await page.getByRole('dialog').getByText('English and Hindi greeting', { exact: true }).click();
     await page.getByLabel('Workflow Name').fill('Validation Error Test');
     await page.getByRole('button', { name: /Validate & Create/i }).click();
     await expect(page).toHaveURL(/#\/workflows\/wf-/);
 
-    const runBtn = page.getByRole('button', { name: 'Run', exact: true }).first();
+    const runBtn = page.getByRole('button', { name: 'Run', exact: true });
     await runBtn.click();
 
     const runModal = page.getByRole('dialog');
@@ -121,11 +123,12 @@ test.describe('Run Console, Replay, and Debugging (F07)', () => {
     page,
   }) => {
     await page.goto(cluster.frontendUrl);
-    await expect(page.getByLabel(/^Service connection status:/)).toContainText(/local-owner/i);
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveText('Connected');
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveAccessibleDescription(/local-owner/i);
 
     // Create workflow from Customer Order template
-    await page.getByRole('button', { name: /\+ New Workflow/i }).click();
-    await page.getByRole('dialog').getByText('Customer Order Triage & Support').click();
+    await page.getByRole('button', { name: /New workflow/i }).click();
+    await page.getByRole('dialog').getByText('Order support with refund approval').click();
 
     const nameInput = page.getByLabel('Workflow Name');
     await nameInput.fill('Approval Gate Flow');
@@ -133,7 +136,7 @@ test.describe('Run Console, Replay, and Debugging (F07)', () => {
     await expect(page).toHaveURL(/#\/workflows\/wf-/);
 
     // Open Run Modal
-    const runBtn = page.getByRole('button', { name: 'Run', exact: true }).first();
+    const runBtn = page.getByRole('button', { name: 'Run', exact: true });
     await runBtn.click();
 
     const runModal = page.getByRole('dialog');

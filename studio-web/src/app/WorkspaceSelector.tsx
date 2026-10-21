@@ -29,25 +29,13 @@ export function WorkspaceSelector() {
           setModalOpen(true);
         }}
         aria-label={`${t('header.workspace')}: ${connection.workspace}`}
-        style={{
-          display: 'inline-flex',
-          minWidth: 0,
-          maxWidth: '100%',
-          overflowWrap: 'anywhere',
-          alignItems: 'center',
-          gap: 6,
-          padding: '4px 10px',
-          borderRadius: 'var(--radius-md)',
-          backgroundColor: 'var(--bg-surface-elevated)',
-          border: '1px solid var(--border-subtle)',
-          color: 'var(--text-primary)',
-          fontSize: 13,
-          fontWeight: 500,
-          cursor: 'pointer',
-        }}
+        type="button"
+        className="studio-utility-button studio-workspace-control"
+        title={connection.workspace}
+        aria-haspopup="dialog"
       >
         <span className="studio-workspace-prefix" style={{ color: 'var(--text-muted)' }}>{t('ui.workspace')}</span>
-        <span style={{ color: 'var(--accent-primary)', fontWeight: 600, minWidth: 0 }}>
+        <span className="studio-workspace-name">
           {connection.workspace}
         </span>
       </button>

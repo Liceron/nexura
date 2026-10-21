@@ -67,6 +67,7 @@ vi.mock('@xyflow/react', () => ({
   ReactFlowProvider: ({ children }: { children: ReactNode }) => <>{children}</>,
   ReactFlow: ({ children }: { children: ReactNode }) => <div>{children}</div>, Background: () => null, Controls: () => null, MiniMap: () => null,
   useNodesState: (nodes: unknown[]) => [nodes, vi.fn(), vi.fn()], useEdgesState: (edges: unknown[]) => [edges, vi.fn(), vi.fn()],
+  useReactFlow: () => ({ fitView: vi.fn(), zoomIn: vi.fn(), zoomOut: vi.fn() }),
   addEdge: vi.fn(), Handle: () => null, Position: { Left: 'left', Right: 'right' },
 }));
 
@@ -181,7 +182,7 @@ describe('Hindi UI coverage (local mock API)', () => {
   });
   it('workflow list, built-in examples and create dialog', async () => {
     await show(<WorkflowList onSelectWorkflow={noop} />); assertHindi();
-    fireEvent.click(screen.getByRole('button', { name: /नया वर्कफ़्लो/ })); assertHindi();
+    fireEvent.click(screen.getByRole('button', { name: /नया कार्यप्रवाह/ })); assertHindi();
   });
   it('workflow detail tabs and real canvas toolbar', async () => { await show(<WorkflowDetail workflowId="वर्कफ़्लो" onBack={noop} onOpenWorkflow={noop} />); assertHindi(); });
   it.each(['export', 'bundle', 'import', 'pyexport', 'pyimport'] as const)('import/export mode %s', async (initialMode) => {

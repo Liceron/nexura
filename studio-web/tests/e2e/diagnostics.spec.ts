@@ -8,13 +8,14 @@ test.afterAll(async () => { if (cluster) await cluster.stop(); });
 test('Studio shows persisted diagnostics and downloads a content-free SDK trace', async ({ page }) => {
   await page.addInitScript((url) => localStorage.setItem('nexura_api_url', url), cluster.backendUrl);
   await page.goto(cluster.frontendUrl);
-  await expect(page.getByLabel(/^Service connection status:/)).toContainText(/local-owner/i);
+  await expect(page.getByLabel(/^Service connection status:/)).toHaveText('Connected');
+  await expect(page.getByLabel(/^Service connection status:/)).toHaveAccessibleDescription(/local-owner/i);
   await page.getByRole('button', { name: /New Workflow/i }).click();
-  await page.getByRole('dialog').getByText('Bilingual Customer Greeting').click();
+  await page.getByRole('dialog').getByText('English and Hindi greeting', { exact: true }).click();
   await page.getByLabel('Workflow Name').fill('SDK Studio Diagnostics');
   await page.getByRole('button', { name: /Validate & Create/i }).click();
   await expect(page).toHaveURL(/#\/workflows\/wf-/);
-  await page.getByRole('button', { name: 'Run', exact: true }).first().click();
+  await page.getByRole('button', { name: 'Run', exact: true }).click();
   await page.getByRole('button', { name: /Launch Run/i }).click();
   await expect(page.getByLabel('Run status badge')).toContainText('Completed');
   await page.getByRole('tab', { name: 'Diagnostics', exact: true }).click();
@@ -54,8 +55,9 @@ test('Studio displays usage emitted by a real SDK module with a local fake model
   const workflow = await created.json();
   await page.addInitScript((url) => localStorage.setItem('nexura_api_url', url), cluster.backendUrl);
   await page.goto(`${cluster.frontendUrl}/#/workflows/${workflow.workflow_id}`);
-  await expect(page.getByLabel(/^Service connection status:/)).toContainText(/local-owner/i);
-  await page.getByRole('button', { name: 'Run', exact: true }).first().click();
+  await expect(page.getByLabel(/^Service connection status:/)).toHaveText('Connected');
+  await expect(page.getByLabel(/^Service connection status:/)).toHaveAccessibleDescription(/local-owner/i);
+  await page.getByRole('button', { name: 'Run', exact: true }).click();
   await page.getByRole('dialog').locator('textarea').first().fill(JSON.stringify({
     operation: 'generate', messages: [{ role: 'user', content: 'नमस्ते — ORD-501' }],
   }));

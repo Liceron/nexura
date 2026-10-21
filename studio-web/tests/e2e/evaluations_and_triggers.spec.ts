@@ -41,7 +41,8 @@ test.describe('Evaluations, Schedules & Signed Webhook Dry Runs (F13)', () => {
 
     // 1. Open Studio and verify connection
     await page.goto(cluster.frontendUrl);
-    await expect(page.getByLabel(/^Service connection status:/)).toContainText(/local-owner/i);
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveText('Connected');
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveAccessibleDescription(/local-owner/i);
 
     // 2. Navigate to Evaluations tab
     const evalNavBtn = page.locator('[data-testid="nav-item-evaluations"]');
@@ -217,6 +218,7 @@ test.describe('Evaluations, Schedules & Signed Webhook Dry Runs (F13)', () => {
 
     // 14. B39: the workflow page's Triggers entry opens the triggers view preselected for it.
     await page.goto(`${cluster.frontendUrl}/#/workflows/${targetWorkflowId}`);
+    await page.getByRole('button', { name: 'More', exact: true }).click();
     await page.locator('[data-testid="workflow-open-triggers"]').click();
     await expect(page.locator('[data-testid="triggers-workflow-filter"]')).toContainText(targetWorkflowId);
     await page.locator('[data-testid="btn-open-create-schedule"]').click();

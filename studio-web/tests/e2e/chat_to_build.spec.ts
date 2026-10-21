@@ -54,7 +54,7 @@ const FAKE_DRAFT = {
 
 async function openDescribe(page: import('@playwright/test').Page) {
   await page.goto(`${cluster.frontendUrl}/#/workflows`);
-  await page.getByRole('button', { name: /new workflow|create/i }).first().click();
+  await page.getByRole('button', { name: 'New workflow', exact: true }).click();
   await page.getByTestId('create-describe-it').click();
   await expect(page.getByTestId('describe-panel')).toBeVisible();
 }

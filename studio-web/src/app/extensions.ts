@@ -14,16 +14,16 @@ import type { MembershipSource } from '../api/membership';
 export const BUILTIN_NAV_TABS = [
   'workflows',
   'templates',
-  'approvals',
-  'playground',
-  'knowledge',
-  'skills',
   'agents',
-  'credentials',
-  'tools',
+  'skills',
+  'knowledge',
+  'playground',
+  'approvals',
+  'traces',
   'evaluations',
   'triggers',
-  'traces',
+  'credentials',
+  'tools',
   'onboarding',
   'system',
 ] as const;
@@ -45,6 +45,8 @@ export interface StudioNavItem {
   icon: string;
   /** Id of the sidebar entry this one follows; omitted or unknown means "at the end". */
   after?: string;
+  /** Optional presentation group; otherwise inherited from the after anchor. */
+  group?: 'build' | 'operate' | 'configure' | 'footer';
 }
 
 export interface StudioRoute {

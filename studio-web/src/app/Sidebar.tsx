@@ -2,24 +2,25 @@
 // Copyright (c) 2026 Liceron
 import { Icon } from '../components/Icon';
 import { useI18n } from '../i18n';
-import { mergeAfter, useStudioExtensions, type BuiltinNavTab, type ExtensionId } from './extensions';
+import { mergeAfter, useStudioExtensions, type BuiltinNavTab, type ExtensionId, type StudioNavItem } from './extensions';
 
-const BUILTIN_TABS: ReadonlyArray<{ id: BuiltinNavTab; labelKey: string; icon: string }> = [
-  { id: 'workflows', labelKey: 'nav.workflows', icon: 'workflows' },
-  { id: 'templates', labelKey: 'nav.templates', icon: 'templates' },
-  { id: 'approvals', labelKey: 'nav.approvals', icon: 'approvals' },
-  { id: 'playground', labelKey: 'nav.playground', icon: 'playground' },
-  { id: 'knowledge', labelKey: 'nav.knowledge', icon: 'knowledge' },
-  { id: 'skills', labelKey: 'nav.skills', icon: 'skills' },
-  { id: 'agents', labelKey: 'nav.agents', icon: 'agents' },
-  { id: 'credentials', labelKey: 'nav.credentials', icon: 'credentials' },
-  { id: 'tools', labelKey: 'nav.tools', icon: 'tools' },
-  { id: 'evaluations', labelKey: 'nav.evaluations', icon: 'evaluations' },
-  { id: 'triggers', labelKey: 'nav.triggers', icon: 'triggers' },
-  { id: 'traces', labelKey: 'nav.traces', icon: 'traces' },
-  { id: 'onboarding', labelKey: 'nav.onboarding', icon: 'onboarding' },
-  { id: 'system', labelKey: 'nav.system', icon: 'system' },
+type NavGroup = NonNullable<StudioNavItem['group']>;
+const GROUPS: ReadonlyArray<{ id: NavGroup; tabs: readonly BuiltinNavTab[] }> = [
+  { id: 'build', tabs: ['workflows', 'templates', 'agents', 'skills', 'knowledge', 'playground'] },
+  { id: 'operate', tabs: ['approvals', 'traces', 'evaluations', 'triggers'] },
+  { id: 'configure', tabs: ['credentials', 'tools'] },
+  { id: 'footer', tabs: ['onboarding', 'system'] },
 ];
+// Keep message keys explicit for translation extraction and the documentation audit.
+const LABEL_KEYS: Record<BuiltinNavTab, string> = {
+  workflows: 'nav.workflows', templates: 'nav.templates', agents: 'nav.agents',
+  skills: 'nav.skills', knowledge: 'nav.knowledge', playground: 'nav.playground',
+  approvals: 'nav.approvals', traces: 'nav.traces', evaluations: 'nav.evaluations',
+  triggers: 'nav.triggers', credentials: 'nav.credentials', tools: 'nav.tools',
+  onboarding: 'nav.onboarding', system: 'nav.system',
+};
+const BUILTIN_TABS = GROUPS.flatMap(({ id: group, tabs }) =>
+  tabs.map((id) => ({ id, labelKey: LABEL_KEYS[id], icon: id, group })));
 
 /** A Studio page: a built-in one or one registered through `extensions.ts`. */
 export type NavTab = BuiltinNavTab | ExtensionId;
@@ -36,17 +37,33 @@ export function Sidebar({ currentTab, onSelectTab, pendingApprovalsCount = 0 }: 
   const extensions = useStudioExtensions();
   // Extension nav items are placed after the entry their `after` names.
   const builtinById = new Map(BUILTIN_TABS.map((tab) => [tab.id as string, tab]));
-  const tabList: Array<{ id: NavTab; labelKey: string; icon: string }> = mergeAfter(
+  const extra = extensions.navItems();
+  const byId = new Map<string, StudioNavItem>([...BUILTIN_TABS, ...extra].map((tab) => [tab.id, tab]));
+  const groupFor = (item: StudioNavItem, seen = new Set<string>()): NavGroup => {
+    if (item.group) return item.group;
+    if (!item.after || seen.has(item.id)) return 'configure';
+    seen.add(item.id);
+    const anchor = byId.get(item.after);
+    return anchor ? groupFor(anchor, seen) : 'configure';
+  };
+  const tabList = mergeAfter(
     BUILTIN_TABS.map((tab) => tab.id),
-    extensions.navItems(),
-  ).map((entry) => (typeof entry === 'string' ? builtinById.get(entry)! : entry));
+    extra,
+  ).map((entry) => {
+    const item = typeof entry === 'string' ? builtinById.get(entry)! : entry;
+    return { ...item, group: groupFor(item) };
+  });
 
   return (
     <nav
       aria-label={t('ui.studioNavigation')}
       className="studio-sidebar"
     >
-      {tabList.map((tab) => {
+      {GROUPS.map(({ id: group }) => (
+        <div key={group} className={`studio-nav-group studio-nav-group--${group}`}
+          role="group" aria-label={t(`shell.groups.${group}`)}>
+          {group !== 'footer' && <div className="studio-nav-group-label" aria-hidden="true">{t(`shell.groups.${group}`)}</div>}
+      {tabList.filter((tab) => tab.group === group).map((tab) => {
         const isActive = currentTab === tab.id;
         return (
           <button
@@ -55,34 +72,15 @@ export function Sidebar({ currentTab, onSelectTab, pendingApprovalsCount = 0 }: 
             aria-label={t(tab.labelKey)}
             aria-current={isActive ? 'page' : undefined}
             onClick={() => onSelectTab(tab.id)}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 10,
-              padding: '8px 12px',
-              borderRadius: 'var(--radius-md)',
-              backgroundColor: isActive ? 'var(--accent-subtle)' : 'transparent',
-              color: isActive ? 'var(--accent-primary)' : 'var(--text-secondary)',
-              fontWeight: isActive ? 600 : 500,
-              fontSize: 13,
-              textAlign: 'left',
-              cursor: 'pointer',
-              transition: 'background-color 0.15s ease',
-            }}
+            type="button"
+            className="studio-nav-item"
           >
             <Icon name={tab.icon} />
-            <span className="studio-sidebar-label" style={{ flex: 1 }}>{t(tab.labelKey)}</span>
+            <span className="studio-sidebar-label">{t(tab.labelKey)}</span>
             {tab.id === 'approvals' && pendingApprovalsCount > 0 && (
               <span
                 className="studio-sidebar-badge"
-                style={{
-                  backgroundColor: 'var(--status-warning)',
-                  color: '#000',
-                  fontSize: 11,
-                  fontWeight: 700,
-                  padding: '1px 6px',
-                  borderRadius: 10,
-                }}
+                aria-label={t('shell.pendingApprovals').replace('{count}', String(pendingApprovalsCount))}
               >
                 {pendingApprovalsCount}
               </span>
@@ -90,6 +88,8 @@ export function Sidebar({ currentTab, onSelectTab, pendingApprovalsCount = 0 }: 
           </button>
         );
       })}
+        </div>
+      ))}
     </nav>
   );
 }

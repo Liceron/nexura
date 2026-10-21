@@ -14,8 +14,8 @@ export function Card({ elevated = false, children, style, ...props }: CardProps)
         border: '1px solid var(--border-subtle)',
         borderRadius: 'var(--radius-lg)',
         padding: '20px',
-        boxShadow: elevated ? 'var(--shadow-md)' : 'var(--shadow-sm)',
         ...style,
+        boxShadow: 'none',
       }}
       {...props}
     >

@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Liceron
 import { Icon } from '../../components/Icon';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useId } from 'react';
 import type { BuilderNode, BuilderEdge } from './types';
+import { WorkflowTabs } from '../../components/WorkflowTabs';
 import { Button } from '../../components/Button';
 import { Input } from '../../components/Input';
 import { Badge } from '../../components/Badge';
@@ -32,30 +33,18 @@ interface NodeInspectorProps {
   onClose: () => void;
 }
 
-export function NodeInspector({
-  selectedNode,
-  allNodes,
-  allEdges,
-  entryNode,
-  onUpdateNodeData,
-  onRenameNode,
-  onSetEntryNode,
-  onDeleteNode,
-  onSetDefaultTransition,
-  onSetBranchTransition,
-  onClose,
-}: NodeInspectorProps) {
+export function NodeInspector(props: NodeInspectorProps) {
+  const t = useBuilderT();
+  return props.selectedNode ? <NodeInspectorFields {...props} selectedNode={props.selectedNode} /> :
+    <div className="workflow-inspector" style={{ width: 'min(320px, 100%)', padding: 16, color: 'var(--text-secondary)', fontSize: 13 }}>
+      {t('ui.selectANodeOnTheCanvasToInspectAndConfigureProperties')}
+    </div>;
+}
+
+function NodeInspectorFields({ selectedNode, allNodes, allEdges, entryNode, onUpdateNodeData, onRenameNode, onSetEntryNode, onDeleteNode, onSetDefaultTransition, onSetBranchTransition, onClose }: NodeInspectorProps & { selectedNode: BuilderNode }) {
   const { manager } = useApi();
   const t = useBuilderT();
-
-  if (!selectedNode) {
-    return (
-      <div className="studio-split-secondary" style={{ width: 'min(340px, 100%)', padding: 16, color: 'var(--text-secondary)', fontSize: 13 }}>
-        {t('ui.selectANodeOnTheCanvasToInspectAndConfigureProperties')}
-      </div>
-    );
-  }
-
+  const panelId = useId();
   const { id, data } = selectedNode;
   const isEntry = id === entryNode;
 
@@ -157,9 +146,9 @@ export function NodeInspector({
   return (
     <div
       aria-label={t('ui.nodePropertiesInspector')}
-      className="studio-split-secondary"
+      className="workflow-inspector"
       style={{
-        width: 'min(360px, 100%)',
+        width: 'min(320px, 100%)',
         backgroundColor: 'var(--bg-surface)',
         borderLeft: '1px solid var(--border-subtle)',
         display: 'flex',
@@ -240,112 +229,13 @@ export function NodeInspector({
         </div>
       </div>
 
-      {/* Inspector Tabs */}
-      <div role="tablist"
-        style={{
-          display: 'flex',
-          borderBottom: '1px solid var(--border-subtle)',
-          backgroundColor: 'var(--bg-canvas)',
-        }}
-      >
-        {isComposite(data) && (
-          <button
-            role="tab"
-            aria-selected={activeTab === 'composite'}
-            onClick={() => setActiveTab('composite')}
-            style={{
-              flex: 1,
-              padding: '8px 4px',
-              fontSize: 11,
-              fontWeight: 600,
-              border: 'none',
-              borderBottom: activeTab === 'composite' ? '2px solid var(--brand-primary)' : '2px solid transparent',
-              backgroundColor: 'transparent',
-              color: activeTab === 'composite' ? 'var(--brand-primary)' : 'var(--text-secondary)',
-              cursor: 'pointer',
-            }}
-          >
-            {t('builder.tabComposite')}
-          </button>
-        )}
-        {!hasNoOwnHandler(data) && (
-        <button
-          role="tab"
-          aria-selected={activeTab === 'config'}
-          onClick={() => setActiveTab('config')}
-          style={{
-            flex: 1,
-            padding: '8px 4px',
-            fontSize: 11,
-            fontWeight: 600,
-            border: 'none',
-            borderBottom: activeTab === 'config' ? '2px solid var(--brand-primary)' : '2px solid transparent',
-            backgroundColor: 'transparent',
-            color: activeTab === 'config' ? 'var(--brand-primary)' : 'var(--text-secondary)',
-            cursor: 'pointer',
-          }}
-        >
-          {t('ui.config')}
-        </button>
-        )}
-        {!hasNoOwnHandler(data) && (
-        <button
-          role="tab"
-          aria-selected={activeTab === 'inputs'}
-          onClick={() => setActiveTab('inputs')}
-          style={{
-            flex: 1,
-            padding: '8px 4px',
-            fontSize: 11,
-            fontWeight: 600,
-            border: 'none',
-            borderBottom: activeTab === 'inputs' ? '2px solid var(--brand-primary)' : '2px solid transparent',
-            backgroundColor: 'transparent',
-            color: activeTab === 'inputs' ? 'var(--brand-primary)' : 'var(--text-secondary)',
-            cursor: 'pointer',
-          }}
-        >
-          {t('ui.inputs')}{Object.keys(data.input_mapping || {}).length})
-        </button>
-        )}
-        <button
-          role="tab"
-          aria-selected={activeTab === 'transitions'}
-          onClick={() => setActiveTab('transitions')}
-          style={{
-            flex: 1,
-            padding: '8px 4px',
-            fontSize: 11,
-            fontWeight: 600,
-            border: 'none',
-            borderBottom: activeTab === 'transitions' ? '2px solid var(--brand-primary)' : '2px solid transparent',
-            backgroundColor: 'transparent',
-            color: activeTab === 'transitions' ? 'var(--brand-primary)' : 'var(--text-secondary)',
-            cursor: 'pointer',
-          }}
-        >
-          {t('ui.routes')}
-        </button>
-        <button
-          role="tab"
-          aria-selected={activeTab === 'properties'}
-          onClick={() => setActiveTab('properties')}
-          style={{
-            flex: 1,
-            padding: '8px 4px',
-            fontSize: 11,
-            fontWeight: 600,
-            border: 'none',
-            borderBottom: activeTab === 'properties' ? '2px solid var(--brand-primary)' : '2px solid transparent',
-            backgroundColor: 'transparent',
-            color: activeTab === 'properties' ? 'var(--brand-primary)' : 'var(--text-secondary)',
-            cursor: 'pointer',
-          }}
-        >
-          {t('ui.details')}
-        </button>
-      </div>
-
+      <WorkflowTabs label={t('workflowDesign.nodeViews')} active={activeTab} panelId={panelId}
+        onChange={(tab) => setActiveTab(tab as typeof activeTab)} tabs={[
+          ...(isComposite(data) ? [{ id: 'composite', label: t('builder.tabComposite') }] : []),
+          ...(!hasNoOwnHandler(data) ? [{ id: 'config', label: t('ui.config') }, { id: 'inputs', label: `${t('ui.inputs')}${Object.keys(data.input_mapping || {}).length})` }] : []),
+          { id: 'transitions', label: t('ui.routes') }, { id: 'properties', label: t('ui.details') },
+        ]} />
+      <div id={panelId} role="tabpanel" aria-label={{ config: t('ui.config'), inputs: t('ui.inputs'), transitions: t('ui.routes'), properties: t('ui.details'), composite: t('builder.tabComposite') }[activeTab]}>
       {activeTab === 'composite' && isComposite(data) && (
         <CompositeInspector
           nodeId={id}
@@ -671,6 +561,7 @@ export function NodeInspector({
         </div>
       )}
 
+      </div>
       {/* Persistent Inspector Footer */}
       <div
         style={{
@@ -680,7 +571,7 @@ export function NodeInspector({
           backgroundColor: 'var(--bg-canvas)',
         }}
       >
-        <Button variant="danger" size="sm" onClick={() => onDeleteNode(id)} style={{ width: '100%' }}>
+        <Button variant="ghost" className="workflow-danger-action" size="sm" onClick={() => onDeleteNode(id)} style={{ width: '100%' }}>
           {t('ui.deleteNode')}
         </Button>
       </div>

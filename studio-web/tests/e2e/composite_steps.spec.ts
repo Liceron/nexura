@@ -35,7 +35,8 @@ async function seed(page: Page, name: string): Promise<string> {
 
 async function open(page: Page, workflowId: string) {
   await page.goto(`${cluster.frontendUrl}/#/workflows/${workflowId}`);
-  await expect(page.getByLabel(/^Service connection status:/)).toContainText(/local-owner/i);
+  await expect(page.getByLabel(/^Service connection status:/)).toHaveText('Connected');
+  await expect(page.getByLabel(/^Service connection status:/)).toHaveAccessibleDescription(/local-owner/i);
   await expect(page.getByTestId('node-start')).toBeVisible();
 }
 
@@ -46,8 +47,8 @@ async function savedSpec(page: Page, workflowId: string) {
 
 async function save(page: Page, expectedRevision: number) {
   await page.getByRole('button', { name: 'Save', exact: true }).click();
-  await expect(page.getByLabel('Authoritative revision badge')).toContainText(`Revision: ${expectedRevision}`);
-  await expect(page.getByText('Unsaved Changes')).not.toBeVisible();
+  await expect(page.getByLabel('Workflow revision')).toContainText(`Revision: ${expectedRevision}`);
+  await expect(page.getByText('Unsaved changes')).not.toBeVisible();
 }
 
 const inspector = (page: Page) => page.getByLabel('Node properties inspector');
@@ -57,7 +58,9 @@ test('parallel step: create, edit, save, reload', async ({ page }) => {
   await open(page, wf);
 
   // Keyboard-operable: focus the toolbar button and press Enter.
-  const add = page.getByRole('button', { name: '+ Parallel Step' });
+  await page.getByRole('button', { name: 'Add step', exact: true }).focus();
+  await page.keyboard.press('Enter');
+  const add = page.getByRole('button', { name: 'Parallel' });
   await add.focus();
   await page.keyboard.press('Enter');
 
@@ -78,11 +81,11 @@ test('parallel step: create, edit, save, reload', async ({ page }) => {
   await expect(inspector(page).getByLabel('Remove reducer results')).toBeVisible();
 
   await page.getByRole('button', { name: 'Validate' }).click();
-  await expect(page.getByText(/Authoritative validation passed/i)).toBeVisible();
+  await expect(page.getByText(/Workflow is valid/i)).toBeVisible();
   await save(page, 2);
 
   await page.reload();
-  await expect(page.getByLabel('Authoritative revision badge')).toContainText('Revision: 2');
+  await expect(page.getByLabel('Workflow revision')).toContainText('Revision: 2');
   const reloaded = page.locator('[data-step-kind="parallel"]');
   await expect(reloaded).toHaveCount(1);
   await expect(reloaded).toContainText('synthetic_router | synthetic_order_lookup');
@@ -100,7 +103,8 @@ test('map step: create, edit, save, reload', async ({ page }) => {
   const wf = await seed(page, 'P2 map');
   await open(page, wf);
 
-  await page.getByRole('button', { name: '+ Map Step' }).click();
+  await page.getByRole('button', { name: 'Add step', exact: true }).click();
+  await page.getByRole('group', { name: 'Add step', exact: true }).getByRole('button', { name: 'Map', exact: true }).click();
   const node = page.locator('[data-step-kind="map"]');
   await expect(node).toHaveCount(1);
 
@@ -129,7 +133,8 @@ test('sub-workflow step: reference a saved workflow, save, reload', async ({ pag
   const wf = await seed(page, 'P2 parent');
   await open(page, wf);
 
-  await page.getByRole('button', { name: '+ Sub-workflow Step' }).click();
+  await page.getByRole('button', { name: 'Add step', exact: true }).click();
+  await page.getByRole('button', { name: 'Sub-workflow' }).click();
   const node = page.locator('[data-step-kind="subworkflow"]');
   await expect(node).toHaveCount(1);
   await expect(inspector(page).getByTestId('composite-errors')).toContainText('Choose the saved workflow');
@@ -153,7 +158,8 @@ test('undo and redo cover composite steps and their edits', async ({ page }) => 
   const wf = await seed(page, 'P2 undo');
   await open(page, wf);
 
-  await page.getByRole('button', { name: '+ Map Step' }).click();
+  await page.getByRole('button', { name: 'Add step', exact: true }).click();
+  await page.getByRole('group', { name: 'Add step', exact: true }).getByRole('button', { name: 'Map', exact: true }).click();
   await expect(page.locator('[data-step-kind="map"]')).toHaveCount(1);
   await inspector(page).getByLabel('Map over (state list)').fill('rows');
   await expect(page.locator('[data-step-kind="map"]')).toContainText('for each rows');
@@ -172,7 +178,8 @@ test('invalid map field is rejected with an inline error and nothing is saved', 
   const wf = await seed(page, 'P2 negative');
   await open(page, wf);
 
-  await page.getByRole('button', { name: '+ Map Step' }).click();
+  await page.getByRole('button', { name: 'Add step', exact: true }).click();
+  await page.getByRole('group', { name: 'Add step', exact: true }).getByRole('button', { name: 'Map', exact: true }).click();
   await inspector(page).getByLabel('Handler run for each item').selectOption('synthetic_router');
   await inspector(page).getByLabel('Map over (state list)').fill('items');
   await inspector(page).getByLabel('Item key').fill('bad key!');
@@ -186,7 +193,7 @@ test('invalid map field is rejected with an inline error and nothing is saved', 
   await expect(issues).toContainText('map_as');
   await expect(page.getByText(/Save blocked/)).toBeVisible();
   await expect(inspector(page).getByTestId('inspector-validation-error')).toContainText('INVALID_COMPOSITE');
-  await expect(page.getByLabel('Authoritative revision badge')).toContainText('Revision: 1');
+  await expect(page.getByLabel('Workflow revision')).toContainText('Revision: 1');
   await expect(savedSpec(page, wf).then((s) => Object.keys(s.nodes))).resolves.toEqual(['start']);
 
   // Fixing the field clears the form error and the save goes through.

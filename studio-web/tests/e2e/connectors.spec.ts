@@ -73,7 +73,8 @@ test.describe('Connectors pack in the module registry (P10)', () => {
     });
 
     await page.goto(cluster.frontendUrl);
-    await expect(page.getByLabel(/^Service connection status:/)).toContainText(/local-owner/i);
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveText('Connected');
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveAccessibleDescription(/local-owner/i);
 
     // Register a credential holding a secret sentinel; no page may ever render it.
     await page.getByRole('button', { name: /Credentials/i }).click();
@@ -115,11 +116,12 @@ test.describe('Connectors pack in the module registry (P10)', () => {
 
     // Build a workflow and open the module drawer.
     await page.getByRole('button', { name: /Workflows/i }).first().click();
-    await page.getByRole('button', { name: /\+ New Workflow/i }).click();
+    await page.getByRole('button', { name: /New workflow/i }).click();
     await page.getByLabel('Workflow Name').fill('P10 Connectors Palette');
     await page.getByRole('button', { name: /Validate & Create/i }).click();
     await expect(page).toHaveURL(/#\/workflows\/wf-/);
-    await page.getByRole('button', { name: /\+ Add Step/i }).click();
+    await page.getByRole('button', { name: /Add step/i }).click();
+    await page.getByRole('button', { name: 'Standard', exact: true }).click();
 
     const palette = page.getByRole('dialog', { name: 'Available modules drawer' });
     await expect(palette).toBeVisible();
@@ -208,13 +210,15 @@ test.describe('Connectors pack in the module registry (P10)', () => {
     await register('p14_github_other', 'github_token', OTHER_SECRET, 'P14 GitHub token, wrong type');
 
     await page.goto(cluster.frontendUrl);
-    await expect(page.getByLabel(/^Service connection status:/)).toContainText(/local-owner/i);
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveText('Connected');
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveAccessibleDescription(/local-owner/i);
     await page.getByRole('button', { name: /Workflows/i }).first().click();
-    await page.getByRole('button', { name: /\+ New Workflow/i }).click();
+    await page.getByRole('button', { name: /New workflow/i }).click();
     await page.getByLabel('Workflow Name').fill('P14 Connector Setup');
     await page.getByRole('button', { name: /Validate & Create/i }).click();
     await expect(page).toHaveURL(/#\/workflows\/wf-/);
-    await page.getByRole('button', { name: /\+ Add Step/i }).click();
+    await page.getByRole('button', { name: /Add step/i }).click();
+    await page.getByRole('button', { name: 'Standard', exact: true }).click();
 
     const palette = page.getByRole('dialog', { name: 'Available modules drawer' });
     await expect(palette.getByText(/Loading registered modules/i)).toHaveCount(0, { timeout: 15000 });
@@ -224,7 +228,7 @@ test.describe('Connectors pack in the module registry (P10)', () => {
     await expect(palette.getByTestId('credential-type')).toContainText(slackType);
 
     // Add the Slack node; the inspector opens on the Config tab.
-    await palette.locator('code', { hasText: /^nexura\.connectors\.slack$/ }).click();
+    await palette.locator('div').filter({ has: page.locator('code', { hasText: /^nexura\.connectors\.slack$/ }) }).filter({ has: page.getByRole('button', { name: '+ Add Node', exact: true }) }).last().getByRole('button', { name: '+ Add Node', exact: true }).click();
 
     // credential_ref is a picker: only the Slack-compatible credential, shown as id and description.
     const picker = page.getByTestId('credential-ref-select');
@@ -245,9 +249,10 @@ test.describe('Connectors pack in the module registry (P10)', () => {
     await expect(op).toHaveValue('post_message');
 
     // A connector with no credential of its type shows the empty state with a link to Credentials.
-    await page.getByRole('button', { name: /\+ Add Step/i }).click();
+    await page.getByRole('button', { name: /Add step/i }).click();
+    await page.getByRole('button', { name: 'Standard', exact: true }).click();
     await palette.getByPlaceholder(/Search modules/i).fill('nexura.connectors.airtable');
-    await palette.locator('code', { hasText: /^nexura\.connectors\.airtable$/ }).click();
+    await palette.locator('div').filter({ has: page.locator('code', { hasText: /^nexura\.connectors\.airtable$/ }) }).filter({ has: page.getByRole('button', { name: '+ Add Node', exact: true }) }).last().getByRole('button', { name: '+ Add Node', exact: true }).click();
     await page.getByRole('tab', { name: /^Config$/ }).click();
     await expect(page.getByTestId('credential-ref-empty')).toContainText(/none of type airtable_token/);
     await expect(page.getByTestId('credential-ref-add-link')).toHaveAttribute('href', '#/credentials');

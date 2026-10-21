@@ -1,4 +1,17 @@
 {
+  "shell": {
+    "openNavigation": "Open navigation",
+    "settings": "Studio settings",
+    "latency": "Latency",
+    "connectionStatus": "Connection status",
+    "pendingApprovals": "{count} pending approvals",
+    "groups": {
+      "build": "Build",
+      "operate": "Operate",
+      "configure": "Configure",
+      "footer": "Help and system"
+    }
+  },
   "header": {
     "workspace": "Active workspace selector",
     "connection": "Service connection status",
@@ -98,16 +111,16 @@
   },
   "nav": {
     "workflows": "Workflows",
-    "approvals": "Approval Inbox",
+    "approvals": "Approvals",
     "playground": "Playground",
-    "knowledge": "Knowledge Base",
-    "credentials": "Credentials & Access",
-    "tools": "Tools & Integrations",
-    "evaluations": "Evaluations & Benchmarks",
-    "triggers": "Triggers & Outbox",
-    "onboarding": "Local Quickstart",
-    "system": "System Capabilities",
-    "traces": "Run Traces",
+    "knowledge": "Knowledge",
+    "credentials": "Credentials",
+    "tools": "Tools",
+    "evaluations": "Evaluations",
+    "triggers": "Triggers",
+    "onboarding": "Quickstart",
+    "system": "System",
+    "traces": "Traces",
     "templates": "Templates",
     "skills": "Skills",
     "agents": "Agents"
@@ -141,8 +154,8 @@
   },
   "workflows": {
     "searchEmptyDescription": "Try another name or clear the search.",
-    "title": "Workflow Library",
-    "create": "New Workflow",
+    "title": "Workflows",
+    "create": "New workflow",
     "search": "Search workflows...",
     "clearSearch": "Clear search",
     "noMatches": "No workflows matching",
@@ -155,8 +168,8 @@
     "nodes": "Nodes",
     "entryNode": "Entry Node",
     "open": "Open",
-    "saveAsCopy": "Save as Copy",
-    "downloadExport": "Download Export",
+    "saveAsCopy": "Duplicate",
+    "downloadExport": "Download bundle",
     "deleteWorkflow": "Delete Workflow",
     "openTriggers": "Triggers",
     "confirmDelete": "Are you sure you want to delete this workflow? This action cannot be undone.",
@@ -169,7 +182,7 @@
     "backToWorkflows": "Back to Workflows",
     "templatesTitle": "Built-in examples",
     "useTemplate": "Use Template",
-    "createModalTitle": "Create New Workflow",
+    "createModalTitle": "New workflow",
     "workflowName": "Workflow Name",
     "selectTemplate": "Select Template or Blank",
     "blankWorkflow": "Blank Workflow",
@@ -178,7 +191,7 @@
     "next": "Next",
     "showing": "Showing",
     "of": "of",
-    "browseGallery": "Browse the template gallery",
+    "browseGallery": "Start from template",
     "describeIt": "Describe it",
     "describeLabel": "Describe the workflow you want",
     "describePlaceholder": "For example: a support agent that looks up orders and asks a manager before refunds over 100",
@@ -404,9 +417,9 @@
     "notAvailable": "N/A"
   },
   "builder": {
-    "addParallel": "+ Parallel Step",
-    "addMap": "+ Map Step",
-    "addSubworkflow": "+ Sub-workflow Step",
+    "addParallel": "Parallel",
+    "addMap": "Map",
+    "addSubworkflow": "Sub-workflow",
     "addParallelHint": "Add a step whose branches run at the same time, then join",
     "addMapHint": "Add a step that runs once for each item of a list",
     "addSubworkflowHint": "Add a step that runs another saved workflow",
@@ -845,7 +858,7 @@
     "recoveredUnsavedLocalChangesFrom": "Recovered unsaved local changes from",
     "discardDraft": "Discard Draft",
     "restoreDraft": "Restore Draft",
-    "addStep": "+ Add Step",
+    "addStep": "Add step",
     "copy": "Copy",
     "paste": "Paste",
     "undoCtrlZ": "Undo (Ctrl+Z)",
@@ -854,10 +867,10 @@
     "redo": "Redo",
     "deleteSelectedNodeDel": "Delete Selected Node (Del)",
     "delete": "Delete",
-    "saveStatusBadge": "Save status badge",
+    "saveStatusBadge": "Save status",
     "revisionConflict": "Revision Conflict",
     "saving": "Saving...",
-    "unsavedChanges": "Unsaved Changes",
+    "unsavedChanges": "Unsaved changes",
     "savedRev": "Saved (Rev",
     "rev": "Rev:",
     "exportJson": "Export JSON",
@@ -866,7 +879,7 @@
     "saveCtrlS": "Save (Ctrl+S)",
     "save": "Save",
     "run": "Run",
-    "authoritativeValidationPassedGraphStructureRoutesAndMappingsAreFullyValid": "Authoritative validation passed: graph structure, routes, and mappings are fully valid.",
+    "authoritativeValidationPassedGraphStructureRoutesAndMappingsAreFullyValid": "Workflow is valid.",
     "saveError": "Save Error:",
     "running": "Running",
     "completed": "Completed",
@@ -1445,7 +1458,7 @@
     "applyToCanvas": "Apply to Canvas",
     "createNewWorkflow": "Create New Workflow",
     "workflowAccessDenied": "Workflow access denied",
-    "authoritativeRevisionBadge": "Authoritative revision badge",
+    "authoritativeRevisionBadge": "Workflow revision",
     "importExportJson": "Import / Export JSON",
     "workflowViews": "Workflow views",
     "runConsole2": "Run Console (",
@@ -1456,7 +1469,7 @@
     "noActiveRunSelected": "No active run selected.",
     "workflow3": "workflow",
     "workflows": "workflows",
-    "tenantScopedWorkflowSpecificationsRevisionsAndExecutionBlueprints": "Tenant-scoped workflow specifications, revisions, and execution blueprints.",
+    "tenantScopedWorkflowSpecificationsRevisionsAndExecutionBlueprints": "Workflows in this workspace.",
     "searchWorkflowsInput": "Search workflows input",
     "synthetic": "Synthetic",
     "workflowName": "Workflow Name",
@@ -1493,12 +1506,12 @@
   },
   "examples": {
     "order-triage-support": {
-      "title": "Customer Order Triage & Support",
-      "description": "Full 4-node support lifecycle: order lookup, value-based branching, human-approval refund gate, and synthetic agent response."
+      "title": "Order support with refund approval",
+      "description": "Look up a sample order, review its refund, and generate a local fake reply."
     },
     "bilingual-greeting": {
-      "title": "Bilingual Customer Greeting",
-      "description": "2-node localized workflow: retrieves synthetic customer order and formulates polite bilingual Devanagari Hindi support message."
+      "title": "English and Hindi greeting",
+      "description": "Look up a sample order and generate an English and Hindi greeting."
     },
     "order-router": {
       "title": "High-Value Order Decision Router",
@@ -1510,8 +1523,8 @@
     }
   },
   "workflowTabs": {
-    "graph": "Visual Graph",
-    "spec": "Raw Specification"
+    "graph": "Graph",
+    "spec": "Specification"
   },
   "runStart": {
     "objectError": "Initial state must be a JSON object.",
@@ -1825,5 +1838,22 @@
       "up": "up",
       "down": "down"
     }
+  },
+  "workflowDesign": {
+    "nodeViews": "Node settings tabs",
+    "more": "More",
+    "duplicate": "Duplicate",
+    "name": "Name",
+    "entryStep": "Entry step",
+    "steps": "Steps",
+    "details": "Details",
+    "standard": "Standard",
+    "edit": "Edit",
+    "minimap": "Minimap",
+    "needsApproval": "Needs approval",
+    "importExport": "Import/export JSON",
+    "editNode": "Edit {name}",
+    "replayStep": "Replay step",
+    "saved": "Saved"
   }
 }

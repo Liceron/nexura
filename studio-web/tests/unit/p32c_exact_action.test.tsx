@@ -124,7 +124,7 @@ describe('P32c exact action', () => {
     Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
     render(<ApprovalDetailsPanel pendingApproval={request} />);
     expect(screen.getByRole('button', { name: 'Copy Payload digest' })).toHaveStyle({
-      color: 'var(--text-primary)', backgroundColor: 'var(--bg-surface-elevated)', border: '1px solid var(--border-subtle)',
+      color: 'var(--text-primary)', backgroundColor: 'var(--bg-surface-elevated)', border: '1px solid var(--border-strong)',
     });
     fireEvent.click(screen.getByRole('button', { name: 'Copy Payload digest' }));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(digest));

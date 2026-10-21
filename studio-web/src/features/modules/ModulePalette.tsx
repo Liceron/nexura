@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Liceron
-import { Icon } from '../../components/Icon';
+import { Modal } from '../../components/Modal';
+import { Button } from '../../components/Button';
 import { useState, useEffect, useMemo } from 'react';
 import { useApi } from '../../api/context';
 import type { ModuleDescriptor } from '@liceron/nexura-sdk';
@@ -82,48 +83,8 @@ export function ModulePalette({ open, onClose, onSelectModule }: ModulePalettePr
   if (!open) return null;
 
   return (
-    <div
-      role="dialog"
-      aria-label={t('ui.availableModulesDrawer')}
-      style={{
-        position: 'absolute',
-        top: 56,
-        left: 16,
-        width: 'min(380px, calc(100% - 32px))',
-        maxHeight: 'calc(100% - 72px)',
-        backgroundColor: 'var(--bg-surface-elevated)',
-        borderRadius: 'var(--radius-lg)',
-        border: '1px solid var(--border-subtle)',
-        boxShadow: 'var(--shadow-xl)',
-        display: 'flex',
-        flexDirection: 'column',
-        zIndex: 50,
-        overflow: 'hidden',
-      }}
-    >
-      {/* Header */}
-      <div
-        style={{
-          padding: '12px 16px',
-          borderBottom: '1px solid var(--border-subtle)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <span style={{ fontWeight: 600, fontSize: 14 }}>{t('ui.moduleRegistry')}</span>
-          <Badge variant="neutral">{filteredModules.length} {t('ui.available2')}</Badge>
-        </div>
-        <button
-          onClick={onClose}
-          style={{ fontSize: 18, color: 'var(--text-muted)', cursor: 'pointer', background: 'none', border: 'none' }}
-          aria-label={t('ui.closeModulePalette')}
-        >
-          <Icon name="close" />
-        </button>
-      </div>
-
+    <Modal open={open} onClose={onClose} title={t('ui.availableModulesDrawer')} maxWidth={480}>
+      <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{filteredModules.length} {t('ui.available2')}</div>
       {/* Search Input */}
       <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--border-subtle)' }}>
         <input
@@ -165,8 +126,8 @@ export function ModulePalette({ open, onClose, onSelectModule }: ModulePalettePr
               padding: '4px 10px',
               borderRadius: 'var(--radius-full)',
               border: 'none',
-              backgroundColor: activeCategory === cat.id ? 'var(--button-primary)' : 'var(--bg-canvas)',
-              color: activeCategory === cat.id ? '#ffffff' : 'var(--text-secondary)',
+              backgroundColor: activeCategory === cat.id ? 'var(--bg-muted)' : 'transparent',
+              color: activeCategory === cat.id ? 'var(--text-primary)' : 'var(--text-secondary)',
               fontSize: 11,
               fontWeight: 500,
               cursor: 'pointer',
@@ -212,7 +173,6 @@ export function ModulePalette({ open, onClose, onSelectModule }: ModulePalettePr
                   cursor: 'pointer',
                   transition: 'border-color 0.15s ease',
                 }}
-                onClick={() => onSelectModule(mod)}
               >
                 <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 4 }}>
                   <div>
@@ -250,14 +210,12 @@ export function ModulePalette({ open, onClose, onSelectModule }: ModulePalettePr
                     <span>{t('ui.kind2') + " "}{mod.kind}</span>
                     {mod.requires_approval && <Badge variant="warning">{t('ui.approvalGate')}</Badge>}
                   </div>
-                  <span style={{ fontSize: 11, color: 'var(--brand-primary)', fontWeight: 600 }}>
-                    {t('ui.addNode')}
-                  </span>
+                  <Button variant="ghost" size="sm" onClick={() => onSelectModule(mod)}>{t('ui.addNode')}</Button>
                 </div>
               </Card>
             );
           })}
       </div>
-    </div>
+    </Modal>
   );
 }

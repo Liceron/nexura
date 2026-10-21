@@ -1,34 +1,14 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import { startTestCluster, TestCluster } from './harness';
-
-import fs from 'node:fs';
-import path from 'node:path';
+import { REGISTRY_TEMPLATES } from '../../src/features/workflows/templates';
 
 let cluster: TestCluster;
-let sharedWorkflowUrl: string;
-const WORKFLOW_URL_FILE = path.resolve('./tests/e2e/.f05-shared-workflow-url.txt');
-
-function getSharedUrl(): string {
-  if (sharedWorkflowUrl) return sharedWorkflowUrl;
-  if (fs.existsSync(WORKFLOW_URL_FILE)) {
-    sharedWorkflowUrl = fs.readFileSync(WORKFLOW_URL_FILE, 'utf-8').trim();
-    return sharedWorkflowUrl;
-  }
-  return '';
-}
 
 test.beforeAll(async () => {
   cluster = await startTestCluster();
 });
 
 test.afterAll(async () => {
-  if (fs.existsSync(WORKFLOW_URL_FILE)) {
-    try {
-      fs.unlinkSync(WORKFLOW_URL_FILE);
-    } catch {
-      // ignore
-    }
-  }
   if (cluster) {
     await cluster.stop();
   }
@@ -40,28 +20,48 @@ test.beforeEach(async ({ page }) => {
   }, cluster.backendUrl);
 });
 
-async function openWorkflow(page: any) {
-  const url = getSharedUrl();
-  if (url) {
-    await page.goto(url);
-    return;
+// Negative cases must also work alone or after a failed test restarts the worker.
+// The first test still exercises all creation/configuration through the real UI.
+async function openWorkflow(page: Page, scenario: string) {
+  const name = `F05 Schema Configured Multi-Instance Spec — ${scenario}`;
+  const spec = structuredClone(REGISTRY_TEMPLATES.find(template => template.id === 'order-triage-support')!.spec);
+  spec.name = name;
+  const created = await page.request.post(`${cluster.backendUrl}/api/v1/workflows`, {
+    headers: cluster.apiHeaders, data: { name, spec },
+  });
+  expect(created.ok()).toBe(true);
+  const workflow = await created.json();
+  expect(workflow.revision).toBe(1);
+  for (const [id, maxLength, template] of [['prompt_greeting', 1200, 'welcome_tmpl'], ['prompt_followup', 4800, 'followup_tmpl']] as const) {
+    spec.nodes[id] = {
+      id, handler: 'nexura.prompt.template', module_id: 'nexura.prompt.template', module_version: '1.0.0',
+      config: { max_output_length: maxLength }, input_mapping: { template }, transitions: {},
+      ...(id === 'prompt_greeting' ? { default_transition: 'prompt_followup' } : {}),
+    };
   }
+  const updated = await page.request.put(`${cluster.backendUrl}/api/v1/workflows/${workflow.workflow_id}`, {
+    headers: cluster.apiHeaders, data: { spec, expected_revision: 1 },
+  });
+  expect(updated.ok()).toBe(true);
+  expect((await updated.json()).revision).toBe(2);
   await page.goto(cluster.frontendUrl);
-  await page.getByText('F05 Schema Configured Multi-Instance Spec').click();
-  await expect(page).toHaveURL(/#\/workflows\/wf-/);
-  sharedWorkflowUrl = page.url();
-  fs.writeFileSync(WORKFLOW_URL_FILE, sharedWorkflowUrl, 'utf-8');
+  await page.getByLabel('Search workflows input').fill(name);
+  await page.getByRole('button', { name: 'Search', exact: true }).click();
+  await page.getByRole('link', { name, exact: true }).click();
+  await expect(page).toHaveURL(`${cluster.frontendUrl}/#/workflows/${workflow.workflow_id}`);
+  await expect(page.getByRole('heading', { name, level: 1, exact: true })).toBeVisible();
 }
 
 test.describe('Schema-Driven Module Configuration & Inspector (F05)', () => {
-  test('creates workflow, configures two distinct instances with schema forms, saves, reloads, and verifies configuration summary on canvas nodes', async ({
+  test('creates workflow, configures two distinct instances with schema forms, saves, reloads, and verifies configuration in the inspector', async ({
     page,
   }) => {
     await page.goto(cluster.frontendUrl);
-    await expect(page.getByLabel(/^Service connection status:/)).toContainText(/local-owner/i);
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveText('Connected');
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveAccessibleDescription(/local-owner/i);
 
     // Create blank workflow
-    const newWorkflowBtn = page.getByRole('button', { name: /\+ New Workflow/i });
+    const newWorkflowBtn = page.getByRole('button', { name: /New workflow/i });
     await newWorkflowBtn.click();
 
     const nameInput = page.getByLabel('Workflow Name');
@@ -71,12 +71,13 @@ test.describe('Schema-Driven Module Configuration & Inspector (F05)', () => {
     await createBtn.click();
 
     await expect(page).toHaveURL(/#\/workflows\/wf-/);
-    sharedWorkflowUrl = page.url();
-    fs.writeFileSync(WORKFLOW_URL_FILE, sharedWorkflowUrl, 'utf-8');
+    const workflowUrl = page.url();
+    await expect(page.getByRole('heading', { name: 'F05 Schema Configured Multi-Instance Spec', level: 1, exact: true })).toBeVisible();
 
     // 1. Add Instance A: Prompt Template
-    const addStepBtn = page.getByRole('button', { name: /\+ Add Step/i });
+    const addStepBtn = page.getByRole('button', { name: /Add step/i });
     await addStepBtn.click();
+    await page.getByRole('button', { name: 'Standard', exact: true }).click();
 
     const palette = page.getByRole('dialog', { name: 'Available modules drawer' });
     await expect(palette).toBeVisible();
@@ -110,6 +111,7 @@ test.describe('Schema-Driven Module Configuration & Inspector (F05)', () => {
 
     // 2. Add Instance B: Second Prompt Template with distinct settings
     await addStepBtn.click();
+    await page.getByRole('button', { name: 'Standard', exact: true }).click();
     await expect(palette).toBeVisible();
     await searchInput.fill('prompt');
     await palette.getByText('+ Add Node').first().click();
@@ -135,35 +137,43 @@ test.describe('Schema-Driven Module Configuration & Inspector (F05)', () => {
     // Validate graph against backend
     const validateBtn = page.getByRole('button', { name: 'Validate' });
     await validateBtn.click();
-    await expect(page.getByText(/Authoritative validation passed/i)).toBeVisible();
+    await expect(page.getByText(/Workflow is valid/i)).toBeVisible();
 
-    // Verify configuration summary badges reflected on canvas nodes
-    await expect(nodeA.getByTestId('node-config-summary')).toContainText('max_output_length: 1200');
+    // Each selected canvas node exposes its own exact configuration in the inspector.
+    await nodeA.click();
+    await inspector.getByRole('tab', { name: 'Config', exact: true }).click();
+    await expect(inspector.getByLabel('max_output_length')).toHaveValue('1200');
     const nodeB = page.getByTestId('node-prompt_followup');
-    await expect(nodeB.getByTestId('node-config-summary')).toContainText('max_output_length: 4800');
+    await nodeB.click();
+    await inspector.getByRole('tab', { name: 'Config', exact: true }).click();
+    await expect(inspector.getByLabel('max_output_length')).toHaveValue('4800');
 
     // Save workflow to backend
     const saveBtn = page.getByRole('button', { name: 'Save', exact: true });
     await saveBtn.click();
 
-    const revBadge = page.getByLabel('Authoritative revision badge');
+    const revBadge = page.getByLabel('Workflow revision');
     await expect(revBadge).toContainText('Revision: 2');
 
     // Reload browser and verify full persistence of distinct configs and bindings
     await page.reload();
-    await expect(page).toHaveURL(sharedWorkflowUrl);
+    await expect(page).toHaveURL(workflowUrl);
     await expect(revBadge).toContainText('Revision: 2');
 
-    // Node A summary verified after reload
-    await expect(page.getByTestId('node-prompt_greeting').getByTestId('node-config-summary')).toContainText('max_output_length: 1200');
-    // Node B summary verified after reload
-    await expect(page.getByTestId('node-prompt_followup').getByTestId('node-config-summary')).toContainText('max_output_length: 4800');
+    // Node A configuration verified after reload
+    await page.getByTestId('node-prompt_greeting').click();
+    await inspector.getByRole('tab', { name: 'Config', exact: true }).click();
+    await expect(inspector.getByLabel('max_output_length')).toHaveValue('1200');
+    // Node B configuration verified after reload
+    await page.getByTestId('node-prompt_followup').click();
+    await inspector.getByRole('tab', { name: 'Config', exact: true }).click();
+    await expect(inspector.getByLabel('max_output_length')).toHaveValue('4800');
   });
 
   test('negative case: invalid port mapping triggers authoritative backend error identifying field and node', async ({
     page,
   }) => {
-    await openWorkflow(page);
+    await openWorkflow(page, 'Invalid mapping');
 
     // Click Node A
     const nodeA = page.getByTestId('node-prompt_greeting');
@@ -198,14 +208,14 @@ test.describe('Schema-Driven Module Configuration & Inspector (F05)', () => {
     await removeBtn.click();
 
     await validateBtn.click();
-    await expect(page.getByText(/Authoritative validation passed/i)).toBeVisible();
+    await expect(page.getByText(/Workflow is valid/i)).toBeVisible();
     await expect(nodeA.getByText('Invalid', { exact: true })).not.toBeVisible();
   });
 
   test('negative case: displays security warning when raw secret/API key is pasted into plain graph fields', async ({
     page,
   }) => {
-    await openWorkflow(page);
+    await openWorkflow(page, 'Secret warning');
 
     const nodeA = page.getByTestId('node-prompt_greeting');
     await nodeA.click();
@@ -237,10 +247,10 @@ test.describe('Schema-Driven Module Configuration & Inspector (F05)', () => {
     await advTextarea.blur();
   });
 
-  test('switching module version displays migration warning and updates canvas version badge', async ({
+  test('switching module version displays migration warning and persists the selected version in the inspector', async ({
     page,
   }) => {
-    await openWorkflow(page);
+    await openWorkflow(page, 'Version change');
 
     const nodeA = page.getByTestId('node-prompt_greeting');
     await nodeA.click();
@@ -259,25 +269,31 @@ test.describe('Schema-Driven Module Configuration & Inspector (F05)', () => {
     await inspector.getByRole('tab', { name: 'Config' }).click();
     await expect(page.getByText(/Switched version to 2.0.0/i)).toBeVisible();
 
-    // Canvas node renders updated version badge
-    await expect(nodeA.getByText('v2.0.0')).toBeVisible();
+    // Version metadata lives in Details; verify its exact value before saving.
+    await inspector.getByRole('tab', { name: 'Details', exact: true }).click();
+    await expect(versionSelect).toBeVisible();
+    await expect(versionSelect).toHaveValue('2.0.0');
 
     // Save and verify persistent v2.0.0
     const saveBtn = page.getByRole('button', { name: 'Save', exact: true });
     await saveBtn.click();
 
-    const revBadge = page.getByLabel('Authoritative revision badge');
+    const revBadge = page.getByLabel('Workflow revision');
     await expect(revBadge).toContainText('Revision: 3');
 
     await page.reload();
-    await expect(page.getByTestId('node-prompt_greeting').getByText('v2.0.0')).toBeVisible();
+    await page.getByTestId('node-prompt_greeting').click();
+    await inspector.getByRole('tab', { name: 'Details', exact: true }).click();
+    await expect(versionSelect).toBeVisible();
+    await expect(versionSelect).toHaveValue('2.0.0');
   });
 
   test('B34: palette Channels and Connectors categories are populated and service-internal modules are not offered', async ({
     page,
   }) => {
-    await openWorkflow(page);
-    await page.getByRole('button', { name: /\+ Add Step/i }).click();
+    await openWorkflow(page, 'Palette');
+    await page.getByRole('button', { name: /Add step/i }).click();
+    await page.getByRole('button', { name: 'Standard', exact: true }).click();
 
     const palette = page.getByRole('dialog', { name: 'Available modules drawer' });
     await expect(palette).toBeVisible();

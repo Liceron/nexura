@@ -31,7 +31,8 @@ async function openRedteam(page: import('@playwright/test').Page) {
   });
   expect(res.ok()).toBeTruthy();
   await page.goto(cluster.frontendUrl);
-  await expect(page.getByLabel(/^Service connection status:/)).toContainText(/local-owner/i);
+  await expect(page.getByLabel(/^Service connection status:/)).toHaveText('Connected');
+  await expect(page.getByLabel(/^Service connection status:/)).toHaveAccessibleDescription(/local-owner/i);
   await page.locator('[data-testid="nav-item-evaluations"]').click();
   await page.locator('[data-testid="tab-studio-evals"]').click();
   await page.locator('[data-testid="studio-evals-tab-redteam"]').click();

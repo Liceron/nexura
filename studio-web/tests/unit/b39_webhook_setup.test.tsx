@@ -287,6 +287,7 @@ describe('B39: Triggers entry point from the workflow page', () => {
       spec: { name: 'Flow', entry_node: 'a', nodes: { a: { id: 'a', handler: 'h' } } },
     });
     wrap(<WorkflowDetail workflowId="wf b/1" onBack={() => {}} onOpenWorkflow={() => {}} />);
+    await user.click(await screen.findByRole('button', { name: 'More' }));
     await user.click(await screen.findByTestId('workflow-open-triggers'));
     expect(window.location.hash).toBe(triggersHref('wf b/1'));
     expect(parseHash(window.location.hash)).toMatchObject({ tab: 'triggers', triggersWorkflowId: 'wf b/1' });

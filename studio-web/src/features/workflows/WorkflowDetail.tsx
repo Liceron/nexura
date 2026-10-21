@@ -5,13 +5,14 @@ import { useState, useEffect, useCallback } from 'react';
 import { useApi } from '../../api/context';
 import { Card } from '../../components/Card';
 import { Button } from '../../components/Button';
-import { Badge } from '../../components/Badge';
+import { PageHeader, PageLayout } from '../../components/PageHeader';
+import { WorkflowTabs } from '../../components/WorkflowTabs';
+import { useCompactLayout } from '../../app/useCompactLayout';
 import { Spinner } from '../../components/Spinner';
 import { Modal } from '../../components/Modal';
 import { Input } from '../../components/Input';
 import { useI18n } from '../../i18n';
 import { WorkflowCanvas } from '../builder/WorkflowCanvas';
-import { ImportExportModal } from './ImportExportModal';
 import { RunStartModal } from '../runs/RunStartModal';
 import { RunVisualizer } from '../runs/RunVisualizer';
 import type { NodeExecutionStatus } from '../runs/types';
@@ -42,6 +43,10 @@ interface WorkflowDetailProps {
 export function WorkflowDetail({ workflowId, runId, onRunChange, onBack, onOpenWorkflow }: WorkflowDetailProps) {
   const { manager, connection } = useApi();
   const { t, locale } = useI18n();
+  const compact = useCompactLayout();
+  const [actionHost, setActionHost] = useState<HTMLDivElement | null>(null);
+  const [feedbackHost, setFeedbackHost] = useState<HTMLDivElement | null>(null);
+  const [editorDirty, setEditorDirty] = useState(false);
 
   const [workflow, setWorkflow] = useState<WorkflowRecord | null>(null);
   const [loading, setLoading] = useState(true);
@@ -58,8 +63,6 @@ export function WorkflowDetail({ workflowId, runId, onRunChange, onBack, onOpenW
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
 
-  // Import / Export modal
-  const [importExportModalOpen, setImportExportModalOpen] = useState(false);
 
   // Run modal & execution visualizer states
   const [runStartModalOpen, setRunStartModalOpen] = useState(false);
@@ -69,7 +72,7 @@ export function WorkflowDetail({ workflowId, runId, onRunChange, onBack, onOpenW
 
   // Built-in tabs plus panels registered by Studio extensions (the closed edition adds Publish).
   const [activeTab, setActiveTab] = useState<BuiltinWorkflowPanel | ExtensionId>(
-    runId ? 'run' : 'canvas',
+    runId ? 'run' : compact ? 'nodes' : 'canvas',
   );
   const extensionPanels = useStudioExtensions().panels('workflow-detail');
   const activePanel = extensionPanels.find((panel) => panel.id === activeTab);
@@ -230,142 +233,50 @@ export function WorkflowDetail({ workflowId, runId, onRunChange, onBack, onOpenW
   const nodeEntries = Object.entries(nodes);
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-      {/* Top Header Card */}
-      <Card elevated>
-        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', flexWrap: 'wrap', gap: 16 }}>
-          <div className="studio-mobile-content">
-            <div className="studio-mobile-wrap" style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-              <Button variant="secondary" size="sm" onClick={onBack}>
-                <Icon name="left" /> {t('workflows.backToWorkflows')}
-              </Button>
-              <Badge variant="neutral">{workflow.workflow_id}</Badge>
-              {/* Authoritative Revision Indicator */}
-              <Badge variant="success" aria-label={t('ui.authoritativeRevisionBadge')}>
-                {t('workflows.revision')}: {workflow.revision}
-              </Badge>
-              {workflow.spec_hash && (
-                <Badge variant="info">
-                  {t('workflows.specHash')}: {workflow.spec_hash.substring(0, 8)}
-                </Badge>
-              )}
-            </div>
-
-            <h1 style={{ fontSize: 22, fontWeight: 700, margin: '4px 0 6px 0' }}>{workflow.name}</h1>
-
-            <div className="studio-mobile-wrap" style={{ display: 'flex', gap: 16, fontSize: 13, color: 'var(--text-secondary)' }}>
-              <span>
-                {t('workflows.entryNode')}: <strong>{spec.entry_node || t('common.notAvailable')}</strong>
-              </span>
-              <span>
-                {t('workflows.nodes')}: <strong>{nodeEntries.length}</strong>
-              </span>
-              <span>
-                {t('workflows.lastModified')}:{' '}
-                <strong>
-                  {workflow.updated_at
-                    ? new Date(workflow.updated_at * 1000).toLocaleString(locale)
-                    : t('common.notAvailable')}
-                </strong>
-              </span>
-            </div>
-          </div>
-
-          <div className="studio-mobile-wrap" style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-            <Button variant="secondary" onClick={() => setCopyModalOpen(true)}>
-              {t('workflows.saveAsCopy')}
-            </Button>
-            <Button variant="secondary" onClick={handleDownloadExport}>
-              {t('workflows.downloadExport')}
-            </Button>
-            <Button variant="secondary" onClick={() => setImportExportModalOpen(true)}>
-              {t('ui.importExportJson')}
-            </Button>
-            <Button
-              variant="secondary"
-              data-testid="workflow-open-triggers"
-              onClick={() => {
-                window.location.hash = triggersHref(workflow.workflow_id);
-              }}
-            >
-              {t('workflows.openTriggers')}
-            </Button>
-            <Button variant="danger" onClick={() => setDeleteModalOpen(true)}>
-              {t('workflows.deleteWorkflow')}
-            </Button>
-            <Button variant="primary" onClick={() => setRunStartModalOpen(true)}>
-              {t('common.run')}
-            </Button>
-          </div>
-        </div>
-      </Card>
-
-      {/* Tabs */}
-      <div
-        role="tablist"
-        aria-label={t('ui.workflowViews')}
-        style={{ display: 'flex', gap: 8, borderBottom: '1px solid var(--border-subtle)', paddingBottom: 8 }}
-      >
-        {mergeAfter(
-          BUILTIN_WORKFLOW_PANELS.filter((id) => id !== 'run'),
-          extensionPanels,
-        ).map((entry) => {
-          if (typeof entry !== 'string') {
-            return (
-              <Button
-                key={entry.id}
-                data-testid={entry.testId ?? `tab-${entry.id}`}
-                variant={activeTab === entry.id ? 'primary' : 'secondary'}
-                size="sm"
-                role="tab"
-                aria-selected={activeTab === entry.id}
-                onClick={() => setActiveTab(entry.id)}
-              >
-                {t(entry.labelKey)}
-              </Button>
-            );
-          }
-          const label: Record<string, string> = {
-            canvas: t('workflowTabs.graph'),
-            nodes: `${t('workflows.nodes')} (${nodeEntries.length})`,
-            json: t('workflowTabs.spec'),
-            tests: t('workflowTests.tab'),
-            runs: t('runs.tab'),
-          };
-          return (
-            <Button
-              key={entry}
-              data-testid={`tab-${entry}`}
-              variant={activeTab === entry ? 'primary' : 'secondary'}
-              size="sm"
-              role="tab"
-              aria-selected={activeTab === entry}
-              onClick={() => setActiveTab(entry)}
-            >
-              {label[entry]}
-            </Button>
-          );
-        })}
-        {activeRunId && (
-          <Button
-            data-testid="tab-run-console"
-            variant={activeTab === 'run' ? 'primary' : 'secondary'}
-            size="sm"
-            role="tab"
-            aria-selected={activeTab === 'run'}
-            onClick={() => setActiveTab('run')}
-          >
-            {t('ui.runConsole2')}{activeRunId.slice(0, 8)})
-          </Button>
-        )}
-      </div>
-
-      {/* Tab 0: Visual Canvas */}
-      {activeTab === 'canvas' && (
-        <Card style={{ height: 680, padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+    <PageLayout width="full" className="workflow-detail">
+      <PageHeader title={workflow.name}
+        breadcrumbs={<><a href="#/workflows" onClick={(event) => { event.preventDefault(); onBack(); }}>{t('workflows.title')}</a> / {workflow.name}</>}
+        metadata={<>
+          <span aria-label={t('ui.authoritativeRevisionBadge')}>{t('workflows.revision')}: {workflow.revision}</span>
+          {' · '}{t('workflows.lastModified')}: {workflow.updated_at ? new Date(workflow.updated_at * 1000).toLocaleString(locale) : t('common.notAvailable')}
+          <details className="workflow-details"><summary>{t('workflowDesign.details')}</summary>
+            <div><code>{workflow.workflow_id}</code></div>
+            {workflow.spec_hash && <div>{t('workflows.specHash')}: <code>{workflow.spec_hash}</code></div>}
+            <div>{t('workflows.entryNode')}: {spec.entry_node} · {t('workflowDesign.steps')}: {nodeEntries.length}</div>
+          </details>
+        </>}
+        actions={<div className="workflow-actions" ref={setActionHost} />}
+      />
+      <div ref={setFeedbackHost} />
+      <WorkflowTabs label={t('ui.workflowViews')} active={activeTab} panelId="workflow-active-panel"
+        onChange={(id) => setActiveTab(id as BuiltinWorkflowPanel | ExtensionId)}
+        tabs={[
+          ...mergeAfter(BUILTIN_WORKFLOW_PANELS.filter((id) => id !== 'run'), extensionPanels).map((entry) => {
+            const labels: Record<string, string> = { canvas: t('workflowTabs.graph'), nodes: `${t('workflows.nodes')} (${nodeEntries.length})`, json: t('workflowTabs.spec'), tests: t('workflowTests.tab'), runs: t('runs.tab') };
+            return typeof entry === 'string' ? { id: entry, label: labels[entry] } : { id: entry.id, label: t(entry.labelKey), testId: entry.testId };
+          }),
+          ...(activeRunId ? [{ id: 'run', label: `${t('ui.runConsole2')}${activeRunId.slice(0, 8)})`, testId: 'tab-run-console' }] : []),
+        ]}
+      />
+      <div id="workflow-active-panel" role="tabpanel" aria-label={activePanel ? t(activePanel.labelKey) : ({ canvas: t('workflowTabs.graph'), nodes: t('workflows.nodes'), json: t('workflowTabs.spec'), tests: t('workflowTests.tab'), runs: t('runs.tab'), run: t('ui.runConsole2') } as Record<string, string>)[activeTab]} tabIndex={0}>
+      {/* Keep the editor mounted across tabs: drafts and undo history have one owner. */}
+      <div hidden={activeTab !== 'canvas' && activeTab !== 'nodes'} className="workflow-editor">
           <WorkflowCanvas
             key={`${workflow.workflow_id}-${workflow.revision}`}
             initialSpec={spec}
+            actionHost={actionHost}
+            feedbackHost={feedbackHost}
+            active={activeTab === 'canvas' || activeTab === 'nodes'}
+            primaryAllowed={activeTab !== 'tests' && !activePanel}
+            viewMode={activeTab === 'nodes' ? 'nodes' : 'graph'}
+            onDirtyChange={setEditorDirty}
+            moreActions={<>
+              <Button variant="ghost" onClick={() => setCopyModalOpen(true)}>{t('workflows.saveAsCopy')}</Button>
+              <Button variant="ghost" onClick={handleDownloadExport}>{t('workflows.downloadExport')}</Button>
+              <Button variant="ghost" data-testid="workflow-open-triggers" onClick={() => { window.location.hash = triggersHref(workflow.workflow_id); }}>{t('workflows.openTriggers')}</Button>
+              <Button variant="ghost" className="workflow-danger-action" onClick={() => setDeleteModalOpen(true)}>{t('workflows.deleteWorkflow')}</Button>
+            </>}
+            onImportedPython={(record) => onOpenWorkflow(record.workflow_id)}
             workflowId={workflow.workflow_id}
             workflowName={workflow.name}
             revision={workflow.revision}
@@ -386,49 +297,7 @@ export function WorkflowDetail({ workflowId, runId, onRunChange, onBack, onOpenW
             }}
             onRunWorkflow={() => setRunStartModalOpen(true)}
           />
-        </Card>
-      )}
-
-      {/* Tab 1: Nodes Overview */}
-      {activeTab === 'nodes' && (
-        <div
-          data-testid="accessible-nodes-list"
-          role="region"
-          aria-label={t('ui.accessibleNodesList')}
-          style={{ display: 'flex', flexDirection: 'column', gap: 12 }}
-        >
-          {nodeEntries.map(([nodeId, node]) => (
-            <Card key={nodeId} data-testid={`accessible-node-${nodeId}`}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span style={{ fontWeight: 600, fontSize: 14 }}>{node.id}</span>
-                  {node.id === spec.entry_node && <Badge variant="success">{t('ui.entryNode')}</Badge>}
-                  {node.requires_approval && <Badge variant="warning">{t('ui.approvalGateRequired')}</Badge>}
-                </div>
-                <Badge variant="neutral">{t('ui.handler') + " "}{node.handler || node.module_id}</Badge>
-              </div>
-
-              <div style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'flex', flexDirection: 'column', gap: 4 }}>
-                {node.default_transition && (
-                  <div>
-                    {t('ui.defaultTransition') + " "}<Icon name="right" /> <strong>{node.default_transition}</strong>
-                  </div>
-                )}
-                {node.transitions && Object.keys(node.transitions).length > 0 && (
-                  <div>
-                    {t('ui.branchTransitions2')}{' '}
-                    {Object.entries(node.transitions).map(([b, tgt]) => (
-                      <span key={b} style={{ marginRight: 8 }}>
-                        <code>{b}</code> <Icon name="right" /> <strong>{String(tgt)}</strong>
-                      </span>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </Card>
-          ))}
-        </div>
-      )}
+      </div>
 
       {/* Tab 2: Raw JSON */}
       {activeTab === 'json' && (
@@ -480,6 +349,8 @@ export function WorkflowDetail({ workflowId, runId, onRunChange, onBack, onOpenW
         )
       )}
 
+      </div>
+
       {/* Save as Copy Modal */}
       <Modal open={copyModalOpen} onClose={() => setCopyModalOpen(false)} title={t('workflows.saveAsCopy')}>
         <form onSubmit={handleSaveAsCopy} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -517,34 +388,6 @@ export function WorkflowDetail({ workflowId, runId, onRunChange, onBack, onOpenW
         </div>
       </Modal>
 
-      {/* Import / Export JSON Modal */}
-      <ImportExportModal
-        open={importExportModalOpen}
-        initialMode="export"
-        workflowId={workflow.workflow_id}
-        workflowName={workflow.name}
-        currentSpec={spec}
-        onClose={() => setImportExportModalOpen(false)}
-        onImportedPython={(record) => {
-          setImportExportModalOpen(false);
-          onOpenWorkflow(record.workflow_id);
-        }}
-        onApplyImportedSpec={async (newSpec) => {
-          try {
-            const updated = await manager.client.workflows.update(workflow.workflow_id, newSpec, workflow.revision);
-            setWorkflow(updated);
-            setImportExportModalOpen(false);
-          } catch (err: unknown) {
-            setError(formatApiError(err, t));
-          }
-        }}
-        onCreateFromImport={async (name, newSpec) => {
-          const created = await manager.client.workflows.create(newSpec, { name });
-          setImportExportModalOpen(false);
-          onOpenWorkflow(created.workflow_id);
-        }}
-      />
-
       {/* Run Start Modal */}
       <RunStartModal
         open={runStartModalOpen}
@@ -552,7 +395,7 @@ export function WorkflowDetail({ workflowId, runId, onRunChange, onBack, onOpenW
         workflowName={workflow.name}
         serverRevision={workflow.revision}
         currentSpec={spec}
-        hasUnsavedDraft={hasWorkflowDraft(connection.workspace, connection.principal, workflow.workflow_id)}
+        hasUnsavedDraft={editorDirty || hasWorkflowDraft(connection.workspace, connection.principal, workflow.workflow_id)}
         onClose={() => setRunStartModalOpen(false)}
         onLaunchRun={async (initialState, asyncExecution) => {
           const run = await manager.client.runs.start({
@@ -563,6 +406,6 @@ export function WorkflowDetail({ workflowId, runId, onRunChange, onBack, onOpenW
           selectRun(run.run_id);
         }}
       />
-    </div>
+    </PageLayout>
   );
 }

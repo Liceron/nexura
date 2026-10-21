@@ -38,7 +38,7 @@ const ONE_STEP = {
 const SECRET = 'sk-abcdef1234567890abcdef';
 
 async function runFromStudio(page: Page, state: Record<string, unknown>) {
-  await page.getByRole('button', { name: 'Run', exact: true }).first().click();
+  await page.getByRole('button', { name: 'Run', exact: true }).click();
   const modal = page.getByRole('dialog');
   await modal.getByLabel('Initial state JSON input').fill(JSON.stringify(state));
   await page.getByRole('button', { name: 'Validate Graph' }).click();
@@ -56,7 +56,8 @@ test.describe('Workflow tests (P22)', () => {
     expect(created.ok()).toBeTruthy();
 
     await page.goto(`${cluster.frontendUrl}/#/workflows/wf-p22`);
-    await expect(page.getByLabel(/^Service connection status:/)).toContainText(/local-owner/i);
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveText('Connected');
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveAccessibleDescription(/local-owner/i);
 
     // No tests yet.
     await page.getByTestId('tab-tests').click();

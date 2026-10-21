@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, within } from '@testing-library/react';
 import { ApiProvider } from '../../src/api/context';
 import { I18nProvider } from '../../src/i18n';
 import { WorkflowList } from '../../src/features/workflows/WorkflowList';
@@ -62,13 +62,17 @@ describe('Workflow Library, Templates & Lifecycle (F03)', () => {
       </I18nProvider>
     );
 
-    // Verify template titles
-    expect(await screen.findByText('Customer Order Triage & Support')).toBeInTheDocument();
-    expect(screen.getByText('Bilingual Customer Greeting')).toBeInTheDocument();
+    // Real rows lead; templates remain reachable from creation.
+    const link = await screen.findByRole('link', { name: 'OrderProcessingWorkflow' });
+    expect(link).toHaveAttribute('href', '#/workflows/wf-alpha-123');
+    const row = link.closest('tr')!;
+    expect(within(row).getAllByRole('cell')[3]).toHaveTextContent(/^3$/);
+    expect(screen.getByLabelText('Search workflows input')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'New workflow' }));
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    expect(screen.getByText('Order support with refund approval')).toBeInTheDocument();
+    expect(screen.getByText('English and Hindi greeting')).toBeInTheDocument();
 
-    // Verify listed workflow and authoritative revision
-    expect(await screen.findByText('OrderProcessingWorkflow')).toBeInTheDocument();
-    expect(screen.getByText('Rev 3')).toBeInTheDocument();
   });
 
   it('pre-validates templates and blocks creation of incompatible/unsupported module versions', async () => {
@@ -238,7 +242,8 @@ describe('Workflow Library, Templates & Lifecycle (F03)', () => {
 
     // Verify authoritative revision badge
     expect(await screen.findByText('Revision: 7')).toBeInTheDocument();
-    expect(screen.getByText(/Hash: a1b2c3d4/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByText('Details', { exact: true }));
+    expect(screen.getByText(/a1b2c3d4/i)).toBeInTheDocument();
     expect(screen.getByText('OrderSupportWorkflow')).toBeInTheDocument();
   });
 });

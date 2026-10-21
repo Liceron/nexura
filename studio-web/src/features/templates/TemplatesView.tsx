@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Liceron
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useApi } from '../../api/context';
-import { Badge } from '../../components/Badge';
+import { PageHeader, PageLayout } from '../../components/PageHeader';
 import { Button } from '../../components/Button';
 import { Card } from '../../components/Card';
 import { Modal } from '../../components/Modal';
@@ -103,15 +103,9 @@ export function TemplatesView() {
   );
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <div>
-        <h1 style={{ fontSize: 20, fontWeight: 600, margin: 0 }}>{t('templates.title')}</h1>
-        <p style={{ color: 'var(--text-secondary)', fontSize: 14, margin: '4px 0 0' }}>
-          {t('templates.subtitle')}
-        </p>
-      </div>
-
-      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+    <PageLayout>
+      <PageHeader title={t('templates.title')} />
+      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center', marginBottom: 16 }}>
         <input
           type="search"
           aria-label={t('templates.search')}
@@ -183,47 +177,30 @@ export function TemplatesView() {
         <p data-testid="templates-empty" style={{ color: 'var(--text-secondary)' }}>{t('templates.empty')}</p>
       )}
 
-      <div
-        data-testid="template-grid"
-        style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 16 }}
-      >
+      <ul data-testid="template-grid" className="workflow-template-list">
         {items.map((tpl) => (
-          <Card key={tpl.id} data-testid={`template-card-${tpl.id}`} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-              <h2 style={{ fontSize: 15, fontWeight: 600, margin: 0 }}>{tpl.title}</h2>
-              <Badge variant="info">{tpl.category}</Badge>
+          <li key={tpl.id} data-testid={`template-card-${tpl.id}`}>
+            <div>
+              <h2><button type="button" data-testid={`template-preview-${tpl.id}`} onClick={() => openPreview(tpl)}>{tpl.title}</button></h2>
+              <p>{tpl.description}</p>
+              <div className="workflow-template-meta">
+                <span>{tpl.node_count} {t('templates.steps')}</span>
+                <span>{tpl.category} · {t(`templates.difficulty.${tpl.difficulty}`)}</span>
+                {tpl.has_approval && <span>{t('workflowDesign.needsApproval')}</span>}
+                {tpl.has_trigger && <span>{t('templates.trigger')}</span>}
+                <span>{t('templates.credentials')}: {tpl.required_credentials.length ? tpl.required_credentials.join(', ') : t('templates.none')}</span>
+              </div>
+              {tpl.tags.length > 0 && <div className="workflow-template-meta">{tpl.tags.join(' · ')}</div>}
             </div>
-            <p style={{ fontSize: 13, color: 'var(--text-secondary)', margin: 0, flex: 1 }}>{tpl.description}</p>
-            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-              <Badge>{t(`templates.difficulty.${tpl.difficulty}`)}</Badge>
-              <Badge>{tpl.node_count} {t('templates.steps')}</Badge>
-              {tpl.has_approval && <Badge variant="warning">{t('templates.approval')}</Badge>}
-              {tpl.has_trigger && <Badge variant="success">{t('templates.trigger')}</Badge>}
-              {tpl.tags.map((x) => (
-                <Badge key={x}>{x}</Badge>
-              ))}
-            </div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <Button size="sm" data-testid={`template-preview-${tpl.id}`} onClick={() => openPreview(tpl)}>
-                {t('templates.preview')}
-              </Button>
-              <Button
-                size="sm"
-                variant="primary"
-                data-testid={`template-use-${tpl.id}`}
-                loading={creatingId === tpl.id}
-                onClick={() => useTemplate(tpl)}
-              >
-                {t('templates.use')}
-              </Button>
-            </div>
-          </Card>
+            <Button size="sm" variant="ghost" data-testid={`template-use-${tpl.id}`} onClick={() => openPreview(tpl)}>{t('templates.preview')}</Button>
+          </li>
         ))}
-      </div>
+      </ul>
 
       {preview && (
         <Modal open onClose={() => setPreview(null)} title={preview.title} maxWidth={760}>
           <div data-testid="template-preview" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            {createError && <div role="alert" style={{ color: 'var(--status-danger)' }}>{createError}</div>}
             <p style={{ fontSize: 13, color: 'var(--text-secondary)', margin: 0 }}>{preview.description}</p>
             <strong style={{ fontSize: 13 }}>{t('templates.graph')}</strong>
             <TemplateGraph spec={preview.spec} label={t('templates.graph')} />
@@ -252,6 +229,6 @@ export function TemplatesView() {
           </div>
         </Modal>
       )}
-    </div>
+    </PageLayout>
   );
 }

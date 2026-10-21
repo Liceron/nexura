@@ -26,9 +26,10 @@ test.beforeEach(async ({ page }) => {
 test.describe('Chat citations from real knowledge_search output (P15)', () => {
   test('ingest on Knowledge page, ask in playground, footnote links to the chunk', async ({ page }) => {
     await page.goto(cluster.frontendUrl);
-    await expect(page.getByLabel(/^Service connection status:/)).toContainText(/local-owner/i);
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveText('Connected');
+    await expect(page.getByLabel(/^Service connection status:/)).toHaveAccessibleDescription(/local-owner/i);
 
-    await page.getByRole('button', { name: /Knowledge Base/i }).click();
+    await page.getByRole('button', { name: 'Knowledge', exact: true }).click();
     await expect(page.locator('[data-testid="knowledge-view"]')).toBeVisible();
     await page.locator('[data-testid="upload-filename-input"]').fill('wombat_facts.txt');
     await page

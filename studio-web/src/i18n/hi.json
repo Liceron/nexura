@@ -1,4 +1,17 @@
 {
+  "shell": {
+    "openNavigation": "नेविगेशन खोलें",
+    "settings": "स्टूडियो सेटिंग्स",
+    "latency": "प्रतिक्रिया का समय",
+    "connectionStatus": "कनेक्शन की स्थिति",
+    "pendingApprovals": "{count} स्वीकृतियाँ लंबित हैं",
+    "groups": {
+      "build": "बनाएँ",
+      "operate": "संचालन",
+      "configure": "सेटिंग्स",
+      "footer": "सहायता और सिस्टम"
+    }
+  },
   "header": {
     "workspace": "सक्रिय कार्यक्षेत्र चुनें",
     "connection": "सेवा कनेक्शन की स्थिति",
@@ -98,16 +111,16 @@
   },
   "nav": {
     "workflows": "वर्कफ़्लो",
-    "approvals": "स्वीकृति इनबॉक्स",
+    "approvals": "स्वीकृतियाँ",
     "playground": "प्लेग्राउंड",
     "knowledge": "ज्ञानकोष",
-    "credentials": "क्रेडेंशियल्स और एक्सेस",
-    "tools": "टूल्स और एकीकरण",
-    "evaluations": "मूल्यांकन और बेंचमार्क",
-    "triggers": "ट्रिगर्स और आउटबॉक्स",
-    "onboarding": "स्थानीय शुरुआत",
-    "system": "सिस्टम क्षमताएं",
-    "traces": "रन ट्रेस",
+    "credentials": "क्रेडेंशियल्स",
+    "tools": "टूल्स",
+    "evaluations": "मूल्यांकन",
+    "triggers": "ट्रिगर्स",
+    "onboarding": "शुरुआत",
+    "system": "सिस्टम",
+    "traces": "ट्रेस",
     "templates": "टेम्पलेट",
     "skills": "स्किल्स",
     "agents": "एजेंट"
@@ -141,8 +154,8 @@
   },
   "workflows": {
     "searchEmptyDescription": "कोई दूसरा नाम आज़माएँ या खोज हटाएँ।",
-    "title": "वर्कफ़्लो लाइब्रेरी",
-    "create": "नया वर्कफ़्लो",
+    "title": "वर्कफ़्लो",
+    "create": "नया कार्यप्रवाह",
     "search": "वर्कफ़्लो खोजें...",
     "clearSearch": "खोज साफ़ करें",
     "noMatches": "कोई वर्कफ़्लो मेल नहीं खाता",
@@ -155,8 +168,8 @@
     "nodes": "नोड्स",
     "entryNode": "प्रवेश नोड",
     "open": "खोलें",
-    "saveAsCopy": "प्रतिलिपि के रूप में सहेजें",
-    "downloadExport": "निर्यात डाउनलोड करें",
+    "saveAsCopy": "प्रतिलिपि बनाएँ",
+    "downloadExport": "बंडल डाउनलोड करें",
     "deleteWorkflow": "वर्कफ़्लो हटाएं",
     "openTriggers": "ट्रिगर्स",
     "confirmDelete": "क्या आप वाकई इस वर्कफ़्लो को हटाना चाहते हैं? यह क्रिया पूर्ववत नहीं की जा सकती।",
@@ -169,7 +182,7 @@
     "backToWorkflows": "वर्कफ़्लो पर वापस जाएं",
     "templatesTitle": "अंतर्निहित उदाहरण",
     "useTemplate": "टेम्पलेट का उपयोग करें",
-    "createModalTitle": "नया वर्कफ़्लो बनाएं",
+    "createModalTitle": "नया कार्यप्रवाह",
     "workflowName": "वर्कफ़्लो का नाम",
     "selectTemplate": "टेम्पलेट या रिक्त चुनें",
     "blankWorkflow": "रिक्त वर्कफ़्लो",
@@ -178,7 +191,7 @@
     "next": "अगला",
     "showing": "दिखा रहा है",
     "of": "में से",
-    "browseGallery": "टेम्पलेट गैलरी देखें",
+    "browseGallery": "टेम्पलेट से शुरू करें",
     "describeIt": "बताकर बनाएँ",
     "describeLabel": "जो वर्कफ़्लो चाहिए उसका वर्णन करें",
     "describePlaceholder": "उदाहरण: एक सपोर्ट एजेंट जो ऑर्डर खोजे और 100 से ऊपर के रिफंड से पहले मैनेजर से पूछे",
@@ -404,9 +417,9 @@
     "notAvailable": "अनुपलब्ध"
   },
   "builder": {
-    "addParallel": "+ समानांतर चरण",
-    "addMap": "+ मैप चरण",
-    "addSubworkflow": "+ उप-वर्कफ़्लो चरण",
+    "addParallel": "समानांतर",
+    "addMap": "मैप",
+    "addSubworkflow": "उप-वर्कफ़्लो",
     "addParallelHint": "ऐसा चरण जोड़ें जिसकी शाखाएं एक साथ चलें, फिर जुड़ें",
     "addMapHint": "ऐसा चरण जोड़ें जो सूची के हर आइटम के लिए एक बार चले",
     "addSubworkflowHint": "ऐसा चरण जोड़ें जो कोई और सहेजा हुआ वर्कफ़्लो चलाए",
@@ -845,7 +858,7 @@
     "recoveredUnsavedLocalChangesFrom": "सहेजे नहीं गए स्थानीय बदलाव पुनः प्राप्त किए गए, समय",
     "discardDraft": "ड्राफ़्ट छोड़ें",
     "restoreDraft": "ड्राफ़्ट बहाल करें",
-    "addStep": "+ चरण जोड़ें",
+    "addStep": "चरण जोड़ें",
     "copy": "कॉपी करें",
     "paste": "पेस्ट करें",
     "undoCtrlZ": "पूर्ववत करें (Ctrl+Z)",
@@ -857,7 +870,7 @@
     "saveStatusBadge": "सहेजने की स्थिति",
     "revisionConflict": "संशोधन में टकराव",
     "saving": "सहेजा जा रहा है...",
-    "unsavedChanges": "सहेजे नहीं गए बदलाव",
+    "unsavedChanges": "बदलाव सहेजे नहीं गए",
     "savedRev": "सहेजा गया (संशोधन",
     "rev": "संशोधन:",
     "exportJson": "JSON निर्यात करें",
@@ -866,7 +879,7 @@
     "saveCtrlS": "सहेजें (Ctrl+S)",
     "save": "सहेजें",
     "run": "चलाएँ",
-    "authoritativeValidationPassedGraphStructureRoutesAndMappingsAreFullyValid": "आधिकारिक सत्यापन सफल: ग्राफ़ की संरचना, मार्ग और मैपिंग पूरी तरह मान्य हैं।",
+    "authoritativeValidationPassedGraphStructureRoutesAndMappingsAreFullyValid": "वर्कफ़्लो मान्य है।",
     "saveError": "सहेजने में त्रुटि:",
     "running": "चल रहा है",
     "completed": "पूरा हुआ",
@@ -1445,7 +1458,7 @@
     "applyToCanvas": "कैनवस पर लागू करें",
     "createNewWorkflow": "नया वर्कफ़्लो बनाएँ",
     "workflowAccessDenied": "वर्कफ़्लो की पहुँच अस्वीकृत",
-    "authoritativeRevisionBadge": "आधिकारिक संशोधन बैज",
+    "authoritativeRevisionBadge": "वर्कफ़्लो संशोधन",
     "importExportJson": "JSON आयात / निर्यात",
     "workflowViews": "वर्कफ़्लो दृश्य",
     "runConsole2": "रन कंसोल (",
@@ -1456,7 +1469,7 @@
     "noActiveRunSelected": "कोई सक्रिय रन नहीं चुना गया।",
     "workflow3": "वर्कफ़्लो",
     "workflows": "वर्कफ़्लो",
-    "tenantScopedWorkflowSpecificationsRevisionsAndExecutionBlueprints": "टेनेंट के दायरे वाले वर्कफ़्लो स्पेसिफ़िकेशन, संशोधन और निष्पादन ब्लूप्रिंट।",
+    "tenantScopedWorkflowSpecificationsRevisionsAndExecutionBlueprints": "इस कार्यस्थान के वर्कफ़्लो।",
     "searchWorkflowsInput": "वर्कफ़्लो खोज इनपुट",
     "synthetic": "अंतर्निहित उदाहरण",
     "workflowName": "वर्कफ़्लो का नाम",
@@ -1493,12 +1506,12 @@
   },
   "examples": {
     "order-triage-support": {
-      "title": "ग्राहक ऑर्डर की छँटाई और सहायता",
-      "description": "4 नोड वाला पूरा सहायता चक्र: ऑर्डर खोज, मूल्य के आधार पर शाखा चयन, मानव अनुमोदन वाला रिफ़ंड गेट और सिंथेटिक एजेंट उत्तर।"
+      "title": "रिफ़ंड स्वीकृति के साथ ऑर्डर सहायता",
+      "description": "नमूना ऑर्डर खोजें, उसका रिफ़ंड जाँचें और स्थानीय नकली मॉडल से जवाब बनाएँ।"
     },
     "bilingual-greeting": {
-      "title": "दो भाषाओं में ग्राहक अभिवादन",
-      "description": "2 नोड वाला स्थानीयकृत वर्कफ़्लो: सिंथेटिक ग्राहक ऑर्डर प्राप्त करता है और विनम्र द्विभाषी सहायता संदेश बनाता है जिसमें देवनागरी हिंदी होती है।"
+      "title": "अंग्रेज़ी और हिंदी में अभिवादन",
+      "description": "नमूना ऑर्डर खोजें और अंग्रेज़ी व हिंदी में अभिवादन बनाएँ।"
     },
     "order-router": {
       "title": "बड़ी राशि के ऑर्डर का निर्णय राउटर",
@@ -1510,8 +1523,8 @@
     }
   },
   "workflowTabs": {
-    "graph": "दृश्य ग्राफ़",
-    "spec": "मूल स्पेसिफ़िकेशन"
+    "graph": "ग्राफ़",
+    "spec": "विनिर्देश"
   },
   "runStart": {
     "objectError": "शुरुआती स्टेट एक JSON ऑब्जेक्ट होना चाहिए।",
@@ -1825,5 +1838,22 @@
       "up": "ऊपर",
       "down": "नीचे"
     }
+  },
+  "workflowDesign": {
+    "nodeViews": "चरण की सेटिंग के टैब",
+    "more": "और",
+    "duplicate": "प्रतिलिपि बनाएँ",
+    "name": "नाम",
+    "entryStep": "शुरुआती चरण",
+    "steps": "चरण",
+    "details": "विवरण",
+    "standard": "सामान्य",
+    "edit": "संपादन",
+    "minimap": "छोटा मानचित्र",
+    "needsApproval": "स्वीकृति चाहिए",
+    "importExport": "JSON आयात/निर्यात",
+    "editNode": "{name} संपादित करें",
+    "replayStep": "रीप्ले चरण",
+    "saved": "सहेजा गया"
   }
 }

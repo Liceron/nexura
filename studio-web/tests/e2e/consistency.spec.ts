@@ -88,13 +88,13 @@ test.describe('SDK, API and Studio consistency (O07)', () => {
     });
 
     await page.goto(cluster.frontendUrl);
-    await page.getByRole('button', { name: /\+ New Workflow/i }).click();
-    await page.getByRole('dialog').getByText('Customer Order Triage & Support').click();
+    await page.getByRole('button', { name: /New workflow/i }).click();
+    await page.getByRole('dialog').getByText('Order support with refund approval').click();
     await page.getByLabel('Workflow Name').fill('O07 Stream Recovery Flow');
     await page.getByRole('button', { name: /Validate & Create/i }).click();
     await expect(page).toHaveURL(/#\/workflows\/wf-/);
 
-    await page.getByRole('button', { name: 'Run', exact: true }).first().click();
+    await page.getByRole('button', { name: 'Run', exact: true }).click();
     const runModal = page.getByRole('dialog');
     await runModal
       .getByLabel('Initial state JSON input')
@@ -115,8 +115,8 @@ test.describe('SDK, API and Studio consistency (O07)', () => {
 
   test('foreign workspace sees access denied for a known workflow link', async ({ page }) => {
     await page.goto(cluster.frontendUrl);
-    await page.getByRole('button', { name: /\+ New Workflow/i }).click();
-    await page.getByRole('dialog').getByText('Bilingual Customer Greeting').click();
+    await page.getByRole('button', { name: /New workflow/i }).click();
+    await page.getByRole('dialog').getByText('English and Hindi greeting', { exact: true }).click();
     await page.getByLabel('Workflow Name').fill('O07 Private Workflow');
     await page.getByRole('button', { name: /Validate & Create/i }).click();
     await expect(page).toHaveURL(/#\/workflows\/wf-/);

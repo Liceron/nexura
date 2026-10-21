@@ -40,7 +40,8 @@ async function seed(page: Page, name: string): Promise<string> {
 async function openModal(page: Page, workflowId: string) {
   await page.goto(`${cluster.frontendUrl}/#/workflows/${workflowId}`);
   await expect(page.getByTestId('node-start')).toBeVisible();
-  await page.getByRole('button', { name: 'Import / Export JSON' }).click();
+  await page.getByRole('button', { name: 'More', exact: true }).click();
+  await page.getByRole('button', { name: 'Import/export JSON', exact: true }).click();
 }
 
 test('export as Python shows code that names the handlers', async ({ page }) => {

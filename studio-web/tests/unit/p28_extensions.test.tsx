@@ -254,6 +254,8 @@ describe('WorkflowDetail', () => {
     expect(screen.getByTestId('tab-notes')).toHaveAttribute('aria-selected', 'true');
     expect(screen.getByTestId('tab-canvas')).toHaveAttribute('aria-selected', 'false');
     expect(await screen.findByTestId('notes-panel')).toHaveTextContent('wf-p28:P28 Workflow');
+    expect(screen.getByRole('button', { name: 'Run' })).toHaveClass('studio-button--secondary');
+    expect(screen.getByRole('button', { name: 'Save' })).toHaveClass('studio-button--secondary');
   });
 
   it('has no Publish tab without the publish extension', async () => {

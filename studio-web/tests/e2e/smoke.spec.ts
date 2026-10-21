@@ -18,22 +18,24 @@ test.describe('Studio Web Smoke & Local Service Integration', () => {
     await page.goto(cluster.frontendUrl);
 
     // Header branding
-    await expect(page.getByRole('heading', { name: 'Nexura Studio' })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Nexura Studio' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Workflows' })).toBeVisible();
 
     // Active workspace indicator
     await expect(page.getByLabel(/^Active workspace selector:/)).toContainText('default');
 
-    // Service connection status badge showing local-owner profile
+    // Quiet connection status; profile remains in its accessible description
     const connectionStatus = page.getByLabel(/^Service connection status:/);
     await expect(connectionStatus).toBeVisible();
-    await expect(connectionStatus).toContainText(/local-owner/i);
+    await expect(connectionStatus).toHaveText('Connected');
+    await expect(connectionStatus).toHaveAccessibleDescription(/local-owner/i);
   });
 
   test('inspects real service capabilities from backend', async ({ page }) => {
     await page.goto(cluster.frontendUrl);
 
     // Navigate to System Capabilities tab
-    await page.getByRole('button', { name: /System Capabilities/i }).click();
+    await page.getByRole('button', { name: 'System', exact: true }).click();
 
     // Verify system capabilities rendered from real API
     await expect(page.getByRole('heading', { name: 'Service Capabilities' })).toBeVisible();
@@ -46,7 +48,7 @@ test.describe('Studio Web Smoke & Local Service Integration', () => {
     await page.goto(cluster.frontendUrl);
 
     // Open Local Quickstart tab
-    await page.getByRole('button', { name: /Local Quickstart/i }).click();
+    await page.getByRole('button', { name: 'Quickstart', exact: true }).click();
 
     // Verify keyless onboarding card
     await expect(page.getByRole('heading', { name: /Local Keyless Example/i })).toBeVisible();

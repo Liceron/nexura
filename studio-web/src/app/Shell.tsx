@@ -15,6 +15,9 @@ import { WorkflowList } from '../features/workflows/WorkflowList';
 import { usePendingApprovals, APPROVALS_BADGE_POLL_MS } from '../features/approvals/usePendingApprovals';
 import { parseHash, workflowRunHref } from './routes';
 import { useStudioExtensions } from './extensions';
+import { Modal } from '../components/Modal';
+import { PageHeader } from '../components/PageHeader';
+import { useCompactLayout } from './useCompactLayout';
 
 const WorkflowDetail = lazyWithRetry(() => import('../features/workflows/WorkflowDetail').then(m => ({ default: m.WorkflowDetail })));
 const ApprovalInbox = lazyWithRetry(() => import('../features/approvals/ApprovalInbox').then(m => ({ default: m.ApprovalInbox })));
@@ -36,6 +39,9 @@ export function Shell() {
   const { connection, refreshConnection } = useApi();
   const { t } = useI18n();
   const extensions = useStudioExtensions();
+  const compact = useCompactLayout();
+  const [navigationOpen, setNavigationOpen] = useState(false);
+  useEffect(() => { if (!compact) setNavigationOpen(false); }, [compact]);
 
   const [currentTab, setCurrentTab] = useState<NavTab>('workflows');
   const [selectedWorkflowId, setSelectedWorkflowId] = useState<string | null>(null);
@@ -51,6 +57,7 @@ export function Shell() {
   });
 
   const parseRoute = useCallback(() => {
+    setNavigationOpen(false);
     const route = parseHash(window.location.hash, extensions);
     setCurrentTab(route.tab);
     setSelectedWorkflowId(route.workflowId);
@@ -70,6 +77,7 @@ export function Shell() {
   const ExtensionPage = extensions.page(currentTab);
 
   const handleSelectTab = (tab: NavTab) => {
+    setNavigationOpen(false);
     setCurrentTab(tab);
     setSelectedWorkflowId(null);
     setSelectedRunId(null);
@@ -95,15 +103,20 @@ export function Shell() {
   };
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden' }}>
-      <Header />
+    <div className="studio-shell">
+      <Header onOpenNavigation={() => setNavigationOpen(true)} navigationOpen={navigationOpen} />
 
-      <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
-        <Sidebar
+      <div className="studio-shell-workspace">
+        {!compact && <Sidebar
           currentTab={currentTab}
           onSelectTab={handleSelectTab}
           pendingApprovalsCount={connection.status === 'connected' ? pendingApprovalsCount : 0}
-        />
+        />}
+        <Modal open={compact && navigationOpen} onClose={() => setNavigationOpen(false)}
+          title={t('ui.studioNavigation')} variant="drawer">
+          <Sidebar currentTab={currentTab} onSelectTab={handleSelectTab}
+            pendingApprovalsCount={connection.status === 'connected' ? pendingApprovalsCount : 0} />
+        </Modal>
 
         <main className="studio-main-container">
           <ErrorBoundary
@@ -121,9 +134,7 @@ export function Shell() {
             <Card elevated style={{ maxWidth: 600, margin: '20px auto', borderColor: 'var(--status-danger)' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
                 <span style={{ fontSize: 24 }}><Icon name="warning" /></span>
-                <h2 style={{ fontSize: 16, fontWeight: 600, color: 'var(--status-danger)' }}>
-                  {t('connection.errorTitle')}
-                </h2>
+                <PageHeader title={t('connection.errorTitle')} />
               </div>
               <p style={{ color: 'var(--text-secondary)', fontSize: 14, marginBottom: 16, lineHeight: 1.5 }}>
                 {connection.error || t('connection.errorDescription')}
@@ -140,9 +151,7 @@ export function Shell() {
             <Card elevated style={{ maxWidth: 600, margin: '20px auto', borderColor: 'var(--status-danger)' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
                 <span style={{ fontSize: 24 }}><Icon name="lock" /></span>
-                <h2 style={{ fontSize: 16, fontWeight: 600, color: 'var(--status-danger)' }}>
-                  {t('connection.unauthorizedTitle')}
-                </h2>
+                <PageHeader title={t('connection.unauthorizedTitle')} />
               </div>
               <p style={{ color: 'var(--text-secondary)', fontSize: 14, marginBottom: 16, lineHeight: 1.5 }}>
                 {connection.error || t('connection.unauthorizedDescription')}

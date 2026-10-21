@@ -73,8 +73,8 @@ describe('Shell & Localization', () => {
       expect(screen.getByText('Test Workflow')).toBeInTheDocument();
     });
 
-    // Switch to System Capabilities tab
-    await user.click(screen.getByRole('button', { name: /System Capabilities/i }));
+    // Short navigation name; capability page copy migrates in round five.
+    await user.click(screen.getByRole('button', { name: 'System' }));
     await waitFor(() => {
       expect(screen.getByText('Service Capabilities')).toBeInTheDocument();
       expect(screen.getByText('0.4.0')).toBeInTheDocument();
