@@ -104,6 +104,8 @@ class ExecutionContext:
         credential_resolver: CredentialResolver | None = None,
         attributes: dict[str, Any] | None = None,
         approval_granted: bool = False,
+        step_key: str | None = None,
+        fencing_token: int | None = None,
     ) -> None:
         # Set only by the caller that owns the approval decision (the workflow engine after
         # a human approved this node, the agent runner after a tool approval, or an operator
@@ -122,6 +124,40 @@ class ExecutionContext:
         self.artifact_store = artifact_store
         self.credential_resolver = credential_resolver
         self.attributes = attributes or {}
+        # Execution Contract v1: the journal step this call belongs to (for example
+        # ``charge#3`` or ``charge#3.2[0]``) and the run lease's fencing token.
+        self.step_key = step_key
+        self._fencing_token = fencing_token
+
+    def idempotency_key(self, index: int = 0) -> str | None:
+        """Stable idempotency key for effect ``index`` of this step, or ``None`` if unknown.
+
+        ``nx-`` plus 32 hex characters of the effect id derived from the workspace, run,
+        step key and ``index`` (see ``default_idempotency_key``). It is the same when the
+        step runs again after a crash or a takeover, and different for a new graph visit or
+        a re-dispatch a person authorised. Forward it to remote systems that de-duplicate
+        (an ``Idempotency-Key`` header, a client reference) so a repeat cannot apply twice.
+        """
+        if self.step_key is not None and self.run_id:
+            from nexura_agents.contracts.execution import ExecutionId, default_idempotency_key
+
+            return default_idempotency_key(
+                ExecutionId(self.workspace_id or "default", self.run_id), self.step_key, index
+            )
+        key = self.attributes.get("idempotency_key")
+        return key if index == 0 and isinstance(key, str) else None
+
+    @property
+    def fencing_token(self) -> int | None:
+        """The run lease's fencing token (only goes up); ``None`` when no lease is held.
+
+        Connectors that support it should forward it (a header or a compare-and-swap field)
+        so a remote system can refuse a stale owner's late write.
+        """
+        if self._fencing_token is not None:
+            return self._fencing_token
+        token = self.attributes.get("fencing_token")
+        return token if isinstance(token, int) and not isinstance(token, bool) else None
 
     def require_write_approval(self, what: str) -> None:
         """Raise unless a trusted caller granted approval for the write ``what``."""

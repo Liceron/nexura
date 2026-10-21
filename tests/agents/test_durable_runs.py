@@ -224,8 +224,17 @@ async def test_on_uncertain_fail() -> None:
     assert c["a"] == 1
 
 
+class _NoJournalStore(MemoryCheckpointStore):
+    """A checkpoint store without an execution journal (like a custom store): nothing
+    records which calls of a batch started, so every unanswered call is uncertain."""
+
+    open_execution_store = None  # type: ignore[assignment]
+
+
 async def test_on_uncertain_tell_model() -> None:
-    c, store = counters(), MemoryCheckpointStore()
+    # A6 S5: with a journal the never-started sibling "b" is known not to have run and runs
+    # on recovery (tests/agents/test_s5_runner_journal.py). Without one, it stays uncertain.
+    c, store = counters(), _NoJournalStore()
     run_id = await _crash_mid_tool(store, c, idempotent=False, extra_calls=True)
     model = FakeModel(responses=["finished"])
     agent = Agent(name="A", model=model, tools=make_tools(c))

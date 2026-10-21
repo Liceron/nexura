@@ -23,17 +23,32 @@ import sqlite3
 import threading
 import time
 import uuid
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NoReturn, Protocol, runtime_checkable
 
 from nexura_agents import tracing
 from nexura_agents.contracts.canonical import canonical_digest, canonical_json
+from nexura_agents.contracts.execution import (
+    Applied,
+    EffectClass,
+    EffectResolution,
+    EffectStatus,
+    ExecutionId,
+    LeaseLostError,
+    NotApplied,
+    StepIntent,
+    StepKey,
+    Unknown,
+    default_idempotency_key,
+    effect_class_from_policy,
+)
 from nexura_agents.errors import (
     ApprovalAlreadyClaimedError,
     ApprovalError,
     UnsupportedWorkflowVersionError,
+    WorkflowConflictError,
     WorkflowError,
     WorkflowExecutionError,
     WorkflowMaxStepsError,
@@ -44,8 +59,13 @@ from nexura_agents.errors import (
 )
 from nexura_agents.events import RunEvent, RunEventType
 
+from nexura_runtime._workflow_journal import TERMINAL as _JOURNAL_TERMINAL
+from nexura_runtime._workflow_journal import WorkflowJournal, journal_capable
+
 if TYPE_CHECKING:
     from nexura_agents.contracts.base import BaseModule
+    from nexura_agents.contracts.execution import EffectRecord
+    from nexura_agents.execution_store import ExecutionStore
 from nexura_runtime.runtime.approvals.errors import (
     ApprovalExpiredError,
     MutatedArgumentsError,
@@ -202,6 +222,88 @@ def approved_request() -> dict[str, Any] | None:
     """
     granted = _NODE_GRANT.get()
     return copy.deepcopy(granted) if granted is not None else None
+
+
+@dataclass(frozen=True)
+class _StepIdentity:
+    """The journal step a handler call belongs to (Execution Contract v1)."""
+
+    execution_id: ExecutionId
+    step_key: StepKey
+    fencing_token: int | None = None
+
+    def idempotency_key(self, index: int = 0) -> str:
+        return default_idempotency_key(self.execution_id, self.step_key, index)
+
+    def for_item(self, index: int) -> _StepIdentity:
+        """A mapped item's own step (``node#step[.attempt][<index>]``)."""
+        return dataclasses.replace(self, step_key=StepKey(f"{self.step_key}[{index}]"))
+
+    def for_branch(self, name: str) -> _StepIdentity:
+        """A parallel branch's own step (``node/branch#step[.attempt]``)."""
+        node, _, rest = str(self.step_key).rpartition("#")
+        return dataclasses.replace(self, step_key=StepKey(f"{node}/{name}#{rest}"))
+
+
+# The step the current handler call belongs to; set by the engine around each node.
+_STEP_IDENTITY: contextvars.ContextVar[_StepIdentity | None] = contextvars.ContextVar(
+    "nexura_workflow_step_identity", default=None
+)
+# The journal of the top-level run being executed in this context (None for runs without
+# a journal: stores without open_execution_store(), sub-workflow children).
+_JOURNAL: contextvars.ContextVar[WorkflowJournal | None] = contextvars.ContextVar(
+    "nexura_workflow_journal", default=None
+)
+
+
+def step_idempotency_key(index: int = 0) -> str | None:
+    """The idempotency key of effect ``index`` of the step running now, for function handlers.
+
+    The same as ``ExecutionContext.idempotency_key(index)`` for modules: ``nx-`` plus 32 hex
+    characters derived from the workspace, run, step key (``<node>#<step>[.<attempt>]``) and
+    ``index``. It stays the same when the step runs again after a crash or a takeover, and
+    changes for a new graph visit or a re-dispatch a person authorised (``not_applied``).
+    Mapped items and parallel branches get their own keys. ``None`` outside a workflow step.
+    """
+    identity = _STEP_IDENTITY.get()
+    return identity.idempotency_key(index) if identity is not None else None
+
+
+def step_fencing_token() -> int | None:
+    """The run lease's fencing token for the step running now (``None`` without a journal)."""
+    identity = _STEP_IDENTITY.get()
+    return identity.fencing_token if identity is not None else None
+
+
+_EFFECT_NAMES = {item.value: item for item in EffectClass}
+
+
+def _coerce_effect(effect: Any, name: str) -> EffectClass | None:
+    """An effect class from ``EffectClass``, its value, or a manifest ``effect_policy``."""
+    if effect is None:
+        return None
+    if isinstance(effect, EffectClass):
+        return effect
+    if isinstance(effect, str):
+        if effect in _EFFECT_NAMES:
+            return _EFFECT_NAMES[effect]
+        try:
+            return effect_class_from_policy(effect)
+        except ValueError:
+            pass
+    raise WorkflowValidationError(
+        f"Handler '{name}' declares unknown effect {effect!r}; use one of "
+        f"{sorted(_EFFECT_NAMES)} (or a manifest effect_policy)."
+    )
+
+
+def _combine_effects(classes: list[EffectClass]) -> EffectClass:
+    """The recovery promise of several effects in one step: the weakest one wins."""
+    if any(c in (EffectClass.NON_IDEMPOTENT, EffectClass.RECONCILABLE) for c in classes):
+        return EffectClass.NON_IDEMPOTENT
+    if any(c == EffectClass.IDEMPOTENT for c in classes):
+        return EffectClass.IDEMPOTENT
+    return EffectClass.PURE
 
 
 @dataclass(frozen=True)
@@ -516,6 +618,25 @@ class WorkflowCheckpoint:
     forked_from: dict[str, Any] | None = None
     # Workspace that owns the run; None only for checkpoints saved before it was recorded.
     workspace_id: str | None = None
+    # Set while paused with pause_reason "effect_unknown": the in-doubt effect (effect_id,
+    # step_key, node_id, effect_class, idempotency_key, approval_id, payload_digest).
+    pending_effect: dict[str, Any] | None = None
+    # Stored revision. A store returns it from get(); saving a checkpoint whose revision
+    # is set succeeds only if the stored revision still equals it (otherwise
+    # WorkflowConflictError), and the store then sets it to the new revision. None saves
+    # unconditionally (last writer wins), as before.
+    revision: int | None = None
+
+    @property
+    def pause_reason(self) -> str | None:
+        """Why a paused run waits: ``effect_unknown``, ``approval`` or ``interrupt``."""
+        if self.status != "paused":
+            return None
+        if self.pending_effect is not None:
+            return "effect_unknown"
+        if self.pending_approval is not None:
+            return "approval"
+        return "interrupt" if self.interrupt is not None else None
 
 
 @dataclass
@@ -532,6 +653,10 @@ class WorkflowRunResult:
     budget_status: dict[str, Any] | None = None
     # Set when paused by interrupt(): {"interrupt_id", "node_id", "value"}.
     interrupt: dict[str, Any] | None = None
+    # "effect_unknown" when paused because a dispatched step's outcome is unknown after a
+    # crash (see WorkflowEngine.recover); pending_effect then describes that effect.
+    pause_reason: str | None = None
+    pending_effect: dict[str, Any] | None = None
 
 
 @dataclass
@@ -659,6 +784,8 @@ class ModuleRegistry:
 
     def __init__(self, versioned_registry: Any | None = None) -> None:
         self._handlers: dict[str, Callable[..., Any] | BaseModule] = {}
+        # Declared effect classes (and reconcile probes) by handler name.
+        self._effects: dict[str, tuple[EffectClass, Callable[..., Any] | None]] = {}
         self._versioned_registry = versioned_registry
         # Per-registry replacements of shared versioned modules, keyed by (module_id, version).
         self._overrides: dict[tuple[str, str], BaseModule] = {}
@@ -674,22 +801,64 @@ class ModuleRegistry:
                 self._versioned_registry = None
         return self._versioned_registry
 
-    def register(self, name: str, handler: Callable[..., Any] | BaseModule) -> None:
-        """Register a Python callable or BaseModule by name."""
+    def register(
+        self,
+        name: str,
+        handler: Callable[..., Any] | BaseModule,
+        *,
+        effect: EffectClass | str | None = None,
+        reconcile: Callable[..., Any] | None = None,
+    ) -> None:
+        """Register a Python callable or BaseModule by name.
+
+        ``effect`` declares what may happen when the step's outcome is unknown after a
+        crash (Execution Contract v1): ``"pure"`` (runs again freely), ``"idempotent"``
+        (runs again with the same ``step_idempotency_key()``), ``"non_idempotent"`` (never
+        repeated silently: ``recover`` pauses with ``pause_reason="effect_unknown"``) or
+        ``"reconcilable"`` with ``reconcile=fn``: ``fn(state, intent)`` (sync or async)
+        returns ``Applied(output)``, ``NotApplied()`` or ``Unknown()``. Manifest spellings
+        (``read``, ``idempotent_write``, ``non_idempotent_write``) are accepted too. A
+        function handler that declares nothing is ``non_idempotent``; a module without a
+        declaration here uses its manifest's ``effect_policy``.
+        """
         if not isinstance(name, str) or not name.strip():
             raise WorkflowValidationError("Handler name must be a non-empty string.")
         if not callable(handler) and not hasattr(handler, "execute"):
             raise WorkflowValidationError(f"Handler '{name}' must be a callable or BaseModule.")
-        self._handlers[name.strip()] = handler
+        declared = _coerce_effect(effect, name)
+        if declared == EffectClass.RECONCILABLE and not callable(reconcile):
+            raise WorkflowValidationError(
+                f"Handler '{name}' declares effect='reconcilable' and needs reconcile=fn."
+            )
+        if reconcile is not None and declared != EffectClass.RECONCILABLE:
+            raise WorkflowValidationError(
+                f"Handler '{name}': reconcile= is only used with effect='reconcilable'."
+            )
+        key = name.strip()
+        self._handlers[key] = handler
+        if declared is None:
+            self._effects.pop(key, None)
+        else:
+            self._effects[key] = (declared, reconcile)
 
-    def register_handler(self, name: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
-        """Decorator to register a handler callable."""
+    def register_handler(
+        self,
+        name: str,
+        *,
+        effect: EffectClass | str | None = None,
+        reconcile: Callable[..., Any] | None = None,
+    ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+        """Decorator to register a handler callable (``effect=`` as in :meth:`register`)."""
 
         def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
-            self.register(name, fn)
+            self.register(name, fn, effect=effect, reconcile=reconcile)
             return fn
 
         return decorator
+
+    def declared_effect(self, name: str) -> tuple[EffectClass, Callable[..., Any] | None] | None:
+        """The effect class (and reconcile probe) registered for ``name``, if declared."""
+        return self._effects.get(name)
 
     def override_module(self, module: BaseModule) -> None:
         """Use ``module`` instead of the shared versioned module with its id and version.
@@ -715,6 +884,7 @@ class ModuleRegistry:
         if clashes:
             raise WorkflowValidationError(f"Handler names already registered: {clashes}.")
         self._handlers.update(other._handlers)
+        self._effects.update(other._effects)
 
     def include_from(self, target: str) -> None:
         """Import trusted handlers named by an operator as ``"package.module:attribute"``.
@@ -1224,7 +1394,7 @@ class WorkflowCheckpointStore(Protocol):
 
 def checkpoint_to_dict(cp: WorkflowCheckpoint) -> dict[str, Any]:
     """JSON-compatible form of a checkpoint (used for history records)."""
-    return {
+    data = {
         "workflow_run_id": cp.workflow_run_id,
         "spec_version": cp.spec_version,
         "spec_hash": cp.spec_hash,
@@ -1240,6 +1410,9 @@ def checkpoint_to_dict(cp: WorkflowCheckpoint) -> dict[str, Any]:
         "forked_from": copy.deepcopy(cp.forked_from),
         "workspace_id": cp.workspace_id,
     }
+    if cp.pending_effect is not None:  # only on effect_unknown pauses
+        data["pending_effect"] = copy.deepcopy(cp.pending_effect)
+    return data
 
 
 def checkpoint_from_dict(data: dict[str, Any]) -> WorkflowCheckpoint:
@@ -1259,6 +1432,7 @@ def checkpoint_from_dict(data: dict[str, Any]) -> WorkflowCheckpoint:
         interrupt=copy.deepcopy(data.get("interrupt")),
         forked_from=copy.deepcopy(data.get("forked_from")),
         workspace_id=data.get("workspace_id"),
+        pending_effect=copy.deepcopy(data.get("pending_effect")),
     )
 
 
@@ -1276,13 +1450,35 @@ def _is_start_reservation(cp: WorkflowCheckpoint) -> bool:
     return cp.status == "running" and cp.step_count == 0 and cp.forked_from is None
 
 
-class MemoryWorkflowStore:
-    """In-memory checkpoint store for transient workflow runs and tests."""
+def _revision_conflict(run_id: str, expected: int, actual: int) -> WorkflowConflictError:
+    error = WorkflowConflictError(run_id, expected, actual)
+    error.args = (
+        f"Workflow run '{run_id}' changed since it was read (checkpoint revision {expected}, "
+        f"now {actual}); another worker owns it.",
+    )
+    return error
 
-    def __init__(self) -> None:
+
+class MemoryWorkflowStore:
+    """In-memory checkpoint store for transient workflow runs and tests.
+
+    Its execution journal (leases, intents, effects) is a ``MemoryExecutionStore``, or the
+    ``execution_store`` given.
+    """
+
+    def __init__(self, *, execution_store: ExecutionStore | None = None) -> None:
         self._checkpoints: dict[str, WorkflowCheckpoint] = {}
         self._history: dict[str, list[WorkflowCheckpoint]] = {}
         self._lock = asyncio.Lock()
+        self._execution_store = execution_store
+
+    async def open_execution_store(self) -> ExecutionStore:
+        """The execution journal kept next to these checkpoints (created on first use)."""
+        if self._execution_store is None:
+            from nexura_agents.execution_store import MemoryExecutionStore
+
+            self._execution_store = MemoryExecutionStore()
+        return self._execution_store
 
     async def get(self, workflow_run_id: str) -> WorkflowCheckpoint | None:
         """The latest checkpoint of a run, or ``None`` if it does not exist."""
@@ -1293,18 +1489,29 @@ class MemoryWorkflowStore:
             return copy.deepcopy(cp)
 
     async def save(self, checkpoint: WorkflowCheckpoint) -> None:
-        """Store a checkpoint as the run's latest and append it to its history."""
+        """Store a checkpoint as the run's latest and append it to its history.
+
+        Fenced when ``checkpoint.revision`` is set: the stored revision must still equal
+        it (``WorkflowConflictError`` otherwise); it is then set to the new revision.
+        """
         async with self._lock:
             stored = copy.deepcopy(checkpoint)
             previous = self._checkpoints.get(checkpoint.workflow_run_id)
+            expected = checkpoint.revision
+            current = (previous.revision or 0) if previous is not None else None
+            if expected is not None and current is not None and current != expected:
+                raise _revision_conflict(checkpoint.workflow_run_id, expected, current)
             if previous is not None:
                 if stored.forked_from is None:
                     stored.forked_from = copy.deepcopy(previous.forked_from)
                 if stored.workspace_id is None:
                     stored.workspace_id = previous.workspace_id
+            stored.revision = current + 1 if current is not None else (expected or 0) + 1
             stored.updated_at = time.time()
             self._checkpoints[checkpoint.workflow_run_id] = stored
             self._history.setdefault(checkpoint.workflow_run_id, []).append(copy.deepcopy(stored))
+            if expected is not None:
+                checkpoint.revision = stored.revision
 
     async def create(self, checkpoint: WorkflowCheckpoint) -> bool:
         """Save the first checkpoint of a new run; False if the run id is taken."""
@@ -1313,6 +1520,8 @@ class MemoryWorkflowStore:
                 return False
             stored = copy.deepcopy(checkpoint)
             stored.updated_at = time.time()
+            stored.revision = 1
+            checkpoint.revision = 1
             self._checkpoints[checkpoint.workflow_run_id] = stored
             if not _is_start_reservation(stored):
                 self._history.setdefault(checkpoint.workflow_run_id, []).append(
@@ -1350,6 +1559,7 @@ class MemoryWorkflowStore:
                 ):
                     return False  # expired: never claimed (checked under the same lock)
                 cp.status = "running"
+                cp.revision = (cp.revision or 0) + 1
                 return True
             return False
 
@@ -1359,12 +1569,20 @@ class MemoryWorkflowStore:
 
 
 class SQLiteWorkflowStore:
-    """Durable workflow checkpoint store backed by sqlite3."""
+    """Durable workflow checkpoint store backed by sqlite3.
+
+    Its execution journal (leases, intents, effects) is a ``SQLiteExecutionStore`` in the
+    same database file, opened on first use with its own connection.
+    """
 
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path).resolve()
         self._lock = threading.Lock()
         self._closed = False
+        self._journal_lock = threading.Lock()
+        self._journal: Any = None
+        self._journal_conn: sqlite3.Connection | None = None
+        self._journal_ready = False
 
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn: sqlite3.Connection | None = sqlite3.connect(
@@ -1393,11 +1611,22 @@ class SQLiteWorkflowStore:
                 );
                 """
             )
-            for column in ("budget_json", "interrupt_json", "meta_json", "workspace_id"):
+            for column in (
+                "budget_json",
+                "interrupt_json",
+                "meta_json",
+                "workspace_id",
+                "effect_json",
+            ):
                 with contextlib.suppress(sqlite3.OperationalError):
                     self._conn.execute(
                         f"ALTER TABLE nexura_workflow_checkpoints ADD COLUMN {column} TEXT;"
                     )
+            with contextlib.suppress(sqlite3.OperationalError):
+                self._conn.execute(
+                    "ALTER TABLE nexura_workflow_checkpoints "
+                    "ADD COLUMN revision INTEGER NOT NULL DEFAULT 0;"
+                )
             # Every saved checkpoint, append-only, for inspection, replay and forks.
             had_history = self._conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'table' "
@@ -1438,6 +1667,29 @@ class SQLiteWorkflowStore:
             raise WorkflowError("SQLiteWorkflowStore connection is closed.")
         return self._conn
 
+    async def open_execution_store(self) -> ExecutionStore:
+        """The execution journal in the same database file (created on first use)."""
+        from nexura_agents.execution_store import SQLiteExecutionStore
+
+        with self._journal_lock:
+            with self._lock:
+                self._ensure_open()
+            if self._journal is None:
+                conn = sqlite3.connect(
+                    str(self.db_path), timeout=10.0, isolation_level=None, check_same_thread=False
+                )
+                conn.execute("PRAGMA foreign_keys=ON")
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA synchronous=FULL")
+                self._journal_conn = conn
+                self._journal = SQLiteExecutionStore.from_connection(conn)
+            journal = self._journal
+        if not self._journal_ready:
+            await journal.init_db()
+            self._journal_ready = True
+        result: ExecutionStore = journal
+        return result
+
     def _get_sync(self, workflow_run_id: str) -> WorkflowCheckpoint | None:
         with self._lock:
             return self._read_checkpoint(self._ensure_open(), workflow_run_id)
@@ -1450,7 +1702,8 @@ class SQLiteWorkflowStore:
             """
             SELECT spec_version, spec_hash, current_node_id, state_json,
                    step_count, status, approval_json, error, updated_at,
-                   budget_json, interrupt_json, meta_json, workspace_id
+                   budget_json, interrupt_json, meta_json, workspace_id,
+                   effect_json, revision
             FROM nexura_workflow_checkpoints
             WHERE workflow_run_id = ?
             """,
@@ -1474,6 +1727,8 @@ class SQLiteWorkflowStore:
             interrupt_json,
             meta_json,
             owner,
+            effect_json,
+            revision,
         ) = row
 
         state = json.loads(state_json)
@@ -1499,6 +1754,8 @@ class SQLiteWorkflowStore:
             interrupt=json.loads(interrupt_json) if interrupt_json else None,
             forked_from=json.loads(meta_json) if meta_json else None,
             workspace_id=owner,
+            pending_effect=json.loads(effect_json) if effect_json else None,
+            revision=int(revision or 0),
         )
 
     def _list_children_sync(self, parent_id: str) -> list[WorkflowCheckpoint]:
@@ -1565,17 +1822,23 @@ class SQLiteWorkflowStore:
                 if checkpoint.budget_state is not None
                 else None
             )
+            effect_json = (
+                json.dumps(checkpoint.pending_effect, ensure_ascii=False)
+                if checkpoint.pending_effect is not None
+                else None
+            )
+            expected = None if create else checkpoint.revision
             insert = """
                     INSERT INTO nexura_workflow_checkpoints (
                         workflow_run_id, spec_version, spec_hash, current_node_id,
                         state_json, step_count, status, approval_id, approval_json,
                         error, updated_at, budget_json, interrupt_json, meta_json,
-                        workspace_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        workspace_id, effect_json, revision
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """
             try:
                 with conn:
-                    conn.execute(
+                    written = conn.execute(
                         insert
                         if create
                         else insert
@@ -1594,7 +1857,10 @@ class SQLiteWorkflowStore:
                         budget_json = excluded.budget_json,
                         interrupt_json = excluded.interrupt_json,
                         meta_json = excluded.meta_json,
-                        workspace_id = excluded.workspace_id
+                        workspace_id = excluded.workspace_id,
+                        effect_json = excluded.effect_json,
+                        revision = nexura_workflow_checkpoints.revision + 1
+                    WHERE ? IS NULL OR nexura_workflow_checkpoints.revision = ?
                     """,
                         (
                             checkpoint.workflow_run_id,
@@ -1612,7 +1878,28 @@ class SQLiteWorkflowStore:
                             interrupt_json,
                             meta_json,
                             owner,
-                        ),
+                            effect_json,
+                            1 if expected is None else expected + 1,
+                        )
+                        + (() if create else (expected, expected)),
+                    )
+                    if written.rowcount != 1:
+                        row = conn.execute(
+                            "SELECT revision FROM nexura_workflow_checkpoints "
+                            "WHERE workflow_run_id = ?",
+                            (checkpoint.workflow_run_id,),
+                        ).fetchone()
+                        raise _revision_conflict(
+                            checkpoint.workflow_run_id,
+                            int(expected or 0),
+                            int(row[0] if row else 0),
+                        )
+                    new_revision = int(
+                        conn.execute(
+                            "SELECT revision FROM nexura_workflow_checkpoints "
+                            "WHERE workflow_run_id = ?",
+                            (checkpoint.workflow_run_id,),
+                        ).fetchone()[0]
                     )
                     if not (create and _is_start_reservation(history_cp)):
                         conn.execute(
@@ -1628,6 +1915,8 @@ class SQLiteWorkflowStore:
                 if create:
                     return False  # another writer created this run first
                 raise
+            if create or expected is not None:
+                checkpoint.revision = new_revision
             return True
 
     def _claim_approval_sync(self, workflow_run_id: str, approval_id: str) -> bool:
@@ -1639,7 +1928,7 @@ class SQLiteWorkflowStore:
                 cursor = conn.execute(
                     """
                     UPDATE nexura_workflow_checkpoints
-                    SET status = 'running', updated_at = ?
+                    SET status = 'running', updated_at = ?, revision = revision + 1
                     WHERE workflow_run_id = ? AND status = 'paused' AND approval_id = ?
                       AND (
                         approval_json IS NULL
@@ -1658,6 +1947,10 @@ class SQLiteWorkflowStore:
                 if self._conn is not None:
                     self._conn.close()
                     self._conn = None
+        with self._journal_lock:
+            conn, self._journal_conn, self._journal = self._journal_conn, None, None
+            if conn is not None:
+                conn.close()
 
     async def get(self, workflow_run_id: str) -> WorkflowCheckpoint | None:
         """The latest checkpoint of a run, or ``None`` if it does not exist."""
@@ -1839,6 +2132,7 @@ class WorkflowEngine:
         approval_ttl: float = 3600.0,
         max_map_writes_per_approval: int = 50,
         policy_version: str = "1.0.0",
+        lease_ttl: float = 30.0,
     ) -> None:
         self.approval_required_handlers = (
             frozenset(approval_required_handlers)
@@ -1850,6 +2144,14 @@ class WorkflowEngine:
             raise WorkflowValidationError(f"max_steps must be an integer >= 1, got {max_steps!r}.")
         if timeout is not None and (not isinstance(timeout, (int, float)) or not (timeout > 0)):
             raise WorkflowValidationError(f"timeout must be a positive number, got {timeout!r}.")
+        if (
+            isinstance(lease_ttl, bool)
+            or not isinstance(lease_ttl, (int, float))
+            or not (0 < lease_ttl < float("inf"))
+        ):
+            raise WorkflowValidationError(
+                f"lease_ttl must be a positive number of seconds, got {lease_ttl!r}."
+            )
 
         self.spec = spec
         self.registry = registry
@@ -1864,6 +2166,10 @@ class WorkflowEngine:
         self.approval_ttl = float(approval_ttl) if approval_ttl is not None else 3600.0
         self.max_map_writes_per_approval = int(max_map_writes_per_approval)
         self.policy_version = policy_version
+        # Run lease of a journaled run, renewed every lease_ttl / 3 (Execution Contract v1).
+        self.lease_ttl = float(lease_ttl)
+        # Sub-workflow child engines keep no journal of their own (A6 S7).
+        self._journal_enabled = True
         # Set on engines running a sub-workflow per map_over item: those cannot pause.
         self._pause_forbidden: str | None = None
         # State keys written by steps this engine ran (sub-workflow outputs).
@@ -1873,7 +2179,196 @@ class WorkflowEngine:
         if checkpoint.workspace_id is None:
             checkpoint.workspace_id = self.workspace_id
         assert self.store is not None
+        journal = self._journal_for(checkpoint.workflow_run_id)
+        if journal is None:
+            await self.store.save(checkpoint)
+            return
+        # The journal moves first (fenced by the lease token), then the checkpoint (fenced
+        # by its revision): a stale owner is refused before it can write either.
+        await self._journal_sync(journal, checkpoint)
+        checkpoint.revision = journal.cp_revision
         await self.store.save(checkpoint)
+        journal.cp_revision = checkpoint.revision
+
+    # ------------------------------------------------------------------ execution journal
+
+    def _journal_for(self, workflow_run_id: str) -> WorkflowJournal | None:
+        journal = _JOURNAL.get()
+        return journal if journal is not None and journal.run_id == workflow_run_id else None
+
+    def _journaled_store(self) -> bool:
+        return self._journal_enabled and journal_capable(self.store)
+
+    async def _open_journal(self, workflow_run_id: str) -> WorkflowJournal:
+        return await WorkflowJournal.open(
+            self.store,
+            self.workspace_id or "default",
+            workflow_run_id,
+            self.spec.canonical_hash(),
+            self.lease_ttl,
+        )
+
+    async def _journal_sync(self, journal: WorkflowJournal, checkpoint: WorkflowCheckpoint) -> None:
+        """Mirror a paused or finished checkpoint's status into the journal first."""
+        if journal.status in _JOURNAL_TERMINAL:
+            return
+        cursor = checkpoint.current_node_id
+        if checkpoint.status == "paused":
+            if journal.status != "paused":
+                await journal.pause(checkpoint.pause_reason or "approval", cursor)
+        elif checkpoint.status in ("failed", "rejected"):
+            await journal.finish("failed", cursor, reason=checkpoint.error)
+        elif checkpoint.status == "completed":
+            await journal.finish("completed", cursor)
+
+    async def _journaled(
+        self, journal: WorkflowJournal | None, run: Callable[[], Awaitable[WorkflowRunResult]]
+    ) -> WorkflowRunResult:
+        """Run ``run`` with ``journal`` as this run's journal; give its lease back after."""
+        if journal is None:
+            return await run()
+        token = _JOURNAL.set(journal)
+        journal.start_heartbeat()
+        try:
+            return await run()
+        finally:
+            _JOURNAL.reset(token)
+            await journal.close()
+
+    async def _take_journal(self, workflow_run_id: str) -> WorkflowJournal | None:
+        """Claim a stored run's lease (resume, recover); None for stores without a journal.
+
+        The returned journal has ``owner`` unset while another live worker holds the lease.
+        """
+        if not self._journaled_store():
+            return None
+        from nexura_agents.durable import new_lease_owner
+
+        journal = await self._open_journal(workflow_run_id)
+        if not await journal.take(new_lease_owner()):
+            journal.owner = None
+        return journal
+
+    async def _take_claimed_journal(self, workflow_run_id: str) -> WorkflowJournal | None:
+        """The lease of a run whose approval (or interrupt) this caller just claimed.
+
+        Nobody else should hold a paused run's lease except briefly (an effect being
+        resolved), so a busy lease is retried for a few seconds. If it stays busy, the run
+        is left claimed but not dispatched, which ``recover()`` continues.
+        """
+        for _ in range(60):
+            journal = await self._take_journal(workflow_run_id)
+            if journal is None or journal.owner is not None:
+                return journal
+            await journal.close()
+            if journal.status in _JOURNAL_TERMINAL:
+                break
+            await asyncio.sleep(0.05)
+        raise WorkflowError(
+            f"Workflow run '{workflow_run_id}' was claimed but another worker holds its run "
+            "lease; nothing was dispatched. Call recover() once that lease is free."
+        )
+
+    def _node_effect(
+        self, node: WorkflowNode, state: dict[str, Any]
+    ) -> tuple[EffectClass, Callable[..., Any] | None]:
+        """The recovery promise of a node visit (and its reconcile probe, if any).
+
+        Function handlers: the class declared with ``register(..., effect=)``, else
+        ``non_idempotent`` (founder decision 1). Modules: a declaration here, else the
+        manifest's ``effect_policy``; a module whose manifest leaves it unset but declares
+        write operations counts as ``non_idempotent`` when this call writes. Composite
+        steps combine their parts (the weakest promise wins) until S7 adds per-branch,
+        per-item and per-child intents.
+        """
+        if node.subgraph is not None:
+            return _combine_effects(self._spec_effects(node.subgraph)), None
+        if node.parallel:
+            classes = [self._handler_effect(node, name, None, state)[0] for name in node.parallel]
+            return _combine_effects(classes), None
+        effect, reconcile = self._handler_effect(node, node.handler, node.module_id, state)
+        if node.map_over is not None and effect == EffectClass.RECONCILABLE:
+            return EffectClass.NON_IDEMPOTENT, None  # per-item probes arrive with S7
+        return effect, reconcile
+
+    def _spec_effects(self, spec: WorkflowSpec) -> list[EffectClass]:
+        classes: list[EffectClass] = []
+        for node in spec.nodes.values():
+            if node.subgraph is not None:
+                classes.extend(self._spec_effects(node.subgraph))
+            else:
+                for name in node.parallel or [node.handler]:
+                    module_id = None if node.parallel else node.module_id
+                    classes.append(self._handler_effect(node, name, module_id, {})[0])
+        return classes
+
+    def _handler_effect(
+        self, node: WorkflowNode, name: str, module_id: str | None, state: dict[str, Any]
+    ) -> tuple[EffectClass, Callable[..., Any] | None]:
+        declared = self.registry.declared_effect(name)
+        if declared is not None:
+            return declared
+        try:
+            obj = self._resolve_handler(name, module_id, node.module_version)
+        except Exception:
+            return EffectClass.NON_IDEMPOTENT, None
+        manifest = getattr(obj, "manifest", None)
+        if manifest is not None:
+            fields_set = getattr(manifest, "model_fields_set", None)
+            writes = bool(
+                getattr(manifest, "write_operations", None) or getattr(manifest, "always_write", 0)
+            )
+            if fields_set is not None and "effect_policy" not in fields_set and writes:
+                gated = self._write_operation_gated(node, state)
+                return (EffectClass.NON_IDEMPOTENT if gated else EffectClass.PURE), None
+            try:
+                return effect_class_from_policy(getattr(manifest, "effect_policy", None)), None
+            except ValueError:
+                return EffectClass.NON_IDEMPOTENT, None
+        attribute = getattr(obj, "effect_policy", None)
+        if isinstance(attribute, str):
+            with contextlib.suppress(WorkflowValidationError):
+                effect = _coerce_effect(attribute, name)
+                if effect is not None and effect != EffectClass.RECONCILABLE:
+                    return effect, None
+        return EffectClass.NON_IDEMPOTENT, None
+
+    async def _before_dispatch(
+        self,
+        workflow_run_id: str,
+        node: WorkflowNode,
+        state: dict[str, Any],
+        step_count: int,
+        approval_id: str | None,
+    ) -> _StepIdentity:
+        """The step identity for a node visit; for a journaled non-pure node, its intent.
+
+        The intent, its ``pending`` effect and the approval it runs under (recorded as
+        consumed) are one fenced journal transaction, written just before the handler
+        runs ("claim for dispatch"). A pure node writes no intent; the lease is checked.
+        """
+        journal = self._journal_for(workflow_run_id)
+        if journal is None:
+            return _StepIdentity(
+                ExecutionId(self.workspace_id or "default", workflow_run_id),
+                StepKey.workflow(node.id, step_count),
+            )
+        key = journal.dispatch_key(node.id, step_count)
+        effect, _ = self._node_effect(node, state)
+        if effect != EffectClass.PURE:
+            await journal.record_intent(
+                StepIntent(
+                    key,
+                    self._binding_digest(node, state) or "",
+                    default_idempotency_key(journal.eid, key),
+                    effect,
+                    approval_id=approval_id,
+                ),
+                node.id,
+            )
+        else:
+            journal.check()
+        return _StepIdentity(journal.eid, key, journal.fencing_token)
 
     def _check_owner(self, checkpoint: WorkflowCheckpoint) -> None:
         owner = checkpoint.workspace_id
@@ -1994,15 +2489,41 @@ class WorkflowEngine:
                 raise WorkflowError(
                     f"Workflow run '{run_id}' already exists with status '{existing_cp.status}'."
                 )
+            journal = await self._new_journal(run_id, first)
+        else:
+            journal = None
 
-        return await self._execute_loop(
-            workflow_run_id=run_id,
-            cursor=self.spec.entry_node,
-            current_state=state,
-            step_count=0,
-            node_already_approved=False,
-            operation="run",
+        return await self._journaled(
+            journal,
+            lambda: self._execute_loop(
+                workflow_run_id=run_id,
+                cursor=self.spec.entry_node,
+                current_state=state,
+                step_count=0,
+                node_already_approved=False,
+                operation="run",
+            ),
         )
+
+    async def _new_journal(
+        self, workflow_run_id: str, first: WorkflowCheckpoint
+    ) -> WorkflowJournal | None:
+        """Journal a run just created in the store, leased by this caller from the start."""
+        if not self._journaled_store():
+            return None
+        from nexura_agents.durable import new_lease_owner
+        from nexura_agents.execution_store import ExecutionConflictError
+
+        journal = await self._open_journal(workflow_run_id)
+        try:
+            await journal.create(new_lease_owner())
+        except ExecutionConflictError as exc:
+            raise WorkflowError(
+                f"Workflow run '{workflow_run_id}' already has an execution journal; "
+                "use a new run id."
+            ) from exc
+        journal.cp_revision = first.revision
+        return journal
 
     async def resume(
         self,
@@ -2121,9 +2642,12 @@ class WorkflowEngine:
                     after = canonical_digest(self._gate_binding(gate_node, updated_state))
                     approval_stands = before == after
 
-        # 6. Atomically Claim Approval (the store refuses one past its stored expires_at)
-        claimed = await self.store.claim_approval(workflow_run_id, approval_id)
-        if not claimed:
+        # 6. Atomically claim the approval (the store refuses one past its stored
+        # expires_at; the first claimer wins), then take the run's lease (journaled
+        # stores). The intent that consumes the approval is written just before the node
+        # dispatches; recover() handles a stop anywhere in between.
+        assert self.store is not None
+        if not await self.store.claim_approval(workflow_run_id, approval_id):
             if deadline is not None and time.time() > deadline:
                 raise ApprovalExpiredError(
                     f"Approval request '{approval_id}' expired before it was claimed. "
@@ -2135,96 +2659,119 @@ class WorkflowEngine:
                 f"Approval '{approval_id}' for workflow run '{workflow_run_id}' "
                 "has already been claimed or resolved."
             )
-        if decision != "reject" and deadline is not None and time.time() > deadline:
-            # Claimed (this caller owns the run now) but past expiry: never dispatch.
-            await self._fail_expired(checkpoint, approval_id, deadline)
+        journal = await self._take_claimed_journal(workflow_run_id)
 
-        if paused_child is not None:
-            # The gate is inside the sub-workflow: decide it there, then re-attach.
-            child, child_id = paused_child
-            with contextlib.suppress(WorkflowExecutionError, WorkflowTimeoutError):
-                await child.resume(
-                    child_id,
-                    approval_id,
-                    decision=decision,
-                    state_update=state_update,
-                    workspace_id=workspace_id,
-                    actor=actor,
-                    actor_role=actor_role,
-                    expected_payload_digest=expected_payload_digest,
+        async def claimed() -> WorkflowRunResult:
+            nonlocal state, state_update
+            # The claim moved the stored revision on by one; saves continue from there.
+            if checkpoint.revision is not None:
+                checkpoint.revision += 1
+            journal = self._journal_for(workflow_run_id)
+            if journal is not None:
+                journal.cp_revision = checkpoint.revision
+            if decision != "reject" and deadline is not None and time.time() > deadline:
+                # Claimed (this caller owns the run now) but past expiry: never dispatch.
+                await self._fail_expired(checkpoint, approval_id, deadline)
+
+            if paused_child is not None:
+                # The gate is inside the sub-workflow: decide it there, then re-attach.
+                child, child_id = paused_child
+                with contextlib.suppress(WorkflowExecutionError, WorkflowTimeoutError):
+                    await child.resume(
+                        child_id,
+                        approval_id,
+                        decision=decision,
+                        state_update=state_update,
+                        workspace_id=workspace_id,
+                        actor=actor,
+                        actor_role=actor_role,
+                        expected_payload_digest=expected_payload_digest,
+                    )
+                state_update = None  # it applied to the sub-workflow's state
+
+            if decision == "reject":
+                # Rejection executes zero gated effects and becomes terminal
+                checkpoint.status = "rejected"
+                checkpoint.pending_approval = None
+                checkpoint.error = f"Approval rejected for node '{cursor}'."
+                await self._save(checkpoint)
+                budget_status = (
+                    self.budget.to_dict().get("status")
+                    if self.budget is not None and hasattr(self.budget, "to_dict")
+                    else None
                 )
-            state_update = None  # it applied to the sub-workflow's state
+                rejected_span = self._start_workflow_span(workflow_run_id, "resume")
+                rejected_span.set("nexura.workflow.status", "rejected")
+                rejected_span.set("nexura.workflow.step_count", step_count)
+                rejected_span.set("nexura.workflow.pause_reason", "approval")
+                rejected_span.end()
+                return WorkflowRunResult(
+                    workflow_run_id=workflow_run_id,
+                    status="rejected",
+                    state=state,
+                    step_count=step_count,
+                    current_node_id=cursor,
+                    error=checkpoint.error,
+                    budget_status=budget_status,
+                )
 
-        if decision == "reject":
-            # Rejection executes zero gated effects and becomes terminal
-            checkpoint.status = "rejected"
-            checkpoint.pending_approval = None
-            checkpoint.error = f"Approval rejected for node '{cursor}'."
-            await self._save(checkpoint)
-            budget_status = (
-                self.budget.to_dict().get("status")
-                if self.budget is not None and hasattr(self.budget, "to_dict")
+            # Approval granted: apply caller state update if provided
+            # An approval is bound to the inputs the approver saw: if the update changes what
+            # the gated node reads (module inputs, a function's state, a sub-workflow's inputs),
+            # the approval does not carry over and the node is gated again (computed above).
+            if updated_state is not None:
+                state = updated_state
+            if journal is not None:
+                await journal.ensure_running(
+                    cursor, {"type": "approval_claimed", "approval_id": approval_id}
+                )
+                if updated_state is not None:
+                    # Keep the approver's correction if this process stops before the node
+                    # runs: recover() re-checks the approval against the stored state.
+                    checkpoint.state = copy.deepcopy(state)
+                    checkpoint.status = "running"
+                    await self._save(checkpoint)
+
+            # A node that asked with request_approval() gets the approved details back on its
+            # next step (only that node, only when the approval still stands).
+            grant = (
+                copy.deepcopy(pending.details)
+                if approval_stands
+                and pending.node_id == cursor
+                and isinstance(pending.details, dict)
+                and pending.details.get("node_request") is True
                 else None
             )
-            rejected_span = self._start_workflow_span(workflow_run_id, "resume")
-            rejected_span.set("nexura.workflow.status", "rejected")
-            rejected_span.set("nexura.workflow.step_count", step_count)
-            rejected_span.set("nexura.workflow.pause_reason", "approval")
-            rejected_span.end()
-            return WorkflowRunResult(
-                workflow_run_id=workflow_run_id,
-                status="rejected",
-                state=state,
-                step_count=step_count,
-                current_node_id=cursor,
-                error=checkpoint.error,
-                budget_status=budget_status,
+            # Re-check expiry right before the approved node runs.
+            if approval_stands and deadline is not None and time.time() > deadline:
+                await self._fail_expired(checkpoint, approval_id, deadline)
+            grant_token = _RESUME_GRANT.set(grant)
+            provenance_token = _REGATE_PROVENANCE.set(
+                {
+                    "node_id": cursor,
+                    "supersedes_approval_id": approval_id,
+                    "regate_reason": "inputs_edited",
+                    "previous_input_state": copy.deepcopy(pending.input_state),
+                }
+                if not approval_stands
+                else None
             )
+            try:
+                # Continue execution loop with approval granted for this node
+                return await self._execute_loop(
+                    workflow_run_id=workflow_run_id,
+                    cursor=cursor,
+                    current_state=state,
+                    step_count=step_count,
+                    node_already_approved=approval_stands,
+                    operation="resume",
+                    approval_id=approval_id if approval_stands else None,
+                )
+            finally:
+                _RESUME_GRANT.reset(grant_token)
+                _REGATE_PROVENANCE.reset(provenance_token)
 
-        # Approval granted: apply caller state update if provided
-        # An approval is bound to the inputs the approver saw: if the update changes what
-        # the gated node reads (module inputs, a function's state, a sub-workflow's inputs),
-        # the approval does not carry over and the node is gated again (computed above).
-        if updated_state is not None:
-            state = updated_state
-
-        # A node that asked with request_approval() gets the approved details back on its
-        # next step (only that node, only when the approval still stands).
-        grant = (
-            copy.deepcopy(pending.details)
-            if approval_stands
-            and pending.node_id == cursor
-            and isinstance(pending.details, dict)
-            and pending.details.get("node_request") is True
-            else None
-        )
-        # Re-check expiry right before the approved node runs.
-        if approval_stands and deadline is not None and time.time() > deadline:
-            await self._fail_expired(checkpoint, approval_id, deadline)
-        grant_token = _RESUME_GRANT.set(grant)
-        provenance_token = _REGATE_PROVENANCE.set(
-            {
-                "node_id": cursor,
-                "supersedes_approval_id": approval_id,
-                "regate_reason": "inputs_edited",
-                "previous_input_state": copy.deepcopy(pending.input_state),
-            }
-            if not approval_stands
-            else None
-        )
-        try:
-            # Continue execution loop with approval granted for this node
-            return await self._execute_loop(
-                workflow_run_id=workflow_run_id,
-                cursor=cursor,
-                current_state=state,
-                step_count=step_count,
-                node_already_approved=approval_stands,
-                operation="resume",
-            )
-        finally:
-            _RESUME_GRANT.reset(grant_token)
-            _REGATE_PROVENANCE.reset(provenance_token)
+        return await self._journaled(journal, claimed)
 
     async def resume_interrupt(
         self,
@@ -2252,46 +2799,59 @@ class WorkflowEngine:
                 approval_id=interrupt_id,
             )
         _validate_json_serializable(value, str(pending.get("node_id")))
-        if not await self.store.claim_approval(workflow_run_id, interrupt_id):  # type: ignore[union-attr]
+        assert self.store is not None
+        if not await self.store.claim_approval(workflow_run_id, interrupt_id):
             raise ApprovalAlreadyClaimedError(
                 f"Interrupt '{interrupt_id}' for workflow run '{workflow_run_id}' "
                 "has already been answered."
             )
-        answers: list[Any] | None = [*pending.get("answers", []), copy.deepcopy(value)]
-        asking = self.spec.nodes.get(checkpoint.current_node_id or "")
-        # The node runs again approved only if it was running with an approval granted for
-        # these same inputs when it asked; a node that was never gated is not approved.
-        approved_binding = pending.get("approved_binding")
-        node_approved = (
-            asking is not None
-            and isinstance(approved_binding, str)
-            and approved_binding == self._binding_digest(asking, checkpoint.state)
-        )
-        if asking is not None and self._waits_on_subgraph(asking, str(pending.get("node_id"))):
-            # The question came from inside the sub-workflow: answer it there.
-            child, child_id = await self._paused_child(
-                workflow_run_id, asking, checkpoint.step_count + 1, interrupt_id
-            )
-            with contextlib.suppress(WorkflowExecutionError, WorkflowTimeoutError):
-                await child.resume_interrupt(
-                    child_id, interrupt_id, value, workspace_id=workspace_id
+        journal = await self._take_claimed_journal(workflow_run_id)
+
+        async def answered() -> WorkflowRunResult:
+            journal = self._journal_for(workflow_run_id)
+            if journal is not None:
+                journal.cp_revision = (checkpoint.revision or 0) + 1  # the claim's write
+                await journal.ensure_running(
+                    checkpoint.current_node_id,
+                    {"type": "interrupt_answered", "interrupt_id": interrupt_id},
                 )
-            answers = None
-        grant_token = _RESUME_GRANT.set(
-            copy.deepcopy(pending.get("approved_request")) if node_approved else None
-        )
-        try:
-            return await self._execute_loop(
-                workflow_run_id=workflow_run_id,
-                cursor=checkpoint.current_node_id,
-                current_state=copy.deepcopy(checkpoint.state),
-                step_count=checkpoint.step_count,
-                node_already_approved=node_approved,
-                resume_answers=answers,
-                operation="resume_interrupt",
+            answers: list[Any] | None = [*pending.get("answers", []), copy.deepcopy(value)]
+            asking = self.spec.nodes.get(checkpoint.current_node_id or "")
+            # The node runs again approved only if it was running with an approval granted for
+            # these same inputs when it asked; a node that was never gated is not approved.
+            approved_binding = pending.get("approved_binding")
+            node_approved = (
+                asking is not None
+                and isinstance(approved_binding, str)
+                and approved_binding == self._binding_digest(asking, checkpoint.state)
             )
-        finally:
-            _RESUME_GRANT.reset(grant_token)
+            if asking is not None and self._waits_on_subgraph(asking, str(pending.get("node_id"))):
+                # The question came from inside the sub-workflow: answer it there.
+                child, child_id = await self._paused_child(
+                    workflow_run_id, asking, checkpoint.step_count + 1, interrupt_id
+                )
+                with contextlib.suppress(WorkflowExecutionError, WorkflowTimeoutError):
+                    await child.resume_interrupt(
+                        child_id, interrupt_id, value, workspace_id=workspace_id
+                    )
+                answers = None
+            grant_token = _RESUME_GRANT.set(
+                copy.deepcopy(pending.get("approved_request")) if node_approved else None
+            )
+            try:
+                return await self._execute_loop(
+                    workflow_run_id=workflow_run_id,
+                    cursor=checkpoint.current_node_id,
+                    current_state=copy.deepcopy(checkpoint.state),
+                    step_count=checkpoint.step_count,
+                    node_already_approved=node_approved,
+                    resume_answers=answers,
+                    operation="resume_interrupt",
+                )
+            finally:
+                _RESUME_GRANT.reset(grant_token)
+
+        return await self._journaled(journal, answered)
 
     async def history(self, workflow_run_id: str) -> list[WorkflowCheckpoint]:
         """Every checkpoint of a run, oldest first: inspect state step by step."""
@@ -2373,14 +2933,506 @@ class WorkflowEngine:
                 await self._save(first)
         if not created:
             raise WorkflowError(f"Workflow run '{run_id}' already exists.")
-        return await self._execute_loop(
-            workflow_run_id=run_id,
-            cursor=source.current_node_id,
-            current_state=state,
-            step_count=source.step_count,
-            node_already_approved=False,
-            operation="fork",
+        journal = await self._new_journal(run_id, first)
+        return await self._journaled(
+            journal,
+            lambda: self._execute_loop(
+                workflow_run_id=run_id,
+                cursor=source.current_node_id,
+                current_state=state,
+                step_count=source.step_count,
+                node_already_approved=False,
+                operation="fork",
+            ),
         )
+
+    # ------------------------------------------------------------------ recovery
+
+    async def recover(
+        self, workflow_run_id: str, *, on_uncertain: Literal["pause", "fail"] = "pause"
+    ) -> WorkflowRunResult:
+        """Continue a stopped run, or an ``effect_unknown`` pause a person resolved.
+
+        For runs left ``running`` / ``interrupted`` by a process that stopped (Execution
+        Contract v1, A6 S6).
+
+        Needs a store with an execution journal (``MemoryWorkflowStore``,
+        ``SQLiteWorkflowStore``). The caller takes the run's lease: at once when the owner
+        was a process on this host that has exited, otherwise only after the lease expired;
+        while another worker holds it, ``WorkflowError`` is raised. Then, for the node at the
+        stored cursor:
+
+        - its outcome was committed (the checkpoint save was lost): the outcome is applied
+          and the run continues from the next node;
+        - it never dispatched (no intent): it runs. A gated node whose approval was claimed
+          runs under that approval after re-checking its payload digest, binding and expiry;
+          an expired or changed approval is asked for again;
+        - it dispatched without an outcome: ``pure`` and ``idempotent`` nodes run again (the
+          latter with the same ``step_idempotency_key()`` / ``ctx.idempotency_key()``);
+          ``reconcilable`` nodes are probed; a ``non_idempotent`` node is never repeated:
+          the run pauses with ``pause_reason="effect_unknown"`` and a ``pending_effect``
+          (``on_uncertain="fail"`` fails the run instead).
+
+        A paused ``effect_unknown`` run continues once its effect is resolved (see
+        :meth:`resolve_effect`, or ``POST /runs/{id}/effects/{effect_id}/resolve``):
+        ``confirmed`` continues with the given result as the node's output, ``not_applied``
+        dispatches the node again as a new attempt with a new key (a gated node first asks
+        for a fresh approval), ``failed`` fails the run. Any other paused run is returned as
+        it is; a finished run raises ``WorkflowTerminalError``.
+        """
+        if on_uncertain not in ("pause", "fail"):
+            raise WorkflowValidationError("on_uncertain must be 'pause' or 'fail'.")
+        checkpoint = await self._recoverable_checkpoint(workflow_run_id)
+        if checkpoint.status == "paused" and checkpoint.pending_effect is None:
+            return self._result_from_checkpoint(checkpoint)  # waiting for a person
+        journal = await self._take_journal(workflow_run_id)
+        assert journal is not None
+        if journal.status in _JOURNAL_TERMINAL:
+            return await self._project_finished(journal, workflow_run_id)
+        if journal.owner is None:
+            await journal.close()
+            raise WorkflowError(
+                f"Workflow run '{workflow_run_id}' is being executed by another worker (its "
+                "run lease is live); recover it after that lease expires."
+            )
+        return await self._journaled(
+            journal, lambda: self._recover_taken(journal, workflow_run_id, on_uncertain)
+        )
+
+    async def resolve_effect(
+        self,
+        workflow_run_id: str,
+        resolution: EffectResolution | str,
+        *,
+        actor: str,
+        result: Any = None,
+        effect_id: str | None = None,
+    ) -> WorkflowRunResult:
+        """Resolve the unknown effect a run is paused on, then continue it with :meth:`recover`.
+
+        ``resolution`` is ``"confirmed"`` (it happened: ``result``, a dict of state updates
+        with an optional ``"_branch"``, becomes the node's output and the node is not run
+        again), ``"not_applied"`` (it did not happen: the node is dispatched again as a new
+        attempt with a new idempotency key; a gated node first asks for a fresh approval) or
+        ``"failed"`` (the run fails). The decision and ``actor`` are journaled once; a
+        second, different resolution raises ``EffectAlreadyResolvedError``.
+        """
+        resolution = EffectResolution(resolution)
+        if resolution == EffectResolution.CONFIRMED:
+            if result is not None and not isinstance(result, dict):
+                raise WorkflowValidationError(
+                    "A confirmed workflow effect's result must be a dict of state updates."
+                )
+            _validate_json_serializable(result or {}, "effect")
+        checkpoint = await self._recoverable_checkpoint(workflow_run_id)
+        pending = checkpoint.pending_effect
+        if checkpoint.status != "paused" or pending is None:
+            raise WorkflowError(f"Workflow run '{workflow_run_id}' is not paused on an effect.")
+        wanted = effect_id or str(pending.get("effect_id"))
+        if wanted != pending.get("effect_id"):
+            raise WorkflowError(
+                f"Workflow run '{workflow_run_id}' is paused on effect "
+                f"'{pending.get('effect_id')}', not '{wanted}'."
+            )
+        journal = await self._take_journal(workflow_run_id)
+        assert journal is not None
+        if journal.owner is None or journal.status in _JOURNAL_TERMINAL:
+            await journal.close()
+            raise WorkflowError(f"Workflow run '{workflow_run_id}' is held by another worker.")
+        try:
+            record = next((e for e in journal.effects.values() if e.effect_id == wanted), None)
+            if record is None:
+                raise WorkflowError(f"Effect '{wanted}' is not in the run's journal.")
+            if record.status != EffectStatus.RESOLVED or record.resolution != resolution:
+                await journal.resolve(wanted, resolution, actor=actor, result=result)
+        finally:
+            await journal.close()
+        return await self.recover(workflow_run_id)
+
+    async def _recoverable_checkpoint(self, workflow_run_id: str) -> WorkflowCheckpoint:
+        if self.store is None or not self._journaled_store():
+            raise WorkflowError(
+                "recover() needs a store with an execution journal, such as "
+                "MemoryWorkflowStore or SQLiteWorkflowStore."
+            )
+        checkpoint = await self.store.get(workflow_run_id)
+        if checkpoint is None:
+            raise WorkflowExecutionError(
+                node_id="unknown", message=f"Workflow run '{workflow_run_id}' not found."
+            )
+        self._check_owner(checkpoint)
+        if checkpoint.status in ("completed", "failed", "rejected"):
+            raise WorkflowTerminalError(
+                f"Workflow run '{workflow_run_id}' is already in terminal state "
+                f"'{checkpoint.status}'."
+            )
+        current_hash = self.spec.canonical_hash()
+        if checkpoint.spec_hash != current_hash:
+            raise WorkflowSpecMismatchError(
+                expected_hash=checkpoint.spec_hash, actual_hash=current_hash
+            )
+        return checkpoint
+
+    def _budget_state(self) -> dict[str, Any] | None:
+        if self.budget is not None and hasattr(self.budget, "to_dict"):
+            state: dict[str, Any] = self.budget.to_dict()
+            return state
+        return None
+
+    def _result_from_checkpoint(self, cp: WorkflowCheckpoint) -> WorkflowRunResult:
+        budget_state = cp.budget_state
+        return WorkflowRunResult(
+            workflow_run_id=cp.workflow_run_id,
+            status=cp.status,
+            state=copy.deepcopy(cp.state),
+            step_count=cp.step_count,
+            current_node_id=cp.current_node_id,
+            pending_approval=cp.pending_approval,
+            error=cp.error,
+            budget_status=budget_state.get("status") if budget_state else None,
+            interrupt=(
+                {k: cp.interrupt[k] for k in ("interrupt_id", "node_id", "value")}
+                if cp.interrupt
+                else None
+            ),
+            pause_reason="effect_unknown" if cp.pending_effect is not None else None,
+            pending_effect=copy.deepcopy(cp.pending_effect),
+        )
+
+    async def _project_finished(
+        self, journal: WorkflowJournal, workflow_run_id: str
+    ) -> WorkflowRunResult:
+        """The journal finished the run but its last checkpoint save was lost: write it."""
+        assert self.store is not None
+        cp = await self.store.get(workflow_run_id)
+        assert cp is not None
+        if journal.status == "completed" and cp.current_node_id in self.spec.nodes:
+            _, key, step = journal.latest(cp.current_node_id, cp.step_count + 1)
+            output = step.outcome.output if step is not None and step.outcome else None
+            if isinstance(output, dict):
+                cp.state.update(output.get("update") or {})
+                cp.step_count += 1
+                cp.current_node_id = output.get("next")
+        cp.status = "completed" if journal.status == "completed" else "failed"
+        cp.pending_approval = None
+        cp.pending_effect = None
+        if cp.status == "failed" and cp.error is None:
+            cp.error = "The run failed (recorded in its execution journal)."
+        await self.store.save(cp)
+        return self._result_from_checkpoint(cp)
+
+    def _next_node(self, node: WorkflowNode, branch: str | None) -> str | None:
+        """Where the graph goes after ``node`` returns ``branch``."""
+        if node.id in self.spec.terminal_nodes:
+            return None
+        if branch is not None:
+            if branch not in node.transitions:
+                raise WorkflowExecutionError(
+                    node_id=node.id,
+                    message=(
+                        f"Handler chose branch '{branch}', but node '{node.id}' "
+                        "defines no such transition."
+                    ),
+                )
+            return node.transitions[branch]
+        return node.default_transition or node.transitions.get("default")
+
+    def _is_finished_cursor(self, cursor: str | None) -> bool:
+        return cursor is None or (
+            cursor in self.spec.terminal_nodes and cursor not in self.spec.nodes
+        )
+
+    def _approval_still_valid(
+        self, node: WorkflowNode, pending: PendingApproval, state: dict[str, Any]
+    ) -> bool:
+        """A claimed approval may still dispatch its node: same node, payload and binding,
+        same workspace, not expired (design §2.7, "claimed but no intent written")."""
+        if pending.node_id != node.id:
+            return False
+        if pending.workspace_id and pending.workspace_id != self.workspace_id:
+            return False
+        deadline = self._approval_deadline(pending)
+        if deadline is not None and time.time() > deadline:
+            return False
+        if pending.payload_digest:
+            details = pending.details if isinstance(pending.details, dict) else None
+            try:
+                digest = (
+                    canonical_digest({"state": pending.input_state, "request": details})
+                    if details is not None and details.get("node_request") is True
+                    else canonical_digest(pending.input_state)
+                )
+            except (TypeError, ValueError):
+                return False
+            if digest != pending.payload_digest:
+                return False
+        before = self._binding_digest(node, pending.input_state)
+        return before is not None and before == self._binding_digest(node, state)
+
+    def _pending_effect_view(self, effect: EffectRecord, node_id: str) -> dict[str, Any]:
+        intent = effect.intent
+        return {
+            "effect_id": effect.effect_id,
+            "step_key": str(intent.step_key),
+            "node_id": node_id,
+            "effect_class": intent.effect_class.value,
+            "idempotency_key": intent.idempotency_key,
+            "approval_id": intent.approval_id,
+            "payload_digest": intent.payload_digest,
+        }
+
+    async def _recover_taken(
+        self, journal: WorkflowJournal, workflow_run_id: str, on_uncertain: str
+    ) -> WorkflowRunResult:
+        assert self.store is not None
+        cp = await self.store.get(workflow_run_id)  # re-read under the lease
+        assert cp is not None
+        journal.cp_revision = cp.revision
+        if cp.status in ("completed", "failed", "rejected"):
+            with contextlib.suppress(LeaseLostError):
+                await self._journal_sync(journal, cp)  # finished meanwhile: end the journal
+            raise WorkflowTerminalError(
+                f"Workflow run '{workflow_run_id}' is already in terminal state '{cp.status}'."
+            )
+        if cp.status == "paused" and cp.pending_effect is None:
+            return self._result_from_checkpoint(cp)
+        cursor, step = cp.current_node_id, cp.step_count
+        if self._is_finished_cursor(cursor):
+            cp.status = "completed"
+            await self._save(cp)
+            return self._result_from_checkpoint(cp)
+        node = self.spec.nodes.get(cursor or "")
+        if node is None:
+            raise WorkflowValidationError(f"Unknown node ID '{cursor}' in run '{workflow_run_id}'.")
+        _, key, record = journal.latest(node.id, step + 1)
+        effect = journal.effects.get(str(key)) if record is not None else None
+
+        outcome = record.outcome if record is not None else None
+        if (
+            outcome is not None
+            and outcome.status == "completed"
+            and isinstance(outcome.output, dict)
+        ):
+            # The outcome committed but the checkpoint save after it was lost.
+            output = outcome.output
+            return await self._continue_after(
+                journal, cp, node, key, output.get("update") or {}, output.get("branch")
+            )
+        if record is not None and record.intent is not None and effect is not None:
+            intent = record.intent
+            if effect.status == EffectStatus.RESOLVED:
+                if effect.resolution == EffectResolution.CONFIRMED:
+                    update, branch = _parse_handler_output(copy.deepcopy(effect.result))
+                    return await self._continue_after(journal, cp, node, key, update, branch)
+                if effect.resolution == EffectResolution.FAILED:
+                    return await self._fail_recovered(
+                        cp,
+                        f"Node '{node.id}' failed: its effect was resolved as failed by "
+                        f"'{effect.resolved_by}'.",
+                    )
+                # not_applied: dispatch again as a new attempt; a gated node asks again.
+                return await self._continue_from(journal, cp, approved=False)
+            if effect.status == EffectStatus.INDETERMINATE:
+                # Still waiting for a person (paused effect_unknown).
+                return await self._pause_effect_unknown(journal, cp, node, effect)
+            effect_class = intent.effect_class
+            if effect_class in (EffectClass.PURE, EffectClass.IDEMPOTENT):
+                return await self._continue_from(
+                    journal,
+                    cp,
+                    approved=intent.approval_id is not None,
+                    approval_id=intent.approval_id,
+                )
+            if effect_class == EffectClass.RECONCILABLE:
+                probe = await self._reconcile(node, intent, cp.state)
+                if isinstance(probe, Applied):
+                    update, branch = _parse_handler_output(copy.deepcopy(probe.result))
+                    return await self._continue_after(journal, cp, node, key, update, branch)
+                if isinstance(probe, NotApplied):
+                    # Same key; a gated node needs a fresh approval to send it again.
+                    gated = self._is_gated(node, cp.state)
+                    return await self._continue_from(
+                        journal, cp, approved=not gated and intent.approval_id is not None
+                    )
+            if on_uncertain == "fail":
+                return await self._fail_recovered(
+                    cp,
+                    f"Node '{node.id}' was dispatched before the process stopped and its "
+                    "outcome is unknown (on_uncertain='fail').",
+                )
+            return await self._pause_effect_unknown(journal, cp, node, effect)
+
+        pending = cp.pending_approval
+        # Approval claimed, node never dispatched (no intent): dispatch under the same
+        # approval if it still holds, else ask again.
+        if (
+            pending is not None
+            and cp.status in ("running", "interrupted")
+            and self._approval_still_valid(node, pending, cp.state)
+        ):
+            grant = (
+                copy.deepcopy(pending.details)
+                if isinstance(pending.details, dict) and pending.details.get("node_request") is True
+                else None
+            )
+            grant_token = _RESUME_GRANT.set(grant)
+            try:
+                return await self._continue_from(
+                    journal, cp, approved=True, approval_id=pending.approval_id
+                )
+            finally:
+                _RESUME_GRANT.reset(grant_token)
+        return await self._continue_from(journal, cp, approved=False)
+
+    def _is_gated(self, node: WorkflowNode, state: dict[str, Any]) -> bool:
+        return (
+            node.requires_approval
+            or node.handler in self.approval_required_handlers
+            or (node.module_id is not None and node.module_id in self.approval_required_handlers)
+            or self._write_operation_gated(node, state)
+        )
+
+    async def _reconcile(
+        self, node: WorkflowNode, intent: StepIntent, state: dict[str, Any]
+    ) -> Applied | NotApplied | Unknown:
+        """Probe a reconcilable node; an error or a wrong answer counts as ``Unknown``."""
+        _, reconcile = self._node_effect(node, state)
+        if reconcile is None:
+            return Unknown()
+        try:
+            answer = reconcile(copy.deepcopy(state), intent)
+            if inspect.isawaitable(answer):
+                answer = await answer
+        except Exception as exc:
+            import warnings
+
+            warnings.warn(
+                f"reconcile for node '{node.id}' raised {type(exc).__name__}: {exc}; "
+                "treating the outcome as unknown.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return Unknown()
+        if isinstance(answer, (Applied, NotApplied, Unknown)):
+            return answer
+        import warnings
+
+        warnings.warn(
+            f"reconcile for node '{node.id}' returned {type(answer).__name__}, not Applied, "
+            "NotApplied or Unknown; treating the outcome as unknown.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return Unknown()
+
+    async def _continue_from(
+        self,
+        journal: WorkflowJournal,
+        cp: WorkflowCheckpoint,
+        *,
+        approved: bool,
+        approval_id: str | None = None,
+    ) -> WorkflowRunResult:
+        """Run the graph again from the stored cursor, under the recovered lease."""
+        await journal.ensure_running(cp.current_node_id, {"type": "run_recovered"})
+        if cp.status != "running" or cp.pending_effect is not None:
+            cp.status = "running"
+            cp.pending_effect = None
+            await self._save(cp)
+        return await self._execute_loop(
+            workflow_run_id=cp.workflow_run_id,
+            cursor=cp.current_node_id,
+            current_state=copy.deepcopy(cp.state),
+            step_count=cp.step_count,
+            node_already_approved=approved,
+            operation="recover",
+            approval_id=approval_id if approved else None,
+        )
+
+    async def _continue_after(
+        self,
+        journal: WorkflowJournal,
+        cp: WorkflowCheckpoint,
+        node: WorkflowNode,
+        key: StepKey,
+        update: dict[str, Any],
+        branch: str | None,
+    ) -> WorkflowRunResult:
+        """Apply a node's known output (committed, confirmed or reconciled) and go on."""
+        _validate_json_serializable(update, node.id)
+        await journal.ensure_running(cp.current_node_id, {"type": "run_recovered"})
+        try:
+            next_node = self._next_node(node, branch)
+        except WorkflowExecutionError as exc:
+            return await self._fail_recovered(cp, str(exc))
+        state = {**copy.deepcopy(cp.state), **copy.deepcopy(update)}
+        step = cp.step_count + 1
+        terminal = self._is_finished_cursor(next_node)
+        await journal.record_outcome(
+            key,
+            {"update": update, "branch": branch, "next": next_node},
+            cursor=next_node,
+            terminal=terminal,
+        )
+        checkpoint = WorkflowCheckpoint(
+            workflow_run_id=cp.workflow_run_id,
+            spec_version=self.spec.spec_version,
+            spec_hash=self.spec.canonical_hash(),
+            current_node_id=next_node,
+            state=copy.deepcopy(state),
+            step_count=step,
+            status="completed" if terminal else "running",
+            budget_state=self._budget_state(),
+        )
+        await self._save(checkpoint)
+        if terminal:
+            return self._result_from_checkpoint(checkpoint)
+        return await self._execute_loop(
+            workflow_run_id=cp.workflow_run_id,
+            cursor=next_node,
+            current_state=state,
+            step_count=step,
+            node_already_approved=False,
+            operation="recover",
+        )
+
+    async def _pause_effect_unknown(
+        self,
+        journal: WorkflowJournal,
+        cp: WorkflowCheckpoint,
+        node: WorkflowNode,
+        effect: EffectRecord,
+    ) -> WorkflowRunResult:
+        """Paused, ``pause_reason="effect_unknown"``: a person decides what happened."""
+        pending_effect = self._pending_effect_view(effect, node.id)
+        if journal.status != "paused" or effect.status == EffectStatus.PENDING:
+            await journal.pause("effect_unknown", node.id, [effect.intent.step_key])
+        pending_effect["effect_id"] = journal.effects[str(effect.intent.step_key)].effect_id
+        if cp.status != "paused" or cp.pending_effect != pending_effect:
+            cp = dataclasses.replace(
+                cp,
+                status="paused",
+                pending_approval=None,
+                interrupt=None,
+                pending_effect=pending_effect,
+                error=None,
+            )
+            await self._save(cp)
+        self._progress(
+            RunEventType.NODE_PAUSED,
+            node_id=node.id,
+            step=cp.step_count + 1,
+            reason="effect_unknown",
+            workflow_run_id=cp.workflow_run_id,
+        )
+        return self._result_from_checkpoint(cp)
+
+    async def _fail_recovered(self, cp: WorkflowCheckpoint, error: str) -> WorkflowRunResult:
+        cp = dataclasses.replace(
+            cp, status="failed", error=error, pending_approval=None, pending_effect=None
+        )
+        await self._save(cp)
+        return self._result_from_checkpoint(cp)
 
     # ------------------------------------------------------------------ steps
 
@@ -2441,6 +3493,17 @@ class WorkflowEngine:
     ) -> NoReturn:
         checkpoint.status = "failed"
         checkpoint.error = f"Approval request '{approval_id}' has expired."
+        if self._journal_for(checkpoint.workflow_run_id) is None and self._journaled_store():
+            # Refused before the run's lease was taken: end its journal too (best effort).
+            journal = await self._take_journal(checkpoint.workflow_run_id)
+            if journal is not None and journal.owner is not None:
+                token = _JOURNAL.set(journal)
+                try:
+                    with contextlib.suppress(LeaseLostError):
+                        await self._journal_sync(journal, checkpoint)
+                finally:
+                    _JOURNAL.reset(token)
+                    await journal.close()
         await self._save(checkpoint)
         raise ApprovalExpiredError(
             f"Approval request '{approval_id}' has expired. Zero side effects dispatched.",
@@ -2679,6 +3742,8 @@ class WorkflowEngine:
         if isinstance(handler_obj, BaseModule) or hasattr(handler_obj, "execute"):
             from nexura_agents.contracts.context import ExecutionContext
 
+            identity = _STEP_IDENTITY.get()
+
             ctx = ExecutionContext(
                 workspace_id=self.workspace_id,
                 run_id=workflow_run_id,
@@ -2690,6 +3755,8 @@ class WorkflowEngine:
                 artifact_store=self.artifact_store,
                 credential_resolver=self.credential_resolver,
                 approval_granted=_NODE_APPROVED.get(),
+                step_key=str(identity.step_key) if identity is not None else None,
+                fencing_token=identity.fencing_token if identity is not None else None,
             )
 
             inputs: dict[str, Any] = {}
@@ -2758,6 +3825,9 @@ class WorkflowEngine:
     ) -> tuple[dict[str, Any], str | None]:
         async def branch(name: str) -> dict[str, Any]:
             _INTERRUPT_STATE.set(_InterruptState([], blocked=_NO_PAUSE_IN_PARALLEL))
+            parent = _STEP_IDENTITY.get()
+            if parent is not None:
+                _STEP_IDENTITY.set(parent.for_branch(name))
             with _child_span(f"workflow.branch {name}", {"nexura.workflow.branch": name}):
                 return await _branch(name)
 
@@ -2803,6 +3873,9 @@ class WorkflowEngine:
 
         async def one(index: int, item: Any) -> dict[str, Any]:
             _INTERRUPT_STATE.set(_InterruptState([], blocked=_NO_PAUSE_IN_PARALLEL))
+            parent = _STEP_IDENTITY.get()
+            if parent is not None:
+                _STEP_IDENTITY.set(parent.for_item(index))
             with _child_span(f"workflow.map_item {index}", {"nexura.workflow.map_index": index}):
                 return await _item(index, item)
 
@@ -2849,6 +3922,8 @@ class WorkflowEngine:
         )
         # A sub-workflow inside a mapped item cannot pause either, at any depth.
         child._pause_forbidden = self._pause_forbidden
+        child.lease_ttl = self.lease_ttl
+        child._journal_enabled = False  # children journal with A6 S7
         return child
 
     async def _run_subgraph(
@@ -3102,6 +4177,7 @@ class WorkflowEngine:
         node_already_approved: bool,
         resume_answers: list[Any] | None = None,
         operation: str = "run",
+        approval_id: str | None = None,
     ) -> WorkflowRunResult:
         """Run the graph inside a ``workflow`` span when tracing is on."""
         span = self._start_workflow_span(workflow_run_id, operation)
@@ -3113,6 +4189,7 @@ class WorkflowEngine:
                 step_count,
                 node_already_approved,
                 resume_answers,
+                approval_id,
             )
         if span.capturing:
             span.content("nexura.workflow.input", "nexura.workflow.state", _redacted(current_state))
@@ -3127,6 +4204,7 @@ class WorkflowEngine:
                 step_count,
                 node_already_approved,
                 resume_answers,
+                approval_id,
             )
             status, steps = result.status, result.step_count
             if span.capturing:
@@ -3153,6 +4231,7 @@ class WorkflowEngine:
         step_count: int,
         node_already_approved: bool,
         resume_answers: list[Any] | None = None,
+        approval_id: str | None = None,
     ) -> WorkflowRunResult:
         start_time = time.monotonic()
         cursor_ref: list[str | None] = [cursor]
@@ -3334,6 +4413,9 @@ class WorkflowEngine:
             # marker; the flag is reset for future nodes.
             node_approved_now = node_already_approved
             node_already_approved = False
+            # The approval this visit runs under (recorded with its intent), first node only.
+            node_approval_id = approval_id if node_approved_now else None
+            approval_id = None
 
             # 4. Execute node handler
             remaining_node_timeout: float | None = None
@@ -3366,6 +4448,11 @@ class WorkflowEngine:
             step_count += 1
             if self.budget is not None and hasattr(self.budget, "record_turn"):
                 self.budget.record_turn()
+            # Journaled runs: the intent of a non-pure node is committed here, just before
+            # it dispatches (a stale owner is refused here, before any effect).
+            identity = await self._before_dispatch(
+                workflow_run_id, node, current_state, step_count, node_approval_id
+            )
 
             self._progress(
                 RunEventType.NODE_STARTED,
@@ -3392,6 +4479,7 @@ class WorkflowEngine:
             if node_grant is not None:
                 _RESUME_GRANT.set(None)  # consumed by this step only
             grant_token = _NODE_GRANT.set(node_grant)
+            identity_token = _STEP_IDENTITY.set(identity)
             try:
                 while True:
                     attempt += 1
@@ -3597,6 +4685,7 @@ class WorkflowEngine:
                 _INTERRUPT_STATE.reset(interrupt_token)
                 _NODE_APPROVED.reset(approved_token)
                 _NODE_GRANT.reset(grant_token)
+                _STEP_IDENTITY.reset(identity_token)
                 node_span.set("nexura.workflow.node.attempts", attempt)
                 node_span.end()
 
@@ -3636,6 +4725,17 @@ class WorkflowEngine:
                 status="completed" if is_terminal else "running",
                 budget_state=budget_state,
             )
+            journal = self._journal_for(workflow_run_id)
+            if journal is not None:
+                # Outcome, effect confirmed and the new cursor: one fenced commit, before
+                # the checkpoint moves (recover() applies it if the save below is lost).
+                await journal.record_outcome(
+                    identity.step_key,
+                    {"update": state_update, "branch": branch, "next": cursor_ref[0]},
+                    cursor=cursor_ref[0],
+                    terminal=is_terminal,
+                    approval_id=node_approval_id,
+                )
             if self.store is not None:
                 await self._save(checkpoint)
 

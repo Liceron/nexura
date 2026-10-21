@@ -110,6 +110,7 @@ _EXPORTS: dict[str, str] = {
     "summarize_older_turns": "nexura_agents.history",
     "MemoryCheckpointStore": "nexura_agents.durable",
     "SQLiteCheckpointStore": "nexura_agents.durable",
+    "ResolvedOutcome": "nexura_agents.durable",
     "RunRecoveryError": "nexura_agents.errors",
     "ApproveWith": "nexura_agents.types",
     "CheckpointLeaseLostError": "nexura_agents.errors",
@@ -237,6 +238,7 @@ __all__ = [
     "summarize_older_turns",
     "MemoryCheckpointStore",
     "SQLiteCheckpointStore",
+    "ResolvedOutcome",
     "RunRecoveryError",
     "ApproveWith",
     "CheckpointLeaseLostError",
@@ -296,6 +298,7 @@ if TYPE_CHECKING:
     from nexura_agents.cancel import CancelToken
     from nexura_agents.durable import (
         MemoryCheckpointStore,
+        ResolvedOutcome,
         RunCheckpointStore,
         SQLiteCheckpointStore,
     )

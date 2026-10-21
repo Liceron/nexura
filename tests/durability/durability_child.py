@@ -64,8 +64,7 @@ def _open_checkpoint_store(config: dict[str, Any]) -> Any:
         return _point_checkpoint_store(SQLiteCheckpointStore)(config["db"])
     import nexura_postgres
 
-    # A6 S5 adds this store; confirm its constructor when it lands.
-    base = nexura_postgres.PostgresCheckpointStore  # type: ignore[attr-defined]
+    base = nexura_postgres.PostgresCheckpointStore
     return _point_checkpoint_store(base)(dsn=backend["dsn"])
 
 
@@ -114,7 +113,9 @@ async def scenario_agent(config: dict[str, Any]) -> dict[str, Any]:
 
     store = _open_checkpoint_store(config)
     tools = _agent_tools(config)
-    runner = Runner(checkpoint_store=store)
+    # The run lease must be shorter than the takeover wait of the stale-owner row (K6,
+    # claim_wait=10): a frozen owner stops renewing and its lease expires after this.
+    runner = Runner(checkpoint_store=store, lease_ttl=float(config.get("lease_ttl", 2.0)))
     if config["mode"] == "run":
         model = FakeModel(
             responses=[
@@ -255,10 +256,8 @@ async def scenario_workflow(config: dict[str, Any]) -> dict[str, Any]:
     if mode == "fork":
         return await outcome(lambda: engine.fork(run_id, -1), _describe_workflow)
     if mode == "recover":
-        # The target API of A6 S6; today WorkflowEngine has no recover().
         return await outcome(
-            lambda: getattr(engine, "recover")(run_id, on_uncertain="pause"),  # noqa: B009
-            _describe_workflow,
+            lambda: engine.recover(run_id, on_uncertain="pause"), _describe_workflow
         )
     raise h.HarnessError(f"unknown workflow mode {mode!r}")
 

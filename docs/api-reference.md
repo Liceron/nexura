@@ -123,6 +123,8 @@ state collisions or leaking conversation history between callers.
   Expose this agent as a tool another agent can call.
 - `clone(self, **overrides: 'Any') -> 'Agent[OutputT]'`
   A new agent with the same configuration and ``overrides`` applied.
+- `definition_digest(self) -> 'str'`
+  A stable ``sha256:<hex>`` of what a durable run depends on.
 - `native_output_schema(self) -> 'dict[str, Any] | None'`
   The schema to hand to the model's native structured-output mode, or ``None``.
 - `override(self, **overrides: 'Any') -> 'Iterator[Agent[OutputT]]'`
@@ -140,7 +142,7 @@ state collisions or leaking conversation history between callers.
 
 ### `Runner`
 
-class `Runner(session_store: 'SessionStore | None' = None, *, hooks: 'AgentHooks | None' = None, usage_limits: 'UsageLimits | None' = None, model_settings: 'ModelSettings | None' = None, budget: 'Any | None' = None, max_handoffs: 'int | None' = None, checkpoint_store: 'RunCheckpointStore | None' = None, approval_ttl: 'float' = 3600.0, approval_signing_secret: 'str | bytes | None' = None, approval_store: 'ApprovalStore | None' = None) -> 'None'`
+class `Runner(session_store: 'SessionStore | None' = None, *, hooks: 'AgentHooks | None' = None, usage_limits: 'UsageLimits | None' = None, model_settings: 'ModelSettings | None' = None, budget: 'Any | None' = None, max_handoffs: 'int | None' = None, checkpoint_store: 'RunCheckpointStore | None' = None, approval_ttl: 'float' = 3600.0, approval_signing_secret: 'str | bytes | None' = None, approval_store: 'ApprovalStore | None' = None, lease_ttl: 'float' = 30.0) -> 'None'`
 
 ~~~text
 Orchestrates agent execution against models and registered tools.
@@ -157,9 +159,9 @@ Supports optional persistent session storage across runs.
   Event-stream form of :meth:`recover_async`.
 - `resume(self, agent: 'Agent[OutputT]', interruption: 'RunInterruption', **kwargs: 'Any') -> 'RunResult[OutputT]'`
   Synchronous form of :meth:`resume_async`.
-- `resume_async(self, agent: 'Agent[OutputT]', interruption: 'RunInterruption', *, approve: 'bool | Iterable[str] | Mapping[str, str | ApproveWith]' = (), reject: 'Mapping[str, str] | None' = None, answers: 'Mapping[str, str] | None' = None, deps: 'Any' = None, timeout: 'float | None' = None, session_store: 'SessionStore | None' = None, cancel: 'CancelToken | None' = None) -> 'RunResult[OutputT]'`
+- `resume_async(self, agent: 'Agent[OutputT]', interruption: 'RunInterruption', *, approve: 'bool | Iterable[str] | Mapping[str, str | ApproveWith]' = (), reject: 'Mapping[str, str] | None' = None, answers: 'Mapping[str, str] | None' = None, deps: 'Any' = None, timeout: 'float | None' = None, session_store: 'SessionStore | None' = None, cancel: 'CancelToken | None' = None, outcomes: 'Mapping[str, ResolvedOutcome] | None' = None, actor: 'str | None' = None) -> 'RunResult[OutputT]'`
   Continue a paused run once every pending tool call has a decision.
-- `resume_stream_async(self, agent: 'Agent', interruption: 'RunInterruption', *, approve: 'bool | Iterable[str] | Mapping[str, str | ApproveWith]' = (), reject: 'Mapping[str, str] | None' = None, answers: 'Mapping[str, str] | None' = None, deps: 'Any' = None, timeout: 'float | None' = None, session_store: 'SessionStore | None' = None, stream_text: 'bool' = False, cancel: 'CancelToken | None' = None) -> 'AsyncGenerator[RunEvent, None]'`
+- `resume_stream_async(self, agent: 'Agent', interruption: 'RunInterruption', *, approve: 'bool | Iterable[str] | Mapping[str, str | ApproveWith]' = (), reject: 'Mapping[str, str] | None' = None, answers: 'Mapping[str, str] | None' = None, deps: 'Any' = None, timeout: 'float | None' = None, session_store: 'SessionStore | None' = None, stream_text: 'bool' = False, cancel: 'CancelToken | None' = None, outcomes: 'Mapping[str, ResolvedOutcome] | None' = None, actor: 'str | None' = None) -> 'AsyncGenerator[RunEvent, None]'`
   Event-stream form of :meth:`resume_async`.
 - `run(self, agent: 'Agent[OutputT]', prompt: 'Prompt', *, session_id: 'str | None' = None, history: 'list[Message] | None' = None, timeout: 'float | None' = None, session_store: 'SessionStore | None' = None, deps: 'Any' = None, cancel: 'CancelToken | None' = None, state: 'dict[str, Any] | None' = None, tags: 'Sequence[str]' = (), metadata: 'Mapping[str, Any] | None' = None) -> 'RunResult[OutputT]'`
   Synchronously execute an agent run.
@@ -339,15 +341,21 @@ single use is the caller's responsibility, including for signed envelopes.
 
 ### `tool`
 
-function `tool(fn: 'Callable[..., Any] | None' = None, *, name: 'str | None' = None, description: 'str | None' = None, args_schema: 'type[BaseModel] | None' = None, requires_approval: 'ApprovalRule' = False, max_retries: 'int | None' = None, idempotent: 'bool' = False, enabled: 'EnabledRule' = True, input_guardrails: 'Sequence[GuardrailFn]' = (), output_guardrails: 'Sequence[GuardrailFn]' = (), timeout: 'float | None' = None, on_timeout: 'OnTimeout' = 'tell_model', retry: 'ToolRetry | None' = None, cache: 'bool' = False) -> 'Tool | Callable[[Callable[..., Any]], Tool]'`
+function `tool(fn: 'Callable[..., Any] | None' = None, *, name: 'str | None' = None, description: 'str | None' = None, args_schema: 'type[BaseModel] | None' = None, requires_approval: 'ApprovalRule' = False, max_retries: 'int | None' = None, idempotent: 'bool' = False, enabled: 'EnabledRule' = True, input_guardrails: 'Sequence[GuardrailFn]' = (), output_guardrails: 'Sequence[GuardrailFn]' = (), timeout: 'float | None' = None, on_timeout: 'OnTimeout' = 'tell_model', retry: 'ToolRetry | None' = None, cache: 'bool' = False, effect: 'EffectName | None' = None, reconcile: 'ReconcileFn | None' = None) -> 'Tool | Callable[[Callable[..., Any]], Tool]'`
 
 ~~~text
 Decorator to define a typed Agent tool from a function.
+
+``effect`` is what a durable run may do with the call after a crash: ``"pure"`` and
+``"idempotent"`` are re-run (the latter with the same ``ctx.idempotency_key``),
+``"non_idempotent"`` (the default, also for undeclared tools) pauses the run, and
+``"reconcilable"`` runs ``reconcile(ctx, intent)`` to find out. ``idempotent=True``
+is an alias of ``effect="idempotent"``.
 ~~~
 
 ### `Tool`
 
-class `Tool(name: 'str', fn: 'Callable[..., Any]', *, description: 'str | None' = None, args_schema: 'type[BaseModel] | None' = None, requires_approval: 'ApprovalRule' = False, max_retries: 'int | None' = None, idempotent: 'bool' = False, enabled: 'EnabledRule' = True, input_guardrails: 'Sequence[GuardrailFn]' = (), output_guardrails: 'Sequence[GuardrailFn]' = (), timeout: 'float | None' = None, on_timeout: 'OnTimeout' = 'tell_model', retry: 'ToolRetry | None' = None, cache: 'bool' = False) -> 'None'`
+class `Tool(name: 'str', fn: 'Callable[..., Any]', *, description: 'str | None' = None, args_schema: 'type[BaseModel] | None' = None, requires_approval: 'ApprovalRule' = False, max_retries: 'int | None' = None, idempotent: 'bool' = False, enabled: 'EnabledRule' = True, input_guardrails: 'Sequence[GuardrailFn]' = (), output_guardrails: 'Sequence[GuardrailFn]' = (), timeout: 'float | None' = None, on_timeout: 'OnTimeout' = 'tell_model', retry: 'ToolRetry | None' = None, cache: 'bool' = False, effect: 'EffectName | None' = None, reconcile: 'ReconcileFn | None' = None) -> 'None'`
 
 ~~~text
 Represents a typed, executable tool for an agent.
@@ -355,6 +363,8 @@ Represents a typed, executable tool for an agent.
 
 - `arun(self, **kwargs: 'Any') -> 'Any'`
   Asynchronously execute tool with given keyword arguments.
+- `effect_class(self) -> 'EffectClass'`
+  The tool's effect class (``non_idempotent`` when a subclass never set one).
 - `execute(self, arguments: 'dict[str, Any]', ctx: 'RunContext[Any] | None' = None) -> 'str'`
   Validate arguments, execute the tool, and return JSON-serialized result.
 - `is_enabled(self, ctx: 'RunContext[Any]') -> 'bool'`
@@ -370,7 +380,7 @@ Represents a typed, executable tool for an agent.
 
 ### `RunContext`
 
-class `RunContext(deps: 'DepsT', run_id: 'str', agent_name: 'str', turn: 'int' = 0, usage: 'Usage' = <factory>, messages: 'list[Message]' = <factory>, tool_call_id: 'str | None' = None, tool_name: 'str | None' = None, retry: 'int' = 0, metadata: 'dict[str, Any]' = <factory>, state: 'dict[str, Any]' = <factory>, tags: 'list[str]' = <factory>, tool_attachments: 'list[Any]' = <factory>, prompt: 'dict[str, Any] | None' = None, _nested_usage: 'list[Usage]' = <factory>, _events: '_EventChannel' = <factory>) -> None`
+class `RunContext(deps: 'DepsT', run_id: 'str', agent_name: 'str', turn: 'int' = 0, usage: 'Usage' = <factory>, messages: 'list[Message]' = <factory>, tool_call_id: 'str | None' = None, tool_name: 'str | None' = None, retry: 'int' = 0, metadata: 'dict[str, Any]' = <factory>, state: 'dict[str, Any]' = <factory>, tags: 'list[str]' = <factory>, tool_attachments: 'list[Any]' = <factory>, prompt: 'dict[str, Any] | None' = None, idempotency_key: 'str | None' = None, fencing_token: 'int | None' = None, _nested_usage: 'list[Usage]' = <factory>, _events: '_EventChannel' = <factory>) -> None`
 
 ~~~text
 What a tool or callback can see about the run it belongs to.
@@ -384,7 +394,7 @@ annotated ``RunContext[YourDeps]``; that parameter is never shown to the model.
   Count usage from work done inside a tool (e.g. a sub-agent) toward this run.
 - `emit(self, name: 'str', **data: 'Any') -> 'None'`
   Send a custom progress event to whoever streams this run.
-- `for_tool(self, tool_call_id: 'str', tool_name: 'str', retry: 'int') -> 'RunContext[DepsT]'`
+- `for_tool(self, tool_call_id: 'str', tool_name: 'str', retry: 'int', *, idempotency_key: 'str | None' = None, fencing_token: 'int | None' = None) -> 'RunContext[DepsT]'`
   Copy scoped to one tool call.
 - `take_nested_usage(self) -> 'list[Usage]'`
   Return the usage recorded by nested runs and clear the buffer.
@@ -1297,7 +1307,7 @@ Its approval is never inherited: only a call the approval gate let through is gr
 
 ### `SchemaTool`
 
-class `SchemaTool(name: 'str', parameters: 'dict[str, Any]', handler: 'SchemaHandler', *, description: 'str' = '', requires_approval: 'ApprovalRule' = False, max_retries: 'int | None' = 1, enabled: 'EnabledRule' = True, input_guardrails: 'Sequence[GuardrailFn]' = (), output_guardrails: 'Sequence[GuardrailFn]' = (), timeout: 'float | None' = None, on_timeout: 'OnTimeout' = 'tell_model', retry: 'ToolRetry | None' = None, cache: 'bool' = False, idempotent: 'bool' = False) -> 'None'`
+class `SchemaTool(name: 'str', parameters: 'dict[str, Any]', handler: 'SchemaHandler', *, description: 'str' = '', requires_approval: 'ApprovalRule' = False, max_retries: 'int | None' = 1, enabled: 'EnabledRule' = True, input_guardrails: 'Sequence[GuardrailFn]' = (), output_guardrails: 'Sequence[GuardrailFn]' = (), timeout: 'float | None' = None, on_timeout: 'OnTimeout' = 'tell_model', retry: 'ToolRetry | None' = None, cache: 'bool' = False, idempotent: 'bool' = False, effect: 'EffectName | None' = None, reconcile: 'ReconcileFn | None' = None) -> 'None'`
 
 ~~~text
 A tool described by a raw JSON Schema instead of a Python signature.
@@ -1717,10 +1727,14 @@ summarising model call without calling a tool does not include it.
 
 ### `MemoryCheckpointStore`
 
-class `MemoryCheckpointStore() -> 'None'`
+class `MemoryCheckpointStore(*, execution_store: 'ExecutionStore | None' = None, workspace_id: 'str' = 'default') -> 'None'`
 
 ~~~text
 In-process store for tests and demos; checkpoints do not survive the process.
+
+Its execution journal is a ``MemoryExecutionStore`` (pass ``execution_store=`` to share
+one between stores of the same process). Journal rows of finished runs stay in memory
+for the life of the store.
 ~~~
 
 - `claim(self, run_id: 'str', owner: 'str', lease_seconds: 'float' = 3600.0) -> 'bool'`
@@ -1735,6 +1749,8 @@ In-process store for tests and demos; checkpoints do not survive the process.
   Return the checkpoint of ``run_id`` or None.
 - `load_approval(self, approval_id: 'str') -> 'str | None'`
   Return the immutable approval payload, including after consumption.
+- `open_execution_store(self) -> 'ExecutionStore'`
+  The execution journal the runner keeps next to these checkpoints.
 - `release(self, run_id: 'str', owner: 'str') -> 'None'`
   Give the lease back (no-op when ``owner`` does not hold it).
 - `save(self, run_id: 'str', checkpoint_json: 'str', owner: 'str | None' = None) -> 'None'`
@@ -1744,7 +1760,7 @@ In-process store for tests and demos; checkpoints do not survive the process.
 
 ### `SQLiteCheckpointStore`
 
-class `SQLiteCheckpointStore(db_path: 'str | Path') -> 'None'`
+class `SQLiteCheckpointStore(db_path: 'str | Path', *, workspace_id: 'str' = 'default') -> 'None'`
 
 ~~~text
 Durable checkpoint store on stdlib ``sqlite3``.
@@ -1752,12 +1768,17 @@ Durable checkpoint store on stdlib ``sqlite3``.
 The database file is created with mode 0600 (owner only) because checkpoints hold the
 conversation transcript. Writes are atomic upserts and I/O runs in a worker thread.
 Saves are fenced by the recovery lease in the same transaction, across processes.
+Checkpoints, claims and approvals are scoped by ``workspace_id`` (schema version 2; a
+version 1 file is migrated on open, its rows going to ``"default"``), so a store opened
+with another workspace neither lists nor recovers them. The execution journal
+(``SQLiteExecutionStore``) lives in the same file; it is opened on first use and
+switches the file to WAL mode. Single host only, like all SQLite leases.
 ~~~
 
 - `claim(self, run_id: 'str', owner: 'str', lease_seconds: 'float' = 3600.0) -> 'bool'`
   Take the exclusive recovery lease of ``run_id`` (atomic across processes).
 - `close(self) -> 'None'`
-  Close the database connection.
+  Close the database connections (checkpoints and execution journal).
 - `consume_approval(self, approval_id: 'str', payload: 'str') -> 'bool'`
   Consume a matching unexpired approval once, atomically across processes.
 - `delete(self, run_id: 'str', owner: 'str | None' = None, *, fenced: 'bool' = False) -> 'None'`
@@ -1768,12 +1789,38 @@ Saves are fenced by the recovery lease in the same transaction, across processes
   Return the checkpoint of ``run_id`` or None.
 - `load_approval(self, approval_id: 'str') -> 'str | None'`
   Load the original approval payload, including after consumption.
+- `open_execution_store(self) -> 'ExecutionStore'`
+  The execution journal in the same database file (created on first use).
 - `release(self, run_id: 'str', owner: 'str') -> 'None'`
   Give the lease back (no-op when ``owner`` does not hold it).
 - `save(self, run_id: 'str', checkpoint_json: 'str', owner: 'str | None' = None) -> 'None'`
   Atomically store the checkpoint of ``run_id``; fenced by the recovery lease.
 - `save_approval(self, approval_id: 'str', payload: 'str', expires_at: 'float') -> 'None'`
   Persist an immutable approval independently of run checkpoint cleanup.
+
+### `ResolvedOutcome`
+
+class `ResolvedOutcome(result: 'Any' = None, resolution: "Literal['confirmed', 'not_applied', 'failed']" = 'confirmed', reason: 'str' = '') -> None`
+
+~~~text
+A person's answer for a tool call whose outcome was unknown after a crash.
+
+Pass it to ``Runner.resume_async(agent, interruption, outcomes={call_id: ...})`` when
+``interruption.pause_reason == "effect_unknown"``:
+
+- ``ResolvedOutcome(result)``: the action happened; ``result`` becomes the tool result
+  and the call is not run again.
+- ``ResolvedOutcome.not_applied()``: the action did not happen; the call is sent again
+  (with a new idempotency key). A tool that requires approval pauses for a fresh one.
+- ``ResolvedOutcome.failed(reason)``: the action failed; the run fails.
+
+With a journal-capable store the resolution is recorded on the call's effect record.
+~~~
+
+- `failed(cls, reason: 'str' = '') -> 'ResolvedOutcome'`
+  The action failed: the run fails with this reason.
+- `not_applied(cls) -> 'ResolvedOutcome'`
+  The action did not happen: send the call again.
 
 ### `RunRecoveryError`
 
@@ -3542,6 +3589,8 @@ class `ModuleRegistry(versioned_registry: 'Any | None' = None) -> 'None'`
 Binds named identifiers to trusted Python handler functions or BaseModules.
 ~~~
 
+- `declared_effect(self, name: 'str') -> 'tuple[EffectClass, Callable[..., Any] | None] | None'`
+  The effect class (and reconcile probe) registered for ``name``, if declared.
 - `describe_module(self, module_id: 'str', version: 'str | None' = None) -> 'dict[str, Any] | None'`
   Describe module metadata if registered.
 - `get(self, name: 'str') -> 'Any'`
@@ -3558,14 +3607,14 @@ Binds named identifiers to trusted Python handler functions or BaseModules.
   Import trusted handlers named by an operator as ``"package.module:attribute"``.
 - `override_module(self, module: 'BaseModule') -> 'None'`
   Use ``module`` instead of the shared versioned module with its id and version.
-- `register(self, name: 'str', handler: 'Callable[..., Any] | BaseModule') -> 'None'`
+- `register(self, name: 'str', handler: 'Callable[..., Any] | BaseModule', *, effect: 'EffectClass | str | None' = None, reconcile: 'Callable[..., Any] | None' = None) -> 'None'`
   Register a Python callable or BaseModule by name.
-- `register_handler(self, name: 'str') -> 'Callable[[Callable[..., Any]], Callable[..., Any]]'`
-  Decorator to register a handler callable.
+- `register_handler(self, name: 'str', *, effect: 'EffectClass | str | None' = None, reconcile: 'Callable[..., Any] | None' = None) -> 'Callable[[Callable[..., Any]], Callable[..., Any]]'`
+  Decorator to register a handler callable (``effect=`` as in :meth:`register`).
 
 ### `WorkflowEngine`
 
-class `WorkflowEngine(spec: 'WorkflowSpec', registry: 'ModuleRegistry', *, store: 'WorkflowCheckpointStore | None' = None, max_steps: 'int' = 50, timeout: 'float | None' = None, workspace_id: 'str' = 'default', budget: 'Any | None' = None, event_sink: 'Any | None' = None, artifact_store: 'Any | None' = None, credential_resolver: 'Any | None' = None, approval_required_handlers: 'frozenset[str] | set[str] | None' = None, approval_ttl: 'float' = 3600.0, max_map_writes_per_approval: 'int' = 50, policy_version: 'str' = '1.0.0') -> 'None'`
+class `WorkflowEngine(spec: 'WorkflowSpec', registry: 'ModuleRegistry', *, store: 'WorkflowCheckpointStore | None' = None, max_steps: 'int' = 50, timeout: 'float | None' = None, workspace_id: 'str' = 'default', budget: 'Any | None' = None, event_sink: 'Any | None' = None, artifact_store: 'Any | None' = None, credential_resolver: 'Any | None' = None, approval_required_handlers: 'frozenset[str] | set[str] | None' = None, approval_ttl: 'float' = 3600.0, max_map_writes_per_approval: 'int' = 50, policy_version: 'str' = '1.0.0', lease_ttl: 'float' = 30.0) -> 'None'`
 
 ~~~text
 Executes workflows deterministically with checkpoints and approval gates.
@@ -3575,6 +3624,10 @@ Executes workflows deterministically with checkpoints and approval gates.
   Start a new run from a past checkpoint, optionally changing its state first.
 - `history(self, workflow_run_id: 'str') -> 'list[WorkflowCheckpoint]'`
   Every checkpoint of a run, oldest first: inspect state step by step.
+- `recover(self, workflow_run_id: 'str', *, on_uncertain: "Literal['pause', 'fail']" = 'pause') -> 'WorkflowRunResult'`
+  Continue a stopped run, or an ``effect_unknown`` pause a person resolved.
+- `resolve_effect(self, workflow_run_id: 'str', resolution: 'EffectResolution | str', *, actor: 'str', result: 'Any' = None, effect_id: 'str | None' = None) -> 'WorkflowRunResult'`
+  Resolve the unknown effect a run is paused on, then continue it with :meth:`recover`.
 - `resume(self, workflow_run_id: 'str', approval_id: 'str', *, decision: "Literal['approve', 'reject']" = 'approve', state_update: 'dict[str, Any] | None' = None, workspace_id: 'str | None' = None, actor: 'str | None' = None, actor_role: 'str | None' = None, expected_payload_digest: 'str | None' = None) -> 'WorkflowRunResult'`
   Resume an approval-gated workflow run with exact-action bindings.
 - `resume_interrupt(self, workflow_run_id: 'str', interrupt_id: 'str', value: 'Any', *, workspace_id: 'str | None' = None) -> 'WorkflowRunResult'`
@@ -3588,10 +3641,13 @@ Executes workflows deterministically with checkpoints and approval gates.
 
 ### `MemoryWorkflowStore`
 
-class `MemoryWorkflowStore() -> 'None'`
+class `MemoryWorkflowStore(*, execution_store: 'ExecutionStore | None' = None) -> 'None'`
 
 ~~~text
 In-memory checkpoint store for transient workflow runs and tests.
+
+Its execution journal (leases, intents, effects) is a ``MemoryExecutionStore``, or the
+``execution_store`` given.
 ~~~
 
 - `claim_approval(self, workflow_run_id: 'str', approval_id: 'str') -> 'bool'`
@@ -3606,6 +3662,8 @@ In-memory checkpoint store for transient workflow runs and tests.
   Every checkpoint saved for the run, oldest first.
 - `list_children(self, parent_id: 'str') -> 'list[WorkflowCheckpoint]'`
   Latest checkpoint of every child run (ids starting ``<parent_id>/``), by id.
+- `open_execution_store(self) -> 'ExecutionStore'`
+  The execution journal kept next to these checkpoints (created on first use).
 - `save(self, checkpoint: 'WorkflowCheckpoint') -> 'None'`
   Store a checkpoint as the run's latest and append it to its history.
 
@@ -3615,6 +3673,9 @@ class `SQLiteWorkflowStore(db_path: 'str | Path') -> 'None'`
 
 ~~~text
 Durable workflow checkpoint store backed by sqlite3.
+
+Its execution journal (leases, intents, effects) is a ``SQLiteExecutionStore`` in the
+same database file, opened on first use with its own connection.
 ~~~
 
 - `claim_approval(self, workflow_run_id: 'str', approval_id: 'str') -> 'bool'`
@@ -3631,6 +3692,8 @@ Durable workflow checkpoint store backed by sqlite3.
   Every checkpoint saved for the run, oldest first.
 - `list_children(self, parent_id: 'str') -> 'list[WorkflowCheckpoint]'`
   Latest checkpoint of every child run (ids starting ``<parent_id>/``), by id.
+- `open_execution_store(self) -> 'ExecutionStore'`
+  The execution journal in the same database file (created on first use).
 - `save(self, checkpoint: 'WorkflowCheckpoint') -> 'None'`
   Store a checkpoint as the run's latest and append it to its history.
 
@@ -3721,7 +3784,7 @@ Explicit output from a workflow node handler.
 
 ### `WorkflowCheckpoint`
 
-class `WorkflowCheckpoint(workflow_run_id: 'str', spec_version: 'int', spec_hash: 'str', current_node_id: 'str | None', state: 'dict[str, Any]', step_count: 'int', status: 'WorkflowStatus', pending_approval: 'PendingApproval | None' = None, error: 'str | None' = None, updated_at: 'float' = <factory>, budget_state: 'dict[str, Any] | None' = None, interrupt: 'dict[str, Any] | None' = None, forked_from: 'dict[str, Any] | None' = None, workspace_id: 'str | None' = None) -> None`
+class `WorkflowCheckpoint(workflow_run_id: 'str', spec_version: 'int', spec_hash: 'str', current_node_id: 'str | None', state: 'dict[str, Any]', step_count: 'int', status: 'WorkflowStatus', pending_approval: 'PendingApproval | None' = None, error: 'str | None' = None, updated_at: 'float' = <factory>, budget_state: 'dict[str, Any] | None' = None, interrupt: 'dict[str, Any] | None' = None, forked_from: 'dict[str, Any] | None' = None, workspace_id: 'str | None' = None, pending_effect: 'dict[str, Any] | None' = None, revision: 'int | None' = None) -> None`
 
 ~~~text
 Point-in-time execution snapshot for workflow resumption.
@@ -3730,7 +3793,7 @@ Point-in-time execution snapshot for workflow resumption.
 
 ### `WorkflowRunResult`
 
-class `WorkflowRunResult(workflow_run_id: 'str', status: 'WorkflowStatus', state: 'dict[str, Any]', step_count: 'int', current_node_id: 'str | None' = None, pending_approval: 'PendingApproval | None' = None, error: 'str | None' = None, budget_status: 'dict[str, Any] | None' = None, interrupt: 'dict[str, Any] | None' = None) -> None`
+class `WorkflowRunResult(workflow_run_id: 'str', status: 'WorkflowStatus', state: 'dict[str, Any]', step_count: 'int', current_node_id: 'str | None' = None, pending_approval: 'PendingApproval | None' = None, error: 'str | None' = None, budget_status: 'dict[str, Any] | None' = None, interrupt: 'dict[str, Any] | None' = None, pause_reason: 'str | None' = None, pending_effect: 'dict[str, Any] | None' = None) -> None`
 
 ~~~text
 Final or paused result of a workflow run.

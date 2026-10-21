@@ -7,9 +7,11 @@ jobs. S1 adds value types and documentation; S2 adds standalone memory, SQLite
 and Postgres execution stores. S3 rebuilds the deprecated `DurableExecutionEngine`
 on those stores, and S4 adds effect resolution over REST and the TypeScript client
 (see [DurableExecutionEngine on the journal](#durableexecutionengine-on-the-journal-s3)
-and [Resolving an unknown effect](#resolving-an-unknown-effect-s4)). The SDK `Runner`,
-`WorkflowEngine` and trigger worker do not use the journal yet, so their dispatch and
-recovery behavior is unchanged. The A6 design report
+and [Resolving an unknown effect](#resolving-an-unknown-effect-s4)). S5 puts the SDK
+`Runner` on the journal (see [SDK agents on the journal](#sdk-agents-on-the-journal-s5)).
+S6 puts top-level `WorkflowEngine` runs on it (see
+[Workflows on the journal](#workflows-on-the-journal-s6)). The trigger worker does not use
+the journal yet, so its retry behavior is unchanged. The A6 design report
 (`P35_A6_DURABLE_EXECUTION_DESIGN.md`, an internal planning record that is not part of
 the public repository) gives today's behavior per path in §1 and the implementation
 sequence in §3. Teams and
@@ -34,9 +36,9 @@ also records its kind (`agent`, `workflow` or `durable_graph`), its
 existing child id formats stay supported. One trigger job owns one run throughout
 its life, including reclaim attempts.
 
-The definition digest is a workflow's `canonical_hash()`, or the planned
-`Agent.definition_digest()`: agent name, instructions hash, tool names, JSON
-schemas and effect classes, handoff targets, and output type.
+The definition digest is a workflow's `canonical_hash()`, or
+`Agent.definition_digest()` (S5): agent name, instructions hash, tool names, argument
+JSON schemas and effect classes, handoff targets, and output schema.
 
 Each execution step has a `StepKey`:
 
@@ -70,11 +72,16 @@ the lease; resuming claims it again.
 Every journal write is one transaction guarded by
 `WHERE fencing_token = :mine AND lease_owner = :me`. A stale owner receives
 `LeaseLostError`; the transaction writes and deletes nothing. A heartbeat renews
-the lease every `ttl/3`. Failed renewal cancels the local task, and the runtime
-checks `assert_lease()` immediately before each non-pure dispatch.
+the lease every `ttl/3`. In the SDK `Runner`, a failed renewal (or any refused journal
+write) stops the run: its in-flight model call or `async` tool is cancelled and the run
+ends with `LeaseLostError`; a synchronous tool running in a thread cannot be stopped and
+finishes, but its result is never written. The runtime also checks the lease against the
+store immediately before each non-pure dispatch (the intent commit, or a fenced renew
+when a crash re-run reuses its intent).
 
-The store's clock determines expiry: Postgres uses `now()`. SQLite is supported
-on one host; multi-host operation requires Postgres. Effects receive
+The store's clock determines expiry: Postgres uses `clock_timestamp()` read after the row
+lock (`now()` is the transaction start and could be stale after a lock wait). SQLite is
+supported on one host; multi-host operation requires Postgres. Effects receive
 `ctx.fencing_token`; connectors should forward it when the remote system supports
 a header or compare-and-swap field. Fencing a journal commit cannot stop an
 already running synchronous tool thread from finishing a remote effect, so its
@@ -113,10 +120,11 @@ records; their constructors restore nested identity/intent records and enums.
 
 Model calls are `pure` for execution; reservations handle uncertain billing.
 `effect_class_from_policy` maps existing manifest/runtime string values without
-importing `nexura_runtime`. `effect_class_from_idempotent` maps today's tool
+importing `nexura_runtime`. `effect_class_from_idempotent` maps the tool
 boolean. Missing declarations map to `non_idempotent`; unknown policy strings
-are rejected. Existing manifest defaults and tool APIs are unchanged by S1;
-the declarations above describe the target executor integrations.
+are rejected. SDK tools declare their class with `@tool(effect=..., reconcile=...)`
+since S5; workflow handlers use `register_handler(name, effect=..., reconcile=...)` since
+S6.
 
 ## Recovery after a crash
 
@@ -148,13 +156,13 @@ caller policy on top of this contract.
 
 The run row carries `journal_schema_version` for storage, `state_version` for the
 engine envelope (agent and workflow checkpoint v2), and `definition_digest`.
-Readers accept versions N and N-1; writers write N. Migrations go through
-`storage/migrations.py`, extended to Postgres.
+Readers accept versions N and N-1; writers write N. Journal migrations go through
+`nexura_agents.execution_store.migrations`, shared by SQLite and Postgres.
 
 Takeover with a different digest raises `DefinitionMismatchError`. A future
 explicit `migrate=` hook is the only bypass. Agents get one release of warnings
-before this check becomes mandatory. S1 introduces the error type, without
-changing current definition checks.
+before this check becomes mandatory: since S5, recovering or resuming an agent run
+with a different `Agent.definition_digest()` emits a `RuntimeWarning` and continues.
 
 ## Approvals and budgets across takeover
 
@@ -380,6 +388,149 @@ example Postgres). Only `DurableExecutionEngine` writes effects there today; oth
 list none. The TypeScript client has `client.runs.effects(runId)` and
 `client.runs.resolveEffect(runId, effectId, {resolution, result})`. Studio has no effects
 view yet. Endpoint details are in [Studio and service](studio-and-service.md).
+
+## SDK agents on the journal (S5)
+
+`Runner(checkpoint_store=...)` with `MemoryCheckpointStore`, `SQLiteCheckpointStore` or
+`nexura_postgres.PostgresCheckpointStore` keeps an execution journal (`kind="agent"`)
+next to the checkpoints: an `ExecutionStore` on the same database, opened with
+`await store.open_execution_store()`. The checkpoint transcript stays what the model
+sees; the journal records the lease and what was dispatched. Details and examples are
+in [Durable agent runs](durable-runs.md).
+
+- **Lease from the first write.** A run creates its journal row with a lease held by
+  its own owner before its first checkpoint, and takes the store's recovery claim with
+  the same owner. A heartbeat renews both every `lease_ttl / 3`
+  (`Runner(lease_ttl=30.0)`). `recover` refuses a run whose lease is live (`"already
+  being recovered"`), except when the lease owner is a process on the same host that
+  has exited: owners are `nx1.<host>.<pid>.<start>.<uuid>` and
+  `nexura_agents.durable.lease_owner_is_dead` checks `/proc`, so a restart on the same
+  host recovers at once. A pid that `/proc` hides (`hidepid`) is confirmed with
+  `kill(pid, 0)` (`EPERM` means alive). Owners on other hosts, and every owner on a host
+  without a boot id (macOS, BSD, Windows, where the hostname alone does not identify a
+  machine), are taken over only after the lease expires. A lost lease stops the run: the
+  heartbeat cancels its in-flight model call or `async` tool, and the run ends with
+  `LeaseLostError` (a synchronous tool thread cannot be stopped; its result is not
+  written). Its checkpoint saves are refused as before (`CheckpointLeaseLostError`).
+  Pausing, completing or failing releases the lease; `resume` claims it again.
+- **Per-call intents.** Just before a non-pure tool call starts (after its input
+  guardrails, cache and `before_tool` hook), the runner commits a `StepIntent` (step key
+  `turn:<n>/call:<tool_call_id>`, with `%` and `#` in the id written as `%25` and `%23`;
+  attempt k adds `#<k>`) and a `pending` effect. A crash re-run that reuses an existing
+  intent first renews the lease against the store. When the result is in the checkpoint
+  it commits the `StepOutcome` and marks the effect `confirmed` (a timed-out call:
+  `indeterminate`); if a crash came between the two, recovery confirms it from the
+  checkpoint. Pure calls write no intent. On recovery, an unanswered call without an
+  intent never started and simply runs; a sibling in the same batch is no longer a false
+  "unknown". The class rules use the class **persisted in the intent** (or the current
+  declaration if that is stricter), so re-declaring a crashed tool cannot loosen them.
+- **Keys and tokens.** Tools get `ctx.idempotency_key` (`nx-` + 32 hex characters of the
+  effect id of their step key; the same for a crash re-run, a new one for a new
+  attempt) and `ctx.fencing_token` (the run lease's token; `None` without a journal).
+- **Effect classes.** `@tool(effect="pure" | "idempotent" | "non_idempotent" |
+  "reconcilable", reconcile=fn)`; `idempotent=True` is the alias of
+  `effect="idempotent"`; undeclared tools are `non_idempotent`.
+- **Unknown outcome.** A dispatched `non_idempotent` call (or a reconcilable one whose
+  probe says `Unknown`) pauses the run: `RunResult.interruption.pause_reason ==
+  "effect_unknown"` (its `reason` stays `"outcome_unknown_after_crash"`), journal status
+  `paused` with `state["pause_reason"]`, the effect `indeterminate`. Resolve it with
+  `runner.resume_async(agent, interruption, outcomes={call_id: ResolvedOutcome(result)})`,
+  `ResolvedOutcome.not_applied()` (sent again as attempt 2, step key `...#2`, with a new
+  key; a tool that requires approval pauses for a fresh approval, `reason
+  "effect_not_applied"`) or `ResolvedOutcome.failed(reason)` (the run fails). The
+  resolution and actor (`resume_async(..., actor="ops@example")`, default
+  `"sdk:resume"`) are journaled with `resolve_effect`. Effects resolved directly in the
+  journal (for example through the effects API) let `recover_async` continue, and the
+  stale pause can no longer be resumed. `approve` sends the call again and journals
+  attempt 1 as `not_applied` (same actor); `reject` tells the model the outcome is
+  unknown and journals nothing. A pause that reached the checkpoint but not the journal
+  (a crash between them) is written to the journal by the next `recover`.
+- **Reconcilable tools.** On recovery, `reconcile(ctx, intent)` runs with the call's
+  `idempotency_key`: `Applied(result)` records the result and the call is not run again;
+  `NotApplied()` runs it again with the same key (a gated tool first needs a fresh
+  approval); `Unknown()`, an exception or a wrong return value pauses as above.
+- **Definition digest.** The run stores `Agent.definition_digest()` of the starting
+  agent; a difference on recover or resume is a `RuntimeWarning` in this release.
+- **Older stores.** A store whose `save` does not accept `owner=` or that has no
+  `open_execution_store()` works as before (no run lease, batch-level uncertainty). A
+  store without `claim` gets a `DeprecationWarning` from `Runner(...)`; it will not be
+  accepted in 0.6. Checkpoints written before S5 (or by a store without a journal) are
+  journaled when they are first recovered or resumed, with `state["pre_journal_turn"]`:
+  their unanswered calls of that turn or earlier have no intent although they may have
+  been sent, so they keep the old rule (a `non_idempotent` one pauses as
+  `effect_unknown`, a reconcilable one is probed).
+- **Workspaces.** The SQLite checkpoint, claim and approval tables are scoped by
+  `workspace_id` (checkpoint schema 2; a schema-1 file is migrated on open and its rows
+  belong to `"default"`), like Postgres. A store opened with another workspace neither
+  lists nor recovers the run, and no journal row is created for it.
+- **Finishing.** A run's terminal journal status is committed before its checkpoint is
+  deleted; a crash in between leaves a terminal row whose `completed` checkpoint
+  `recover` replays (another phase is deleted with a "has already failed" error).
+
+Limits: budgets and approval records are not yet linked to intents (S11); teams and
+`AgentCoordinator` are outside the contract; the memory journal keeps finished runs'
+rows for the life of the store.
+
+## Workflows on the journal (S6)
+
+`WorkflowEngine` with `MemoryWorkflowStore` or `SQLiteWorkflowStore` keeps an execution
+journal (`kind="workflow"`, `definition_digest` = the spec's `canonical_hash()`) for each
+top-level run: a `MemoryExecutionStore`, or a `SQLiteExecutionStore` in the same database
+file, opened with `await store.open_execution_store()`. The checkpoint stays the state the
+graph reads; the journal records the lease and what was dispatched. User guide and example:
+[Workflows: recovering after a crash](workflows.md#recovering-after-a-crash).
+
+- **Lease and fencing.** `run` and `fork` create the journal run with a lease held by the
+  caller (owner `nx1.<host>.<pid>.<start>.<uuid>`); a heartbeat renews it every
+  `lease_ttl / 3` (`WorkflowEngine(lease_ttl=30.0)`). Pausing, completing or failing
+  releases it; `resume` and `resume_interrupt` claim the approval first (the first
+  claimer wins; others get `ApprovalAlreadyClaimedError`), then take the lease. Checkpoints carry a
+  `revision`: `get()` returns it, a save of a checkpoint whose `revision` is set succeeds
+  only if the stored revision is unchanged (`WorkflowConflictError` otherwise), and
+  `claim_approval` advances it. The journal commit comes first (token-fenced), then the
+  checkpoint save (revision-fenced), so a stale owner's next write raises
+  `LeaseLostError` and writes nothing.
+- **Intents per node.** Just before a node that is not `pure` dispatches, one fenced
+  commit writes its `StepIntent` (step key `<node>#<step>[.<attempt>]`, payload digest of
+  the inputs the node reads, idempotency key, effect class, and the `approval_id` it runs
+  under), a `pending` effect, and the approval as consumed ("claim for dispatch"). After
+  the node returns, its `StepOutcome` (state update, branch, next node), the effect
+  `confirmed`, and the new cursor are committed together, then the checkpoint is saved.
+  A pure node writes only the outcome.
+- **Effect classes.** `ModuleRegistry.register(name, fn, effect=..., reconcile=...)` and
+  `register_handler(name, effect=...)` accept `pure`, `idempotent`, `non_idempotent`,
+  `reconcilable` (with `reconcile(state, intent)` returning `Applied`, `NotApplied` or
+  `Unknown`) and the manifest spellings. Undeclared function handlers are
+  `non_idempotent`. Modules use their manifest `effect_policy`; a module that leaves it
+  unset but declares write operations counts as `non_idempotent` for a call that writes.
+  Sub-workflow, parallel and mapped steps record one intent with the weakest class of
+  their parts (per-branch, per-item and per-child intents are S7).
+- **Keys and tokens.** `ExecutionContext.idempotency_key(index=0)` and
+  `ExecutionContext.fencing_token` for modules; `step_idempotency_key(index=0)` and
+  `step_fencing_token()` in `nexura_runtime.workflow` for function handlers. Mapped items
+  (`node#3[0]`) and parallel branches (`node/branch#3`) get their own keys.
+- **`WorkflowEngine.recover(run_id, *, on_uncertain="pause")`** continues a `running` or
+  `interrupted` run (and a paused `effect_unknown` run whose effect is resolved) per the
+  crash table above: no intent -> run; outcome committed but checkpoint lost -> apply it;
+  `pure`/`idempotent` -> run again (same key); `reconcilable` -> probe; `non_idempotent`
+  -> `paused`, `pause_reason="effect_unknown"`, `pending_effect`, effect `indeterminate`
+  (`on_uncertain="fail"` fails the run). Approval claimed but no intent written -> the
+  step runs under the same approval after re-checking its node, payload digest, binding
+  and expiry; otherwise the approval is asked for again. A run whose lease is live
+  raises `WorkflowError`; a dead owner on the same host is taken over at once. Other
+  paused runs are returned unchanged.
+- **Resolution.** `WorkflowEngine.resolve_effect(run_id, resolution, actor=...,
+  result=...)` (or the effects REST route followed by `recover`): `confirmed` -> the
+  node's output is `result` and it does not run again; `not_applied` -> new attempt
+  (`<node>#<step>.2`, new key), a gated node first asks for a fresh approval; `failed` ->
+  the run fails. `WorkflowRunResult` has `pause_reason` and `pending_effect`;
+  `WorkflowCheckpoint` has `pending_effect`, `revision` and a `pause_reason` property.
+
+Limits: sub-workflow children keep no journal of their own (a recovered parent re-attaches
+to its child as before); `SQLiteWorkflowStore` is single-host and there is no Postgres
+workflow store yet (S8); the service still marks runs interrupted with its startup sweep
+and has no recover endpoint (S9); trigger reclaim still starts a new run (S10); budgets
+are not yet linked to intents (S11).
 
 ## See also
 

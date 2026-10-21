@@ -21,6 +21,8 @@ one owner's projects. They do not add accounts or tenant isolation.
 - [Packages and installation](packages.md): the eight Python packages, TypeScript client,
   source/wheel installs, supported versions and optional backend requirements.
 - [Getting started](getting-started.md): install, first agent, first tool, in five minutes.
+- [Quickstart in 10 minutes](quickstart-10-minutes.md): from install to an approval-gated
+  workflow with a budget, resumed after a restart, all offline.
 - [Agents](agents.md): instructions (sync or async), sessions and history trimming,
   handoffs with structured input, agents as tools, streaming, cancelling runs, `clone`,
   diagrams.
@@ -100,3 +102,9 @@ one owner's projects. They do not add accounts or tenant isolation.
 - [Migrating from OpenAI Agent Builder and Evals](migrating-from-openai.md): concept map from the
   Agents SDK, a worked translation, and importing OpenAI Evals JSONL as Studio datasets (before
   the 2026-10-31 read-only and 2026-11-30 shutdown dates).
+- [Migrating from LangGraph](migrating-from-langgraph.md): `StateGraph`, checkpointers,
+  `interrupt()`, history and fork mapped to workflows; agents and approvals mapped to the SDK.
+- [Migrating from Pydantic AI](migrating-from-pydantic-ai.md): agents, tools, deferred tool
+  approvals, testing and durable execution mapped to the SDK.
+- [Migrating from CrewAI](migrating-from-crewai.md): crews mapped to agents and teams, flows
+  mapped to workflows, human feedback mapped to approvals and `interrupt()`.

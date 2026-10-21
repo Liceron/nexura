@@ -33,10 +33,15 @@ else:
     asyncio = LazyModule("asyncio")
 
 if TYPE_CHECKING:
+    from nexura_agents.contracts.execution import EffectClass
     from nexura_agents.guardrails import GuardrailFn
     from nexura_agents.run_context import RunContext
 
 ApprovalRule = bool | Callable[["RunContext[Any]", dict[str, Any]], bool]
+# The recovery promise of a tool after a crash (Execution Contract v1, docs/durable-execution.md).
+EffectName = Literal["pure", "idempotent", "non_idempotent", "reconcilable"]
+# reconcile(ctx, intent) -> Applied(result) | NotApplied() | Unknown(), sync or async.
+ReconcileFn = Callable[["RunContext[Any]", Any], Any]
 # True/False, or a function of the RunContext (sync or async) checked before each model call.
 EnabledRule = bool | Callable[["RunContext[Any]"], bool | Awaitable[bool]]
 
@@ -106,6 +111,42 @@ def _check_timeout(name: str, timeout: Any, on_timeout: Any) -> tuple[float | No
     return (None if timeout is None else float(timeout)), on_timeout
 
 
+def _check_effect(
+    name: str, effect: Any, idempotent: Any, reconcile: Any
+) -> tuple[EffectClass, ReconcileFn | None]:
+    """Resolve ``effect=`` and its ``idempotent=True`` alias; undeclared is non_idempotent."""
+    from nexura_agents.contracts.execution import EffectClass
+
+    if not isinstance(idempotent, bool):
+        raise SDKValidationError(f"Tool '{name}': idempotent must be True or False.")
+    if effect is None:
+        effect_class = EffectClass.IDEMPOTENT if idempotent else EffectClass.NON_IDEMPOTENT
+    else:
+        try:
+            effect_class = EffectClass(effect)
+        except ValueError:
+            raise SDKValidationError(
+                f"Tool '{name}': effect must be 'pure', 'idempotent', 'non_idempotent' or "
+                f"'reconcilable', got {effect!r}."
+            ) from None
+        if idempotent and effect_class is not EffectClass.IDEMPOTENT:
+            raise SDKValidationError(
+                f"Tool '{name}': idempotent=True is an alias of effect='idempotent'; "
+                f"it cannot be combined with effect={effect_class.value!r}."
+            )
+    if effect_class is EffectClass.RECONCILABLE:
+        if not callable(reconcile):
+            raise SDKValidationError(
+                f"Tool '{name}': effect='reconcilable' needs reconcile=fn(ctx, intent) returning "
+                "Applied(result), NotApplied() or Unknown()."
+            )
+    elif reconcile is not None:
+        raise SDKValidationError(
+            f"Tool '{name}': reconcile= is only used with effect='reconcilable'."
+        )
+    return effect_class, reconcile
+
+
 def _check_retry_and_cache(
     name: str, retry: Any, cache: Any, idempotent: bool
 ) -> tuple[ToolRetry | None, bool]:
@@ -116,7 +157,7 @@ def _check_retry_and_cache(
     if (retry is not None or cache) and not idempotent:
         raise SDKValidationError(
             f"Tool '{name}': retry and cache run a call again or skip it, so they need "
-            "idempotent=True (safe to repeat)."
+            "idempotent=True or effect='pure'/'idempotent' (safe to repeat)."
         )
     return retry, cache
 
@@ -245,7 +286,9 @@ class StopAtTools:
 class Tool:
     """Represents a typed, executable tool for an agent."""
 
-    idempotent: bool = False
+    idempotent: bool = False  # True for effect "pure" or "idempotent": safe to repeat
+    effect: EffectClass  # set by __init__; see effect_class() for the default
+    reconcile: ReconcileFn | None = None
     enabled: EnabledRule = True
     input_guardrails: tuple[GuardrailFn, ...] = ()
     output_guardrails: tuple[GuardrailFn, ...] = ()
@@ -272,9 +315,13 @@ class Tool:
         on_timeout: OnTimeout = "tell_model",
         retry: ToolRetry | None = None,
         cache: bool = False,
+        effect: EffectName | None = None,
+        reconcile: ReconcileFn | None = None,
     ) -> None:
         self.name = name
         self.fn = fn
+        self.effect, self.reconcile = _check_effect(name, effect, idempotent, reconcile)
+        idempotent = self.effect.value in ("pure", "idempotent")
         self.timeout, self.on_timeout = _check_timeout(name, timeout, on_timeout)
         self.retry, self.cache = _check_retry_and_cache(name, retry, cache, idempotent)
         # False, or a predicate returning False: not offered to the model this step.
@@ -283,6 +330,7 @@ class Tool:
         self.input_guardrails = _check_guardrails(name, input_guardrails)
         self.output_guardrails = _check_guardrails(name, output_guardrails)
         # True: safe to run again after a crash (durable runs re-run it on recovery).
+        # ``effect`` is the full recovery promise; ``idempotent`` stays as its alias.
         self.idempotent = idempotent
         self.description = description or inspect.getdoc(fn) or f"Execute {name}"
         self.is_async = inspect.iscoroutinefunction(fn)
@@ -295,6 +343,13 @@ class Tool:
         # Retries granted after ModelRetry (default 1). Invalid arguments are sent back
         # to the model only when max_retries is set explicitly; otherwise they raise.
         self.max_retries = max_retries
+
+    def effect_class(self) -> EffectClass:
+        """The tool's effect class (``non_idempotent`` when a subclass never set one)."""
+        from nexura_agents.contracts.execution import EffectClass
+
+        effect = self.__dict__.get("effect")
+        return EffectClass(effect) if effect is not None else EffectClass.NON_IDEMPOTENT
 
     def needs_approval(self, ctx: RunContext[Any], arguments: dict[str, Any]) -> bool:
         """Whether this call needs human approval, from the ``requires_approval`` flag or rule."""
@@ -504,9 +559,13 @@ class SchemaTool(Tool):
         retry: ToolRetry | None = None,
         cache: bool = False,
         idempotent: bool = False,
+        effect: EffectName | None = None,
+        reconcile: ReconcileFn | None = None,
     ) -> None:
         self.name = name
         self.fn = handler
+        self.effect, self.reconcile = _check_effect(name, effect, idempotent, reconcile)
+        idempotent = self.effect.value in ("pure", "idempotent")
         self.idempotent = idempotent
         self.timeout, self.on_timeout = _check_timeout(name, timeout, on_timeout)
         self.retry, self.cache = _check_retry_and_cache(name, retry, cache, idempotent)
@@ -615,6 +674,8 @@ def tool(
     on_timeout: OnTimeout = "tell_model",
     retry: ToolRetry | None = None,
     cache: bool = False,
+    effect: EffectName | None = None,
+    reconcile: ReconcileFn | None = None,
 ) -> Callable[[Callable[..., Any]], Tool]: ...
 
 
@@ -634,8 +695,17 @@ def tool(
     on_timeout: OnTimeout = "tell_model",
     retry: ToolRetry | None = None,
     cache: bool = False,
+    effect: EffectName | None = None,
+    reconcile: ReconcileFn | None = None,
 ) -> Tool | Callable[[Callable[..., Any]], Tool]:
-    """Decorator to define a typed Agent tool from a function."""
+    """Decorator to define a typed Agent tool from a function.
+
+    ``effect`` is what a durable run may do with the call after a crash: ``"pure"`` and
+    ``"idempotent"`` are re-run (the latter with the same ``ctx.idempotency_key``),
+    ``"non_idempotent"`` (the default, also for undeclared tools) pauses the run, and
+    ``"reconcilable"`` runs ``reconcile(ctx, intent)`` to find out. ``idempotent=True``
+    is an alias of ``effect="idempotent"``.
+    """
     if fn is not None:
         return Tool(
             name=name or fn.__name__,
@@ -652,6 +722,8 @@ def tool(
             on_timeout=on_timeout,
             retry=retry,
             cache=cache,
+            effect=effect,
+            reconcile=reconcile,
         )
 
     def decorator(func: Callable[..., Any]) -> Tool:
@@ -670,6 +742,8 @@ def tool(
             on_timeout=on_timeout,
             retry=retry,
             cache=cache,
+            effect=effect,
+            reconcile=reconcile,
         )
 
     return decorator

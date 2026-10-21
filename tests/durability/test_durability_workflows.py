@@ -5,9 +5,9 @@ approval gate). Each handler performs one effect through the external effect ser
 Neither declares an effect class, so by founder decision 1 (design §6) both count as
 ``non_idempotent``: after a crash they must not repeat silently.
 
-Today no public API continues a top-level ``running`` run; ``fork`` is the only way on,
-and it re-runs the node. Tests asserting the target (``WorkflowEngine.recover``, A6 S6)
-are ``xfail(strict=True)``. Postgres rows wait for ``PostgresWorkflowStore`` (A6 S8).
+``WorkflowEngine.recover`` (A6 S6) continues a top-level ``running`` run under the
+execution contract; ``fork`` still re-runs the node (a new run). Postgres rows wait for
+``PostgresWorkflowStore`` (A6 S8).
 """
 
 from __future__ import annotations
@@ -33,12 +33,6 @@ ON_BACKENDS = pytest.mark.parametrize(
         ),
     ],
     indirect=True,
-)
-
-S6_RECOVER = pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="A6 S6: public WorkflowEngine.recover() with per-node intents and leases",
 )
 
 
@@ -114,7 +108,6 @@ def test_mid_node_kill_leaves_run_stuck_and_fork_reruns_the_node(
 
 
 @ON_BACKENDS
-@S6_RECOVER
 def test_mid_node_kill_recover_pauses_effect_unknown(harness: Harness, backend: Backend) -> None:
     """K3': target is ``paused`` with ``pause_reason="effect_unknown"``, one payment."""
     backend.require("workflow")
@@ -129,7 +122,6 @@ def test_mid_node_kill_recover_pauses_effect_unknown(harness: Harness, backend: 
 
 
 @ON_BACKENDS
-@S6_RECOVER
 def test_kill_after_node_commit_recover_continues_from_the_cursor(
     harness: Harness, backend: Backend
 ) -> None:
@@ -192,7 +184,6 @@ def test_approval_claimed_then_killed_is_consumed_and_nothing_dispatched(
 
 
 @ON_BACKENDS
-@S6_RECOVER
 def test_approval_claimed_then_killed_recover_dispatches_once_under_that_approval(
     harness: Harness, backend: Backend
 ) -> None:

@@ -217,9 +217,136 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-If the process dies in the middle of a step, the checkpoint from the step before is
-what remains, so that step runs again. Write handlers that are safe to repeat, or guard
-them with a retry refusal (see [Retries](#retries)).
+### Recovering after a crash
+
+Both stores keep an **execution journal** next to the checkpoints (the
+[durable execution contract](durable-execution.md); `SQLiteWorkflowStore` keeps it in the
+same file). A run holds a lease from its first write, renewed every `lease_ttl / 3`
+(`WorkflowEngine(lease_ttl=30.0)`). Before a step that is not `pure` runs, the engine
+records that it is about to dispatch it (an intent); after it returns, its outcome and the
+next node are recorded together, then the checkpoint moves. Checkpoint saves are fenced by
+a revision, so a stale worker cannot overwrite a newer checkpoint.
+
+`await engine.recover(run_id)` continues a run whose process stopped. It takes the run's
+lease (at once when the owner was a process on this host that has exited, otherwise once
+the lease has expired; while another worker holds it, it raises `WorkflowError`) and then
+looks at the step at the cursor:
+
+- the step never started: it runs;
+- its outcome was recorded but the checkpoint was not saved: the outcome is used and the
+  step is **not** run again;
+- it started and its outcome is unknown: what happens depends on its effect class.
+  `pure` steps run again; `idempotent` steps run again with the same idempotency key;
+  `reconcilable` steps are asked what happened; `non_idempotent` steps are never run again
+  silently: the run pauses with `pause_reason="effect_unknown"` and a `pending_effect`
+  (`recover(run_id, on_uncertain="fail")` fails the run instead).
+
+Declare a handler's class when you register it:
+`registry.register_handler("lookup", effect="pure")`, `effect="idempotent"`,
+`effect="non_idempotent"`, or `effect="reconcilable", reconcile=fn` where
+`fn(state, intent)` returns `Applied(output)`, `NotApplied()` or `Unknown()` (from
+`nexura_agents.contracts.execution`). **A function handler that declares nothing is
+`non_idempotent`.** A module uses its manifest's `effect_policy` (`pure` / `read`,
+`idempotent_write`, `non_idempotent_write`). Handlers get a stable key to pass on to the
+system they call: `ctx.idempotency_key()` in modules, `step_idempotency_key()` (from
+`nexura_runtime.workflow`) in functions; it is the same when the step runs again after a
+crash and different for a new visit of the node. `ctx.fencing_token` /
+`step_fencing_token()` is the lease's fencing token.
+
+A person resolves a paused `effect_unknown` run with
+`await engine.resolve_effect(run_id, resolution, actor=..., result=...)`, which records the
+decision once and continues the run:
+
+- `"confirmed"`: it happened; `result` (a dict of state updates) is used as the step's
+  output and the step does not run again;
+- `"not_applied"`: it did not happen; the step runs again as a new attempt with a new key.
+  If the step needs approval, a fresh approval is asked for first;
+- `"failed"`: the run fails.
+
+The run service's `POST /api/v1/runs/{run_id}/effects/{effect_id}/resolve` records the same
+decision; `recover(run_id)` then continues the run.
+
+Approvals survive a crash too. A paused run holds no lease, so any process can resume it.
+If a process stops after it claimed an approval but before the approved step dispatched,
+`recover` checks the approval again (same step, same inputs, not expired) and runs the
+step under it; an expired or changed approval is asked for again. Once the step has
+dispatched, the approval is used up: a `not_applied` resolution needs a fresh one.
+
+```python
+import asyncio
+
+from nexura_runtime.workflow import (
+    MemoryWorkflowStore,
+    ModuleRegistry,
+    WorkflowEngine,
+    WorkflowNode,
+    WorkflowSpec,
+)
+
+payments: list[str] = []
+
+
+class ProcessStopped(BaseException):
+    """Stands in for the process dying in the middle of the payment."""
+
+
+registry = ModuleRegistry()
+
+
+@registry.register_handler("lookup", effect="pure")
+def lookup(state: dict) -> dict:
+    return {"amount": 4500}
+
+
+@registry.register_handler("pay")  # undeclared: non_idempotent
+def pay(state: dict) -> dict:
+    payments.append(state["order_id"])  # the remote system applied it ...
+    if len(payments) == 1:
+        raise ProcessStopped  # ... and the process died before the result was saved
+    return {"paid": True}
+
+
+spec = WorkflowSpec(
+    name="Pay",
+    entry_node="lookup",
+    nodes={
+        "lookup": WorkflowNode(id="lookup", handler="lookup", default_transition="pay"),
+        "pay": WorkflowNode(id="pay", handler="pay"),
+    },
+    terminal_nodes=["pay"],
+)
+
+
+async def main() -> None:
+    store = MemoryWorkflowStore()
+    try:
+        await WorkflowEngine(spec, registry, store=store).run(
+            {"order_id": "ORD-7"}, workflow_run_id="pay-1"
+        )
+    except ProcessStopped:
+        pass
+
+    engine = WorkflowEngine(spec, registry, store=store)  # after the restart
+    paused = await engine.recover("pay-1")
+    assert paused.status == "paused" and paused.pause_reason == "effect_unknown"
+    assert payments == ["ORD-7"]  # not sent a second time
+
+    # Someone checks the payment provider: the payment went through.
+    done = await engine.resolve_effect(
+        "pay-1", "confirmed", actor="ops@example.test", result={"paid": True}
+    )
+    assert done.status == "completed" and payments == ["ORD-7"]
+
+
+asyncio.run(main())
+```
+
+Limits: sub-workflow, parallel and `map_over` steps record one intent for the whole step
+(the weakest class of their parts) until per-branch, per-item and per-child intents land;
+sub-workflow children keep no journal of their own, and a recovered parent re-attaches to
+its child run as before. `SQLiteWorkflowStore` is for one host; there is no Postgres
+workflow store yet. `fork` is unchanged: it starts a new run that runs the forked step
+again.
 
 ## Approval gates
 

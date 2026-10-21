@@ -106,6 +106,14 @@ class RunContext(Generic[DepsT]):  # noqa: UP046 - keeps Python 3.11 support
     tool_attachments: list[Any] = field(default_factory=list, repr=False)
     # Set by ``PromptRegistry.instructions``: {"name", "version", "sha256"} of the prompt used.
     prompt: dict[str, Any] | None = None
+    # Inside a tool call: a key for the remote system that is the same for every attempt of
+    # this call, including the re-run after a crash ("nx-" + 32 hex characters, see
+    # docs/durable-execution.md). Forward it as an Idempotency-Key where the API takes one.
+    idempotency_key: str | None = None
+    # Inside a tool call of a durable run: the run lease's fencing token (it only goes up).
+    # Systems that can compare it (a header or a compare-and-swap field) can refuse a stale
+    # caller. None without a durable store.
+    fencing_token: int | None = None
     # Shared by every per-tool copy so nested usage reaches the run's totals.
     _nested_usage: list[Usage] = field(default_factory=list, repr=False)
     # Where ctx.emit sends events; shared by every per-tool copy.
@@ -148,7 +156,15 @@ class RunContext(Generic[DepsT]):  # noqa: UP046 - keeps Python 3.11 support
         self._nested_usage.clear()
         return taken
 
-    def for_tool(self, tool_call_id: str, tool_name: str, retry: int) -> RunContext[DepsT]:
+    def for_tool(
+        self,
+        tool_call_id: str,
+        tool_name: str,
+        retry: int,
+        *,
+        idempotency_key: str | None = None,
+        fencing_token: int | None = None,
+    ) -> RunContext[DepsT]:
         """Copy scoped to one tool call."""
         return RunContext(
             deps=self.deps,
@@ -164,6 +180,8 @@ class RunContext(Generic[DepsT]):  # noqa: UP046 - keeps Python 3.11 support
             state=self.state,  # the same dict: a tool's changes are the run's changes
             tags=self.tags,
             prompt=self.prompt,
+            idempotency_key=idempotency_key,
+            fencing_token=fencing_token,
             _nested_usage=self._nested_usage,
             _events=self._events,
         )

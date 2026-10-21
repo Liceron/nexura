@@ -342,6 +342,13 @@ class RunInterruption:
             if call.id in asked
         ]
 
+    @property
+    def pause_reason(self) -> str:
+        """``"effect_unknown"`` when the pending calls may already have run before a crash
+        (resolve them with ``resume_async(..., outcomes=...)``, approve or reject); otherwise
+        ``"approval"`` (calls or questions waiting for a person)."""
+        return "effect_unknown" if self.reason == "outcome_unknown_after_crash" else "approval"
+
     def pending_digests(self) -> dict[str, str]:
         """Show these to the reviewer; pass them back as ``approve={id: digest}``."""
         return {call.id: self.action_digest(call) for call in self.pending}

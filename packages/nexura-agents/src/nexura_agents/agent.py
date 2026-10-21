@@ -388,6 +388,40 @@ class Agent(Generic[OutputT]):  # noqa: UP046 (a TypeVar default needs typing_ex
             return None
         return schema
 
+    def definition_digest(self) -> str:
+        """A stable ``sha256:<hex>`` of what a durable run depends on.
+
+        Covers the agent name, a hash of string instructions (or the qualified name of an
+        instructions function), each tool's name, argument JSON schema and effect class,
+        the handoff targets and the output schema. Models, limits and descriptions are not
+        included. Recovery compares it with the digest stored when the run started; a
+        difference is a warning in this release and an error in a later one.
+        """
+        import hashlib
+
+        instructions = self.instructions
+        if isinstance(instructions, str):
+            instructions_id = "sha256:" + hashlib.sha256(instructions.encode("utf-8")).hexdigest()
+        else:
+            module = getattr(instructions, "__module__", "") or ""
+            qualname = getattr(instructions, "__qualname__", type(instructions).__qualname__)
+            instructions_id = f"callable:{module}.{qualname}"
+        tools = []
+        for t in sorted(self.tools, key=lambda item: item.name):
+            schema = t.to_schema().get("function", {}).get("parameters")
+            tools.append({"name": t.name, "parameters": schema, "effect": t.effect_class().value})
+        payload = {
+            "name": self.name,
+            "instructions": instructions_id,
+            "tools": tools,
+            "handoffs": sorted([h.tool_name, h.agent.name] for h in self.handoffs),
+            "output_schema": self.output_schema,
+        }
+        encoded = json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str
+        )
+        return "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
     def render_instructions(self, ctx: RunContext[Any]) -> str:
         """System prompt for this run, including the output schema when typed.
 

@@ -99,7 +99,9 @@ from nexura_agents.usage import admission
 if TYPE_CHECKING:
     import asyncio
 
-    from nexura_agents.durable import RunCheckpointStore
+    from nexura_agents._agent_journal import AgentJournal
+    from nexura_agents.contracts.execution import ReconcileResult, StepIntent, StepKey
+    from nexura_agents.durable import ResolvedOutcome, RunCheckpointStore
 else:
     asyncio = LazyModule("asyncio")
 
@@ -435,6 +437,59 @@ async def _until_cancelled(awaitable: Awaitable[Any], cancel: CancelToken | None
                 await work
 
 
+class _RunStopToken(CancelToken):
+    """The run's cancel token in a journaled durable run: it fires when the caller's token
+    fires, or when the run lease is lost (``stop_for_lost_lease``), so an in-flight model
+    call or async tool is interrupted. A sync tool thread cannot be stopped."""
+
+    def __init__(self, parent: CancelToken | None) -> None:
+        super().__init__()
+        self.parent = parent
+        self.lease_lost = False
+
+    @property
+    def cancelled(self) -> bool:
+        return self._event.is_set() or (self.parent is not None and self.parent.cancelled)
+
+    @property
+    def reason(self) -> str | None:
+        if self._own_reason is None and self.parent is not None:
+            return self.parent.reason
+        return self._own_reason
+
+    @reason.setter
+    def reason(self, value: str | None) -> None:
+        self._own_reason = value
+
+    def stop_for_lost_lease(self) -> None:
+        self.lease_lost = True
+        self.cancel("run lease lost")
+
+    async def wait(self) -> None:
+        if self.parent is None:
+            await super().wait()
+            return
+        waits = {
+            asyncio.ensure_future(super().wait()),
+            asyncio.ensure_future(self.parent.wait()),
+        }
+        try:
+            await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for waiter in waits:
+                waiter.cancel()
+
+
+def _raise_if_lease_lost(state: _RunState) -> None:
+    """A stop caused by a lost run lease ends the run with ``LeaseLostError``, not cancel."""
+    if state.journal is not None:
+        state.journal.check()
+    if isinstance(state.cancel, _RunStopToken) and state.cancel.lease_lost:
+        from nexura_agents.contracts.execution import LeaseLostError
+
+        raise LeaseLostError(f"Run '{state.run_id}': the run lease was lost; stopped.")
+
+
 @dataclass(frozen=True)
 class _TimedOut:
     message: str
@@ -633,13 +688,60 @@ class _Decisions:
     unknown: set[str] = field(default_factory=set)
     # ask_user calls answered by a person: the answer is the tool result, nothing runs.
     answers: dict[str, str] = field(default_factory=dict)
+    # Calls with an unknown outcome resolved by a person (resume outcomes=) or, during
+    # recovery, already resolved in the execution journal (``journal_resolved``).
+    outcomes: dict[str, ResolvedOutcome] = field(default_factory=dict)
+    journal_resolved: set[str] = field(default_factory=set)
+    # Calls to send again that need a fresh approval first (not applied, gated tool).
+    deferred: set[str] = field(default_factory=set)
+    # In-doubt calls a person approved to send again (journaled as not_applied first).
+    resend: set[str] = field(default_factory=set)
+    # Who decided (recorded on journal resolutions).
+    actor: str = "sdk:resume"
 
 
 _UNKNOWN_REASON = "outcome_unknown_after_crash"
+# A call whose earlier dispatch did not happen waits for a fresh approval to be sent again.
+_REAPPROVE_REASON = "effect_not_applied"
 _UNKNOWN_RESULT = (
     "The outcome of this action is unknown: the process stopped while it was running. "
     "It was not retried."
 )
+
+
+def _warn_definition_changed(run_id: str, agent: Agent) -> None:
+    warnings.warn(
+        f"Agent '{agent.name}' differs from the definition run '{run_id}' started with "
+        "(Agent.definition_digest(): tools, schemas, effect classes, instructions, handoffs "
+        "or output type changed). Continuing; a later release refuses this with "
+        "DefinitionMismatchError.",
+        RuntimeWarning,
+        stacklevel=3,
+    )
+
+
+_EFFECT_STRICTNESS = ("pure", "idempotent", "reconcilable", "non_idempotent")
+
+
+def _stricter_effect(persisted: Any, current: Any, tool: Tool) -> Any:
+    """The stricter of the persisted intent's and the tool's effect class; a reconcilable
+    class without a ``reconcile`` function on the tool counts as non_idempotent."""
+    from nexura_agents.contracts.execution import EffectClass
+
+    order = _EFFECT_STRICTNESS
+    chosen = max(EffectClass(persisted), EffectClass(current), key=lambda e: order.index(e.value))
+    if chosen is EffectClass.RECONCILABLE and tool.reconcile is None:
+        return EffectClass.NON_IDEMPOTENT
+    return chosen
+
+
+def _result_text(tool: Tool | None, result: Any) -> str:
+    """A person's or a reconcile function's result as the tool result text."""
+    if isinstance(result, str):
+        return result
+    if tool is not None:
+        return tool._serialize_result(result)
+    return json.dumps(result, ensure_ascii=False, default=str)
 
 
 def _unanswered(messages: list[Message]) -> tuple[list[ToolCall], list[ToolCall]]:
@@ -748,6 +850,12 @@ class _RunState:
     tool_cache: dict[tuple[int, str], Any] = field(default_factory=dict)
     # Tools offered on the latest model call (enabled / prepare_tools); None: all tools.
     offered_tools: dict[str, Tool] | None = None
+    # Durable runs with a journal-capable store: the run's lease and effect journal.
+    journal: AgentJournal | None = None
+    # tool_call_id -> step key of a dispatched call whose outcome is not committed yet.
+    dispatch_keys: dict[str, StepKey] = field(default_factory=dict)
+    # tool_call_id -> step key of a call whose outcome is unknown after a crash.
+    in_doubt: dict[str, StepKey] = field(default_factory=dict)
 
     def remaining(self) -> float | None:
         if self.effective_timeout is None:
@@ -778,7 +886,17 @@ class Runner:
         approval_ttl: float = 3600.0,
         approval_signing_secret: str | bytes | None = None,
         approval_store: ApprovalStore | None = None,
+        lease_ttl: float = 30.0,
     ) -> None:
+        if (
+            isinstance(lease_ttl, bool)
+            or not isinstance(lease_ttl, (int, float))
+            or not math.isfinite(lease_ttl)
+            or lease_ttl <= 0
+        ):
+            raise SDKValidationError("lease_ttl must be a finite positive number of seconds.")
+        # Durable runs: the run lease lasts lease_ttl seconds and is renewed every third of it.
+        self.lease_ttl = float(lease_ttl)
         if (
             isinstance(approval_ttl, bool)
             or not isinstance(approval_ttl, (int, float))
@@ -811,6 +929,16 @@ class Runner:
         self.session_store = session_store
         # Durable runs: when set, the run is checkpointed and can be recovered (see durable.py).
         self.checkpoint_store = checkpoint_store
+        if checkpoint_store is not None and not callable(getattr(checkpoint_store, "claim", None)):
+            warnings.warn(
+                f"{type(checkpoint_store).__name__} has no claim(run_id, owner, lease_seconds): "
+                "recovery cannot be made exclusive and the run holds no lease. Checkpoint "
+                "stores without claim are deprecated and will not be accepted in 0.6; use "
+                "MemoryCheckpointStore, SQLiteCheckpointStore or nexura_postgres."
+                "PostgresCheckpointStore, or implement claim/release and save(owner=...).",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         self.hooks = hooks
         self.usage_limits = usage_limits
         self.model_settings = model_settings
@@ -921,6 +1049,8 @@ class Runner:
         timeout: float | None = None,
         session_store: SessionStore | None = None,
         cancel: CancelToken | None = None,
+        outcomes: Mapping[str, ResolvedOutcome] | None = None,
+        actor: str | None = None,
     ) -> RunResult[OutputT]:
         """Continue a paused run once every pending tool call has a decision.
 
@@ -934,6 +1064,15 @@ class Runner:
         Fresh unsigned JSON resumes need reviewed digests. Interruptions expire after
         approval_ttl. Without an approval/checkpoint store, single use is the caller's
         responsibility; signatures provide authenticity, not replay prevention.
+
+        When ``interruption.pause_reason == "effect_unknown"`` (calls that may have run
+        before a crash), ``outcomes={call_id: ResolvedOutcome(result)}`` records that the
+        action happened (``result`` is the tool result), ``ResolvedOutcome.not_applied()``
+        sends it again (a tool that requires approval pauses for a fresh approval first) and
+        ``ResolvedOutcome.failed(reason)`` fails the run. ``approve`` sends it again now
+        (journaled as ``not_applied``) and ``reject`` tells the model the outcome is unknown.
+        ``actor`` names who decided; it is recorded on journal resolutions (default
+        ``"sdk:resume"``).
         """
         _validate_timeout(timeout)
         return await self._collect(
@@ -947,6 +1086,8 @@ class Runner:
                 timeout=timeout,
                 session_store=session_store,
                 cancel=cancel,
+                outcomes=outcomes,
+                actor=actor,
             )
         )
 
@@ -1197,6 +1338,8 @@ class Runner:
         session_store: SessionStore | None = None,
         stream_text: bool = False,
         cancel: CancelToken | None = None,
+        outcomes: Mapping[str, ResolvedOutcome] | None = None,
+        actor: str | None = None,
     ) -> AsyncGenerator[RunEvent, None]:
         """Event-stream form of :meth:`resume_async`."""
         kwargs: dict[str, Any] = {
@@ -1204,6 +1347,8 @@ class Runner:
             "approve": approve,
             "reject": reject,
             "answers": answers,
+            "outcomes": outcomes,
+            "actor": actor,
             "deps": deps,
             "timeout": timeout,
             "session_store": session_store,
@@ -1239,11 +1384,32 @@ class Runner:
         session_store: SessionStore | None = None,
         stream_text: bool = False,
         cancel: CancelToken | None = None,
+        outcomes: Mapping[str, ResolvedOutcome] | None = None,
+        actor: str | None = None,
         _span: Any = tracing.NOOP,
     ) -> AsyncGenerator[RunEvent, None]:
+        from nexura_agents.durable import ResolvedOutcome
+
         _validate_timeout(timeout)
+        if actor is None:
+            actor = "sdk:resume"
+        elif not isinstance(actor, str) or not actor.strip():
+            raise ApprovalDecisionError("actor must be a nonempty string naming who decided.")
         # Detach before awaiting storage: a client must not mutate arguments during admission.
         interruption = copy.deepcopy(interruption)
+        resolved = dict(outcomes or {})
+        if resolved:
+            if interruption.reason != _UNKNOWN_REASON:
+                raise ApprovalDecisionError(
+                    "outcomes= resolves calls whose outcome is unknown after a crash; this "
+                    "interruption is waiting for approval."
+                )
+            for call_id, value in resolved.items():
+                if not isinstance(value, ResolvedOutcome):
+                    raise ApprovalDecisionError(
+                        f"outcomes['{call_id}'] must be a ResolvedOutcome, not "
+                        f"{type(value).__name__}."
+                    )
         if interruption.agent_name != agent.name:
             raise ApprovalDecisionError(
                 f"Interruption belongs to agent '{interruption.agent_name}', not '{agent.name}'."
@@ -1272,7 +1438,9 @@ class Runner:
             approve = {
                 call_id: digest
                 for call_id, digest in interruption.pending_digests().items()
-                if call_id not in (reject or {}) and call_id not in questions
+                if call_id not in (reject or {})
+                and call_id not in questions
+                and call_id not in resolved
             }
         elif approve is False:
             approve = ()
@@ -1285,6 +1453,12 @@ class Runner:
         pending_ids = {c.id for c in interruption.pending}
         _check_answers(answers, questions, decisions)
         decisions.answers = answers
+        overlap = set(resolved) & (decisions.approved | set(decisions.rejected) | set(answers))
+        if overlap:
+            raise ApprovalDecisionError(
+                f"Give each call one decision; {sorted(overlap)} also have an outcome."
+            )
+        decisions.outcomes = resolved
         if isinstance(approve, Mapping):
             expected = interruption.pending_digests()
             for call_id, digest in approve.items():
@@ -1302,7 +1476,7 @@ class Runner:
                         f"Approval for '{call_id}' does not match the pending action; "
                         "the arguments changed after review."
                     )
-        decided = decisions.approved | set(decisions.rejected) | set(answers)
+        decided = decisions.approved | set(decisions.rejected) | set(answers) | set(resolved)
         if decided != pending_ids or decisions.approved & set(decisions.rejected):
             raise ApprovalDecisionError(
                 "Approve, reject or answer every pending tool call exactly once. "
@@ -1314,10 +1488,13 @@ class Runner:
         state = self._state_from_interruption(interruption, root, agent, deps, timeout, _span)
         state.cancel = cancel
         messages = state.messages
-        if interruption.reason is not None:
+        if interruption.reason == _UNKNOWN_REASON:
             # Calls that may already have run before a crash: a rejection tells the model the
             # outcome is unknown instead of claiming a human refused.
             decisions.unknown, decisions.rejected = set(decisions.rejected), {}
+            # Approving one is the decision to send it again: journal it as not applied.
+            decisions.resend = set(decisions.approved)
+        decisions.actor = actor
         _span.set("nexura.run_id", interruption.run_id)
         _set_run_attributes(_span, state.ctx, state.session_id)
         if root.handoffs:
@@ -1429,20 +1606,59 @@ class Runner:
         """The loop with checkpoint cleanup: finished or failed runs leave no checkpoint.
 
         A crash (``BaseException``: process kill, cancellation) leaves the last checkpoint.
+        With a journal-capable store the run holds a fenced lease from its first write
+        (renewed by a heartbeat) and gives it back when this generator ends.
         """
+        from nexura_agents._agent_journal import AgentJournal, journal_capable
+        from nexura_agents.contracts.execution import LeaseLostError
+        from nexura_agents.durable import new_lease_owner
+
         assert self.checkpoint_store is not None
+        journal = state.journal
+        if journal is None and journal_capable(self.checkpoint_store):
+            # The original run, or resume: take the run before its first write.
+            journal = await AgentJournal.open(self.checkpoint_store, state.run_id, self.lease_ttl)
+            await journal.begin(
+                new_lease_owner(),
+                state.root.definition_digest(),
+                state.root.name,
+                # resume of a run checkpointed before it had a journal (H1)
+                pre_journal_turn=state.turn if resume_batch is not None else None,
+            )
+            if journal.stored_digest != state.root.definition_digest():
+                _warn_definition_changed(state.run_id, state.root)
+            state.journal = journal
+            state.checkpoint_owner = journal.owner
         try:
-            async for event in self._loop_body(state, store, hooks, stream_text, resume_batch):
-                if event.type == RunEventType.RUN_COMPLETED:
-                    # The run is done and persisted: a failing delete must not turn it into
-                    # an error. A stale "completed" checkpoint is finished by recover.
-                    await self._delete_checkpoint(state.run_id, state.checkpoint_owner)
-                yield event
-        except Exception:
-            # A storage error is not a run failure: the previous checkpoint stays the truth.
-            if not state.checkpoint_store_failed:
-                await self._delete_checkpoint(state.run_id, state.checkpoint_owner)
-            raise
+            if journal is not None:
+                if not isinstance(state.cancel, _RunStopToken):
+                    state.cancel = _RunStopToken(state.cancel)
+                journal.on_lost = state.cancel.stop_for_lost_lease
+                if journal.lost is not None:
+                    state.cancel.stop_for_lost_lease()
+                await journal.ensure_running()
+                journal.start_heartbeat()
+            try:
+                async for event in self._loop_body(state, store, hooks, stream_text, resume_batch):
+                    if event.type == RunEventType.RUN_COMPLETED:
+                        # The run is done and persisted: a failing delete must not turn it
+                        # into an error. A stale "completed" checkpoint is finished by recover.
+                        await self._delete_checkpoint(
+                            state.run_id, state.checkpoint_owner, journal, "completed"
+                        )
+                    yield event
+            except Exception as exc:
+                if isinstance(exc, LeaseLostError):
+                    state.checkpoint_store_failed = True  # another worker owns the run now
+                # A storage error is not a run failure: the previous checkpoint stays the truth.
+                if not state.checkpoint_store_failed:
+                    await self._delete_checkpoint(
+                        state.run_id, state.checkpoint_owner, journal, "failed"
+                    )
+                raise
+        finally:
+            if journal is not None:
+                await journal.close()
 
     async def _loop_body(
         self,
@@ -1461,8 +1677,16 @@ class Runner:
             if resume_batch is not None:
                 calls, decisions = resume_batch
                 resumed_agent = state.agent
-                async for event in self._run_tools(resumed_agent, state, hooks, calls, decisions):
+                if decisions.outcomes or decisions.resend:
+                    async for event in self._apply_outcomes(state, resumed_agent, calls, decisions):
+                        yield event
+                run_now = [c for c in calls if c.id not in decisions.deferred]
+                async for event in self._run_tools(resumed_agent, state, hooks, run_now, decisions):
                     yield event
+                if decisions.deferred:
+                    async for event in self._pause_for_reapproval(state, calls, decisions):
+                        yield event
+                    return
                 async for event in self._apply_handoff(state):
                     yield event
                 if state.agent is resumed_agent:
@@ -1480,6 +1704,7 @@ class Runner:
             while True:
                 agent = state.agent
                 if state.cancel is not None and state.cancel.cancelled:
+                    _raise_if_lease_lost(state)
                     yield _cancelled(state)  # between steps: nothing is half-done
                     return
                 if self.checkpoint_store is not None:
@@ -1754,6 +1979,7 @@ class Runner:
         except _RunCancelled:
             # The token interrupted a model call or tool. Nothing from that step is
             # recorded; the checkpoint is kept (it is deleted only on completion/failure).
+            _raise_if_lease_lost(state)
             yield _cancelled(state)
             return
         except asyncio.CancelledError:
@@ -2132,6 +2358,94 @@ class Runner:
         ):
             yield event
 
+    async def _apply_outcomes(
+        self, state: _RunState, agent: Agent, calls: list[ToolCall], decisions: _Decisions
+    ) -> AsyncGenerator[RunEvent, None]:
+        """Record resolved outcomes of in-doubt calls before the batch continues.
+
+        Confirmed: the result becomes the tool result. Not applied: the call is sent again
+        as a new attempt, after a fresh approval when its tool requires one. Failed: the
+        run fails before anything else in the batch runs.
+        """
+        from nexura_agents.durable import ResolvedOutcome
+        from nexura_agents.execution_store import EffectAlreadyResolvedError
+
+        journal = state.journal
+        failed: list[tuple[ToolCall, ResolvedOutcome]] = []
+        for call in calls:
+            outcome = decisions.outcomes.get(call.id)
+            if outcome is None and call.id in decisions.resend:
+                outcome = ResolvedOutcome.not_applied()  # approved: sent again now
+            if outcome is None:
+                continue
+            tool = _callable_tool(agent, state, call.name)
+            text = _result_text(tool, outcome.result) if outcome.resolution == "confirmed" else None
+            key: StepKey | None = None
+            if journal is not None:
+                _, key, step = journal.latest(state.turn, call.id)
+                if step is None or step.intent is None:
+                    key = None
+                elif call.id not in decisions.journal_resolved:
+                    try:
+                        await journal.resolve(
+                            key,
+                            outcome.resolution,
+                            actor=decisions.actor,
+                            result=text if text is not None else outcome.reason or None,
+                        )
+                    except EffectAlreadyResolvedError as exc:
+                        bad = ApprovalDecisionError(
+                            f"Outcome of '{call.id}' was already resolved differently: {exc}"
+                        )
+                        yield _failed(state.run_id, bad)
+                        raise bad from exc
+            if outcome.resolution == "confirmed":
+                assert text is not None
+                decisions.answers[call.id] = text
+                if key is not None:
+                    state.dispatch_keys[call.id] = key
+            elif outcome.resolution == "failed":
+                failed.append((call, outcome))
+            elif call.id in decisions.resend:
+                pass  # approved in this resume: that is its fresh approval
+            elif tool is not None and tool.needs_approval(state.ctx, call.arguments):
+                decisions.deferred.add(call.id)  # not applied: send again after approval
+        if failed:
+            call, outcome = failed[0]
+            err = ToolExecutionError(
+                tool_name=call.name,
+                original_error=RuntimeError(
+                    f"tool call '{call.id}' was resolved as failed"
+                    + (f": {outcome.reason}" if outcome.reason else "")
+                ),
+            )
+            yield _failed(state.run_id, err)
+            raise err
+
+    async def _pause_for_reapproval(
+        self, state: _RunState, calls: list[ToolCall], decisions: _Decisions
+    ) -> AsyncGenerator[RunEvent, None]:
+        """Pause for a fresh approval of calls whose earlier dispatch did not happen."""
+        pending = [c for c in calls if c.id in decisions.deferred]
+        interruption = self._make_interruption(
+            state, pending, copy_messages=True, reason=_REAPPROVE_REASON
+        )
+        await self._remember_interruption(interruption)
+        if self.checkpoint_store is not None:
+            await self._save_interruption(state, "paused", interruption)
+        yield RunEvent(
+            type=RunEventType.RUN_PAUSED,
+            run_id=state.run_id,
+            data={
+                "pending": [
+                    {"id": c.id, "name": c.name, "arguments": c.arguments} for c in pending
+                ],
+                "interruption": interruption,
+                "last_agent": state.agent,
+                "agent_path": list(state.path),
+            },
+        )
+
     async def _run_tools(
         self,
         agent: Agent,
@@ -2411,6 +2725,12 @@ class Runner:
             )
             if self.checkpoint_store is not None:
                 await self._checkpoint(state, "tools_pending")
+            dispatched = state.dispatch_keys.pop(tc.id, None)
+            if dispatched is not None and state.journal is not None:
+                # The result is in the checkpoint: close the call's intent in the journal.
+                await state.journal.record_outcome(
+                    dispatched, result_text, uncertain=retry_reason == "tool_timeout"
+                )
         if failure is not None:
             tc, outcome = failure
             if isinstance(outcome, TimeoutError):
@@ -2475,7 +2795,14 @@ class Runner:
             return decisions.answers[tc.id], None  # the person's answer to ask_user
 
         retries = state.tool_retries.get(tc.name, 0)
-        tool_ctx = state.ctx.for_tool(tc.id, tc.name, retries)
+        step_key = self._dispatch_key(state, tc)
+        tool_ctx = state.ctx.for_tool(
+            tc.id,
+            tc.name,
+            retries,
+            idempotency_key=self._idempotency_key(state, step_key),
+            fencing_token=state.journal.fencing_token if state.journal is not None else None,
+        )
         limit = tool.max_retries if tool.max_retries is not None else 1
         if tool.input_guardrails:
             blocked = await _until_cancelled(
@@ -2496,7 +2823,9 @@ class Runner:
                 if answered is not None:
                     result = answered  # the hook answered: the tool does not run
                 else:
-                    result = await self._execute_with_retry(state, tc, tool, tool_ctx)
+                    result = await self._execute_with_retry(
+                        state, tc, tool, tool_ctx, step_key=step_key
+                    )
                 if isinstance(result, _TimedOut):
                     return result.message, "tool_timeout"
             except ModelRetry as retry:
@@ -2533,9 +2862,21 @@ class Runner:
         return result, None
 
     async def _execute_with_retry(
-        self, state: _RunState, tc: ToolCall, tool: Tool, tool_ctx: RunContext[Any]
+        self,
+        state: _RunState,
+        tc: ToolCall,
+        tool: Tool,
+        tool_ctx: RunContext[Any],
+        *,
+        step_key: StepKey | None = None,
     ) -> Any:
-        """Run the tool (with its own timeout), retrying transient errors per ``tool.retry``."""
+        """Run the tool (with its own timeout), retrying transient errors per ``tool.retry``.
+
+        In a journaled durable run, a non-pure call's intent is committed first (fenced by
+        the run lease), so a crash before this point is known to have dispatched nothing.
+        """
+        if state.journal is not None:
+            await self._record_intent(state, tc, tool, tool_ctx, step_key)
         policy = tool.retry
         attempt = 0
         while True:
@@ -2584,6 +2925,49 @@ class Runner:
                 raise
 
     # ------------------------------------------------------------------ durable runs
+
+    @staticmethod
+    def _dispatch_key(state: _RunState, tc: ToolCall) -> StepKey:
+        """The journal step key of this call's next dispatch (``turn:<n>/call:<id>[#k]``)."""
+        from nexura_agents._agent_journal import call_step_key
+
+        if state.journal is not None:
+            return state.journal.dispatch_key(state.turn, tc.id)
+        return call_step_key(state.turn, tc.id)
+
+    @staticmethod
+    def _idempotency_key(state: _RunState, step_key: StepKey) -> str:
+        """``nx-`` + 32 hex of sha256(workspace, run, step key, 0): stable across takeover."""
+        from nexura_agents.contracts.execution import ExecutionId, default_idempotency_key
+
+        workspace = state.journal.eid.workspace_id if state.journal is not None else "default"
+        return default_idempotency_key(ExecutionId(workspace, state.run_id), step_key)
+
+    async def _record_intent(
+        self,
+        state: _RunState,
+        tc: ToolCall,
+        tool: Tool,
+        tool_ctx: RunContext[Any],
+        step_key: StepKey | None,
+    ) -> None:
+        from nexura_agents.contracts.execution import EffectClass, StepIntent
+
+        journal = state.journal
+        assert journal is not None
+        journal.check()  # assert_lease: a worker that lost the run dispatches nothing
+        effect = tool.effect_class()
+        if effect is EffectClass.PURE:
+            return
+        key = step_key if step_key is not None else self._dispatch_key(state, tc)
+        intent = StepIntent(
+            step_key=key,
+            payload_digest=RunInterruption.action_digest(tc),
+            idempotency_key=tool_ctx.idempotency_key or self._idempotency_key(state, key),
+            effect_class=effect,
+        )
+        await journal.record_intent(intent, tc.name)
+        state.dispatch_keys[tc.id] = key
 
     @staticmethod
     def _state_from_interruption(
@@ -2805,6 +3189,8 @@ class Runner:
             agent_started_at=state.agent_started_at,
         )
         try:
+            if state.journal is not None:
+                state.journal.check()  # a worker that lost the run lease writes nothing
             if accepts_fencing(self.checkpoint_store.save):
                 # Refused when another caller holds the recovery lease, so a stalled or
                 # superseded writer can never overwrite newer progress.
@@ -2813,16 +3199,40 @@ class Runner:
                 )
             else:
                 await self.checkpoint_store.save(state.run_id, data)
+            if phase == "paused" and state.journal is not None and state.journal.held:
+                keys = [
+                    state.in_doubt[c.id] for c in interruption.pending if c.id in state.in_doubt
+                ]
+                await state.journal.pause(interruption.pause_reason, keys)
         except Exception:
             state.checkpoint_store_failed = True
             raise
 
-    async def _delete_checkpoint(self, run_id: str, owner: str | None) -> None:
-        """Best-effort cleanup; fenced so a stale caller cannot delete a recoverer's work."""
+    async def _delete_checkpoint(
+        self,
+        run_id: str,
+        owner: str | None,
+        journal: AgentJournal | None = None,
+        status: str = "failed",
+    ) -> None:
+        """Best-effort cleanup; fenced so a stale caller cannot delete a recoverer's work.
+
+        With a journal, the run's status becomes ``status`` first (fenced), then the
+        checkpoint is deleted: a crash in between leaves a terminal journal row and a
+        checkpoint that ``recover`` finishes (a ``completed`` one is replayed), never a
+        ``running`` row without a checkpoint. A refused journal write deletes nothing.
+        """
         from nexura_agents.durable import accepts_fencing
 
         store = self.checkpoint_store
         assert store is not None
+        if journal is not None:
+            await journal.stop_heartbeat()
+            if journal.held:
+                try:
+                    await journal.finish(status)
+                except Exception:
+                    return  # stale or failing journal: keep the checkpoint
         with contextlib.suppress(Exception):
             if accepts_fencing(store.delete, "fenced"):
                 await store.delete(run_id, owner, fenced=True)  # type: ignore[call-arg]
@@ -2929,6 +3339,38 @@ class Runner:
         checkpoints = self.checkpoint_store
         if checkpoints is None:
             raise SDKValidationError("recover needs Runner(checkpoint_store=...).")
+        from nexura_agents._agent_journal import AgentJournal, journal_capable
+
+        if journal_capable(checkpoints):
+            from nexura_agents.durable import new_lease_owner
+
+            # The run lease: free, expired, or held by a process on this host that is gone.
+            journal = await AgentJournal.open(checkpoints, run_id, self.lease_ttl)
+            lease_owner = new_lease_owner()
+            if not await journal.takeover(lease_owner, agent.definition_digest(), agent.name):
+                raise RunRecoveryError(
+                    f"Run '{run_id}' is already being recovered by another caller (or its "
+                    "process still holds the run lease)."
+                )
+            journal.start_heartbeat()  # reconcile probes run before the loop
+            try:
+                async for event in self._recover_claimed(
+                    agent,
+                    run_id,
+                    deps=deps,
+                    on_uncertain=on_uncertain,
+                    timeout=timeout,
+                    session_store=session_store,
+                    stream_text=stream_text,
+                    cancel=cancel,
+                    _span=_span,
+                    _owner=lease_owner,
+                    _journal=journal,
+                ):
+                    yield event
+            finally:
+                await journal.close()
+            return
         # Exclusive recovery lease: a second recoverer of the same run must not continue it.
         claim = getattr(checkpoints, "claim", None)
         owner = uuid.uuid4().hex
@@ -2967,6 +3409,7 @@ class Runner:
         cancel: CancelToken | None = None,
         _span: Any = tracing.NOOP,
         _owner: str | None = None,
+        _journal: AgentJournal | None = None,
     ) -> AsyncGenerator[RunEvent, None]:
         from nexura_agents.durable import (
             checkpoint_final_text,
@@ -2987,6 +3430,17 @@ class Runner:
         if raw is None:
             raise RunRecoveryError(f"No checkpoint found for run '{run_id}'.")
         phase, interruption = decode_checkpoint(raw, run_id)
+        if (
+            _journal is not None
+            and _journal.status in ("completed", "failed")
+            and phase != "completed"
+        ):
+            # Its terminal status was committed before a lost checkpoint cleanup.
+            await self._delete_checkpoint(run_id, _owner)
+            raise RunRecoveryError(
+                f"Run '{run_id}' has already {_journal.status}; only its lost cleanup "
+                "could be finished, and its checkpoint is not a completed one."
+            )
         if interruption.agent_name != agent.name:
             raise RunRecoveryError(
                 f"Checkpoint of run '{run_id}' belongs to agent '{interruption.agent_name}', "
@@ -2999,6 +3453,10 @@ class Runner:
         state = self._state_from_interruption(interruption, agent, active, deps, timeout, _span)
         state.checkpoint_owner = _owner
         state.cancel = cancel
+        if _journal is not None and _journal.lease is not None:
+            state.journal = _journal
+            if _journal.stored_digest != agent.definition_digest():
+                _warn_definition_changed(run_id, agent)
         # Older checkpoints keep these counters only in the envelope.
         state.output_attempts = checkpoint_output_attempts(raw) or state.output_attempts
         state.agent_started_at = min(
@@ -3012,8 +3470,23 @@ class Runner:
             _span.set(tracing.AGENT_PATH, list(state.path))
             _span.set(tracing.LAST_AGENT, active.name)
 
-        if phase == "paused":
+        if state.journal is not None:
+            await self._heal_journal(state, phase, interruption)
+        if phase == "paused" and not await self._paused_effects_resolved(state, interruption):
             # Still waiting for a human: hand the stored interruption back.
+            if (
+                state.journal is not None
+                and state.journal.held
+                and state.journal.status != "paused"
+            ):
+                # The pause reached the checkpoint but not the journal (a crash between
+                # the two): write it now, so the journal says paused / indeterminate.
+                keys = [
+                    state.journal.latest(state.turn, c.id)[1]
+                    for c in interruption.pending
+                    if interruption.reason == _UNKNOWN_REASON
+                ]
+                await state.journal.pause(interruption.pause_reason, keys)
             yield RunEvent(
                 type=RunEventType.RUN_PAUSED,
                 run_id=run_id,
@@ -3047,7 +3520,9 @@ class Runner:
             )
             await _hook(hooks, "on_agent_end", state.ctx, active, output)
             await hooks.on_run_end(state.ctx, output)  # at-least-once across a crash
-            await self._delete_checkpoint(run_id, state.checkpoint_owner)
+            await self._delete_checkpoint(
+                run_id, state.checkpoint_owner, state.journal, "completed"
+            )
             for custom in _pending_custom(state):
                 yield custom
             yield RunEvent(
@@ -3072,19 +3547,25 @@ class Runner:
 
         effective_store = self._store(session_store)
         resume_batch: tuple[list[ToolCall], _Decisions] | None = None
-        if phase == "tools_pending":
+        if phase in ("tools_pending", "paused"):
             calls, remaining_calls = _unanswered(state.messages)
             self._restore_handoff(state, calls, interruption)
-            uncertain = [
-                c
-                for c in remaining_calls
-                if c.name not in active.handoffs_by_name
-                and (tool := active.tools_by_name.get(c.name)) is not None
-                and not getattr(tool, "idempotent", False)
-            ]
+            if state.journal is not None:
+                await state.journal.ensure_running()
             decisions = _Decisions()
+            uncertain: list[ToolCall] = []
+            for c in remaining_calls:
+                if c.name in active.handoffs_by_name:
+                    continue
+                tool = active.tools_by_name.get(c.name)
+                if tool is not None and not await self._settle_in_doubt(state, tool, c, decisions):
+                    uncertain.append(c)
             if uncertain:
                 names = ", ".join(f"{c.name}({c.id})" for c in uncertain)
+                if on_uncertain != "pause" and state.journal is not None:
+                    await state.journal.mark_indeterminate(
+                        [state.in_doubt[c.id] for c in uncertain if c.id in state.in_doubt]
+                    )
                 if on_uncertain == "fail":
                     raise RunRecoveryError(
                         f"Run '{run_id}' stopped while these tool calls may have executed: "
@@ -3117,6 +3598,170 @@ class Runner:
             state, effective_store, hooks, stream_text=stream_text, resume_batch=resume_batch
         ):
             yield event
+
+    async def _heal_journal(
+        self, state: _RunState, phase: str, interruption: RunInterruption
+    ) -> None:
+        """Close intents whose result reached the checkpoint but not the journal.
+
+        A crash between saving a tool result and committing its outcome leaves the effect
+        ``pending``; the checkpointed result is the outcome, so record it now.
+        """
+        from nexura_agents.contracts.execution import EffectStatus
+
+        journal = state.journal
+        if journal is None or not journal.held or phase == "completed":
+            return
+        calls, remaining = _unanswered(state.messages)
+        open_ids = {c.id for c in remaining}
+        results = {m.tool_call_id: m.content or "" for m in state.messages if m.role == "tool"}
+        for call in calls:
+            if call.id in open_ids or call.id not in results:
+                continue
+            _, key, step = journal.latest(state.turn, call.id)
+            effect = journal.effects.get(str(key))
+            if (
+                step is not None
+                and step.intent is not None
+                and step.outcome is None
+                and effect is not None
+                and effect.status == EffectStatus.PENDING
+            ):
+                await journal.record_outcome(key, results[call.id])
+
+    async def _paused_effects_resolved(
+        self, state: _RunState, interruption: RunInterruption
+    ) -> bool:
+        """A crash pause whose in-doubt effects were all resolved in the journal (for
+        example through the effects API) continues on recover; the stale pause is consumed."""
+        from nexura_agents.contracts.execution import EffectStatus
+
+        journal = state.journal
+        if journal is None or interruption.reason != _UNKNOWN_REASON or not interruption.pending:
+            return False
+        for call in interruption.pending:
+            _, key, step = journal.latest(state.turn, call.id)
+            effect = journal.effects.get(str(key))
+            if step is None or effect is None or effect.status != EffectStatus.RESOLVED:
+                return False
+        store = self.approval_store
+        if store is not None and callable(getattr(store, "consume_approval", None)):
+            with contextlib.suppress(Exception):
+                await store.consume_approval(
+                    interruption.interruption_id, _approval_payload(interruption)
+                )
+        return True
+
+    async def _settle_in_doubt(
+        self, state: _RunState, tool: Tool, call: ToolCall, decisions: _Decisions
+    ) -> bool:
+        """Decide what recovery does with an unanswered call; False means its outcome is unknown.
+
+        With a journal, a call without an intent was never dispatched and simply runs. A
+        dispatched one: pure and idempotent calls run again with the same key, a
+        reconcilable one is probed, a resolved effect applies its resolution, and a
+        non-idempotent one is in doubt. Without a journal every unanswered call may have
+        been dispatched.
+        """
+        from nexura_agents.contracts.execution import (
+            Applied,
+            EffectClass,
+            EffectStatus,
+            NotApplied,
+            StepIntent,
+        )
+        from nexura_agents.durable import ResolvedOutcome
+
+        effect = tool.effect_class()
+        journal = state.journal
+        step = None
+        if journal is not None:
+            _, key, step = journal.latest(state.turn, call.id)
+            if (step is None or step.intent is None) and not journal.unjournaled_dispatch_possible(
+                state.turn
+            ):
+                return True  # K1: nothing was dispatched
+            # Otherwise without an intent: checkpointed before the run had a journal (H1).
+        if journal is not None and step is not None and step.intent is not None:
+            if step.outcome is not None:
+                decisions.answers[call.id] = _result_text(tool, step.outcome.output)
+                return True
+            record = journal.effects.get(str(key))
+            if record is not None and record.status == EffectStatus.RESOLVED:
+                assert record.resolution is not None
+                decisions.outcomes[call.id] = ResolvedOutcome(
+                    result=record.result,
+                    resolution=record.resolution.value,
+                    reason=str(record.result or "") if record.resolution == "failed" else "",
+                )
+                decisions.journal_resolved.add(call.id)
+                return True
+            if record is not None and record.status == EffectStatus.CONFIRMED:
+                decisions.answers[call.id] = _result_text(tool, record.result)
+                state.dispatch_keys[call.id] = key
+                return True
+            intent = step.intent
+            # The promise the call was sent under decides (H3): a tool re-declared after the
+            # crash can only make recovery stricter, never looser.
+            effect = _stricter_effect(intent.effect_class, effect, tool)
+        else:
+            key = self._dispatch_key(state, call)
+            intent = StepIntent(
+                step_key=key,
+                payload_digest=RunInterruption.action_digest(call),
+                idempotency_key=self._idempotency_key(state, key),
+                effect_class=effect,
+            )
+        if effect in (EffectClass.PURE, EffectClass.IDEMPOTENT):
+            return True  # re-run with the same idempotency key
+        if effect is EffectClass.RECONCILABLE:
+            probe = await self._reconcile(state, tool, call, intent)
+            if isinstance(probe, Applied):
+                decisions.answers[call.id] = _result_text(tool, probe.result)
+                if journal is not None:
+                    state.dispatch_keys[call.id] = key
+                return True
+            if isinstance(probe, NotApplied):
+                if tool.needs_approval(state.ctx, call.arguments):
+                    decisions.deferred.add(call.id)  # its approval was used by the first try
+                return True
+        state.in_doubt[call.id] = key
+        return False
+
+    async def _reconcile(
+        self, state: _RunState, tool: Tool, call: ToolCall, intent: StepIntent
+    ) -> ReconcileResult:
+        """Run the tool's ``reconcile(ctx, intent)``; an error or bad answer means Unknown."""
+        from nexura_agents.contracts.execution import Applied, NotApplied, Unknown
+
+        ctx = state.ctx.for_tool(
+            call.id,
+            call.name,
+            0,
+            idempotency_key=intent.idempotency_key,
+            fencing_token=state.journal.fencing_token if state.journal is not None else None,
+        )
+        assert tool.reconcile is not None
+        try:
+            probe = tool.reconcile(ctx, intent)
+            if inspect.isawaitable(probe):
+                probe = await probe
+        except Exception as exc:
+            warnings.warn(
+                f"reconcile of tool '{tool.name}' failed ({exc!r}); its outcome stays unknown.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return Unknown()
+        if not isinstance(probe, (Applied, NotApplied, Unknown)):
+            warnings.warn(
+                f"reconcile of tool '{tool.name}' must return Applied(result), NotApplied() or "
+                f"Unknown(), not {type(probe).__name__}; its outcome stays unknown.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return Unknown()
+        return probe
 
     # ------------------------------------------------------------------ helpers
 

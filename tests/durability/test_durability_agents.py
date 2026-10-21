@@ -1,9 +1,8 @@
 """A6 S0: SDK ``Runner(checkpoint_store=...)`` under real SIGKILL / SIGSTOP.
 
-Rows of the design §4 matrix for the agent path, on a SQLite file (Postgres rows are
-strict expected failures until A6 S5 adds a Postgres checkpoint store). Tests that assert
-the target contract where today's behaviour differs are ``xfail(strict=True)`` and flip
-to passing when the named step lands.
+Rows of the design §4 matrix for the agent path, on a SQLite file and on Postgres
+(``nexura_postgres.PostgresCheckpointStore``, A6 S5; skipped without
+``NEXURA_TEST_POSTGRES_URI``). The S5 rows that were ``xfail(strict=True)`` now pass.
 
 Effects go to the external effect service; ``ledger.applied`` is how often the effect
 really happened. ``charge`` is a plain (non-idempotent) tool; ``reserve`` is
@@ -16,27 +15,11 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from durability_harness import POSTGRES_STORES, Backend, Harness
+from durability_harness import Backend, Harness
 
 pytestmark = pytest.mark.durability
 
-ON_BACKENDS = pytest.mark.parametrize(
-    "backend",
-    [
-        "sqlite",
-        pytest.param(
-            "postgres",
-            marks=pytest.mark.xfail(
-                strict=True, raises=AssertionError, reason=POSTGRES_STORES["agent"][1]
-            ),
-        ),
-    ],
-    indirect=True,
-)
-
-
-def _target(step: str, what: str) -> pytest.MarkDecorator:
-    return pytest.mark.xfail(strict=True, raises=AssertionError, reason=f"A6 {step}: {what}")
+ON_BACKENDS = pytest.mark.parametrize("backend", ["sqlite", "postgres"], indirect=True)
 
 
 def _crash_run(harness: Harness, tool: str, point: str, mode: str = "forever") -> tuple[Any, str]:
@@ -86,7 +69,6 @@ def test_kill_during_idempotent_tool_reruns_and_remote_deduplicates(
 
 
 @ON_BACKENDS
-@_target("S5", "ToolContext.idempotency_key, stable across takeover")
 def test_idempotent_rerun_gets_the_same_runtime_idempotency_key(
     harness: Harness, backend: Backend
 ) -> None:
@@ -102,7 +84,6 @@ def test_idempotent_rerun_gets_the_same_runtime_idempotency_key(
 
 
 @ON_BACKENDS
-@_target("S5", "per-call intent written just before invocation, not at batch start")
 def test_kill_before_non_idempotent_dispatch_runs_it_once(
     harness: Harness, backend: Backend
 ) -> None:
@@ -139,7 +120,6 @@ def test_kill_after_tool_result_commit_continues_without_repeating(
 
 
 @ON_BACKENDS
-@_target("S5", "the original run holds a lease from its first write; a stale owner is fenced")
 def test_stale_original_run_is_fenced_after_takeover(harness: Harness, backend: Backend) -> None:
     """K6: the original process is frozen (SIGSTOP) before the tool, another process takes
     over, then the original wakes up (SIGCONT).
