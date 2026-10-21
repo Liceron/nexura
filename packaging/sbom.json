@@ -14,7 +14,7 @@
       },
       {
         "name": "nexura:lock-sha256",
-        "value": "f957fdae96c36fc4b8fca85c6c25234ae73b77f759c4c73abd92bc901c2246e6"
+        "value": "d9b7ac1a588cf65d94916bd33ece2abcdda462b282e7d2ae5ec23295fdef085e"
       },
       {
         "name": "nexura:generator",
@@ -919,6 +919,7 @@
     {
       "ref": "pkg:pypi/nexura-agents@0.4.0",
       "dependsOn": [
+        "pkg:pypi/cryptography@50.0.2",
         "pkg:pypi/httpx@0.28.1",
         "pkg:pypi/litellm@1.106.0",
         "pkg:pypi/opentelemetry-api@1.45.1",
