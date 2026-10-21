@@ -157,7 +157,8 @@ def _crypto() -> Any:
     except ImportError as exc:  # pragma: no cover - depends on the environment
         raise A2AError(
             -32603,
-            "Agent card signing needs the 'cryptography' package (pip install 'nexura-agents[signing]').",
+            "Agent card signing needs the 'cryptography' package "
+            "(pip install 'nexura-agents[signing]').",
         ) from exc
     return hashes, ec, ed25519, padding, rsa, utils
 
