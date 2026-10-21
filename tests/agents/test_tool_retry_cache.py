@@ -37,8 +37,19 @@ async def run(tools: list[Any], responses: list[Any], **kw: Any) -> Any:
 # ---------------------------------------------------------------- retry
 
 
-async def test_transient_errors_are_retried_with_backoff() -> None:
+async def test_transient_errors_are_retried_with_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
     attempts: list[float] = []
+    # Record the delays the runner asks for: wall-clock gaps this short are below the
+    # Windows timer resolution (about 15.6 ms), so measuring them is unreliable there.
+    slept: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def recording_sleep(delay: float, *args: Any, **kwargs: Any) -> Any:
+        if delay > 0:
+            slept.append(delay)
+        return await real_sleep(delay, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "sleep", recording_sleep)
 
     @tool(idempotent=True, retry=ToolRetry(max_attempts=3, initial_delay=0.01))
     def flaky(q: str) -> str:
@@ -51,7 +62,8 @@ async def test_transient_errors_are_retried_with_backoff() -> None:
     result = await run([flaky], [calls(("flaky", {"q": "x"})), "done"])
     assert results(result) == ["found x"]
     assert len(attempts) == 3
-    assert attempts[2] - attempts[1] >= attempts[1] - attempts[0]  # backoff grows
+    assert attempts[2] >= attempts[1] >= attempts[0]
+    assert len(slept) == 2 and slept[1] > slept[0]  # backoff grows
     assert not [e for e in result.events if e.type == RunEventType.RETRY]  # invisible to the model
 
 
