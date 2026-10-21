@@ -341,12 +341,117 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-Limits: sub-workflow, parallel and `map_over` steps record one intent for the whole step
-(the weakest class of their parts) until per-branch, per-item and per-child intents land;
-sub-workflow children keep no journal of their own, and a recovered parent re-attaches to
-its child run as before. `SQLiteWorkflowStore` is for one host; there is no Postgres
-workflow store yet. `fork` is unchanged: it starts a new run that runs the forked step
-again.
+#### Parallel, map and sub-workflow steps
+
+The parts of a composite step are recorded one by one. Each parallel branch
+(`<node>/<branch>#<step>`) and each mapped item (`<node>#<step>[<item>]`) has its own
+intent, outcome and idempotency key (`ctx.idempotency_key()` / `step_idempotency_key()`
+inside it return the part's key). A sub-workflow child keeps its own journal under its run
+id (`<parent>/<node>#<step>[[<item>]]`, with `parent_run_id` set). When `recover` runs the
+step again, it decides per part:
+
+- a part whose outcome was recorded is **not** run again; its recorded update is used;
+- a part that never started runs;
+- a part that started without an outcome follows its effect class, with its own key:
+  `pure` and `idempotent` parts run again with the same key, `reconcilable` parts are
+  probed one by one, and a `non_idempotent` part is never repeated: once the other parts
+  have finished, the run pauses `effect_unknown` with a `pending_effect` naming the part
+  (`"part": "item"` and `"item": 2`, `"part": "branch"` and `"branch": "charge"`, or
+  `"part": "subworkflow"` and the child's `"run_id"`);
+- a sub-workflow child is recovered under its own journal from the parent's `recover`
+  (call `recover` on the top-level run, not on the child).
+
+`resolve_effect` applies to that part only: `"confirmed"` uses `result` as the part's
+update, `"not_applied"` sends that part again as a new attempt (`<node>#<step>.2[<item>]`,
+a new key; a step that needs approval first asks for a fresh one), `"failed"` fails the run.
+If several parts are in doubt, the run pauses on them one at a time. A retry of the step
+in the same process (`retry=`) keeps the parts that already finished and runs the failed
+ones again with their keys.
+
+```python
+import asyncio
+
+from nexura_runtime.workflow import (
+    MemoryWorkflowStore,
+    ModuleRegistry,
+    WorkflowEngine,
+    WorkflowNode,
+    WorkflowSpec,
+)
+
+sent: list[int] = []
+
+
+class ProcessStopped(BaseException):
+    """Stands in for the process dying while invoice 2 is being sent."""
+
+
+registry = ModuleRegistry()
+
+
+@registry.register_handler("send_invoice")  # undeclared: non_idempotent
+def send_invoice(state: dict) -> dict:
+    sent.append(state["invoice"])
+    if state["invoice"] == 2 and sent.count(2) == 1:
+        raise ProcessStopped
+    return {"sent": state["invoice"]}
+
+
+spec = WorkflowSpec(
+    name="Invoices",
+    entry_node="send",
+    nodes={
+        "send": WorkflowNode(
+            id="send",
+            handler="send_invoice",
+            map_over="invoices",
+            map_as="invoice",
+            reducers={"sent": "append"},
+            max_concurrency=1,
+        )
+    },
+    terminal_nodes=["send"],
+)
+
+
+async def main() -> None:
+    store = MemoryWorkflowStore()
+    try:
+        await WorkflowEngine(spec, registry, store=store).run(
+            {"invoices": [1, 2, 3]}, workflow_run_id="inv-1"
+        )
+    except ProcessStopped:
+        pass
+
+    engine = WorkflowEngine(spec, registry, store=store)  # after the restart
+    paused = await engine.recover("inv-1")
+    assert paused.pause_reason == "effect_unknown"
+    assert paused.pending_effect["item"] == 1  # invoice 2 is in doubt
+    assert sent == [1, 2, 3]  # invoice 1 was not sent again; invoice 3 was sent once
+
+    done = await engine.resolve_effect("inv-1", "confirmed", actor="ops", result={"sent": 2})
+    assert done.status == "completed" and done.state["sent"] == [1, 2, 3]
+    assert sent == [1, 2, 3]
+
+
+asyncio.run(main())
+```
+
+#### Built-in modules use the step's key
+
+`nexura.http.request` sends the step's key as `Idempotency-Key` on writes (POST, PUT,
+PATCH, DELETE, OPTIONS) when you give no `idempotency_key` input or header, so its
+`retries` input (at most 5; transport errors and 429/5xx answers) can retry a POST or PATCH
+inside a workflow step. Outside a workflow step, a POST/PATCH retry without a key is still
+refused (`NonIdempotentRetryForbiddenError`). The email and WhatsApp channel modules use
+the step's key as the outbox de-duplication key, and connector writes send it as
+`Idempotency-Key` (the S3 connector, which signs its headers, does not). An explicit key
+always wins.
+
+Limits: `SQLiteWorkflowStore` is for one host; there is no Postgres workflow store yet.
+`fork` is unchanged: it starts a new run that runs the forked step again. A child whose
+`recover` was asked for with `on_uncertain="fail"` fails, and the parent's step fails like
+any failed sub-workflow (`WorkflowExecutionError`).
 
 ## Approval gates
 

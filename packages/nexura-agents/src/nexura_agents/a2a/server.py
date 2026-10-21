@@ -200,6 +200,10 @@ class A2AServer:
         deps: Passed to every run as ``RunContext.deps``.
         runner: ``Runner`` for agent runs (usage limits, hooks, budgets) and for teams
             without their own runner.
+        signing_key: Optional ``cryptography`` private key (EC P-256/P-384, Ed25519 or RSA).
+            When set, the served card carries a JWS signature (A2A 1.0 section 8.4).
+        signing_kid: Key id put in the signature header; required with ``signing_key``.
+        signing_jku: Optional JWK Set URL advertised in the signature header.
 
     Security model. One bearer token guards the whole endpoint, so every holder of it can
     read, continue and cancel every task; task and context ids are random 144-bit values
@@ -217,9 +221,17 @@ class A2AServer:
         skills: Sequence[dict[str, Any]] | None = None,
         deps: Any = None,
         runner: Any = None,
+        signing_key: Any = None,
+        signing_kid: str | None = None,
+        signing_jku: str | None = None,
     ) -> None:
         from nexura_agents.runner import Runner
 
+        if signing_key is not None and not signing_kid:
+            raise SDKValidationError("signing_kid is required when signing_key is set.")
+        self.signing_key = signing_key
+        self.signing_kid = signing_kid
+        self.signing_jku = signing_jku
         if not isinstance(agent_or_team, (Agent, Team)):
             raise SDKValidationError("A2AServer serves an Agent or a Team.")
         if not isinstance(url, str) or not url.startswith(("http://", "https://")):
@@ -259,7 +271,10 @@ class A2AServer:
     # ------------------------------------------------------------------ card
 
     def card(self, *, authenticated: bool = False) -> dict[str, Any]:
-        """The agent card. ``authenticated=True`` advertises bearer auth (``http_app`` does)."""
+        """The agent card. ``authenticated=True`` advertises bearer auth (``http_app`` does).
+
+        Signed when the server was given a ``signing_key``.
+        """
         card: dict[str, Any] = {
             "name": self.name,
             "description": self.description,
@@ -283,6 +298,13 @@ class A2AServer:
         if authenticated:
             card["securitySchemes"] = {"bearer": {"httpAuthSecurityScheme": {"scheme": "Bearer"}}}
             card["securityRequirements"] = [{"schemes": {"bearer": {"list": []}}}]
+        if self.signing_key is not None:
+            from nexura_agents.a2a.signing import sign_agent_card
+
+            assert self.signing_kid is not None
+            card = sign_agent_card(
+                card, self.signing_key, kid=self.signing_kid, jku=self.signing_jku
+            )
         return card
 
     # ------------------------------------------------------------- running

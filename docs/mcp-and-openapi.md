@@ -79,6 +79,77 @@ async with files, remote:
 
 `MCPServer.stdio(command, *args, env=None, cwd=None, allowed_commands=None)` only launches an allow-listed program: python, python3, uv, uvx, node and npx. Pass `allowed_commands={...}` to use another executable. `MCPServer.http(url, headers=None, timeout=30.0, transport=None)` takes extra headers for authentication. For HTTP the endpoint's own host is trusted, and loopback and private addresses are allowed by default, because the URL is your explicit choice.
 
+## Protocol versions
+
+Nexura speaks MCP **2026-07-28** (the current revision, with a stateless core) and the
+older handshake revisions **2025-11-25, 2025-06-18, 2025-03-26 and 2024-11-05**. Both the
+client (`MCPServer`, `McpClientSession`) and the server (`AgentMCPServer`,
+`McpServerSession`) prefer 2026-07-28.
+
+How the client picks a version (once per stdio process or HTTP endpoint):
+
+1. It sends `server/discover` with 2026-07-28 in `params._meta` (over HTTP also in the
+   `MCP-Protocol-Version` and `Mcp-Method` headers).
+2. A discover result that lists 2026-07-28: the session is stateless. Every request
+   carries `io.modelcontextprotocol/protocolVersion`, `clientInfo` and
+   `clientCapabilities` in `_meta`; there is no `initialize` and no HTTP session.
+3. `UnsupportedProtocolVersionError` (-32022): a mutual stateless version is retried;
+   if the server lists only handshake versions, the handshake is used; if it lists
+   nothing Nexura speaks, `McpProtocolVersionMismatchError` is raised.
+4. Any other answer (a legacy server's -32601/-32602, an HTTP 400/404/405 without a
+   2026-07-28 error, or on stdio no answer within `discover_timeout`, 10 s by default):
+   the server is treated as legacy and the `initialize` handshake runs.
+
+`session.era` is `"modern"` or `"legacy"` afterwards and `session.server_version` holds the
+version in use. To skip detection pass `protocol_version=` to `MCPServer` (or
+`McpClientSession`): a 2026-07-28 pin never falls back; a handshake version such as
+`"2025-06-18"` runs `initialize` offering it.
+
+What 2026-07-28 support covers:
+
+- **Tools, resources and prompts** over stdio and Streamable HTTP, with `resultType` on
+  every result (a missing one from an older server counts as `"complete"`).
+- **Request headers.** Over HTTP the client derives `MCP-Protocol-Version`, `Mcp-Method`,
+  `Mcp-Name` (tool or prompt name, resource URI) and `Mcp-Param-{Name}` (tool parameters
+  annotated with `x-mcp-header`) from each request body, Base64-encoding values that are
+  not plain ASCII. A tool whose `x-mcp-header` annotations break the specification is
+  left out of `list_tools()` with a warning. The server rejects any header that disagrees
+  with the body with HTTP 400 and `HeaderMismatch` (-32020).
+- **Cache hints.** The server puts `ttlMs` and `cacheScope` on discover, list and
+  `resources/read` results (`list_ttl_ms`, default 60 s on `AgentMCPServer` and 0 on
+  `McpServerSession`; `resources/read` is always 0; scope `"private"` by default). The
+  client records them in `session.cache_hints`. It does not change its own caching:
+  `MCPServer.list_tools()` keeps its list until `refresh=True`, and pinned calls re-list
+  as before (`tool_list_max_age`).
+- **Multi round-trip requests.** If a server answers `tools/call`, `resources/read` or
+  `prompts/get` with `resultType: "input_required"`, the client retries with a new
+  request id, echoing `requestState` unchanged. `inputRequests` (elicitation, sampling,
+  roots) are answered only through `McpClientSession(input_handler=...)`, together with
+  the matching `client_capabilities`; otherwise `McpInputRequiredError` is raised. Retries
+  stop after `max_input_rounds` (8). Nexura's own server never asks for input: tools that
+  need approval are refused, as before.
+- **Authorization.** The client sends the `headers` you pass; it does not run an OAuth
+  flow. If you run your own authorization-code flow, `check_metadata_issuer` and
+  `check_authorization_response_issuer` (in `nexura_agents.mcp`) apply the RFC 8414 issuer
+  check and the RFC 9207 `iss` check that 2026-07-28 requires before the code is redeemed.
+
+Not implemented: `subscriptions/listen` (so the server advertises no `listChanged` on
+2026-07-28 and sends no change notifications), progress notifications, completion,
+pagination cursors (lists are returned whole), resource templates (the list is always
+empty), and the deprecated Roots, Sampling and Logging features. None of the optional
+extensions is implemented: **Tasks** (`io.modelcontextprotocol/tasks`), **MCP Apps**
+(`io.modelcontextprotocol/ui`) and **Enterprise Managed Authorization**. Neither is the
+deprecated HTTP+SSE transport of 2024-11-05: `MCPServer.http` speaks Streamable HTTP only.
+
+**Verified:** the offline tests in `experiments/interop` (a separate uv project) run
+Nexura against the official MCP Python SDK in both directions, over stdio and over
+Streamable HTTP on 127.0.0.1: the `mcp` 2.3.0 client (`mode="auto"`, `"2026-07-28"` and
+`"legacy"`) against `AgentMCPServer`; Nexura's client against an `mcp` 2.3.0 server
+(stateless, including an `x-mcp-header` parameter the reference server enforces); the
+handshake-only `mcp` 1.30.0 client against `AgentMCPServer`; and Nexura's client falling
+back to 2025-11-25 against an `mcp` 1.30.0 server. Desktop MCP apps (Claude Desktop,
+Cursor, VS Code) and public MCP servers have not been tested.
+
 ## Options common to both constructors
 
 Both constructors pass these keyword arguments on to `MCPServer`:

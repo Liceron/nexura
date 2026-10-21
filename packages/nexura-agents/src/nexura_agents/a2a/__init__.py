@@ -2,7 +2,8 @@
 # Copyright (c) 2026 Liceron
 """A2A (Agent2Agent) interoperability: serve Nexura agents and call remote A2A agents.
 
-Implements A2A protocol 1.0 over the JSON-RPC binding (plus the 0.3 method names).
+Implements A2A protocol 1.0 over the JSON-RPC binding (plus the 0.3 method names), with
+optional signed Agent Cards (JWS over the RFC 8785 canonical card).
 """
 
 from __future__ import annotations
@@ -18,6 +19,9 @@ _EXPORTS = {
     "remote_agent_tool": "nexura_agents.a2a.client",
     "A2AError": "nexura_agents.a2a.protocol",
     "PROTOCOL_VERSION": "nexura_agents.a2a.protocol",
+    "AgentCardSignatureError": "nexura_agents.a2a.signing",
+    "sign_agent_card": "nexura_agents.a2a.signing",
+    "verify_agent_card": "nexura_agents.a2a.signing",
 }
 
 __all__ = [
@@ -28,6 +32,9 @@ __all__ = [
     "remote_agent_tool",
     "A2AError",
     "PROTOCOL_VERSION",
+    "AgentCardSignatureError",
+    "sign_agent_card",
+    "verify_agent_card",
 ]
 
 
@@ -44,3 +51,8 @@ if TYPE_CHECKING:
     from nexura_agents.a2a.client import A2AClient, A2AEvent, A2ATask, remote_agent_tool
     from nexura_agents.a2a.protocol import PROTOCOL_VERSION, A2AError
     from nexura_agents.a2a.server import A2AServer
+    from nexura_agents.a2a.signing import (
+        AgentCardSignatureError,
+        sign_agent_card,
+        verify_agent_card,
+    )

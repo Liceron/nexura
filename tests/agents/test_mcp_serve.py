@@ -10,7 +10,7 @@ from typing import Any
 import httpx
 import pytest
 from nexura_agents import Agent, AgentMCPServer, FakeModel, MCPServer, ToolCall, tool
-from nexura_agents.mcp.types import LATEST_PROTOCOL_VERSION
+from nexura_agents.mcp.types import LATEST_HANDSHAKE_VERSION, LATEST_PROTOCOL_VERSION
 from pydantic import BaseModel
 
 FIXTURE = Path(__file__).with_name("mcp_agent_server_fixture.py")
@@ -124,7 +124,8 @@ async def test_http_app_rejects_bad_auth_origin_session_and_methods() -> None:
         "id": 1,
         "method": "initialize",
         "params": {
-            "protocolVersion": LATEST_PROTOCOL_VERSION,
+            # initialize exists only in the handshake revisions (2026-07-28 has none).
+            "protocolVersion": LATEST_HANDSHAKE_VERSION,
             "capabilities": {},
             "clientInfo": {"name": "t", "version": "1"},
         },
@@ -137,7 +138,11 @@ async def test_http_app_rejects_bad_auth_origin_session_and_methods() -> None:
 
     ok = await raw(app, "POST", init, **auth)
     session = ok.headers["mcp-session-id"]
-    assert ok.json()["result"]["protocolVersion"] == LATEST_PROTOCOL_VERSION
+    assert ok.json()["result"]["protocolVersion"] == LATEST_HANDSHAKE_VERSION
+    # Asking initialize for the stateless revision is answered with the newest handshake one.
+    modern_init = {**init, "params": {**init["params"], "protocolVersion": LATEST_PROTOCOL_VERSION}}
+    counter = await raw(app, "POST", modern_init, **auth)
+    assert counter.json()["result"]["protocolVersion"] == LATEST_HANDSHAKE_VERSION
 
     listing = {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}
     assert (await raw(app, "POST", listing, **auth)).status_code == 400  # no session

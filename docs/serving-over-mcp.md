@@ -1,7 +1,8 @@
 # Serving agents over MCP
 
 `AgentMCPServer` exposes your agents and tools as an MCP server, so Claude Desktop, Cursor, VS Code, another agent or any other MCP client can use them. Each agent becomes one tool that takes a `request` string and returns the agent's answer. Plain tools are exposed with their own schemas. You can serve over stdio (the client launches your script) or over HTTP (an ASGI app).
-Tested in-process against this SDK's own MCP client only; not yet checked with those apps.
+Tested against the official MCP Python SDK clients (2026-07-28 and handshake revisions);
+not yet checked with those apps.
 
 ## Try it in-process
 
@@ -72,12 +73,14 @@ Agent tool names are the agent name lowercased with spaces replaced by `_` (clea
 
 ## AgentMCPServer arguments
 
-`AgentMCPServer(name, *, agents=(), tools=(), deps=None, runner=None, version="0.4.0")`
+`AgentMCPServer(name, *, agents=(), tools=(), deps=None, runner=None, version="0.4.0", list_ttl_ms=60_000, instructions=None)`
 
 - `agents`: each becomes a tool named after the agent.
 - `tools`: `Tool` objects exposed with their own schemas.
 - `deps`: passed to every agent run and tool call as `RunContext.deps`.
 - `runner`: the `Runner` used for agent calls. Pass one to apply usage limits, hooks or budgets.
+- `list_ttl_ms`: the `ttlMs` cache hint on 2026-07-28 discover and list results. The tool list is fixed when the server is built, so clients may reuse it this long.
+- `instructions`: optional guidance for the client's model, returned by `server/discover`.
 
 ## Approval-gated work is refused
 
@@ -187,10 +190,24 @@ Options of `http_app`:
 | `path` | `"/mcp"` | The URL path. Other paths return 404. |
 | `allowed_origins` | `()` | Requests with an `Origin` header are refused with 403 unless the origin is listed. This protects against DNS-rebinding from browsers. Clients that send no `Origin` (most MCP clients) are unaffected. |
 | `max_body_bytes` | 4 MiB | Larger request bodies get 413. |
-| `max_sessions` | 1000 | When exceeded, the least recently used session is dropped. |
-| `session_ttl_seconds` | 3600.0 | Sessions idle for longer expire. |
+| `max_sessions` | 1000 | Handshake-era sessions only: when exceeded, the least recently used session is dropped. |
+| `session_ttl_seconds` | 3600.0 | Handshake-era sessions idle for longer expire. |
 
-Sessions start with the `initialize` request: the server returns an `Mcp-Session-Id` header, and later requests must send it (missing gives 400, unknown or expired gives 404). `DELETE` ends a session. `GET` returns 405, because the server does not stream notifications.
+The app serves both MCP eras on the same path:
+
+- **2026-07-28 (stateless).** Each request carries its protocol version and client
+  capabilities in `params._meta`; no session is created and an `Mcp-Session-Id` header is
+  ignored. The `MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name` and `Mcp-Param-*` headers
+  must match the body, otherwise the reply is HTTP 400 with `HeaderMismatch` (-32020). A
+  missing `_meta` field gives 400 with -32602, an unsupported version 400 with
+  `UnsupportedProtocolVersionError` (-32022, listing the supported versions), and an unknown
+  method 404 with -32601. `server/discover` returns the supported versions, capabilities
+  and server identity, with `ttlMs` (`list_ttl_ms`, default 60 s) and `cacheScope`
+  (`"private"`) cache hints, as do the list results.
+- **2025-11-25 back to 2024-11-05 (handshake).** Sessions start with the `initialize` request: the server returns an `Mcp-Session-Id` header, and later requests must send it (missing gives 400, unknown or expired gives 404). `DELETE` ends a session.
+
+`GET` returns 405, because the server does not stream notifications. The token, `Origin`
+and body-size checks apply to both eras, and tools that need approval are refused in both.
 
 The checks are visible with plain HTTP calls through the ASGI transport:
 
@@ -237,8 +254,8 @@ asyncio.run(main())
 
 ## Limits to know about
 
-- Tested in-process against this SDK's own MCP client only; not yet checked with Claude Desktop, Cursor or VS Code.
-- Agent tools return only the final answer as text. Streaming, progress notifications and server-to-client requests are not implemented.
+- Tested against the official MCP Python SDK clients (`mcp` 2.3.0 in its 2026-07-28 and handshake modes, and the handshake-only `mcp` 1.30.0) over stdio and HTTP on localhost; see `experiments/interop`. Not yet checked with Claude Desktop, Cursor or VS Code.
+- Agent tools return only the final answer as text. Streaming, progress notifications, `subscriptions/listen`, multi round-trip input requests and the optional extensions (Tasks, MCP Apps, Enterprise Managed Authorization) are not implemented.
 - HTTP session state lives in the memory of one process; there is no shared store, so run a single worker or use sticky routing.
 - Every agent call runs with the same `deps`, so do not put per-user credentials in `deps` if clients should not share them.
 
@@ -254,7 +271,8 @@ asyncio.run(main())
 
 `AgentMCPServer` turns your agents and tools into an MCP server, so they can be used
 from Claude Desktop, Cursor, VS Code or any other MCP client — or from another agent.
-Tested in-process against this SDK's own MCP client only; not yet checked with those apps.
+Tested against the official MCP Python SDK clients (2026-07-28 and handshake revisions);
+not yet checked with those apps.
 
 Point your client at it, e.g. in Claude Desktop's `claude_desktop_config.json`:
 

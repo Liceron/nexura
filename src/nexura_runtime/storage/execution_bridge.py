@@ -196,7 +196,10 @@ class ExecutionRepositoryBridge:
                     effects.append(replace(old_effect, status=EffectStatus.INDETERMINATE))
         completed = state.get("completed_nodes", [])
         previous = run.state.get("completed_nodes", [])
-        failed = status == "failed" and run.state.get("pre_dispatch_intent") is not None
+        # A cancelled run ends like a failed one: a dispatched effect's outcome is unknown.
+        failed = (
+            status in ("failed", "cancelled") and run.state.get("pre_dispatch_intent") is not None
+        )
         if len(completed) > len(previous) or failed:
             key = visit_key(run.state)
             result = (

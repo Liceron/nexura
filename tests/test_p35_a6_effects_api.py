@@ -298,3 +298,57 @@ async def test_python_client_effect_methods_encode_ids_and_body() -> None:
         "result": {"receipt": "local"},
     }
     assert json.loads(calls[2].content) == {"resolution": "not_applied"}
+
+
+def test_timed_out_node_is_resolved_over_rest_and_continues(tmp_path: Path) -> None:
+    """A timed-out non-pure node pauses effect_unknown; REST resolves it and the run continues."""
+    from nexura_agents.contracts.errors import DeadlineExceededError
+
+    client, db = _local(tmp_path)
+    spec = DurableWorkflowSpec(
+        workflow_id="fake-timeout",
+        entry_node="pay",
+        terminal_nodes=["pay"],
+        nodes={"pay": DurableNodeSpec(node_id="pay", handler="fake-pay", timeout_seconds=0.05)},
+    )
+
+    async def slow(_: dict[str, Any]) -> dict[str, Any]:
+        await asyncio.sleep(1)
+        return {}
+
+    async def time_out() -> str:
+        store = SQLiteExecutionStore(db)
+        try:
+            engine = DurableExecutionEngine(store, {"fake-pay": slow})
+            await engine.init_run("wsA", "run-t", spec)
+            await engine.claim_run("wsA", "run-t", "worker")
+            with pytest.raises(DeadlineExceededError):
+                await engine.execute_step("wsA", "run-t", "worker", spec)
+            (effect_id,) = (await store.get(ExecutionId("wsA", "run-t"))).effects
+            return effect_id
+        finally:
+            await store.close()
+
+    effect_id = asyncio.run(time_out())
+    with client:
+        headers = local_headers("wsA")
+        (effect,) = client.get(f"{API}/runs/run-t/effects", headers=headers).json()["effects"]
+        assert effect["status"] == "indeterminate"
+        resolved = client.post(
+            f"{API}/runs/run-t/effects/{effect_id}/resolve",
+            json={"resolution": "confirmed", "result": {"paid": "per ledger"}},
+            headers=headers,
+        )
+        assert resolved.status_code == 200, resolved.text
+        assert resolved.json()["resolved_by"] == "local-owner"
+
+    async def resume() -> Any:
+        store = SQLiteExecutionStore(db)
+        try:
+            engine = DurableExecutionEngine(store, {"fake-pay": slow})
+            return await engine.run_until_idle("wsA", "run-t", "resumer", spec)
+        finally:
+            await store.close()
+
+    done = asyncio.run(resume())
+    assert done.status == "completed" and done.state["paid"] == "per ledger"

@@ -449,6 +449,9 @@ class ConnectorHttp:
     base_origin: str | None = None
     default_host: str | None = None
     attempts_made: int = field(default=0)
+    #: Sent as ``Idempotency-Key`` on writes that do not set one (the workflow step's key,
+    #: stable across a crash recovery; see ``ExecutionContext.idempotency_key()``).
+    idempotency_key: str | None = None
 
     def same_origin(self, url: str) -> bool:
         """True when ``url`` has the same scheme and host as the configured base."""
@@ -482,6 +485,12 @@ class ConnectorHttp:
         """Send one logical request; retry only when it is a read (``write=False``)."""
         if not self.same_origin(url):
             raise SsrfBlockedError("refusing to send credentials to a different origin")
+        if (
+            write
+            and self.idempotency_key
+            and not any(k.lower() == "idempotency-key" for k in (headers or {}))
+        ):
+            headers = {**(headers or {}), "Idempotency-Key": self.idempotency_key}
         total = (0 if write else self.max_retries) + 1
         for attempt in range(total):
             last = attempt == total - 1
@@ -625,6 +634,9 @@ class ConnectorModule(BaseModule):
     SOURCE: ClassVar[str] = "packages/nexura-connectors/src/nexura_connectors/"
     DEFAULT_BASE_URL: ClassVar[str | None] = None
     NEEDS_CREDENTIAL: ClassVar[bool] = True
+    #: Writes carry the workflow step's idempotency key as ``Idempotency-Key`` (APIs that
+    #: ignore the header are unaffected); a connector that signs its headers opts out.
+    SENDS_IDEMPOTENCY_KEY: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -816,6 +828,11 @@ class ConnectorModule(BaseModule):
             sleep=self.sleep,
             base_origin=str(base) if base else None,
             default_host=default_host,
+            idempotency_key=(
+                context.idempotency_key()
+                if context is not None and self.SENDS_IDEMPOTENCY_KEY
+                else None
+            ),
         )
         if override:
             http.check_base_url(str(override))

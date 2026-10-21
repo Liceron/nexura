@@ -1102,7 +1102,7 @@ Guarantees:
 
 ### `MCPServer`
 
-class `MCPServer(transport: 'McpTransport', *, name: 'str' = 'mcp', prefix: 'str | None' = None, include: 'Collection[str] | None' = None, exclude: 'Collection[str]' = (), requires_approval: 'ApprovalPolicy' = False, read_only: 'Collection[str]' = (), max_result_chars: 'int | None' = 20000, request_timeout: 'float | None' = None, tool_timeout: 'float | None' = None, on_timeout: 'OnTimeout' = 'tell_model', input_guardrails: 'Sequence[GuardrailFn]' = (), output_guardrails: 'Sequence[GuardrailFn]' = (), enabled: 'EnabledRule' = True) -> 'None'`
+class `MCPServer(transport: 'McpTransport', *, name: 'str' = 'mcp', prefix: 'str | None' = None, include: 'Collection[str] | None' = None, exclude: 'Collection[str]' = (), requires_approval: 'ApprovalPolicy' = False, read_only: 'Collection[str]' = (), max_result_chars: 'int | None' = 20000, request_timeout: 'float | None' = None, tool_timeout: 'float | None' = None, on_timeout: 'OnTimeout' = 'tell_model', input_guardrails: 'Sequence[GuardrailFn]' = (), output_guardrails: 'Sequence[GuardrailFn]' = (), enabled: 'EnabledRule' = True, protocol_version: 'str | None' = None) -> 'None'`
 
 ~~~text
 A connection to one MCP server whose tools an agent can call.
@@ -1126,6 +1126,9 @@ Args:
         Applied to every tool, as on ``@tool``. ``tool_timeout`` is ``@tool``'s
         ``timeout``; the name differs because ``MCPServer.http`` already uses
         ``timeout`` for the HTTP client.
+    protocol_version: ``None`` (default) prefers MCP 2026-07-28 and falls back to the
+        ``initialize`` handshake of 2025-11-25 ... 2024-11-05 when the server is older.
+        Pass a version to pin it (see ``McpClientSession``).
 ~~~
 
 - `close(self) -> 'None'`
@@ -1153,7 +1156,7 @@ Args:
 
 ### `AgentMCPServer`
 
-class `AgentMCPServer(name: 'str', *, agents: 'Sequence[Agent | Team]' = (), tools: 'Sequence[Tool]' = (), deps: 'Any' = None, runner: 'Any' = None, version: 'str' = '0.4.0') -> 'None'`
+class `AgentMCPServer(name: 'str', *, agents: 'Sequence[Agent | Team]' = (), tools: 'Sequence[Tool]' = (), deps: 'Any' = None, runner: 'Any' = None, version: 'str' = '0.4.0', list_ttl_ms: 'int' = 60000, instructions: 'str | None' = None) -> 'None'`
 
 ~~~text
 Expose agents and tools as an MCP server.
@@ -1167,6 +1170,13 @@ Args:
     deps: Passed to every run and tool call as ``RunContext.deps``.
     runner: Runner used for agent calls (for usage limits, hooks or budgets), and for
         teams that were not given their own runner.
+    list_ttl_ms: ``ttlMs`` cache hint on 2026-07-28 discover and list results. The
+        tool list is fixed when the server is built, so clients may reuse it for this
+        long (default 60 s).
+    instructions: Optional guidance for the client's model, sent by ``server/discover``.
+
+Both MCP eras are served: 2026-07-28 clients send stateless requests (no session), and
+clients of the handshake revisions (2025-11-25 back to 2024-11-05) send ``initialize``.
 ~~~
 
 - `http_app(self, *, token: 'str | None' = None, path: 'str' = '/mcp', allowed_origins: 'Sequence[str]' = (), max_body_bytes: 'int' = 4194304, max_sessions: 'int' = 1000, session_ttl_seconds: 'float' = 3600.0) -> 'Callable[[Scope, Receive, Send], Awaitable[None]]'`
@@ -1178,7 +1188,7 @@ Args:
 
 ### `A2AServer`
 
-class `A2AServer(agent_or_team: 'Agent | Team', *, name: 'str | None' = None, description: 'str | None' = None, url: 'str', version: 'str' = '1.0.0', skills: 'Sequence[dict[str, Any]] | None' = None, deps: 'Any' = None, runner: 'Any' = None) -> 'None'`
+class `A2AServer(agent_or_team: 'Agent | Team', *, name: 'str | None' = None, description: 'str | None' = None, url: 'str', version: 'str' = '1.0.0', skills: 'Sequence[dict[str, Any]] | None' = None, deps: 'Any' = None, runner: 'Any' = None, signing_key: 'Any' = None, signing_kid: 'str | None' = None, signing_jku: 'str | None' = None) -> 'None'`
 
 ~~~text
 Expose an ``Agent`` or ``Team`` as an A2A agent.
@@ -1194,6 +1204,10 @@ Args:
     deps: Passed to every run as ``RunContext.deps``.
     runner: ``Runner`` for agent runs (usage limits, hooks, budgets) and for teams
         without their own runner.
+    signing_key: Optional ``cryptography`` private key (EC P-256/P-384, Ed25519 or RSA).
+        When set, the served card carries a JWS signature (A2A 1.0 section 8.4).
+    signing_kid: Key id put in the signature header; required with ``signing_key``.
+    signing_jku: Optional JWK Set URL advertised in the signature header.
 
 Security model. One bearer token guards the whole endpoint, so every holder of it can
 read, continue and cancel every task; task and context ids are random 144-bit values
@@ -1207,7 +1221,7 @@ but are not per-user. Use one server per tenant if you need isolation.
 
 ### `A2AClient`
 
-class `A2AClient(url: 'str', *, headers: 'dict[str, str] | None' = None, timeout: 'float' = 60, transport: 'httpx.AsyncBaseTransport | None' = None, policy: 'DestinationPolicy | None' = None) -> 'None'`
+class `A2AClient(url: 'str', *, headers: 'dict[str, str] | None' = None, timeout: 'float' = 60, transport: 'httpx.AsyncBaseTransport | None' = None, policy: 'DestinationPolicy | None' = None, card_keys: 'Mapping[str, Any] | None' = None, card_algorithms: 'Sequence[str] | None' = None) -> 'None'`
 
 ~~~text
 Talk to one remote A2A agent over JSON-RPC.
@@ -1221,6 +1235,12 @@ Args:
         permits loopback and private ranges and trusts the host you configured; other
         hosts (a card pointing elsewhere) must pass the policy. Pass your own policy to
         tighten this. Cloud metadata addresses are always blocked.
+    card_keys: Trusted public keys for signed agent cards, by key id (``cryptography``
+        public keys or JWK dicts). When given, the card must carry a JWS signature that
+        verifies with one of them, or every call fails with ``AgentCardSignatureError``.
+        ``jku`` URLs in the card are never fetched. Without ``card_keys`` signatures
+        are not checked.
+    card_algorithms: JWS algorithms accepted for card signatures.
 
 The client speaks 1.0 when the card offers a 1.0 JSON-RPC interface and falls back to
 the 0.3 method names and shapes for older cards. No connection is kept between calls,

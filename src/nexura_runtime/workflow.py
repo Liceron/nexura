@@ -231,6 +231,8 @@ class _StepIdentity:
     execution_id: ExecutionId
     step_key: StepKey
     fencing_token: int | None = None
+    # The approval the step runs under (its parts' intents carry it too).
+    approval_id: str | None = None
 
     def idempotency_key(self, index: int = 0) -> str:
         return default_idempotency_key(self.execution_id, self.step_key, index)
@@ -243,6 +245,85 @@ class _StepIdentity:
         """A parallel branch's own step (``node/branch#step[.attempt]``)."""
         node, _, rest = str(self.step_key).rpartition("#")
         return dataclasses.replace(self, step_key=StepKey(f"{node}/{name}#{rest}"))
+
+
+_VISIT_KEY = re.compile(r"^(.*)#(\d+)(?:\.(\d+))?$", re.DOTALL)
+
+
+def _part_family(container: StepKey, item: int | None, branch: str | None) -> tuple[Any, int]:
+    """Key family of a composite step's part, and the attempt its keys start at.
+
+    A mapped item of ``node#5`` is ``node#5[2]``, a parallel branch ``node/b#5``; a part a
+    person resolved as ``not_applied`` is dispatched again as the next attempt
+    (``node#5.2[2]``, ``node/b#5.2``). Parts start at the attempt of their step, so the keys
+    of a step's first dispatch are the ones S6 handed out.
+    """
+    match = _VISIT_KEY.match(str(container))
+    if match is None:  # pragma: no cover - container keys always come from StepKey.workflow
+        raise WorkflowError(f"Unexpected step key '{container}'.")
+    node_id, step, attempt = match.group(1), int(match.group(2)), int(match.group(3) or 1)
+    if branch is not None:
+        return (lambda a: StepKey.workflow(f"{node_id}/{branch}", step, a)), attempt
+    return (lambda a: StepKey.workflow(node_id, step, a, item)), attempt
+
+
+@dataclass
+class _UncertainPart:
+    """A branch, item or sub-workflow child whose outcome is unknown after a crash.
+
+    Returned (not raised) by a part so the other parts of the step still finish and record
+    their outcomes; the step then pauses on the first one (``effect_unknown``).
+    """
+
+    pending: dict[str, Any]
+    keys: list[str] = field(default_factory=list)
+    failed: str | None = None
+
+
+class _PartUncertain(WorkflowInterrupt):  # noqa: N818 - control flow
+    """A part of a composite step is in doubt (or was resolved as failed)."""
+
+    def __init__(self, parts: list[_UncertainPart]) -> None:
+        super().__init__(None)
+        self.parts = parts
+
+    @property
+    def failed(self) -> str | None:
+        return next((p.failed for p in self.parts if p.failed), None)
+
+    @property
+    def pending(self) -> dict[str, Any]:
+        return next(p.pending for p in self.parts if not p.failed)
+
+    @property
+    def keys(self) -> list[str]:
+        return [key for part in self.parts for key in part.keys]
+
+
+def _raise_uncertain(results: list[Any]) -> list[dict[str, Any]]:
+    """The parts' updates; raises ``_PartUncertain`` when any part is in doubt."""
+    doubtful = [r for r in results if isinstance(r, _UncertainPart)]
+    if doubtful:
+        raise _PartUncertain(doubtful)
+    return results
+
+
+class _ChildLeaseBusy(BaseException):  # noqa: N818 - control flow
+    """A sub-workflow child's run lease is still live: recover the parent later."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
+class _LeaseBusyError(WorkflowError):
+    """``recover()``: another live worker holds the run lease."""
+
+
+# recover(on_uncertain=...) for the run being recovered and its sub-workflow children.
+_ON_UNCERTAIN: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "nexura_workflow_on_uncertain", default="pause"
+)
 
 
 # The step the current handler call belongs to; set by the engine around each node.
@@ -2095,13 +2176,22 @@ def _child_span(name: str, attributes: dict[str, Any]) -> Any:
 async def _gather_limited(factories: list[Callable[[], Any]], limit: int) -> list[dict[str, Any]]:
     """Run coroutine factories concurrently (at most ``limit`` at once), in order.
 
-    The first failure cancels the rest and is raised as itself, not as a group.
+    The first failure cancels the rest and is raised as itself, not as a group. A factory
+    still waiting for its turn when another one failed does not start.
     """
     gate = asyncio.Semaphore(limit)
+    stopped = False
 
     async def guarded(factory: Callable[[], Any]) -> dict[str, Any]:
+        nonlocal stopped
         async with gate:
-            result: dict[str, Any] = await factory()
+            if stopped:
+                raise asyncio.CancelledError
+            try:
+                result: dict[str, Any] = await factory()
+            except BaseException:
+                stopped = True
+                raise
             return result
 
     try:
@@ -2168,8 +2258,10 @@ class WorkflowEngine:
         self.policy_version = policy_version
         # Run lease of a journaled run, renewed every lease_ttl / 3 (Execution Contract v1).
         self.lease_ttl = float(lease_ttl)
-        # Sub-workflow child engines keep no journal of their own (A6 S7).
+        # Journal runs on stores that offer one; a sub-workflow child keeps its own journal
+        # (A6 S7) with ``parent_run_id`` set to the run that started it.
         self._journal_enabled = True
+        self._parent_run_id: str | None = None
         # Set on engines running a sub-workflow per map_over item: those cannot pause.
         self._pause_forbidden: str | None = None
         # State keys written by steps this engine ran (sub-workflow outputs).
@@ -2206,6 +2298,7 @@ class WorkflowEngine:
             workflow_run_id,
             self.spec.canonical_hash(),
             self.lease_ttl,
+            self._parent_run_id,
         )
 
     async def _journal_sync(self, journal: WorkflowJournal, checkpoint: WorkflowCheckpoint) -> None:
@@ -2277,9 +2370,9 @@ class WorkflowEngine:
         Function handlers: the class declared with ``register(..., effect=)``, else
         ``non_idempotent`` (founder decision 1). Modules: a declaration here, else the
         manifest's ``effect_policy``; a module whose manifest leaves it unset but declares
-        write operations counts as ``non_idempotent`` when this call writes. Composite
-        steps combine their parts (the weakest promise wins) until S7 adds per-branch,
-        per-item and per-child intents.
+        write operations counts as ``non_idempotent`` when this call writes. For a
+        composite step (parallel, map, sub-workflow) this is the weakest promise of its
+        parts; each part is journaled on its own (A6 S7), see :meth:`_before_dispatch`.
         """
         if node.subgraph is not None:
             return _combine_effects(self._spec_effects(node.subgraph)), None
@@ -2288,8 +2381,12 @@ class WorkflowEngine:
             return _combine_effects(classes), None
         effect, reconcile = self._handler_effect(node, node.handler, node.module_id, state)
         if node.map_over is not None and effect == EffectClass.RECONCILABLE:
-            return EffectClass.NON_IDEMPOTENT, None  # per-item probes arrive with S7
+            return EffectClass.NON_IDEMPOTENT, None  # each item is probed on its own
         return effect, reconcile
+
+    @staticmethod
+    def _is_composite(node: WorkflowNode) -> bool:
+        return bool(node.parallel) or node.map_over is not None or node.subgraph is not None
 
     def _spec_effects(self, spec: WorkflowSpec) -> list[EffectClass]:
         classes: list[EffectClass] = []
@@ -2346,16 +2443,34 @@ class WorkflowEngine:
         The intent, its ``pending`` effect and the approval it runs under (recorded as
         consumed) are one fenced journal transaction, written just before the handler
         runs ("claim for dispatch"). A pure node writes no intent; the lease is checked.
+
+        A composite step with a non-pure part writes a container intent of class ``pure``
+        (running the step again is safe: each branch, item or sub-workflow child records
+        its own intent and outcome and decides for itself after a crash); it carries the
+        approval the step runs under.
         """
         journal = self._journal_for(workflow_run_id)
         if journal is None:
             return _StepIdentity(
                 ExecutionId(self.workspace_id or "default", workflow_run_id),
                 StepKey.workflow(node.id, step_count),
+                approval_id=approval_id,
             )
         key = journal.dispatch_key(node.id, step_count)
         effect, _ = self._node_effect(node, state)
-        if effect != EffectClass.PURE:
+        if self._is_composite(node) and effect != EffectClass.PURE:
+            effect = EffectClass.PURE
+            await journal.record_intent(
+                StepIntent(
+                    key,
+                    self._binding_digest(node, state) or "",
+                    default_idempotency_key(journal.eid, key),
+                    effect,
+                    approval_id=approval_id,
+                ),
+                node.id,
+            )
+        elif effect != EffectClass.PURE:
             await journal.record_intent(
                 StepIntent(
                     key,
@@ -2368,7 +2483,7 @@ class WorkflowEngine:
             )
         else:
             journal.check()
-        return _StepIdentity(journal.eid, key, journal.fencing_token)
+        return _StepIdentity(journal.eid, key, journal.fencing_token, approval_id)
 
     def _check_owner(self, checkpoint: WorkflowCheckpoint) -> None:
         owner = checkpoint.workspace_id
@@ -2979,6 +3094,15 @@ class WorkflowEngine:
         dispatches the node again as a new attempt with a new key (a gated node first asks
         for a fresh approval), ``failed`` fails the run. Any other paused run is returned as
         it is; a finished run raises ``WorkflowTerminalError``.
+
+        Composite steps (A6 S7) are decided per part when the step runs again: a parallel
+        branch or mapped item whose outcome was committed is not run again; one dispatched
+        without an outcome follows the rules above with its own key (``<node>/<branch>#<step>``
+        or ``<node>#<step>[<item>]``); a ``non_idempotent`` one pauses the run with a
+        ``pending_effect`` naming it (``"part"``, ``"branch"`` / ``"item"``), after the other
+        parts finished. A sub-workflow child is recovered under its own journal, from here
+        (call ``recover`` on the top-level run, not on a child): when it pauses
+        ``effect_unknown``, so does this run, with the child's effect and ``"run_id"``.
         """
         if on_uncertain not in ("pause", "fail"):
             raise WorkflowValidationError("on_uncertain must be 'pause' or 'fail'.")
@@ -2991,13 +3115,17 @@ class WorkflowEngine:
             return await self._project_finished(journal, workflow_run_id)
         if journal.owner is None:
             await journal.close()
-            raise WorkflowError(
+            raise _LeaseBusyError(
                 f"Workflow run '{workflow_run_id}' is being executed by another worker (its "
                 "run lease is live); recover it after that lease expires."
             )
-        return await self._journaled(
-            journal, lambda: self._recover_taken(journal, workflow_run_id, on_uncertain)
-        )
+        token = _ON_UNCERTAIN.set(on_uncertain)
+        try:
+            return await self._journaled(
+                journal, lambda: self._recover_taken(journal, workflow_run_id, on_uncertain)
+            )
+        finally:
+            _ON_UNCERTAIN.reset(token)
 
     async def resolve_effect(
         self,
@@ -3016,6 +3144,11 @@ class WorkflowEngine:
         attempt with a new idempotency key; a gated node first asks for a fresh approval) or
         ``"failed"`` (the run fails). The decision and ``actor`` are journaled once; a
         second, different resolution raises ``EffectAlreadyResolvedError``.
+
+        For a parallel branch or mapped item the decision applies to that part only (its
+        result is the part's update); for an effect inside a sub-workflow child (the
+        ``pending_effect`` has the child's ``"run_id"``) it is journaled in the child's run
+        and the child continues when this run is recovered.
         """
         resolution = EffectResolution(resolution)
         if resolution == EffectResolution.CONFIRMED:
@@ -3034,13 +3167,22 @@ class WorkflowEngine:
                 f"Workflow run '{workflow_run_id}' is paused on effect "
                 f"'{pending.get('effect_id')}', not '{wanted}'."
             )
-        journal = await self._take_journal(workflow_run_id)
+        target = str(pending.get("run_id") or workflow_run_id)
+        if target != workflow_run_id:
+            if not target.startswith(f"{workflow_run_id}/"):
+                raise WorkflowError(
+                    f"Effect '{wanted}' belongs to run '{target}', which is not a sub-workflow "
+                    f"of '{workflow_run_id}'."
+                )
+            journal: WorkflowJournal | None = await self._take_run_journal(target)
+        else:
+            journal = await self._take_journal(workflow_run_id)
         assert journal is not None
         if journal.owner is None or journal.status in _JOURNAL_TERMINAL:
             await journal.close()
-            raise WorkflowError(f"Workflow run '{workflow_run_id}' is held by another worker.")
+            raise WorkflowError(f"Workflow run '{target}' is held by another worker.")
         try:
-            record = next((e for e in journal.effects.values() if e.effect_id == wanted), None)
+            record = journal.effect_by_id(wanted)
             if record is None:
                 raise WorkflowError(f"Effect '{wanted}' is not in the run's journal.")
             if record.status != EffectStatus.RESOLVED or record.resolution != resolution:
@@ -3048,6 +3190,47 @@ class WorkflowEngine:
         finally:
             await journal.close()
         return await self.recover(workflow_run_id)
+
+    async def _take_run_journal(self, run_id: str) -> WorkflowJournal:
+        """The lease of another journaled run (a sub-workflow child), by its stored digest."""
+        from nexura_agents.durable import new_lease_owner
+
+        assert self.store is not None
+        store = await self.store.open_execution_store()  # type: ignore[attr-defined]
+        try:
+            snapshot = await store.get(ExecutionId(self.workspace_id or "default", run_id))
+        except KeyError as exc:
+            raise WorkflowError(f"Workflow run '{run_id}' has no execution journal.") from exc
+        journal = WorkflowJournal(
+            store,
+            self.workspace_id or "default",
+            run_id,
+            snapshot.run.definition_digest,
+            self.lease_ttl,
+            snapshot.run.parent_run_id,
+        )
+        if not await journal.take(new_lease_owner()):
+            journal.owner = None
+        return journal
+
+    async def _part_resolution(
+        self, journal: WorkflowJournal, pending: dict[str, Any]
+    ) -> EffectResolution | None:
+        """How a person resolved the part effect a run paused on (None: not resolved)."""
+        run_id = str(pending.get("run_id") or journal.run_id)
+        effect: EffectRecord | None
+        if run_id == journal.run_id:
+            effect = journal.effect_by_id(pending.get("effect_id"))
+        else:
+            store = journal.store
+            try:
+                snapshot = await store.get(ExecutionId(journal.eid.workspace_id, run_id))
+            except KeyError:
+                return None
+            effect = snapshot.effects.get(str(pending.get("effect_id")))
+        if effect is None or effect.status != EffectStatus.RESOLVED:
+            return None
+        return effect.resolution
 
     async def _recoverable_checkpoint(self, workflow_run_id: str) -> WorkflowCheckpoint:
         if self.store is None or not self._journaled_store():
@@ -3196,6 +3379,11 @@ class WorkflowEngine:
             )
         if cp.status == "paused" and cp.pending_effect is None:
             return self._result_from_checkpoint(cp)
+        part = cp.pending_effect if cp.pending_effect and cp.pending_effect.get("part") else None
+        if part is not None and part.get("run_id") == workflow_run_id:
+            in_doubt = journal.effect_by_id(part.get("effect_id"))
+            if in_doubt is not None and in_doubt.status == EffectStatus.INDETERMINATE:
+                return self._result_from_checkpoint(cp)  # still waiting for a person
         cursor, step = cp.current_node_id, cp.step_count
         if self._is_finished_cursor(cursor):
             cp.status = "completed"
@@ -3237,11 +3425,21 @@ class WorkflowEngine:
                 return await self._pause_effect_unknown(journal, cp, node, effect)
             effect_class = intent.effect_class
             if effect_class in (EffectClass.PURE, EffectClass.IDEMPOTENT):
+                approved = intent.approval_id is not None
+                if (
+                    approved
+                    and part is not None
+                    and self._is_gated(node, cp.state)
+                    and await self._part_resolution(journal, part) == EffectResolution.NOT_APPLIED
+                ):
+                    # A part of a gated step did not happen: sending it again needs a
+                    # fresh approval of the step (design §2.5).
+                    approved = False
                 return await self._continue_from(
                     journal,
                     cp,
-                    approved=intent.approval_id is not None,
-                    approval_id=intent.approval_id,
+                    approved=approved,
+                    approval_id=intent.approval_id if approved else None,
                 )
             if effect_class == EffectClass.RECONCILABLE:
                 probe = await self._reconcile(node, intent, cp.state)
@@ -3299,29 +3497,34 @@ class WorkflowEngine:
         _, reconcile = self._node_effect(node, state)
         if reconcile is None:
             return Unknown()
+        return await self._probe(f"node '{node.id}'", reconcile, intent, state)
+
+    @staticmethod
+    async def _probe(
+        what: str, reconcile: Callable[..., Any], intent: StepIntent, state: dict[str, Any]
+    ) -> Applied | NotApplied | Unknown:
+        """Call ``reconcile(state, intent)``; an error or a wrong answer is ``Unknown``."""
+        import warnings
+
         try:
             answer = reconcile(copy.deepcopy(state), intent)
             if inspect.isawaitable(answer):
                 answer = await answer
         except Exception as exc:
-            import warnings
-
             warnings.warn(
-                f"reconcile for node '{node.id}' raised {type(exc).__name__}: {exc}; "
+                f"reconcile for {what} raised {type(exc).__name__}: {exc}; "
                 "treating the outcome as unknown.",
                 RuntimeWarning,
-                stacklevel=2,
+                stacklevel=3,
             )
             return Unknown()
         if isinstance(answer, (Applied, NotApplied, Unknown)):
             return answer
-        import warnings
-
         warnings.warn(
-            f"reconcile for node '{node.id}' returned {type(answer).__name__}, not Applied, "
+            f"reconcile for {what} returned {type(answer).__name__}, not Applied, "
             "NotApplied or Unknown; treating the outcome as unknown.",
             RuntimeWarning,
-            stacklevel=2,
+            stacklevel=3,
         )
         return Unknown()
 
@@ -3366,6 +3569,7 @@ class WorkflowEngine:
         except WorkflowExecutionError as exc:
             return await self._fail_recovered(cp, str(exc))
         state = {**copy.deepcopy(cp.state), **copy.deepcopy(update)}
+        self._written.update(update)
         step = cp.step_count + 1
         terminal = self._is_finished_cursor(next_node)
         await journal.record_outcome(
@@ -3823,13 +4027,16 @@ class WorkflowEngine:
         step_count: int,
         remaining: float | None,
     ) -> tuple[dict[str, Any], str | None]:
-        async def branch(name: str) -> dict[str, Any]:
+        async def branch(name: str) -> Any:
             _INTERRUPT_STATE.set(_InterruptState([], blocked=_NO_PAUSE_IN_PARALLEL))
-            parent = _STEP_IDENTITY.get()
-            if parent is not None:
-                _STEP_IDENTITY.set(parent.for_branch(name))
             with _child_span(f"workflow.branch {name}", {"nexura.workflow.branch": name}):
-                return await _branch(name)
+                return await self._run_part(
+                    node,
+                    workflow_run_id,
+                    state,
+                    functools.partial(_branch, name),
+                    branch=name,
+                )
 
         async def _branch(name: str) -> dict[str, Any]:
             handler = self._resolve_handler(name)
@@ -3849,8 +4056,10 @@ class WorkflowEngine:
                 )
             return update
 
-        updates = await _gather_limited(
-            [functools.partial(branch, name) for name in node.parallel], node.max_concurrency
+        updates = _raise_uncertain(
+            await _gather_limited(
+                [functools.partial(branch, name) for name in node.parallel], node.max_concurrency
+            )
         )
         return _merge_branch_updates(node.id, updates, node.reducers, state), None
 
@@ -3871,13 +4080,26 @@ class WorkflowEngine:
                 f"state; got {type(items).__name__}."
             )
 
-        async def one(index: int, item: Any) -> dict[str, Any]:
+        async def one(index: int, item: Any) -> Any:
             _INTERRUPT_STATE.set(_InterruptState([], blocked=_NO_PAUSE_IN_PARALLEL))
-            parent = _STEP_IDENTITY.get()
-            if parent is not None:
-                _STEP_IDENTITY.set(parent.for_item(index))
             with _child_span(f"workflow.map_item {index}", {"nexura.workflow.map_index": index}):
-                return await _item(index, item)
+                if node.subgraph is not None:
+                    # The child run journals its own steps; the item is that run.
+                    try:
+                        return await _item(index, item)
+                    except _PartUncertain as uncertain:
+                        return uncertain.parts[0]
+                item_state = copy.deepcopy(state)
+                item_state[node.map_as] = copy.deepcopy(item)
+                item_state[f"{node.map_as}_index"] = index
+                return await self._run_part(
+                    node,
+                    workflow_run_id,
+                    item_state,
+                    functools.partial(_item, index, item),
+                    item=index,
+                    digest_of=self._item_inputs(node, state, item, index),
+                )
 
         async def _item(index: int, item: Any) -> dict[str, Any]:
             item_state = copy.deepcopy(state)
@@ -3897,13 +4119,145 @@ class WorkflowEngine:
                 )
             return update
 
-        updates = await _gather_limited(
-            [functools.partial(one, i, item) for i, item in enumerate(items)],
-            node.max_concurrency,
+        updates = _raise_uncertain(
+            await _gather_limited(
+                [functools.partial(one, i, item) for i, item in enumerate(items)],
+                node.max_concurrency,
+            )
         )
         return _merge_branch_updates(node.id, updates, node.reducers, state), None
 
-    def _child_engine(self, spec: WorkflowSpec, timeout: float | None) -> WorkflowEngine:
+    async def _run_part(
+        self,
+        node: WorkflowNode,
+        workflow_run_id: str,
+        part_state: dict[str, Any],
+        call: Callable[[], Awaitable[dict[str, Any]]],
+        *,
+        item: int | None = None,
+        branch: str | None = None,
+        digest_of: Any = None,
+    ) -> dict[str, Any] | _UncertainPart:
+        """Run one parallel branch or mapped item under its own journal step (A6 S7).
+
+        A part whose outcome was committed is not run again: its recorded update is used. A
+        part dispatched without an outcome by a process that stopped follows §2.5 with its
+        own key: ``pure``/``idempotent`` run again with the same key, ``reconcilable`` is
+        probed, ``non_idempotent`` (or a probe answering ``Unknown``) is returned as in
+        doubt; a person's resolution of the part is applied. A non-pure part writes its
+        intent just before it runs; every part's outcome is committed when it returns.
+        """
+        parent = _STEP_IDENTITY.get()
+        if parent is None:
+            return await call()
+        family, first = _part_family(parent.step_key, item, branch)
+        journal = self._journal_for(workflow_run_id)
+        if journal is None:
+            _STEP_IDENTITY.set(dataclasses.replace(parent, step_key=family(first)))
+            return await call()
+        if branch is not None:
+            effect, reconcile = self._handler_effect(node, branch, None, part_state)
+            label = f"branch '{branch}' of node '{node.id}'"
+        else:
+            effect, reconcile = self._handler_effect(node, node.handler, node.module_id, part_state)
+            label = f"item {item} of node '{node.id}'"
+        attempt, key, record = journal.latest_of(family, first)
+        if record is not None:
+            outcome = record.outcome
+            if outcome is not None and outcome.status == "completed":
+                output = outcome.output if isinstance(outcome.output, dict) else {}
+                return copy.deepcopy(output.get("update") or {})
+            if record.intent is not None and str(key) not in journal.local:
+                decided = await self._part_after_crash(
+                    journal, node, record.intent, label, reconcile, part_state, item, branch
+                )
+                if isinstance(decided, _UncertainPart):
+                    return decided
+                if isinstance(decided, dict):
+                    await journal.record_part(key, decided, node.id)
+                    return decided
+                if decided == "new_attempt":
+                    key = family(attempt + 1)
+        if effect != EffectClass.PURE:
+            try:
+                digest = canonical_digest(
+                    digest_of if digest_of is not None else self._gate_binding(node, part_state)
+                )
+            except (TypeError, ValueError):
+                digest = ""
+            await journal.record_intent(
+                StepIntent(
+                    key,
+                    digest,
+                    default_idempotency_key(journal.eid, key),
+                    effect,
+                    approval_id=parent.approval_id,
+                ),
+                node.id,
+            )
+        else:
+            journal.check()
+            journal.local.add(str(key))
+        _STEP_IDENTITY.set(dataclasses.replace(parent, step_key=key))
+        update = await call()
+        _validate_json_serializable(update, node.id)
+        await journal.record_part(key, update, node.id)
+        return update
+
+    async def _part_after_crash(
+        self,
+        journal: WorkflowJournal,
+        node: WorkflowNode,
+        intent: StepIntent,
+        label: str,
+        reconcile: Callable[..., Any] | None,
+        part_state: dict[str, Any],
+        item: int | None,
+        branch: str | None,
+    ) -> dict[str, Any] | _UncertainPart | str:
+        """A part dispatched by a process that stopped: its update, "rerun", "new_attempt"
+        or an ``_UncertainPart`` (also used for "a person resolved it as failed")."""
+        effect = journal.effects.get(str(intent.step_key))
+
+        def doubtful(failed: str | None = None) -> _UncertainPart:
+            assert effect is not None
+            view = self._pending_effect_view(effect, node.id)
+            view["part"] = "branch" if branch is not None else "item"
+            if branch is not None:
+                view["branch"] = branch
+            else:
+                view["item"] = item
+            view["run_id"] = journal.run_id
+            return _UncertainPart(view, [str(intent.step_key)], failed)
+
+        if effect is None:
+            return "rerun"
+        if effect.status == EffectStatus.RESOLVED:
+            if effect.resolution == EffectResolution.CONFIRMED:
+                update, _ = _parse_handler_output(copy.deepcopy(effect.result))
+                return update
+            if effect.resolution == EffectResolution.FAILED:
+                return doubtful(
+                    f"The {label} failed: its effect was resolved as failed by "
+                    f"'{effect.resolved_by}'."
+                )
+            return "new_attempt"  # not_applied: a new attempt with a new key
+        if effect.status == EffectStatus.INDETERMINATE:
+            return doubtful()  # still waiting for a person
+        if intent.effect_class in (EffectClass.PURE, EffectClass.IDEMPOTENT):
+            return "rerun"
+        if intent.effect_class == EffectClass.RECONCILABLE and reconcile is not None:
+            probe = await self._probe(f"the {label}", reconcile, intent, part_state)
+            if isinstance(probe, Applied):
+                update, _ = _parse_handler_output(copy.deepcopy(probe.result))
+                return update
+            if isinstance(probe, NotApplied):
+                return "rerun"
+        return doubtful()
+
+    def _child_engine(
+        self, spec: WorkflowSpec, timeout: float | None, parent_run_id: str | None = None
+    ) -> WorkflowEngine:
         child = WorkflowEngine(
             spec,
             self.registry,
@@ -3923,7 +4277,9 @@ class WorkflowEngine:
         # A sub-workflow inside a mapped item cannot pause either, at any depth.
         child._pause_forbidden = self._pause_forbidden
         child.lease_ttl = self.lease_ttl
-        child._journal_enabled = False  # children journal with A6 S7
+        # A child journals under its own run id, linked to the run that started it (A6 S7).
+        child._journal_enabled = self._journal_enabled
+        child._parent_run_id = parent_run_id
         return child
 
     async def _run_subgraph(
@@ -3939,7 +4295,7 @@ class WorkflowEngine:
         """Run (or re-attach to) the node's sub-workflow and return its state update."""
         assert node.subgraph is not None
         child_id = _child_run_id(workflow_run_id, node.id, step_count, attempt, item)
-        child = self._child_engine(node.subgraph, remaining)
+        child = self._child_engine(node.subgraph, remaining, workflow_run_id)
         if item is not None:
             child._pause_forbidden = _NO_PAUSE_IN_PARALLEL
         inputs = _map_inputs(node.input_mapping, state)
@@ -3947,6 +4303,19 @@ class WorkflowEngine:
         existing = await self.store.get(child_id) if self.store is not None else None
         if existing is None:
             result = await child.run(inputs, workflow_run_id=child_id)
+        elif child._journaled_store() and (
+            existing.status in ("running", "interrupted")
+            or (existing.status == "paused" and existing.pending_effect is not None)
+        ):
+            # A process stopped mid-way (or a person resolved the child's unknown effect):
+            # recover the child under its own journal, with this run's on_uncertain.
+            try:
+                result = await child.recover(
+                    child_id,
+                    on_uncertain="fail" if _ON_UNCERTAIN.get() == "fail" else "pause",
+                )
+            except _LeaseBusyError as busy:
+                raise _ChildLeaseBusy(str(busy)) from None
         elif existing.status == "running":  # the process stopped mid-way: continue it
             result = await child._execute_loop(
                 child_id,
@@ -3969,8 +4338,21 @@ class WorkflowEngine:
                     if existing.interrupt
                     else None
                 ),
+                pause_reason="effect_unknown" if existing.pending_effect is not None else None,
+                pending_effect=copy.deepcopy(existing.pending_effect),
             )
 
+        if result.status == "paused" and result.pending_effect is not None:
+            # The child stopped on an unknown effect: this run pauses on it too.
+            view = {
+                **copy.deepcopy(result.pending_effect),
+                "node_id": f"{node.id}/{result.pending_effect.get('node_id')}",
+                "part": "subworkflow",
+                "run_id": result.pending_effect.get("run_id") or child_id,
+            }
+            if item is not None:
+                view["item"] = item
+            raise _PartUncertain([_UncertainPart(view)])
         if result.status == "paused":
             if item is not None:
                 raise WorkflowValidationError(_NO_PAUSE_IN_PARALLEL)
@@ -4116,6 +4498,75 @@ class WorkflowEngine:
             budget_status=budget_state.get("status") if budget_state else None,
         )
 
+    async def _pause_part_uncertain(
+        self,
+        workflow_run_id: str,
+        node: WorkflowNode,
+        state: dict[str, Any],
+        step_count: int,
+        uncertain: _PartUncertain,
+    ) -> WorkflowRunResult:
+        """A branch, item or child is in doubt: pause ``effect_unknown`` naming it.
+
+        With ``on_uncertain="fail"`` (or a part a person resolved as failed) the run fails
+        instead. The other parts of the step already finished and recorded their outcomes.
+        """
+        failure = uncertain.failed
+        if failure is None and _ON_UNCERTAIN.get() == "fail":
+            failure = (
+                f"Node '{node.id}': part '{uncertain.pending.get('step_key')}' was dispatched "
+                "before the process stopped and its outcome is unknown (on_uncertain='fail')."
+            )
+        budget_state = self._budget_state()
+        if failure is not None:
+            self._progress(
+                RunEventType.NODE_FAILED, node_id=node.id, step=step_count + 1, error=failure
+            )
+            failed = WorkflowCheckpoint(
+                workflow_run_id=workflow_run_id,
+                spec_version=self.spec.spec_version,
+                spec_hash=self.spec.canonical_hash(),
+                current_node_id=node.id,
+                state=copy.deepcopy(state),
+                step_count=step_count,
+                status="failed",
+                error=failure,
+                budget_state=budget_state,
+            )
+            if self.store is not None:
+                await self._save(failed)
+            return self._result_from_checkpoint(failed)
+        pending = copy.deepcopy(uncertain.pending)
+        journal = self._journal_for(workflow_run_id)
+        if journal is not None:
+            await journal.pause(
+                "effect_unknown",
+                node.id,
+                uncertain.keys,
+                effect_id=str(pending.get("effect_id") or "") or None,
+            )
+        paused = WorkflowCheckpoint(
+            workflow_run_id=workflow_run_id,
+            spec_version=self.spec.spec_version,
+            spec_hash=self.spec.canonical_hash(),
+            current_node_id=node.id,
+            state=copy.deepcopy(state),
+            step_count=step_count,
+            status="paused",
+            pending_effect=pending,
+            budget_state=budget_state,
+        )
+        if self.store is not None:
+            await self._save(paused)
+        self._progress(
+            RunEventType.NODE_PAUSED,
+            node_id=node.id,
+            step=step_count + 1,
+            reason="effect_unknown",
+            workflow_run_id=workflow_run_id,
+        )
+        return self._result_from_checkpoint(paused)
+
     @staticmethod
     def _waits_on_subgraph(node: WorkflowNode, pending_node_id: str) -> bool:
         return node.subgraph is not None and pending_node_id.startswith(f"{node.id}/")
@@ -4129,7 +4580,7 @@ class WorkflowEngine:
             child_id = _child_run_id(workflow_run_id, node.id, step, attempt, None)
             cp = await self.store.get(child_id)
             if cp is not None and cp.status == "paused" and _pending_id(cp) == pending_id:
-                return self._child_engine(node.subgraph, self.timeout), child_id
+                return self._child_engine(node.subgraph, self.timeout, workflow_run_id), child_id
         raise WorkflowError(
             f"No sub-workflow of node '{node.id}' in run '{workflow_run_id}' is waiting on "
             f"'{pending_id}'."
@@ -4594,6 +5045,14 @@ class WorkflowEngine:
                             _redacted(state_update),
                         )
                     break
+            except _PartUncertain as uncertain:
+                node_span.set("nexura.workflow.pause_reason", "effect_unknown")
+                # The node did not finish: keep the pre-node state and step count.
+                return await self._pause_part_uncertain(
+                    workflow_run_id, node, current_state, step_count - 1, uncertain
+                )
+            except _ChildLeaseBusy as busy:
+                raise _LeaseBusyError(busy.message) from None
             except _SubgraphPaused as child_paused:
                 self._progress(
                     RunEventType.NODE_PAUSED,

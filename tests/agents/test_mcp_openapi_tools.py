@@ -192,6 +192,9 @@ async def test_streamable_http_session_sse_and_cleanup() -> None:
         msg = json.loads(request.content)
         if "id" not in msg:
             return httpx.Response(202)
+        if msg["method"] not in ("initialize", "tools/list", "tools/call"):
+            # A handshake-era server refuses anything before initialize, as real ones do.
+            return httpx.Response(400, text="Bad Request: No valid session ID provided")
         if msg["method"] == "initialize":
             body = {
                 "jsonrpc": "2.0",
@@ -243,7 +246,16 @@ async def test_streamable_http_session_sse_and_cleanup() -> None:
         result = await agent.run_async("search")
 
     assert tool_results(result)["c1"] == "3 results for agents"
-    posts = [r for r in seen if r.method == "POST"]
+    # The client first probes for MCP 2026-07-28 (stateless, no session) and falls back
+    # to the initialize handshake when this older server refuses the probe.
+    probe = seen[0]
+    assert json.loads(probe.content)["method"] == "server/discover"
+    assert probe.headers["mcp-protocol-version"] == "2026-07-28"
+    assert probe.headers["mcp-method"] == "server/discover"
+    assert "mcp-session-id" not in probe.headers
+    assert server.session.era == "legacy"
+    posts = [r for r in seen[1:] if r.method == "POST"]
+    assert json.loads(posts[0].content)["method"] == "initialize"
     assert "text/event-stream" in posts[0].headers["accept"]
     assert all(r.headers["authorization"] == "Bearer t0ken" for r in seen)
     assert "mcp-session-id" not in posts[0].headers

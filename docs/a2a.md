@@ -2,7 +2,7 @@
 
 [A2A](https://a2a-protocol.org) is an open protocol that lets agents built with different frameworks talk to each other. Nexura speaks it in both directions: `A2AServer` serves a Nexura agent or team as an A2A agent, and `A2AClient` / `remote_agent_tool` call any remote A2A agent from a Nexura agent.
 
-**Protocol version implemented: A2A 1.0, JSON-RPC binding** (methods `SendMessage`, `SendStreamingMessage`, `GetTask`, `CancelTask`; agent card at `/.well-known/agent-card.json`). The 0.3 method names `message/send`, `message/stream`, `tasks/get` and `tasks/cancel` are also accepted, answered in the 0.3 payload shape. Field names, error codes and states were checked against the official `a2a-sdk` 1.2.2 sources; that package is not a dependency.
+**Protocol version implemented: A2A 1.0, JSON-RPC binding** (methods `SendMessage`, `SendStreamingMessage`, `GetTask`, `CancelTask`; agent card at `/.well-known/agent-card.json`). The 0.3 method names `message/send`, `message/stream`, `tasks/get` and `tasks/cancel` are also accepted, answered in the 0.3 payload shape. Field names, error codes and states were checked against the official `a2a-sdk` sources, and the offline tests in `experiments/interop` run Nexura against `a2a-sdk` 1.2.3 in both directions (see [Verified against the reference SDK](#verified-against-the-reference-sdk)); that package is not a dependency of Nexura.
 
 ## Try it in-process
 
@@ -68,11 +68,12 @@ app = server.http_app(token="a-long-random-token", allowed_origins=[])
 
 Run it with `uvicorn app:app` and point any A2A client at `https://agents.example.com`. `url` is the public address of the JSON-RPC endpoint (the app answers `POST /`; pass `path=` to `http_app` to move it), and it is what the agent card advertises.
 
-`A2AServer(agent_or_team, *, name=None, description=None, url, version="1.0.0", skills=None, deps=None, runner=None)`
+`A2AServer(agent_or_team, *, name=None, description=None, url, version="1.0.0", skills=None, deps=None, runner=None, signing_key=None, signing_kid=None, signing_jku=None)`
 
 - A `Team` (`SequentialAgent`, `ParallelAgent`, `LoopAgent`) is served as one agent.
 - `skills` are card skills as dicts (`id`, `name`, `description`, `tags`); by default one skill describes the agent.
 - `deps` and `runner` work as in [`AgentMCPServer`](serving-over-mcp.md): pass a `Runner` to apply usage limits, hooks or budgets.
+- `signing_key` / `signing_kid` / `signing_jku`: sign the served card (see [Signed agent cards](#signed-agent-cards)).
 
 `http_app(*, token=None, allowed_origins=(), max_body_bytes=4 MiB, max_tasks=1000, task_ttl_seconds=3600, path="/")`
 
@@ -140,7 +141,7 @@ agent = Agent(
 )
 ```
 
-`A2AClient(url, *, headers=None, timeout=60, transport=None, policy=None)` offers `get_card()`, `send(text_or_parts, *, task_id=None, context_id=None)`, `stream(...)`, `get_task(id)`, `cancel(id)` and `decide(task_id, approve=..., reject=...)`. It returns `A2ATask` (`state`, `text`, `data`, `output`, `pending_approvals`, `raw`). It uses the 1.0 interface from the card and falls back to the 0.3 shapes for older cards.
+`A2AClient(url, *, headers=None, timeout=60, transport=None, policy=None, card_keys=None, card_algorithms=None)` offers `get_card()`, `send(text_or_parts, *, task_id=None, context_id=None)`, `stream(...)`, `get_task(id)`, `cancel(id)` and `decide(task_id, approve=..., reject=...)`. It returns `A2ATask` (`state`, `text`, `data`, `output`, `pending_approvals`, `raw`). It uses the 1.0 interface from the card and falls back to the 0.3 shapes for older cards.
 
 `remote_agent_tool(url_or_client, *, name=None, description=None, requires_approval=False)` returns a `Tool` with one `request` string. It returns the remote output (structured output stays a dict). If the remote task is `input-required` or fails, the tool raises a `ToolError` the calling model sees, like `Agent.as_tool`; approvals cannot be given inside a tool call. Set `requires_approval=True` to make your own run pause before calling a partner agent.
 
@@ -192,11 +193,83 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
+## Signed agent cards
+
+A2A 1.0 lets a provider sign its agent card with a JSON Web Signature over the RFC 8785
+canonical form of the card (empty strings, lists and objects removed, `signatures`
+excluded). Nexura signs and verifies such cards. Signing needs the `cryptography`
+package, which `nexura-runtime` installs; `nexura-agents` alone does not depend on it.
+
+```python
+import asyncio
+
+import httpx
+from cryptography.hazmat.primitives.asymmetric import ec
+
+from nexura_agents import A2AClient, A2AServer, Agent, FakeModel
+from nexura_agents.a2a import AgentCardSignatureError
+
+key = ec.generate_private_key(ec.SECP256R1())  # in production: load your private key
+agent = Agent(name="Support", instructions="", model=FakeModel(responses=["Shipped."]))
+server = A2AServer(agent, url="http://support.test/", signing_key=key, signing_kid="2026-10")
+transport = httpx.ASGITransport(app=server.http_app())
+
+
+async def main() -> None:
+    trusted = {"2026-10": key.public_key()}
+    client = A2AClient("http://support.test", transport=transport, card_keys=trusted)
+    assert (await client.send("Where is A1?")).text == "Shipped."
+    assert client.card_verified_kid == "2026-10"
+
+    impostor = ec.generate_private_key(ec.SECP256R1()).public_key()
+    wary = A2AClient("http://support.test", transport=transport, card_keys={"2026-10": impostor})
+    try:
+        await wary.send("Where is A1?")
+    except AgentCardSignatureError:
+        pass  # nothing was sent: the card did not verify
+    else:
+        raise AssertionError("expected the card to be refused")
+
+
+asyncio.run(main())
+```
+
+- **Serving:** `A2AServer(signing_key=..., signing_kid=...)` adds one entry to the card's
+  `signatures` (`alg` chosen from the key: ES256, ES384, EdDSA or RS256; `typ` "JOSE";
+  optional `jku`). The signature covers the card as served, including the bearer
+  `securitySchemes` that `http_app(token=...)` adds.
+- **Calling:** with `card_keys={kid: public_key_or_jwk}` the client requires a signature
+  that verifies with one of those keys before it uses the card; otherwise every call
+  raises `AgentCardSignatureError` and the card is not cached. Accepted algorithms
+  default to ES256, ES384, RS256, PS256 and EdDSA (`card_algorithms=` narrows them).
+  Signatures with unknown `kid`s or `crit` headers are skipped, so a rotated key can sit
+  next to the current one.
+- **Without `card_keys`** signatures are not checked at all, and an unsigned card is
+  accepted. Keys are never fetched from a card's `jku` URL: trust comes only from the keys
+  you configure. `sign_agent_card` and `verify_agent_card` (in `nexura_agents.a2a`) work
+  on plain card dicts if you manage cards yourself.
+
+## Verified against the reference SDK
+
+`experiments/interop` is a separate uv project (its own `pyproject.toml` and `uv.lock`)
+that installs the official `a2a-sdk` 1.2.3 next to Nexura and runs offline on 127.0.0.1:
+
+- the `a2a-sdk` card resolver parses Nexura's card and verifies its signature with the
+  SDK's own verifier (and rejects it with the wrong key);
+- the `a2a-sdk` 1.0 client sends to Nexura (non-streaming and streaming) and reads the
+  task back with `GetTask`; the SDK's v0.3 compatibility transport also works against
+  Nexura's 0.3 method names;
+- Nexura's client verifies a card signed by the SDK's `create_agent_card_signer`, refuses
+  it with an untrusted key or after tampering, sends and streams to an `a2a-sdk` server,
+  and uses the 0.3 wire against the SDK's v0.3 compatibility endpoint.
+
+Other A2A implementations (other languages, hosted agents) have not been tested.
+
 ## What is and is not implemented
 
-Implemented: agent card, `SendMessage`, `SendStreamingMessage` (server-sent events), `GetTask`, `CancelTask`, text, data and file parts, task states `submitted`, `working`, `completed`, `failed`, `canceled` and `input-required`, contexts, the A2A and JSON-RPC error codes, the `A2A-Version` header (1.0 and 0.3 accepted), and the 0.3 method names.
+Implemented: agent card with `supportedInterfaces`, signed agent cards (sign and verify), `SendMessage`, `SendStreamingMessage` (server-sent events), `GetTask`, `CancelTask`, text, data and file parts, task states `submitted`, `working`, `completed`, `failed`, `canceled` and `input-required`, contexts, the A2A and JSON-RPC error codes, the `A2A-Version` header (1.0 and 0.3 accepted), and the 0.3 method names.
 
-Not implemented: push notifications (`-32003`), `ListTasks`, `SubscribeToTask` and the authenticated extended card (answered with their specific error codes), the HTTP+JSON and gRPC bindings, agent card signatures, OAuth and other security schemes beyond a static bearer token, extensions, multi-tenancy, task persistence, and the 0.3 agent card format on the server side (the client does read 0.3 cards). Not verified against a live third-party A2A implementation: tests run in-process against this implementation and hard-coded field names from the reference sources.
+Not implemented: push notifications (`-32003`), `ListTasks`, `SubscribeToTask` and the authenticated extended card (answered with their specific error codes), the HTTP+JSON and gRPC bindings, fetching signing keys from `jku`, OAuth and other security schemes beyond a static bearer token, extensions, multi-tenancy, task persistence, and the 0.3 agent card format on the server side (the client does read 0.3 cards). Interoperability is verified against the official `a2a-sdk` 1.2.3 only (above), not against other third-party agents.
 
 ## Talk to other agents with A2A
 
@@ -204,6 +277,7 @@ Not implemented: push notifications (`-32003`), `ListTasks`, `SubscribeToTask` a
 Agent2Agent 1.0 JSON-RPC methods (`SendMessage`, `SendStreamingMessage`, `GetTask`,
 `CancelTask`; 0.3 method names accepted). Approvals appear as `input-required` and are
 continued with digest-bound decisions. `A2AClient` and `remote_agent_tool(url)` let your
-agent call any A2A agent. Not implemented: push notifications, ListTasks and Subscribe,
-the HTTP+JSON and gRPC bindings, signed cards and OAuth. The wire format was checked
-against the official a2a-sdk source, not against live third-party agents. See `docs/a2a.md`.
+agent call any A2A agent. Agent cards can be signed (`signing_key=`) and verified
+(`card_keys=`). Not implemented: push notifications, ListTasks and Subscribe, the HTTP+JSON
+and gRPC bindings, and OAuth. Tested offline against the official `a2a-sdk` 1.2.3 in both
+directions; not against other third-party agents. See `docs/a2a.md`.

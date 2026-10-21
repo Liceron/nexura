@@ -1,0 +1,24 @@
+[project]
+name = "experiments-interop"
+version = "0.1.0"
+description = "Offline interop tests: Nexura MCP/A2A against the official reference SDKs"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "nexura-agents",
+    "mcp==2.3.0",
+    "a2a-sdk[http-server,signing]==1.2.3",
+    "uvicorn>=0.30.0,<1.0.0",
+    "cryptography>=46.0.0",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+]
+
+[tool.uv.sources]
+nexura-agents = { path = "../../packages/nexura-agents", editable = true }
+
+[tool.uv.workspace]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+asyncio_mode = "auto"
+testpaths = ["tests"]

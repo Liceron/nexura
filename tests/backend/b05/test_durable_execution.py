@@ -306,6 +306,9 @@ async def test_final_node_timeout_remains_enforced(temp_db: Path) -> None:
             "n_terminal": DurableNodeSpec(
                 node_id="n_terminal",
                 handler="slow_terminal",
+                # A6 founder decision 2: a timed-out non-pure node pauses effect_unknown
+                # (its outcome is unknown); this test is about a pure node's timeout.
+                effect_policy="pure",
                 timeout_seconds=0.08,  # Exceedingly short timeout
             ),
         },

@@ -29,9 +29,26 @@ from pydantic import BaseModel
 
 from nexura_agents.agent import Agent
 from nexura_agents.guardrails import check_tool_input, check_tool_output
+from nexura_agents.mcp.headers import (
+    METHOD_HEADER,
+    NAME_HEADER,
+    PROTOCOL_VERSION_HEADER,
+    InvalidHeaderAnnotation,
+    check_param_headers,
+    decode_value,
+    header_paths,
+    header_safe,
+)
 from nexura_agents.mcp.server import McpServerSession
 from nexura_agents.mcp.transports import McpTransport
-from nexura_agents.mcp.types import SUPPORTED_PROTOCOL_VERSIONS, McpImplementation
+from nexura_agents.mcp.types import (
+    HANDSHAKE_PROTOCOL_VERSIONS,
+    HEADER_MISMATCH,
+    META_PROTOCOL_VERSION,
+    NAME_BEARING_METHODS,
+    SUPPORTED_PROTOCOL_VERSIONS,
+    McpImplementation,
+)
 from nexura_agents.run_context import RunContext
 from nexura_agents.teams import Team
 from nexura_agents.tools import Tool
@@ -82,6 +99,13 @@ class AgentMCPServer:
         deps: Passed to every run and tool call as ``RunContext.deps``.
         runner: Runner used for agent calls (for usage limits, hooks or budgets), and for
             teams that were not given their own runner.
+        list_ttl_ms: ``ttlMs`` cache hint on 2026-07-28 discover and list results. The
+            tool list is fixed when the server is built, so clients may reuse it for this
+            long (default 60 s).
+        instructions: Optional guidance for the client's model, sent by ``server/discover``.
+
+    Both MCP eras are served: 2026-07-28 clients send stateless requests (no session), and
+    clients of the handshake revisions (2025-11-25 back to 2024-11-05) send ``initialize``.
     """
 
     def __init__(
@@ -93,6 +117,8 @@ class AgentMCPServer:
         deps: Any = None,
         runner: Any = None,
         version: str = "0.4.0",
+        list_ttl_ms: int = 60_000,
+        instructions: str | None = None,
     ) -> None:
         from nexura_agents.runner import Runner
 
@@ -100,7 +126,12 @@ class AgentMCPServer:
         self.deps = deps
         self.runner = runner or Runner()
         self.info = McpImplementation(name=name, version=version)
-        self.session = McpServerSession(_NoTransport(), server_info=self.info)
+        self.session = McpServerSession(
+            _NoTransport(),
+            server_info=self.info,
+            list_ttl_ms=list_ttl_ms,
+            instructions=instructions,
+        )
         seen: set[str] = set()
         for agent in agents:
             self._add(seen, _agent_tool_name(agent))
@@ -279,8 +310,14 @@ class AgentMCPServer:
         ``token`` requires ``Authorization: Bearer <token>``; always set one unless the
         server is bound to localhost. Browser requests are refused unless their
         ``Origin`` is listed in ``allowed_origins`` (DNS-rebinding protection).
-        Bodies over ``max_body_bytes`` get 413. Sessions idle past ``session_ttl_seconds``
-        expire, and beyond ``max_sessions`` the least recently used one is evicted.
+        Bodies over ``max_body_bytes`` get 413.
+
+        2026-07-28 requests are stateless: the ``MCP-Protocol-Version``, ``Mcp-Method``,
+        ``Mcp-Name`` and ``Mcp-Param-*`` headers must match the body (else 400 with
+        ``HeaderMismatch`` -32020), an unsupported version gets 400 with -32022, an
+        unknown method 404, and no session is created. Handshake-revision clients get a
+        session from ``initialize``: sessions idle past ``session_ttl_seconds`` expire, and
+        beyond ``max_sessions`` the least recently used one is evicted.
         """
         # id -> last-used time, least recently used first.
         sessions: OrderedDict[str, float] = OrderedDict()
@@ -390,6 +427,13 @@ class AgentMCPServer:
                 )
                 return
 
+            header_version = headers.get("mcp-protocol-version")
+            if _meta_version(message) is not None or (
+                header_version is not None and header_version not in HANDSHAKE_PROTOCOL_VERSIONS
+            ):
+                await self._serve_modern(message, headers, send, respond)
+                return
+
             if message["method"] == "initialize":
                 reply = await self.session.handle_request(message)
                 new_id = secrets.token_urlsafe(24)
@@ -421,6 +465,96 @@ class AgentMCPServer:
                 await respond(send, 200, reply)
 
         return app
+
+    async def _serve_modern(
+        self,
+        message: dict[str, Any],
+        headers: dict[str, str],
+        send: Send,
+        respond: Callable[..., Awaitable[None]],
+    ) -> None:
+        """One stateless 2026-07-28 request: validate the headers, then answer it."""
+        if "id" not in message:
+            await respond(send, 202)  # no client notifications are defined; accept and drop
+            return
+
+        def error(code: int, text: str, data: Any = None) -> dict[str, Any]:
+            return {
+                "jsonrpc": "2.0",
+                "id": message.get("id"),
+                "error": {"code": code, "message": text, "data": data},
+            }
+
+        params = message.get("params")
+        problem = self.session.check_envelope(params)
+        mismatch = _header_mismatch(message, headers)
+        if problem is not None and problem[0] == -32602:
+            await respond(send, 400, error(*problem))
+            return
+        if mismatch is not None:
+            await respond(send, 400, error(HEADER_MISMATCH, mismatch))
+            return
+        if problem is not None:
+            await respond(send, 400, error(*problem))
+            return
+        if message.get("method") == "tools/call" and isinstance(params, dict):
+            definition = self.session.tool_definition(str(params.get("name")))
+            arguments = params.get("arguments")
+            if definition is not None and isinstance(arguments, dict):
+                try:
+                    paths = header_paths(definition.inputSchema)
+                except InvalidHeaderAnnotation:
+                    paths = {}
+                lowered = {k.lower(): v for k, v in headers.items()}
+                reason = check_param_headers(paths, arguments, lowered)
+                if reason is not None:
+                    await respond(send, 400, error(HEADER_MISMATCH, reason))
+                    return
+
+        reply = await self.session.handle_request(message)
+        if reply is None:
+            await respond(send, 202)
+            return
+        code = reply.get("error", {}).get("code") if isinstance(reply.get("error"), dict) else None
+        status = 404 if code == -32601 else 400 if code in _BAD_REQUEST_CODES else 200
+        await respond(send, status, reply)
+
+
+# JSON-RPC errors a 2026-07-28 Streamable HTTP server answers with HTTP 400.
+_BAD_REQUEST_CODES = frozenset({-32700, -32600, -32602, -32020, -32021, -32022})
+
+
+def _meta_version(message: dict[str, Any]) -> Any:
+    params = message.get("params")
+    meta = params.get("_meta") if isinstance(params, dict) else None
+    return meta.get(META_PROTOCOL_VERSION) if isinstance(meta, dict) else None
+
+
+def _header_mismatch(message: dict[str, Any], headers: dict[str, str]) -> str | None:
+    """Why the request metadata headers disagree with the body, or None."""
+    for name in ("mcp-protocol-version", "mcp-method", "mcp-name"):
+        value = headers.get(name)
+        if value is not None and not header_safe(value):
+            return f"The {name} header contains invalid characters."
+    version = headers.get("mcp-protocol-version")
+    if version is None or version != _meta_version(message):
+        return (
+            f"The {PROTOCOL_VERSION_HEADER} header does not match the protocol version in "
+            "params._meta."
+        )
+    method = message.get("method")
+    if headers.get("mcp-method") != method:
+        return f"The {METHOD_HEADER} header does not match the request method."
+    key = NAME_BEARING_METHODS.get(str(method))
+    params = message.get("params")
+    if key is not None and isinstance(params, dict):
+        body_value = params.get(key)
+        raw = headers.get("mcp-name")
+        if raw is None:
+            return f"The {NAME_HEADER} header is required for {method}."
+        if decode_value(raw) != body_value:
+            return f"The {NAME_HEADER} header does not match the request's '{key}'."
+    return None
 
 
 def _agent_tool_name(agent: Agent | Team) -> str:

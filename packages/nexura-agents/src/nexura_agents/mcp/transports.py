@@ -21,6 +21,14 @@ from nexura_agents.mcp.errors import (
     McpCommandNotAllowedError,
     McpTransportError,
 )
+from nexura_agents.mcp.headers import (
+    METHOD_HEADER,
+    NAME_HEADER,
+    PROTOCOL_VERSION_HEADER,
+    encode_value,
+    param_headers,
+)
+from nexura_agents.mcp.types import META_PROTOCOL_VERSION, NAME_BEARING_METHODS
 from nexura_agents.network.client import SafeHttpClient
 from nexura_agents.network.policy import DestinationPolicy
 
@@ -30,6 +38,17 @@ class McpTransport(ABC):
 
     # How long a client session waits for one reply unless told otherwise.
     request_timeout: float = 60.0
+    # "stream" (stdio, in-memory: one ordered channel) or "http" (one POST per message).
+    kind: str = "stream"
+    # True when the transport mirrors body fields into HTTP headers (2026-07-28).
+    mirrors_headers: bool = False
+
+    def set_tool_headers(self, tool_headers: dict[str, dict[tuple[str, ...], str]]) -> None:
+        """Record which tool parameters are mirrored into ``Mcp-Param-*`` headers.
+
+        Called by the client after ``tools/list``; only header-mirroring transports use it.
+        """
+        return None
 
     @abstractmethod
     async def send_message(self, message: dict[str, Any]) -> None:
@@ -441,9 +460,18 @@ class McpHttpTransport(McpTransport):
     """MCP "Streamable HTTP" transport, bounded by a DestinationPolicy.
 
     Each JSON-RPC message is POSTed to one endpoint. Replies come back as JSON or as a
-    server-sent event stream; the ``Mcp-Session-Id`` the server assigns is sent on
+    server-sent event stream.
+
+    A 2026-07-28 request (one whose ``params._meta`` carries a protocol version) is sent
+    statelessly with the request metadata headers ``MCP-Protocol-Version``,
+    ``Mcp-Method``, ``Mcp-Name`` and ``Mcp-Param-*``, all derived from the body, and no
+    session id. A modern server's JSON-RPC error on HTTP 400/404 is delivered as the
+    reply. For the older revisions the ``Mcp-Session-Id`` the server assigns is sent on
     every later request, and the session is closed with ``DELETE`` on ``close()``.
     """
+
+    kind = "http"
+    mirrors_headers = True
 
     def __init__(
         self,
@@ -471,13 +499,23 @@ class McpHttpTransport(McpTransport):
         self._is_closed = False
         self.session_id: str | None = None
         self.protocol_version: str | None = None
+        self._tool_headers: dict[str, dict[tuple[str, ...], str]] = {}
 
-    def _request_headers(self) -> dict[str, str]:
+    def set_tool_headers(self, tool_headers: dict[str, dict[tuple[str, ...], str]]) -> None:
+        self._tool_headers = {name: dict(paths) for name, paths in tool_headers.items()}
+
+    def _request_headers(self, message: dict[str, Any] | None = None) -> dict[str, str]:
         headers = {
             **self.headers,
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
         }
+        modern = _modern_version(message)
+        if modern is not None and message is not None:
+            # Stateless revision: every header is derived from this message's body, so
+            # the headers and the body can never disagree. No session id is sent.
+            headers.update(_metadata_headers(message, modern, self._tool_headers))
+            return headers
         if self.session_id:
             headers["Mcp-Session-Id"] = self.session_id
         if self.protocol_version:
@@ -487,9 +525,10 @@ class McpHttpTransport(McpTransport):
     async def send_message(self, message: dict[str, Any]) -> None:
         if self._is_closed:
             raise McpTransportError("Cannot send message on closed HTTP transport.")
+        modern = _modern_version(message) is not None
         resp = await self._client.post(
             self.endpoint_url,
-            headers=self._request_headers(),
+            headers=self._request_headers(message),
             json=message,
             follow_redirects=False,
         )
@@ -498,12 +537,21 @@ class McpHttpTransport(McpTransport):
                 f"MCP endpoint answered with a redirect (HTTP {resp.status_code}); "
                 "redirects are not followed."
             )
-        if resp.status_code == 404 and self.session_id:
+        if resp.status_code == 404 and self.session_id and not modern:
             raise McpTransportError("MCP session expired or unknown to the server (HTTP 404).")
         if resp.status_code in (202, 204):
             return  # notification or response accepted; nothing to read
         if resp.status_code != 200:
-            raise McpTransportError(f"MCP HTTP request failed with status code {resp.status_code}.")
+            error = _rpc_error_body(resp) if modern and resp.status_code in (400, 404) else None
+            if error is not None and "id" in message:
+                # A modern server's protocol error (unsupported version, header mismatch,
+                # unknown method): hand it to the client as this request's reply.
+                await self._response_queue.put({**error, "id": message["id"]})
+                return
+            raise McpTransportError(
+                f"MCP HTTP request failed with status code {resp.status_code}.",
+                details={"http_status": resp.status_code},
+            )
         session_id = resp.headers.get("mcp-session-id")
         if session_id:
             self.session_id = session_id
@@ -520,7 +568,12 @@ class McpHttpTransport(McpTransport):
         for item in messages:
             if isinstance(item, dict):
                 result = item.get("result")
-                if isinstance(result, dict) and "protocolVersion" in result:
+                if (
+                    not modern
+                    and message.get("method") == "initialize"
+                    and isinstance(result, dict)
+                    and "protocolVersion" in result
+                ):
                     self.protocol_version = str(result["protocolVersion"])
                 await self._response_queue.put(item)
 
@@ -563,3 +616,45 @@ def _parse_sse_messages(text: str) -> list[Any]:
         elif line.startswith("data:"):
             data.append(line[5:].lstrip(" "))
     return messages
+
+
+def _modern_version(message: dict[str, Any] | None) -> str | None:
+    """The 2026-07-28-style protocol version in ``params._meta``, if the message has one."""
+    params = message.get("params") if isinstance(message, dict) else None
+    meta = params.get("_meta") if isinstance(params, dict) else None
+    version = meta.get(META_PROTOCOL_VERSION) if isinstance(meta, dict) else None
+    return version if isinstance(version, str) else None
+
+
+def _metadata_headers(
+    message: dict[str, Any],
+    version: str,
+    tool_headers: dict[str, dict[tuple[str, ...], str]],
+) -> dict[str, str]:
+    """``MCP-Protocol-Version``, ``Mcp-Method``, ``Mcp-Name`` and ``Mcp-Param-*`` headers."""
+    method = str(message.get("method", ""))
+    params = message.get("params") or {}
+    headers = {PROTOCOL_VERSION_HEADER: version, METHOD_HEADER: method}
+    name_key = NAME_BEARING_METHODS.get(method)
+    name = params.get(name_key) if name_key else None
+    if isinstance(name, str):
+        headers[NAME_HEADER] = encode_value(name)
+    if method == "tools/call" and isinstance(name, str) and name in tool_headers:
+        arguments = params.get("arguments")
+        if isinstance(arguments, dict):
+            headers.update(param_headers(tool_headers[name], arguments))
+    return headers
+
+
+def _rpc_error_body(resp: httpx.Response) -> dict[str, Any] | None:
+    """The JSON-RPC error response in an HTTP error body, if that is what it is."""
+    try:
+        body = resp.json()
+    except ValueError:
+        return None
+    if not isinstance(body, dict):
+        return None
+    error = body.get("error")
+    if not isinstance(error, dict) or not isinstance(error.get("code"), int):
+        return None
+    return {"jsonrpc": "2.0", "error": error}

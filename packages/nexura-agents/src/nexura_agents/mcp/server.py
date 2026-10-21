@@ -12,8 +12,14 @@ from nexura_agents.contracts.base import BaseModule
 from nexura_agents.contracts.context import ExecutionContext
 from nexura_agents.mcp.transports import McpTransport
 from nexura_agents.mcp.types import (
+    CACHEABLE_METHODS,
+    LATEST_HANDSHAKE_VERSION,
     LATEST_PROTOCOL_VERSION,
+    META_CLIENT_CAPABILITIES,
+    META_PROTOCOL_VERSION,
+    META_SERVER_INFO,
     SUPPORTED_PROTOCOL_VERSIONS,
+    UNSUPPORTED_PROTOCOL_VERSION,
     McpContentBlock,
     McpImplementation,
     McpPromptArgument,
@@ -21,6 +27,7 @@ from nexura_agents.mcp.types import (
     McpResourceDefinition,
     McpToolCallResult,
     McpToolDefinition,
+    is_modern_version,
 )
 
 ToolHandler = Callable[[dict[str, Any]], Coroutine[Any, Any, Any]]
@@ -28,7 +35,24 @@ PromptHandler = Callable[[dict[str, Any]], Coroutine[Any, Any, list[dict[str, An
 
 
 class McpServerSession:
-    """Server hosting tools, resources, and Nexura modules as an MCP endpoint."""
+    """Server hosting tools, resources, and Nexura modules as an MCP endpoint.
+
+    Dual-era: a request whose ``params._meta`` carries
+    ``io.modelcontextprotocol/protocolVersion`` is served statelessly under that
+    (2026-07-28) revision, with ``server/discover``, ``resultType`` and cache hints; an
+    ``initialize`` request selects one of the handshake revisions for that connection.
+
+    Args:
+        transport: Where requests come from (unused when ``handle_request`` is fed directly).
+        server_info: Name and version reported to clients.
+        protocol_version: Pin one version; the server then speaks only that one.
+        list_ttl_ms: ``ttlMs`` freshness hint on discover and list results (2026-07-28).
+            0 (the default) tells clients to re-fetch; raise it when the tool, resource and
+            prompt lists do not change while the server runs.
+        cache_scope: ``"private"`` (default; caches are per authorization context) or
+            ``"public"`` (lists are identical for every caller).
+        instructions: Optional guidance returned by ``server/discover``.
+    """
 
     def __init__(
         self,
@@ -36,7 +60,14 @@ class McpServerSession:
         *,
         server_info: McpImplementation | None = None,
         protocol_version: str | None = None,
+        list_ttl_ms: int = 0,
+        cache_scope: str = "private",
+        instructions: str | None = None,
     ) -> None:
+        if list_ttl_ms < 0:
+            raise ValueError("list_ttl_ms must be >= 0.")
+        if cache_scope not in ("public", "private"):
+            raise ValueError("cache_scope must be 'public' or 'private'.")
         self.transport = transport
         self.server_info = server_info or McpImplementation(
             name="nexura-mcp-server",
@@ -47,6 +78,9 @@ class McpServerSession:
         self.supported_versions = (
             [protocol_version] if protocol_version else list(SUPPORTED_PROTOCOL_VERSIONS)
         )
+        self.list_ttl_ms = list_ttl_ms
+        self.cache_scope = cache_scope
+        self.instructions = instructions
         self._tools: dict[str, McpToolDefinition] = {}
         self._tool_handlers: dict[str, ToolHandler] = {}
         self._resources: dict[str, tuple[McpResourceDefinition, str]] = {}
@@ -68,6 +102,10 @@ class McpServerSession:
             inputSchema=input_schema,
         )
         self._tool_handlers[name] = handler
+
+    def tool_definition(self, name: str) -> McpToolDefinition | None:
+        """The registered definition of tool ``name``, if any."""
+        return self._tools.get(name)
 
     def register_module(
         self,
@@ -147,6 +185,31 @@ class McpServerSession:
                 "error": {"code": -32603, "message": "Internal error", "data": None},
             }
 
+    def modern_versions(self) -> list[str]:
+        """Supported revisions served statelessly (no ``initialize``)."""
+        return [v for v in self.supported_versions if is_modern_version(v)]
+
+    def check_envelope(self, params: Any) -> tuple[int, str, Any] | None:
+        """Validate a modern request's ``_meta`` envelope: ``(code, message, data)`` or None."""
+        meta = params.get("_meta") if isinstance(params, dict) else None
+        if not isinstance(meta, dict):
+            return (-32602, "Invalid params: params._meta must be an object.", None)
+        missing = [k for k in (META_PROTOCOL_VERSION, META_CLIENT_CAPABILITIES) if k not in meta]
+        if missing:
+            return (-32602, f"Invalid params: _meta is missing {', '.join(missing)}.", None)
+        version = meta[META_PROTOCOL_VERSION]
+        if not isinstance(version, str):
+            return (-32602, "Invalid params: the protocol version must be a string.", None)
+        if not isinstance(meta[META_CLIENT_CAPABILITIES], dict):
+            return (-32602, "Invalid params: clientCapabilities must be an object.", None)
+        if version not in self.modern_versions():
+            return (
+                UNSUPPORTED_PROTOCOL_VERSION,
+                "Unsupported protocol version",
+                {"supported": list(self.supported_versions), "requested": version},
+            )
+        return None
+
     async def _dispatch(self, req: dict[str, Any]) -> dict[str, Any] | None:
         req_id = req.get("id")
         method = req.get("method")
@@ -155,6 +218,9 @@ class McpServerSession:
         # Handle notification (no id)
         if req_id is None:
             return None
+
+        if _has_modern_meta(params) or method == "server/discover":
+            return await self._dispatch_modern(req_id, method, params)
 
         def _make_res(result_val: Any) -> dict[str, Any]:
             return {"jsonrpc": "2.0", "id": req_id, "result": result_val}
@@ -174,8 +240,22 @@ class McpServerSession:
 
         if method == "initialize":
             requested = params.get("protocolVersion")
+            # Handshake versions only: the stateless revisions have no initialize.
+            offers = [v for v in self.supported_versions if not is_modern_version(v)]
+            if not offers:
+                return _make_err(
+                    UNSUPPORTED_PROTOCOL_VERSION,
+                    "This server speaks only stateless MCP revisions, which have no "
+                    f"initialize; supported versions: {', '.join(self.supported_versions)}.",
+                    {"supported": list(self.supported_versions), "requested": requested},
+                )
             # Echo the client's version when supported; otherwise offer ours.
-            version = requested if requested in self.supported_versions else self.protocol_version
+            if requested in offers:
+                version = requested
+            elif LATEST_HANDSHAKE_VERSION in offers:
+                version = LATEST_HANDSHAKE_VERSION
+            else:
+                version = offers[0]
             return _make_res(
                 {
                     "protocolVersion": version,
@@ -263,7 +343,73 @@ class McpServerSession:
             except Exception as exc:
                 return _make_err(-32000, f"Prompt error: {exc}")
 
+        if method == "resources/templates/list":
+            return _make_res({"resourceTemplates": []})
+
         return _make_err(-32601, f"Method '{method}' not implemented.")
+
+    # ------------------------------------------------------------------ 2026-07-28
+
+    def discover_result(self) -> dict[str, Any]:
+        """The ``server/discover`` result body (without the cache hint fields)."""
+        result: dict[str, Any] = {
+            "supportedVersions": list(self.supported_versions),
+            # No subscriptions/listen stream is offered, so no listChanged here.
+            "capabilities": {"tools": {}, "resources": {}, "prompts": {}},
+        }
+        if self.instructions:
+            result["instructions"] = self.instructions
+        return result
+
+    async def _dispatch_modern(self, req_id: Any, method: Any, params: Any) -> dict[str, Any]:
+        def _make_err(code: int, msg: str, data: Any = None) -> dict[str, Any]:
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": code, "message": msg, "data": data},
+            }
+
+        problem = self.check_envelope(params)
+        if problem is not None:
+            return _make_err(*problem)
+        assert isinstance(params, dict)
+
+        if method == "server/discover":
+            result: dict[str, Any] = self.discover_result()
+        elif method in (
+            "tools/list",
+            "tools/call",
+            "resources/list",
+            "resources/read",
+            "resources/templates/list",
+            "prompts/list",
+            "prompts/get",
+        ):
+            # The method bodies are the same as for the handshake revisions; only the
+            # error codes for unknown names differ (-32602 under 2026-07-28).
+            inner = await self._dispatch(
+                {"jsonrpc": "2.0", "id": req_id, "method": method, "params": _strip_meta(params)}
+            )
+            assert inner is not None
+            if "error" in inner:
+                error = dict(inner["error"])
+                if error.get("code") == -32601 and method in ("tools/call", "prompts/get"):
+                    error["code"] = -32602  # unknown tool / prompt name
+                if error.get("code") == -32000:
+                    error["code"] = -32603  # -32000..-32019 are legacy-only codes
+                return {"jsonrpc": "2.0", "id": req_id, "error": error}
+            result = dict(inner["result"])
+        else:
+            return _make_err(-32601, f"Method '{method}' not found.")
+
+        result["resultType"] = "complete"
+        meta = dict(result.get("_meta") or {})
+        meta[META_SERVER_INFO] = self.server_info.model_dump()
+        result["_meta"] = meta
+        if method in CACHEABLE_METHODS:
+            result["ttlMs"] = 0 if method == "resources/read" else self.list_ttl_ms
+            result["cacheScope"] = self.cache_scope
+        return {"jsonrpc": "2.0", "id": req_id, "result": result}
 
     async def serve_once(self) -> None:
         """Read and process a single message from the transport."""
@@ -297,3 +443,12 @@ def _as_text(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False, default=str)
     except (TypeError, ValueError):
         return str(value)
+
+
+def _has_modern_meta(params: Any) -> bool:
+    meta = params.get("_meta") if isinstance(params, dict) else None
+    return isinstance(meta, dict) and META_PROTOCOL_VERSION in meta
+
+
+def _strip_meta(params: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in params.items() if k != "_meta"}

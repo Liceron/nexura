@@ -4,9 +4,14 @@
 
 from __future__ import annotations
 
+from nexura_agents.mcp.auth import (
+    check_authorization_response_issuer,
+    check_metadata_issuer,
+)
 from nexura_agents.mcp.client import McpClientSession
 from nexura_agents.mcp.errors import (
     McpCommandNotAllowedError,
+    McpInputRequiredError,
     McpIntegrationError,
     McpJsonRpcError,
     McpProtocolVersionMismatchError,
@@ -28,8 +33,12 @@ from nexura_agents.mcp.transports import (
     McpTransport,
 )
 from nexura_agents.mcp.types import (
+    HANDSHAKE_PROTOCOL_VERSIONS,
+    LATEST_HANDSHAKE_VERSION,
     LATEST_PROTOCOL_VERSION,
+    MODERN_PROTOCOL_VERSIONS,
     SUPPORTED_PROTOCOL_VERSIONS,
+    McpCacheHint,
     McpContentBlock,
     McpImplementation,
     McpPromptArgument,
@@ -61,7 +70,14 @@ __all__ = [
     "McpImplementation",
     "McpServerCapabilities",
     "LATEST_PROTOCOL_VERSION",
+    "LATEST_HANDSHAKE_VERSION",
+    "MODERN_PROTOCOL_VERSIONS",
+    "HANDSHAKE_PROTOCOL_VERSIONS",
     "SUPPORTED_PROTOCOL_VERSIONS",
+    "McpCacheHint",
+    "McpInputRequiredError",
+    "check_authorization_response_issuer",
+    "check_metadata_issuer",
     "McpIntegrationError",
     "McpProtocolVersionMismatchError",
     "McpToolReplacementError",

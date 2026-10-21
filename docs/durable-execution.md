@@ -288,9 +288,18 @@ journal as `kind="durable_graph"`:
   both a `DurableExecutionError` and a `DefinitionMismatchError`.
 - Before a non-pure node runs, the same fenced commit that records the legacy
   `pre_dispatch_intent` writes a `StepIntent` and a `pending` effect. A handler that
-  returns marks it `confirmed` with its output; a handler that raises or times out
-  leaves it `indeterminate` (the remote system may have applied it). A missing handler
-  is detected before any intent is written.
+  returns marks it `confirmed` with its output. A missing handler is detected before any
+  intent is written.
+- A non-pure handler that **raises or times out** may still have applied its effect (a
+  lost response looks like a refusal), so the run pauses (`status="paused"`,
+  `pause_reason="effect_unknown"`, effect `indeterminate`, lease released) and the
+  exception (`DeadlineExceededError` for a timeout) propagates; resolve it as below. A
+  `pure`/`read` handler that raises or times out fails the run as before.
+- Cancelling the worker task (worker shutdown) is treated as a crash: nothing is
+  committed, the dispatched intent stays, and after the lease expires the next worker
+  applies the crash rules below. `request_cancellation` while a node is in flight ends the
+  run `cancelled` and marks that node's effect `indeterminate`; the handler's late result
+  is refused.
 - Handlers that take an `ExecutionContext` get `ctx.attributes["idempotency_key"]`
   (stable for this graph visit across takeover) and `ctx.attributes["fencing_token"]`
   (the journal token; `DurableRunState.fencing_token` keeps the legacy numbering, one
@@ -503,8 +512,7 @@ graph reads; the journal records the lease and what was dispatched. User guide a
   `Unknown`) and the manifest spellings. Undeclared function handlers are
   `non_idempotent`. Modules use their manifest `effect_policy`; a module that leaves it
   unset but declares write operations counts as `non_idempotent` for a call that writes.
-  Sub-workflow, parallel and mapped steps record one intent with the weakest class of
-  their parts (per-branch, per-item and per-child intents are S7).
+  Sub-workflow, parallel and mapped steps are journaled per part (S7, below).
 - **Keys and tokens.** `ExecutionContext.idempotency_key(index=0)` and
   `ExecutionContext.fencing_token` for modules; `step_idempotency_key(index=0)` and
   `step_fencing_token()` in `nexura_runtime.workflow` for function handlers. Mapped items
@@ -526,11 +534,54 @@ graph reads; the journal records the lease and what was dispatched. User guide a
   the run fails. `WorkflowRunResult` has `pause_reason` and `pending_effect`;
   `WorkflowCheckpoint` has `pending_effect`, `revision` and a `pause_reason` property.
 
-Limits: sub-workflow children keep no journal of their own (a recovered parent re-attaches
-to its child as before); `SQLiteWorkflowStore` is single-host and there is no Postgres
-workflow store yet (S8); the service still marks runs interrupted with its startup sweep
-and has no recover endpoint (S9); trigger reclaim still starts a new run (S10); budgets
-are not yet linked to intents (S11).
+Limits: `SQLiteWorkflowStore` is single-host and there is no Postgres workflow store yet
+(S8); the service still marks runs interrupted with its startup sweep and has no recover
+endpoint (S9); trigger reclaim still starts a new run (S10); budgets are not yet linked to
+intents (S11).
+
+## Composite workflow steps and module keys (S7)
+
+User guide and example:
+[Workflows: parallel, map and sub-workflow steps](workflows.md#parallel-map-and-sub-workflow-steps).
+
+- **Container intent.** A parallel, `map_over` or sub-workflow node with any non-pure part
+  writes an intent of class `pure` for the step itself (`<node>#<step>`, carrying the
+  approval it runs under): running the step again is safe because each part decides for
+  itself. Its outcome (the merged update) is committed as for any node.
+- **Parts.** Each parallel branch (`<node>/<branch>#<step>[.<attempt>]`) and mapped item
+  (`<node>#<step>[.<attempt>][<item>]`) that is not `pure` writes its own intent (payload
+  digest of its inputs, its own idempotency key, its effect class, the step's approval)
+  just before it runs; every part's outcome (`{"update": ...}`) and confirmed effect are
+  committed as soon as it returns. Part attempts start at the step's attempt; a part
+  resolved `not_applied` is dispatched as the next attempt (`m#3.2[1]`).
+- **Recovery per part.** When `recover` runs the step again: a part with an outcome is not
+  run again (its update is used); a part without an intent runs; a part dispatched by a
+  stopped process follows §"Recovery after a crash" with its own key, and a
+  `non_idempotent` part (or a probe answering `Unknown`) is in doubt. The other parts
+  finish first; then the run pauses `effect_unknown` with a `pending_effect` naming the
+  first part in doubt (`part`, `item` / `branch`, `run_id`) and every part in doubt
+  becomes `indeterminate`. A resolution applies to that part; `not_applied` on a part of
+  a gated step asks for a fresh approval of the step. An in-process retry (`retry=`)
+  keeps finished parts and re-runs the failed ones with their keys.
+- **Sub-workflow children.** A child run is journaled under its own id with
+  `parent_run_id`, its own lease and heartbeat, and its own intents. The parent's
+  `recover` recovers it (dead same-host owner released, otherwise after its lease
+  expires; a live child lease makes the parent's `recover` raise `WorkflowError` without
+  failing the run). A child paused `effect_unknown` pauses the parent with
+  `"part": "subworkflow"`, the child's `run_id` and `node_id` `<node>/<child node>`;
+  `WorkflowEngine.resolve_effect` on the parent journals the decision in the child's run,
+  and the child continues when the parent is recovered.
+- **Module keys.** `ExecutionContext.idempotency_key()` returns the part's key inside a
+  branch or item. `nexura.http.request` sends the step's key as `Idempotency-Key` on
+  writes without an explicit key and then retries POST/PATCH (`retries`, at most 5, on
+  transport errors and 429/5xx, same key every try); without any key a POST/PATCH retry is
+  still refused. The email and WhatsApp channel modules use the step's key as the outbox
+  de-duplication key; connector writes send it as `Idempotency-Key`
+  (`ConnectorModule.SENDS_IDEMPOTENCY_KEY`; `False` for S3, which signs its headers).
+
+Limits: recover top-level runs (`parent_run_id` is `None`); `list_recoverable()` also lists
+child runs, which their parent recovers. A part in doubt is reported one at a time. The
+effects REST route lists and resolves a child's effects under the child's run id.
 
 ## See also
 

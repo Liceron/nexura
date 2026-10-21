@@ -15,6 +15,11 @@ Internal to ``WorkflowEngine``. A workflow store that offers ``open_execution_st
 - the node's ``StepOutcome`` committed with the new cursor before the checkpoint moves;
 - the run status (``paused`` with ``pause_reason``, ``completed``, ``failed``).
 
+Composite steps (A6 S7): a parallel, map or sub-workflow node writes a container intent
+(class ``pure``: the step itself may run again, its parts guard themselves); each parallel
+branch (``<node>/<branch>#<step>``) and mapped item (``<node>#<step>[<item>]``) gets its own
+intent and outcome; a sub-workflow child keeps its own journal (``parent_run_id`` set).
+
 The checkpoint stays the state the graph reads; its saves are fenced by a revision. The
 journal records the lease and what was dispatched.
 """
@@ -24,7 +29,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
 from nexura_agents.contracts.execution import (
@@ -58,10 +63,18 @@ class WorkflowJournal:
     """Lease, heartbeat, intents and outcomes of one run; one instance per engine call."""
 
     def __init__(
-        self, store: ExecutionStore, workspace_id: str, run_id: str, digest: str, ttl: float
+        self,
+        store: ExecutionStore,
+        workspace_id: str,
+        run_id: str,
+        digest: str,
+        ttl: float,
+        parent_run_id: str | None = None,
     ) -> None:
         self.store = store
         self.run_id = run_id
+        #: The run this one is a sub-workflow child of (journaled as ``parent_run_id``).
+        self.parent_run_id = parent_run_id
         self.eid = ExecutionId(workspace_id or "default", run_id)
         self.digest = digest
         self.ttl = ttl
@@ -74,15 +87,26 @@ class WorkflowJournal:
         self.effects: dict[str, EffectRecord] = {}  # by step key (one effect per step)
         #: Revision of the workflow checkpoint this run last read or wrote (fences saves).
         self.cp_revision: int | None = None
+        #: Step keys this instance dispatched (an in-process node retry re-runs them; an
+        #: open intent not in here was left by a process that stopped).
+        self.local: set[str] = set()
         self._heartbeat: asyncio.Task[None] | None = None
         self._closed = False
+        # Parallel branches and mapped items commit concurrently; one commit at a time.
+        self._lock = asyncio.Lock()
 
     @classmethod
     async def open(
-        cls, checkpoints: Any, workspace_id: str, run_id: str, digest: str, ttl: float
+        cls,
+        checkpoints: Any,
+        workspace_id: str,
+        run_id: str,
+        digest: str,
+        ttl: float,
+        parent_run_id: str | None = None,
     ) -> WorkflowJournal:
         store = await checkpoints.open_execution_store()
-        return cls(store, workspace_id, run_id, digest, ttl)
+        return cls(store, workspace_id, run_id, digest, ttl, parent_run_id)
 
     # ------------------------------------------------------------------ taking the run
 
@@ -119,6 +143,7 @@ class WorkflowJournal:
             state=self._initial_state(),
             ttl=self.ttl,
             kind="workflow",
+            parent_run_id=self.parent_run_id,
             origin=origin,
         )
         self.status = run.status
@@ -233,6 +258,20 @@ class WorkflowJournal:
         effects: Sequence[EffectRecord] = (),
         events: Sequence[dict[str, Any]] = (),
     ) -> None:
+        async with self._lock:
+            await self._commit_locked(
+                status=status, cursor=cursor, steps=steps, effects=effects, events=events
+            )
+
+    async def _commit_locked(
+        self,
+        *,
+        status: str,
+        cursor: str | None,
+        steps: Sequence[StepIntent | StepOutcome],
+        effects: Sequence[EffectRecord],
+        events: Sequence[dict[str, Any]],
+    ) -> None:
         self.check()
         if self.lease is None:
             raise LeaseLostError(f"Workflow run '{self.run_id}': no run lease is held.")
@@ -274,12 +313,22 @@ class WorkflowJournal:
 
     def latest(self, node_id: str, step: int) -> tuple[int, StepKey, ExecutionStep | None]:
         """The newest attempt of a node visit: (attempt, step key, journal step or None)."""
-        attempt, key = 1, StepKey.workflow(node_id, step)
+        return self.latest_of(lambda attempt: StepKey.workflow(node_id, step, attempt))
+
+    def latest_of(
+        self, family: Callable[[int], StepKey], first: int = 1
+    ) -> tuple[int, StepKey, ExecutionStep | None]:
+        """The newest recorded attempt of a step family (``family(attempt)`` is its key).
+
+        Used for node visits and for the parts of a composite step (a branch or an item,
+        whose attempts start at the attempt of the step they belong to).
+        """
+        attempt, key = first, family(first)
         if str(key) not in self.steps:
             return attempt, key, None
-        while str(StepKey.workflow(node_id, step, attempt + 1)) in self.steps:
+        while str(family(attempt + 1)) in self.steps:
             attempt += 1
-        key = StepKey.workflow(node_id, step, attempt)
+        key = family(attempt)
         return attempt, key, self.steps[str(key)]
 
     def dispatch_key(self, node_id: str, step: int) -> StepKey:
@@ -299,6 +348,9 @@ class WorkflowJournal:
             return key
         return StepKey.workflow(node_id, step, attempt + 1)
 
+    def effect_by_id(self, effect_id: str | None) -> EffectRecord | None:
+        return next((e for e in self.effects.values() if e.effect_id == effect_id), None)
+
     def _consume(self, approval_id: str | None, key: StepKey) -> None:
         if approval_id is None:
             return
@@ -310,6 +362,7 @@ class WorkflowJournal:
     async def record_intent(self, intent: StepIntent, node_id: str) -> None:
         """Claim for dispatch: intent, ``pending`` effect and approval consumed, one commit."""
         self.check()
+        self.local.add(str(intent.step_key))
         step = self.steps.get(str(intent.step_key))
         if step is not None and step.intent is not None:
             # A re-run of the same attempt keeps its intent and key; a fresh approval for
@@ -374,6 +427,28 @@ class WorkflowJournal:
             events=[{"type": "node_completed", "step_key": str(key), "next": cursor}],
         )
 
+    async def record_part(self, key: StepKey, update: dict[str, Any], node_id: str) -> None:
+        """A branch's or item's outcome (effect confirmed), committed as soon as it returns.
+
+        A recovered run uses it instead of running that part again.
+        """
+        steps: list[StepIntent | StepOutcome] = []
+        effects: list[EffectRecord] = []
+        step = self.steps.get(str(key))
+        if step is None or step.outcome is None:
+            steps.append(StepOutcome(key, "completed", {"update": update}))
+        effect = self.effects.get(str(key))
+        if effect is not None and effect.status == EffectStatus.PENDING:
+            effects.append(
+                dataclasses.replace(effect, status=EffectStatus.CONFIRMED, result=update)
+            )
+        await self._commit(
+            cursor=node_id,
+            steps=steps,
+            effects=effects,
+            events=[{"type": "part_completed", "step_key": str(key), "node_id": node_id}],
+        )
+
     def _indeterminate(self, keys: Sequence[StepKey | str]) -> list[EffectRecord]:
         changed = []
         for key in keys:
@@ -383,12 +458,21 @@ class WorkflowJournal:
         return changed
 
     async def pause(
-        self, pause_reason: str, cursor: str | None, keys: Sequence[StepKey | str] = ()
+        self,
+        pause_reason: str,
+        cursor: str | None,
+        keys: Sequence[StepKey | str] = (),
+        *,
+        effect_id: str | None = None,
     ) -> None:
-        """``paused`` with ``pause_reason``; in-doubt effects become indeterminate."""
+        """``paused`` with ``pause_reason``; in-doubt effects become indeterminate.
+
+        ``effect_id`` names the pending effect when it lives in another run's journal (a
+        sub-workflow child); otherwise it is the effect of ``keys[0]``.
+        """
         effects = self._indeterminate(keys)
         self.state["pause_reason"] = pause_reason
-        self.state["pending_effect"] = (
+        self.state["pending_effect"] = effect_id or (
             self.effects[str(keys[0])].effect_id if keys and str(keys[0]) in self.effects else None
         )
         await self._commit(

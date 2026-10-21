@@ -37,9 +37,15 @@ class _ScriptedTransport(McpTransport):
             result = {}
         elif method == "tools/list":
             result = {"tools": [{"name": "t", "description": "d", "inputSchema": self.schema}]}
-        else:
+        elif method == "tools/call":
             self.calls += 1
             result = {"content": [{"type": "text", "text": "ok"}]}
+        else:
+            # A handshake-era server: unknown methods (such as the 2026-07-28
+            # server/discover probe) get "method not found".
+            error = {"code": -32601, "message": f"Method not found: {method}"}
+            await self._out.put({"jsonrpc": "2.0", "id": rid, "error": error})
+            return
         await self._out.put({"jsonrpc": "2.0", "id": rid, "result": result})
 
     async def receive_message(self, timeout: float | None = None) -> dict[str, Any]:

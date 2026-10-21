@@ -8,6 +8,11 @@ Neither declares an effect class, so by founder decision 1 (design §6) both cou
 ``WorkflowEngine.recover`` (A6 S6) continues a top-level ``running`` run under the
 execution contract; ``fork`` still re-runs the node (a new run). Postgres rows wait for
 ``PostgresWorkflowStore`` (A6 S8).
+
+The composite rows (A6 S7, design §4 "sub-workflow child / map item") run one step over
+three parts: a map over items 0-2, a parallel step with branches a-c, or a sub-workflow
+child running that map. The process is killed inside part 1, after its effect: part 0
+finished, part 2 never started.
 """
 
 from __future__ import annotations
@@ -196,3 +201,80 @@ def test_approval_claimed_then_killed_recover_dispatches_once_under_that_approva
     result = _step(harness, "recover", run_id, "recover", gated=True)
     assert result.get("status") == "completed", f"today: {result}"
     assert harness.ledger.applied("pay") == 1
+
+
+# ------------------------------------------------------------- composite steps (A6 S7)
+
+COMPOSITE = pytest.mark.parametrize("shape", ["map", "parallel", "subworkflow"])
+
+
+def _parts(shape: str) -> list[str]:
+    """Effect names of parts 0, 1 and 2 of a composite shape."""
+    if shape == "parallel":
+        return ["branch_a", "branch_b", "branch_c"]
+    return ["item0", "item1", "item2"]
+
+
+def _kill_in_part_one(harness: Harness, run_id: str, shape: str, **params: Any) -> None:
+    point = "in_branch_b" if shape == "parallel" else "in_item_1"
+    _kill_at(harness, run_id, point, shape=shape, **params)
+
+
+@ON_BACKENDS
+@COMPOSITE
+def test_composite_kill_mid_non_idempotent_part_pauses_naming_it(
+    harness: Harness, backend: Backend, shape: str
+) -> None:
+    """K3' per part: finished parts are not repeated, the unstarted one runs, the run
+    pauses ``effect_unknown`` on the part in doubt; a person confirms it from another
+    process and the run completes. Every part's effect happened exactly once."""
+    backend.require("workflow")
+    run_id = _run_id()
+    parts = _parts(shape)
+    _kill_in_part_one(harness, run_id, shape)
+    assert [harness.ledger.applied(p) for p in parts] == [1, 1, 0]
+
+    paused = _step(harness, "recover", run_id, "recover", shape=shape)
+    assert paused["status"] == "paused", paused
+    assert paused["pause_reason"] == "effect_unknown"
+    pending = paused["pending"]
+    if shape == "parallel":
+        assert (pending["part"], pending["branch"]) == ("branch", "b")
+    elif shape == "map":
+        assert (pending["part"], pending["item"], pending["step_key"]) == ("item", 1, "m#1[1]")
+    else:
+        assert pending["part"] == "subworkflow" and pending["run_id"] == f"{run_id}/m#1"
+        assert pending["node_id"] == "m/m" and pending["step_key"] == "m#1[1]"
+    assert [harness.ledger.applied(p) for p in parts] == [1, 1, 1]
+
+    result = {"b": True} if shape == "parallel" else {"paid": 1}
+    done = _step(
+        harness, "resolve", run_id, "resolve", shape=shape, resolution="confirmed", result=result
+    )
+    assert done["status"] == "completed", done
+    if shape == "parallel":
+        assert done["state"] == {"items": [0, 1, 2], "a": True, "b": True, "c": True}
+    else:
+        assert done["state"]["paid"] == [0, 1, 2]
+    assert [harness.ledger.applied(p) for p in parts] == [1, 1, 1]
+    assert [harness.ledger.requests(p) for p in parts] == [1, 1, 1]
+
+
+@ON_BACKENDS
+@COMPOSITE
+def test_composite_kill_mid_idempotent_part_reruns_it_with_the_same_key(
+    harness: Harness, backend: Backend, shape: str
+) -> None:
+    """K3' per part, idempotent: only the part in doubt is sent again, with the key it had;
+    the effect service de-duplicates it, and the run completes."""
+    backend.require("workflow")
+    run_id = _run_id()
+    parts = _parts(shape)
+    _kill_in_part_one(harness, run_id, shape, effect="idempotent")
+
+    done = _step(harness, "recover", run_id, "recover", shape=shape, effect="idempotent")
+    assert done["status"] == "completed", done
+    assert [harness.ledger.applied(p) for p in parts] == [1, 1, 1]
+    assert [harness.ledger.requests(p) for p in parts] == [1, 2, 1]
+    first, second = (row["key"] for row in harness.ledger.request_rows(parts[1]))
+    assert first == second and first.startswith("nx-")

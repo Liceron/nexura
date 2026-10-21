@@ -58,6 +58,7 @@ ALLOW: tuple[str, ...] = (
     # Release gate, benchmark and single-user deployment
     "experiments/release-gate/**",
     "experiments/benchmark/**",
+    "experiments/interop/**",
     "deployment/**",
     "packaging/**",
     # Project files
@@ -86,6 +87,8 @@ NEVER: tuple[str, ...] = (
     "**/*.key",
     "**/.env*",
     "experiments/benchmark/.venv/**",
+    "experiments/interop/.venv/**",
+    "experiments/interop/legacy/.venv/**",
     "studio-web/dist/**",
     "studio-web/node_modules/**",
     "studio-web/test-results/**",

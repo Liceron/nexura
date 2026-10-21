@@ -220,6 +220,67 @@ def workflow_spec(gated: bool) -> Any:
     )
 
 
+def composite_registry(effect: str | None) -> Any:
+    """Handlers of the composite shapes (A6 S7): each performs one effect per item/branch.
+
+    ``effect="idempotent"`` declares them idempotent and sends the step's idempotency key,
+    so the effect service de-duplicates a repeat; undeclared they are non_idempotent.
+    """
+    from nexura_runtime.workflow import ModuleRegistry, step_idempotency_key
+
+    registry = ModuleRegistry()
+    keyed = effect == "idempotent"
+
+    def pay_item(state: dict[str, Any]) -> dict[str, Any]:
+        index = state["item_index"]
+        h.effect(f"item{index}", key=step_idempotency_key() if keyed else None)
+        h.point(f"in_item_{index}")
+        return {"paid": index}
+
+    def branch(name: str) -> Any:
+        def handler(state: dict[str, Any]) -> dict[str, Any]:
+            h.effect(f"branch_{name}", key=step_idempotency_key() if keyed else None)
+            h.point(f"in_branch_{name}")
+            return {name: True}
+
+        return handler
+
+    registry.register("pay_item", pay_item, effect=effect)
+    for name in ("a", "b", "c"):
+        registry.register(name, branch(name), effect=effect)
+    return registry
+
+
+def composite_spec(shape: str) -> Any:
+    from nexura_runtime.workflow import WorkflowSpec
+
+    if shape == "map":
+        node = {
+            "id": "m",
+            "handler": "pay_item",
+            "map_over": "items",
+            "reducers": {"paid": "append"},
+            "max_concurrency": 1,
+        }
+    elif shape == "parallel":
+        node = {"id": "m", "handler": "", "parallel": ["a", "b", "c"], "max_concurrency": 1}
+    else:  # a sub-workflow child running the map over the items
+        node = {
+            "id": "m",
+            "handler": "",
+            "subgraph": composite_spec("map").to_dict(),
+            "output_mapping": {"paid": "paid"},
+        }
+    return WorkflowSpec.from_dict(
+        {
+            "name": f"durability-{shape}",
+            "entry_node": "m",
+            "terminal_nodes": ["m"],
+            "nodes": {"m": node},
+        }
+    )
+
+
 def _describe_workflow(result: Any) -> dict[str, Any]:
     pending = result.pending_approval
     return {
@@ -228,6 +289,7 @@ def _describe_workflow(result: Any) -> dict[str, Any]:
         "approval_id": pending.approval_id if pending is not None else None,
         "pause_reason": getattr(result, "pause_reason", None),
         "pending_effect": getattr(result, "pending_effect", None) is not None,
+        "pending": getattr(result, "pending_effect", None),
         "state": result.state,
         "error": result.error,
     }
@@ -237,16 +299,30 @@ async def scenario_workflow(config: dict[str, Any]) -> dict[str, Any]:
     from nexura_runtime.workflow import WorkflowEngine
 
     store = _open_workflow_store(config)
-    engine = WorkflowEngine(
-        workflow_spec(bool(config.get("gated"))),
-        workflow_registry(),
-        store=store,
-        workspace_id=WORKSPACE,
-    )
+    shape = config.get("shape", "line")
+    if shape == "line":
+        spec, registry, initial = (
+            workflow_spec(bool(config.get("gated"))),
+            workflow_registry(),
+            {},
+        )
+    else:
+        spec, registry = composite_spec(shape), composite_registry(config.get("effect"))
+        initial = {"items": [0, 1, 2]}
+    engine = WorkflowEngine(spec, registry, store=store, workspace_id=WORKSPACE)
     run_id = config["run_id"]
     mode = config["mode"]
     if mode == "run":
-        return await outcome(lambda: engine.run({}, workflow_run_id=run_id), _describe_workflow)
+        return await outcome(
+            lambda: engine.run(initial, workflow_run_id=run_id), _describe_workflow
+        )
+    if mode == "resolve":
+        return await outcome(
+            lambda: engine.resolve_effect(
+                run_id, config["resolution"], actor="ops", result=config.get("result")
+            ),
+            _describe_workflow,
+        )
     if mode == "resume":
         approval_id = config.get("approval_id")
         if approval_id is None:

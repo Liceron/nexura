@@ -19,6 +19,18 @@ from nexura_runtime.integrations.channels.models import ChannelEnvelope
 from nexura_runtime.integrations.channels.whatsapp import WhatsAppAdapter
 
 
+def _send_key(inputs: dict[str, Any], context: ExecutionContext) -> str | None:
+    """The idempotency key of an outbound send: the input's, else the workflow step's.
+
+    Inside a workflow step ``context.idempotency_key()`` is stable across retries and crash
+    recovery (Execution Contract v1), so a repeated send de-duplicates in the outbox.
+    """
+    explicit = inputs.get("idempotency_key")
+    if explicit:
+        return str(explicit)
+    return context.idempotency_key()
+
+
 class EmailChannelModule(BaseModule):
     """B00/B01 module for Email channel parsing, webhook verification, and outbound sending."""
 
@@ -119,10 +131,11 @@ class EmailChannelModule(BaseModule):
 
             if operation == "send_email":
                 context.require_write_approval("sending an email")
+                key = _send_key(inputs, context)
                 envelope = ChannelEnvelope(
                     channel="email",
                     direction="outbound",
-                    message_id=inputs.get("idempotency_key", f"msg_{context.run_id}"),
+                    message_id=key or f"msg_{context.run_id}",
                     sender=inputs.get("sender", "noreply@nexura.local"),
                     recipient=inputs.get("recipient", "customer@example.com"),
                     subject=inputs.get("subject", "Notification"),
@@ -130,7 +143,7 @@ class EmailChannelModule(BaseModule):
                     html_content=inputs.get("html_content"),
                     dry_run=inputs.get("dry_run", True),
                     approved=True,  # approval is context.approval_granted, checked above
-                    idempotency_key=inputs.get("idempotency_key"),
+                    idempotency_key=key,
                 )
                 receipt = self.adapter.send(envelope)
                 return ModuleResult.success(
@@ -283,10 +296,11 @@ class WhatsAppChannelModule(BaseModule):
 
             if operation == "send_message":
                 context.require_write_approval("sending a WhatsApp message")
+                key = _send_key(inputs, context)
                 envelope = ChannelEnvelope(
                     channel="whatsapp",
                     direction="outbound",
-                    message_id=inputs.get("idempotency_key", f"wamsg_{context.run_id}"),
+                    message_id=key or f"wamsg_{context.run_id}",
                     sender="system",
                     recipient=inputs.get("recipient", "15551234567"),
                     text_content=inputs.get("text_content", ""),
@@ -297,7 +311,7 @@ class WhatsAppChannelModule(BaseModule):
                     approved=True,  # approval is context.approval_granted, checked above
                     consent_verified=inputs.get("consent_verified", False),
                     is_service_window_active=inputs.get("is_service_window_active", False),
-                    idempotency_key=inputs.get("idempotency_key"),
+                    idempotency_key=key,
                 )
                 receipt = self.adapter.send(envelope)
                 return ModuleResult.success(

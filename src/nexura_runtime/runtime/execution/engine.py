@@ -345,7 +345,9 @@ class DurableExecutionEngine:
                 limit=state.fuel_consumed + state.fuel_remaining,
             )
 
-        if state.time_budget_remaining <= 0.0:
+        # A confirmed resolution dispatches nothing, so it does not need active time left
+        # (a run-budget timeout may have used it all up).
+        if state.time_budget_remaining <= 0.0 and not recovered:
             state.status = "failed"
             state.error = f"Active time budget exceeded (limit {spec.default_time_budget_seconds}s)"
             await self._commit_state(
@@ -426,34 +428,49 @@ class DurableExecutionEngine:
             elapsed = time.time() - start_time
             state.time_consumed += elapsed
             state.time_budget_remaining = max(0.0, state.time_budget_remaining - elapsed)
-            state.status = "failed"
             state.error = f"Node '{current_node_id}' timed out after {effective_timeout:.2f}s"
-            await self._commit_state(
-                workspace_id,
-                run_id,
-                state,
-                rec.revision,
-                [{"type": "node_timeout", "node_id": current_node_id, "elapsed": elapsed}],
-            )
+            events: list[dict[str, Any]] = [
+                {"type": "node_timeout", "node_id": current_node_id, "elapsed": elapsed}
+            ]
+            if effect_class == EffectClass.PURE:
+                state.status = "failed"
+            else:
+                # A timed-out call may still have been applied remotely (founder decision 2:
+                # an unknown outcome pauses): pause effect_unknown so a person resolves it.
+                state.status = "paused"
+                state.pause_reason = "effect_unknown"
+                state.pending_effect = await self._pending_effect_view(workspace_id, run_id, state)
+                events.append({"type": "indeterminate_effect_detected", "node_id": current_node_id})
+            await self._commit_state(workspace_id, run_id, state, rec.revision, events)
             raise DeadlineExceededError(
                 state.error,
                 timeout_seconds=effective_timeout,
                 elapsed_seconds=elapsed,
             ) from exc
-        except BaseException as exc:
+        except Exception as exc:
             elapsed = time.time() - start_time
             state.time_consumed += elapsed
             state.time_budget_remaining = max(0.0, state.time_budget_remaining - elapsed)
-            state.status = "failed"
-            state.error = f"Node '{current_node_id}' failed: {exc}"
-            await self._commit_state(
-                workspace_id,
-                run_id,
-                state,
-                rec.revision,
-                [{"type": "node_error", "node_id": current_node_id, "error": str(exc)}],
-            )
+            events = [{"type": "node_error", "node_id": current_node_id, "error": str(exc)}]
+            if effect_class == EffectClass.PURE or recovered:
+                state.status = "failed"
+                state.error = f"Node '{current_node_id}' failed: {exc}"
+            else:
+                # The remote system may have applied the effect before the handler raised
+                # (a lost response looks the same as a refusal): pause effect_unknown so a
+                # person can resolve it, rather than ending the run with an unresolvable
+                # effect. The bridge marks the pending effect indeterminate in this commit.
+                state.status = "paused"
+                state.pause_reason = "effect_unknown"
+                state.pending_effect = await self._pending_effect_view(workspace_id, run_id, state)
+                state.error = f"Node '{current_node_id}' raised with an unknown outcome: {exc}"
+                events.append({"type": "indeterminate_effect_detected", "node_id": current_node_id})
+            await self._commit_state(workspace_id, run_id, state, rec.revision, events)
             raise
+        # A BaseException that is not an Exception (task cancellation at worker shutdown,
+        # KeyboardInterrupt, SystemExit) propagates without a commit: crash semantics. The
+        # dispatched intent stays; after the lease expires the next worker treats it by its
+        # effect class (a non-idempotent node pauses effect_unknown).
 
         # 10. Update state, fuel, and transition
         elapsed = time.time() - start_time
@@ -521,6 +538,20 @@ class DurableExecutionEngine:
             cur_state = await self.execute_step(workspace_id, run_id, worker_id, spec, context)
             steps += 1
         return cur_state
+
+    async def _pending_effect_view(
+        self, workspace_id: str, run_id: str, state: DurableRunState
+    ) -> dict[str, Any] | None:
+        """The current visit's journal effect as a dict, or else the legacy intent."""
+        snapshot = await (await self.get_execution_store()).get(ExecutionId(workspace_id, run_id))
+        key = visit_key(state.model_dump())
+        effect = next(
+            (item for item in snapshot.effects.values() if item.intent.step_key == key), None
+        )
+        if effect is not None:
+            return asdict(effect)
+        intent = state.pre_dispatch_intent
+        return intent.model_dump() if intent is not None else None
 
     async def request_cancellation(self, workspace_id: str, run_id: str) -> DurableRunState:
         """Durable cancellation request independent of API transport disconnection."""

@@ -15,6 +15,7 @@ from nexura_agents.contracts.execution import (
     EffectStatus,
     ExecutionId,
 )
+from nexura_agents.errors import SessionConflictError
 from nexura_agents.execution_store import (
     EffectAlreadyResolvedError,
     ExecutionConflictError,
@@ -159,10 +160,14 @@ async def test_expired_lease_refuses_completion_and_lets_another_worker_take_ove
     assert after.effects[effect.effect_id].status == EffectStatus.CONFIRMED
 
 
-async def test_failed_handler_leaves_its_effect_indeterminate() -> None:
+async def test_failed_handler_pauses_effect_unknown_and_stays_resolvable() -> None:
+    """Review M3a: a raising non-pure handler may have applied its effect, so the run
+    pauses effect_unknown (founder decision 2) instead of failing unresolvably."""
     store = MemoryExecutionStore()
+    calls: list[str] = []
 
     def broken(_: dict[str, Any]) -> dict[str, Any]:
+        calls.append("sent")
         raise ConnectionError("local fake connection reset")
 
     engine = DurableExecutionEngine(store, {"fake-pay": broken})
@@ -171,10 +176,102 @@ async def test_failed_handler_leaves_its_effect_indeterminate() -> None:
     with pytest.raises(ConnectionError):
         await engine.execute_step("ws", "run", "owner", spec())
     snapshot = await store.get(ExecutionId("ws", "run"))
-    assert snapshot.run.status == "failed"
+    assert snapshot.run.status == "paused" and snapshot.run.lease_owner is None
     assert [e.status for e in snapshot.effects.values()] == [EffectStatus.INDETERMINATE]
     step = next(iter(snapshot.steps.values()))
-    assert step.outcome is not None and step.outcome.status == "failed"
+    assert step.intent is not None and step.outcome is None
+    state = await engine.get_state("ws", "run")
+    assert state.status == "paused" and state.pause_reason == "effect_unknown"
+    (effect_id,) = snapshot.effects
+    assert state.pending_effect is not None
+    assert state.pending_effect["intent"]["idempotency_key"] == (
+        snapshot.effects[effect_id].intent.idempotency_key
+    )
+    assert "local fake connection reset" in (state.error or "")
+
+    await engine.resolve_effect(
+        "ws", "run", effect_id, EffectResolution.CONFIRMED, actor="person", result={"ok": 1}
+    )
+    done = await engine.run_until_idle("ws", "run", "resumer", spec())
+    assert done.status == "completed" and done.state["ok"] == 1
+    assert calls == ["sent"]  # the confirmed effect was not sent again
+
+
+async def test_failed_pure_handler_still_fails_the_run() -> None:
+    store = MemoryExecutionStore()
+
+    def broken(_: dict[str, Any]) -> dict[str, Any]:
+        raise ValueError("local fake bad input")
+
+    engine = DurableExecutionEngine(store, {"fake-pay": broken})
+    await engine.init_run("ws", "run", spec("pure"))
+    await engine.claim_run("ws", "run", "owner")
+    with pytest.raises(ValueError):
+        await engine.execute_step("ws", "run", "owner", spec("pure"))
+    snapshot = await store.get(ExecutionId("ws", "run"))
+    assert snapshot.run.status == "failed" and not snapshot.effects
+    assert (await engine.get_state("ws", "run")).status == "failed"
+
+
+async def test_cancelled_worker_leaves_a_recoverable_run_that_pauses_on_takeover() -> None:
+    """Review M3b: task cancellation is crash semantics (no commit); after the lease
+    expires the next worker pauses effect_unknown instead of re-sending."""
+    store = MemoryExecutionStore()
+    started = asyncio.Event()
+    calls: list[str] = []
+
+    async def slow(_: dict[str, Any]) -> dict[str, Any]:
+        calls.append("sent")
+        started.set()
+        await asyncio.sleep(30)
+        return {}
+
+    engine = DurableExecutionEngine(store, {"fake-pay": slow})
+    await engine.init_run("ws", "run", spec())
+    await engine.claim_run("ws", "run", "owner", lease_duration=0.05)
+    task = asyncio.create_task(engine.execute_step("ws", "run", "owner", spec()))
+    await asyncio.wait_for(started.wait(), 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    snapshot = await store.get(ExecutionId("ws", "run"))
+    assert snapshot.run.status == "running"
+    assert [e.status for e in snapshot.effects.values()] == [EffectStatus.PENDING]
+    await asyncio.sleep(0.1)  # the cancelled worker's lease expires
+    await engine.claim_run("ws", "run", "taker")
+    with pytest.raises(IndeterminateEffectError):
+        await engine.execute_step("ws", "run", "taker", spec())
+    state = await engine.get_state("ws", "run")
+    assert state.status == "paused" and state.pause_reason == "effect_unknown"
+    assert calls == ["sent"]
+
+
+async def test_cancelling_a_dispatched_run_marks_the_effect_indeterminate() -> None:
+    """Review L5: cancellation ends the run; the in-flight effect becomes indeterminate
+    (not pending), and the handler's late completion is refused."""
+    store = MemoryExecutionStore()
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def slow(_: dict[str, Any]) -> dict[str, Any]:
+        started.set()
+        await release.wait()
+        return {"late": True}
+
+    engine = DurableExecutionEngine(store, {"fake-pay": slow})
+    await engine.init_run("ws", "run", spec())
+    await engine.claim_run("ws", "run", "owner")
+    task = asyncio.create_task(engine.execute_step("ws", "run", "owner", spec()))
+    await asyncio.wait_for(started.wait(), 5)
+    cancelled = await engine.request_cancellation("ws", "run")
+    assert cancelled.status == "cancelled"
+    release.set()
+    with pytest.raises(SessionConflictError):
+        await task
+    snapshot = await store.get(ExecutionId("ws", "run"))
+    (effect,) = snapshot.effects.values()
+    assert effect.status == EffectStatus.INDETERMINATE
+    assert "late" not in snapshot.run.state["state"]
+    assert (await engine.get_state("ws", "run")).status == "cancelled"
 
 
 async def test_missing_handler_records_no_dispatch() -> None:

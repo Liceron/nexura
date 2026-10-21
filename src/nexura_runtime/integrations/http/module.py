@@ -4,8 +4,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -43,8 +45,35 @@ def _default_http_mock_transport() -> httpx.AsyncBaseTransport:
     return httpx.MockTransport(handler)
 
 
+#: Most retries one call may ask for (``retries`` input).
+MAX_HTTP_RETRIES = 5
+#: Responses worth sending again: rate limited or a server/gateway failure.
+RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+_RETRY_ERRORS = (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError)
+_KEYED_METHODS = ("POST", "PATCH")
+
+
+def _retry_delay(response: httpx.Response | None, attempt: int) -> float:
+    """Seconds before retry ``attempt`` (0-based): a numeric Retry-After, else backoff."""
+    if response is not None:
+        try:
+            return max(0.0, min(float(response.headers.get("retry-after", "")), 10.0))
+        except ValueError:
+            pass
+    return float(min(0.25 * (2**attempt), 4.0))
+
+
 class HttpRequestModule(BaseModule):
-    """B00/B01 module for issuing policy-bounded, SSRF-safe HTTP requests."""
+    """B00/B01 module for issuing policy-bounded, SSRF-safe HTTP requests.
+
+    ``retries`` (at most ``MAX_HTTP_RETRIES``) sends the request again after a transport
+    error or a 429/5xx answer. POST and PATCH are retried only with an idempotency key: the
+    ``idempotency_key`` input, an ``Idempotency-Key`` header, or (for a write inside a
+    workflow step) the step's key from ``ExecutionContext.idempotency_key()``, which is the
+    same on every try and after a crash recovery. Without any key a POST/PATCH retry is
+    refused (``NonIdempotentRetryForbiddenError``). Writes send the key as
+    ``Idempotency-Key``.
+    """
 
     manifest = ModuleManifest(
         schema_version=1,
@@ -108,8 +137,14 @@ class HttpRequestModule(BaseModule):
         verification_status="mock_verified",
     )
 
-    def __init__(self, transport: httpx.AsyncBaseTransport | None = None) -> None:
+    def __init__(
+        self,
+        transport: httpx.AsyncBaseTransport | None = None,
+        *,
+        sleep: Callable[[float], Awaitable[Any]] | None = None,
+    ) -> None:
         self.transport = transport
+        self._sleep = sleep or asyncio.sleep
 
     async def invoke(
         self,
@@ -127,15 +162,22 @@ class HttpRequestModule(BaseModule):
         json_data = inputs.get("json")
         data = inputs.get("data")
         timeout = float(inputs.get("timeout") or 30.0)
-        idempotency_key = inputs.get("idempotency_key")
-        retries = int(inputs.get("retries") or 0)
+        retries = min(max(int(inputs.get("retries") or 0), 0), MAX_HTTP_RETRIES)
+        header_key = next(
+            (str(v) for k, v in headers.items() if k.lower() == "idempotency-key" and v), None
+        )
+        # An explicit key wins; a write inside a workflow step defaults to the step's key
+        # (stable across retries and crash recovery, Execution Contract v1).
+        idempotency_key = inputs.get("idempotency_key") or header_key
+        if not idempotency_key and self.manifest.write_gate(method):
+            idempotency_key = context.idempotency_key()
 
         # 1. Enforce Non-Idempotent Retry Policy
-        if retries > 0 and method in ("POST", "PATCH") and not idempotency_key:
+        if retries > 0 and method in _KEYED_METHODS and not idempotency_key:
             raise NonIdempotentRetryForbiddenError(method, url)
 
-        if idempotency_key:
-            headers["Idempotency-Key"] = idempotency_key
+        if idempotency_key and header_key is None:
+            headers["Idempotency-Key"] = str(idempotency_key)
 
         # 2. Build DestinationPolicy from config
         allowed_hosts = list(cfg.get("allowed_hosts") or [])
@@ -156,20 +198,33 @@ class HttpRequestModule(BaseModule):
 
         max_size = cfg.get("max_response_size_bytes") or 5_000_000
 
-        # 3. Dispatch request via SafeHttpClient
-        client = SafeHttpClient(policy=policy, transport=self.transport, timeout=timeout)
+        # 3. Dispatch request via SafeHttpClient (again on a transient failure, see retries)
         start_time = time.monotonic()
-        try:
-            resp = await client.request(
-                method=method,
-                url=url,
-                headers=headers,
-                params=params,
-                json=json_data,
-                data=data,
-            )
-        finally:
-            await client.close()
+        attempt = 0
+        while True:
+            client = SafeHttpClient(policy=policy, transport=self.transport, timeout=timeout)
+            try:
+                resp = await client.request(
+                    method=method,
+                    url=url,
+                    headers=headers,
+                    params=params,
+                    json=json_data,
+                    data=data,
+                )
+            except _RETRY_ERRORS:
+                if attempt >= retries:
+                    raise
+                await self._sleep(_retry_delay(None, attempt))
+                attempt += 1
+                continue
+            finally:
+                await client.close()
+            if resp.status_code in RETRY_STATUSES and attempt < retries:
+                await self._sleep(_retry_delay(resp, attempt))
+                attempt += 1
+                continue
+            break
 
         elapsed = round(time.monotonic() - start_time, 4)
 
@@ -196,5 +251,6 @@ class HttpRequestModule(BaseModule):
                 "headers": safe_resp_headers,
                 "body": body_val,
                 "elapsed_seconds": elapsed,
-            }
+            },
+            metadata={"attempts": attempt + 1},
         )

@@ -8,10 +8,55 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-# Newest first. 2025-03-26 introduced Streamable HTTP; 2025-06-18 requires the
-# MCP-Protocol-Version header on HTTP requests after initialization.
-SUPPORTED_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"]
+# Protocol revisions, newest first.
+#
+# "Modern" revisions (2026-07-28 and later) are stateless: there is no ``initialize``
+# handshake and every request carries its version and client capabilities in
+# ``params._meta``. "Handshake" (legacy) revisions open a session with ``initialize``.
+# 2025-03-26 introduced Streamable HTTP; 2025-06-18 requires the MCP-Protocol-Version
+# header on HTTP requests after initialization.
+MODERN_PROTOCOL_VERSIONS = ["2026-07-28"]
+HANDSHAKE_PROTOCOL_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
+SUPPORTED_PROTOCOL_VERSIONS = [*MODERN_PROTOCOL_VERSIONS, *HANDSHAKE_PROTOCOL_VERSIONS]
 LATEST_PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0]
+LATEST_HANDSHAKE_VERSION = HANDSHAKE_PROTOCOL_VERSIONS[0]
+
+# Reserved ``_meta`` keys of the 2026-07-28 per-request envelope.
+META_PROTOCOL_VERSION = "io.modelcontextprotocol/protocolVersion"
+META_CLIENT_INFO = "io.modelcontextprotocol/clientInfo"
+META_CLIENT_CAPABILITIES = "io.modelcontextprotocol/clientCapabilities"
+META_SERVER_INFO = "io.modelcontextprotocol/serverInfo"
+META_LOG_LEVEL = "io.modelcontextprotocol/logLevel"
+
+# Error codes the 2026-07-28 specification reserves (-32020..-32099). A peer that answers
+# with one of these speaks a modern revision.
+HEADER_MISMATCH = -32020
+MISSING_REQUIRED_CLIENT_CAPABILITY = -32021
+UNSUPPORTED_PROTOCOL_VERSION = -32022
+MODERN_ERROR_CODES = frozenset(
+    {HEADER_MISMATCH, MISSING_REQUIRED_CLIENT_CAPABILITY, UNSUPPORTED_PROTOCOL_VERSION}
+)
+
+# Methods whose results carry ``ttlMs`` / ``cacheScope`` hints under 2026-07-28.
+CACHEABLE_METHODS = frozenset(
+    {
+        "server/discover",
+        "tools/list",
+        "prompts/list",
+        "resources/list",
+        "resources/templates/list",
+        "resources/read",
+    }
+)
+# Methods that may answer with an ``input_required`` (multi round-trip) result.
+MRTR_METHODS = frozenset({"tools/call", "resources/read", "prompts/get"})
+# Method -> params key mirrored into the ``Mcp-Name`` HTTP header.
+NAME_BEARING_METHODS = {"tools/call": "name", "prompts/get": "name", "resources/read": "uri"}
+
+
+def is_modern_version(version: str | None) -> bool:
+    """True for revisions that use the stateless per-request envelope (no handshake)."""
+    return version in MODERN_PROTOCOL_VERSIONS
 
 
 class JsonRpcRequest(BaseModel):
@@ -62,6 +107,21 @@ class McpServerCapabilities(BaseModel):
     resources: dict[str, Any] | None = None
     prompts: dict[str, Any] | None = None
     logging: dict[str, Any] | None = None
+    # Optional extensions (2026-07-28): extension identifier -> settings object.
+    extensions: dict[str, Any] | None = None
+
+
+class McpCacheHint(BaseModel):
+    """Freshness hint a 2026-07-28 server attaches to cacheable results.
+
+    ``ttl_ms`` is how long the result may be considered fresh (0 = immediately stale;
+    absent or negative values from older servers read as 0). ``scope`` is ``"public"``
+    (shareable across callers) or ``"private"`` (one authorization context only).
+    """
+
+    ttl_ms: int = 0
+    scope: str = "private"
+    received_at: float = 0.0
 
 
 class McpClientCapabilities(BaseModel):

@@ -92,3 +92,19 @@ class McpJsonRpcError(McpIntegrationError):
             details={"rpc_code": code, "rpc_message": message, "rpc_data": data},
         )
         self.code = code
+
+
+class McpInputRequiredError(McpIntegrationError):
+    """A 2026-07-28 server asked for client input (elicitation, sampling or roots) that
+    this client was not configured to provide."""
+
+    def __init__(self, method: str, requested: list[str]) -> None:
+        super().__init__(
+            f"MCP server needs client input to complete '{method}' ({', '.join(requested)}); "
+            "pass input_handler= to McpClientSession to answer such requests.",
+            details={
+                "error_code": "MCP_INPUT_REQUIRED",
+                "method": method,
+                "requested": requested,
+            },
+        )

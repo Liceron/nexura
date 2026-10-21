@@ -133,6 +133,8 @@ class S3Connector(ConnectorModule):
         "config 'region' and optional 'base_url' (MinIO, R2)."
     )
     CREDENTIAL_TYPE: ClassVar[str] = "s3_access_key"
+    # SigV4 signs the request headers; PUT and DELETE of an object are idempotent anyway.
+    SENDS_IDEMPOTENCY_KEY: ClassVar[bool] = False
     OPS: ClassVar[dict[str, Op]] = {
         "list_objects": Op("list_objects", False, ListObjects),
         "get_object": Op("get_object", False, ObjectRef),

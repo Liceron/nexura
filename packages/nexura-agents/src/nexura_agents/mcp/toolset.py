@@ -64,6 +64,9 @@ class MCPServer:
             Applied to every tool, as on ``@tool``. ``tool_timeout`` is ``@tool``'s
             ``timeout``; the name differs because ``MCPServer.http`` already uses
             ``timeout`` for the HTTP client.
+        protocol_version: ``None`` (default) prefers MCP 2026-07-28 and falls back to the
+            ``initialize`` handshake of 2025-11-25 ... 2024-11-05 when the server is older.
+            Pass a version to pin it (see ``McpClientSession``).
     """
 
     def __init__(
@@ -83,9 +86,12 @@ class MCPServer:
         input_guardrails: Sequence[GuardrailFn] = (),
         output_guardrails: Sequence[GuardrailFn] = (),
         enabled: EnabledRule = True,
+        protocol_version: str | None = None,
     ) -> None:
         self.transport = transport
-        self.session = McpClientSession(transport, request_timeout=request_timeout)
+        self.session = McpClientSession(
+            transport, request_timeout=request_timeout, protocol_version=protocol_version
+        )
         self.name = name
         self.prefix = prefix
         self.include = set(include) if include is not None else None

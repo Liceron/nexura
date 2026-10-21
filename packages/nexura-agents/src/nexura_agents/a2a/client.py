@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import AsyncGenerator, Sequence
+from collections.abc import AsyncGenerator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
@@ -194,6 +194,12 @@ class A2AClient:
             permits loopback and private ranges and trusts the host you configured; other
             hosts (a card pointing elsewhere) must pass the policy. Pass your own policy to
             tighten this. Cloud metadata addresses are always blocked.
+        card_keys: Trusted public keys for signed agent cards, by key id (``cryptography``
+            public keys or JWK dicts). When given, the card must carry a JWS signature that
+            verifies with one of them, or every call fails with ``AgentCardSignatureError``.
+            ``jku`` URLs in the card are never fetched. Without ``card_keys`` signatures
+            are not checked.
+        card_algorithms: JWS algorithms accepted for card signatures.
 
     The client speaks 1.0 when the card offers a 1.0 JSON-RPC interface and falls back to
     the 0.3 method names and shapes for older cards. No connection is kept between calls,
@@ -208,6 +214,8 @@ class A2AClient:
         timeout: float = 60,
         transport: httpx.AsyncBaseTransport | None = None,
         policy: DestinationPolicy | None = None,
+        card_keys: Mapping[str, Any] | None = None,
+        card_algorithms: Sequence[str] | None = None,
     ) -> None:
         parts = urlsplit(url)
         if parts.scheme not in ("http", "https") or not parts.hostname:
@@ -224,6 +232,10 @@ class A2AClient:
         )
         self.card: dict[str, Any] | None = None
         self._endpoint: tuple[str, str] | None = None  # (JSON-RPC url, "1.0" | "0.3")
+        self.card_keys = dict(card_keys) if card_keys else None
+        self.card_algorithms = tuple(card_algorithms) if card_algorithms else None
+        # Key id of the signature that verified the cached card (None when unchecked).
+        self.card_verified_kid: str | None = None
 
     # ---------------------------------------------------------------- plumbing
 
@@ -292,6 +304,13 @@ class A2AClient:
             card = None
         if not isinstance(card, dict) or not isinstance(card.get("name"), str):
             raise A2AError(p.INVALID_AGENT_RESPONSE, "The URL did not return an A2A agent card.")
+        if self.card_keys is not None:
+            from nexura_agents.a2a.signing import DEFAULT_ALGORITHMS, verify_agent_card
+
+            # Raises AgentCardSignatureError; an unverified card is never cached or used.
+            self.card_verified_kid = verify_agent_card(
+                card, self.card_keys, algorithms=self.card_algorithms or DEFAULT_ALGORITHMS
+            )
         self.card = card
         self._endpoint = None
         return card
