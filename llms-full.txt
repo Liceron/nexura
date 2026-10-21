@@ -9278,7 +9278,8 @@ asyncio.run(main())
 A2A 1.0 lets a provider sign its agent card with a JSON Web Signature over the RFC 8785
 canonical form of the card (empty strings, lists and objects removed, `signatures`
 excluded). Nexura signs and verifies such cards. Signing needs the `cryptography`
-package, which `nexura-runtime` installs; `nexura-agents` alone does not depend on it.
+package, which `nexura-runtime` installs; with `nexura-agents` alone, install
+`nexura-agents[signing]`.
 
 ```python
 import asyncio
