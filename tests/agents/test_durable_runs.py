@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import stat
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -288,6 +289,7 @@ async def test_recovery_in_new_process_with_sqlite(tmp_path: Path) -> None:
     store2.close()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode bits; Windows uses ACLs")
 async def test_sqlite_file_is_owner_only(tmp_path: Path) -> None:
     old = os.umask(0)
     try:

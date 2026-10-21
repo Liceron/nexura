@@ -10,7 +10,7 @@ The MIT open-source edition is **single user, this machine only; for a team or a
 
 | Asset | Where it lives |
 | --- | --- |
-| Workflow definitions, run state, checkpoints, chat history | SQLite (`nexura_service.sqlite3`, created 0600) |
+| Workflow definitions, run state, checkpoints, chat history | SQLite (`nexura_service.sqlite3`, created 0600 on Linux and macOS; on Windows the file inherits the folder's ACL, so keep the data folder private) |
 | Credentials and webhook signing secrets | scoped credential store, trigger secretbox |
 | Host process privileges and filesystem | whatever runs `nexura-runtime serve`, the worker or a registered handler |
 | Provider API keys and environment variables | process environment |

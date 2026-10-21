@@ -697,14 +697,17 @@ async def test_sqlite_journal_lives_in_the_checkpoint_file(tmp_path: Path) -> No
         assert c["charge"] == 1
     finally:
         store2.close()
-    assert oct(os.stat(path).st_mode & 0o777) == "0o600"
+    if sys.platform != "win32":  # POSIX mode bits; Windows uses ACLs (SECURITY_MODEL.md)
+        assert oct(os.stat(path).st_mode & 0o777) == "0o600"
 
 
 def test_lease_owner_liveness_is_conservative() -> None:
     assert not lease_owner_is_dead(new_lease_owner())  # this process
     for other in (None, "", "0b5c1f", "nx1.other-host.1.0.abc", "nx1.x.y.z"):
         assert not lease_owner_is_dead(other)
-    if sys.platform == "win32":
+    if not sys.platform.startswith("linux"):
+        # Without /proc boot ids (macOS, BSD, Windows) owners are never declared dead;
+        # they are taken over only after the lease expires (S2-S5 review L8).
         return
     child = subprocess.Popen([sys.executable, "-c", "pass"])
     host = new_lease_owner().split(".")[1]
