@@ -1,0 +1,26 @@
+{
+  "source": "https://google.aip.dev/193 (google.rpc ErrorInfo/RetryInfo/QuotaFailure, as Gemini generateContent returns them)",
+  "retrieved": "2026-10-21",
+  "note": "",
+  "response": {
+    "status": 400,
+    "headers": {},
+    "json": {
+      "error": {
+        "code": 400,
+        "message": "API key not valid. Please pass a valid API key.",
+        "status": "INVALID_ARGUMENT",
+        "details": [
+          {
+            "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+            "reason": "API_KEY_INVALID",
+            "domain": "googleapis.com",
+            "metadata": {
+              "service": "generativelanguage.googleapis.com"
+            }
+          }
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "source": "https://developers.openai.com/api/reference/resources/responses/streaming-events.md",
+  "retrieved": "2026-10-21",
+  "note": "",
+  "response": {
+    "status": 200,
+    "headers": {},
+    "json": {
+      "id": "resp_67ccd2bed1ec8190b14f964abc0542670bb6a6b452d3795b",
+      "object": "response",
+      "created_at": 1761004800,
+      "status": "failed",
+      "completed_at": null,
+      "error": {
+        "code": "server_error",
+        "message": "The model failed to generate a response."
+      },
+      "incomplete_details": null,
+      "instructions": null,
+      "max_output_tokens": null,
+      "model": "gpt-5.4-nano",
+      "output": [],
+      "parallel_tool_calls": true,
+      "previous_response_id": null,
+      "reasoning": {
+        "effort": "low",
+        "summary": null
+      },
+      "store": false,
+      "temperature": 1.0,
+      "text": {
+        "format": {
+          "type": "text"
+        }
+      },
+      "tool_choice": "auto",
+      "tools": [],
+      "top_p": 1.0,
+      "truncation": "disabled",
+      "usage": {},
+      "user": null,
+      "metadata": {}
+    }
+  }
+}

@@ -131,7 +131,21 @@ class ProviderAuthError(ProviderError):
 
 
 class ProviderServerError(_SDKProviderError):
-    """Raised for HTTP 5xx responses; transient, so ``RetryModel`` retries it."""
+    """Raised for HTTP 5xx responses; transient, so ``RetryModel`` retries it.
+
+    ``retry_after`` holds the server's ``Retry-After`` seconds when it sent one (OpenAI 503
+    ``server_is_overloaded`` and Anthropic 529 ``overloaded_error`` may), else ``None``.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        retry_after: float | None = None,
+        original_error: BaseException | None = None,
+    ) -> None:
+        super().__init__(message, original_error=original_error)
+        self.retry_after = retry_after
 
 
 class ProviderClientError(_SDKProviderError):
@@ -139,6 +153,27 @@ class ProviderClientError(_SDKProviderError):
 
     Never retried: sending the same request again fails the same way.
     """
+
+
+class ProviderContentFilterError(ProviderClientError):
+    """The provider blocked the prompt or the answer with its content or safety filter.
+
+    Raised for a blocked prompt (Gemini ``promptFeedback.blockReason``, an HTTP 400 with code
+    ``content_filter``) and for an answer that was withheld with nothing returned (OpenAI
+    ``finish_reason: "content_filter"`` without content, Gemini ``SAFETY``-type finish
+    reasons without parts). Not retried: the same input is blocked again. ``reason`` is the
+    provider's own code, for example ``"SAFETY"`` or ``"content_filter"``.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason: str | None = None,
+        original_error: BaseException | None = None,
+    ) -> None:
+        super().__init__(message, original_error=original_error)
+        self.reason = reason
 
 
 class ProviderContextLengthError(ProviderClientError):
@@ -188,6 +223,112 @@ class ProviderRateLimitedError(ProviderRateLimitError):
     ) -> None:
         super().__init__(message, original_error=original_error)
         self.retry_after = retry_after
+
+
+class ProviderQuotaExceededError(ProviderRateLimitedError):
+    """A 429 for an exhausted quota, credit balance or spend limit, not a short throttle.
+
+    It is still a :class:`ProviderRateLimitError` (callers that catch 429s keep working), but
+    ``retryable`` is ``False``: OpenAI's rate-limit guide says not to retry quota and billing
+    errors, and a Gemini per-day quota only resets the next day. ``RetryModel`` raises it at
+    once; ``FallbackModel`` still moves on to the next model. ``code`` is the provider's code,
+    for example ``"insufficient_quota"`` or a Gemini ``quotaId``.
+    """
+
+    retryable = False
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str | None = None,
+        retry_after: float | None = None,
+        original_error: BaseException | None = None,
+    ) -> None:
+        super().__init__(message, retry_after=retry_after, original_error=original_error)
+        self.code = code
+
+
+# 429 codes that need the account owner to act (OpenAI error-codes guide, Sarvam ErrorDetails,
+# OpenAI-compatible servers). Matched case-insensitively against the error ``code``/``type``.
+QUOTA_ERROR_CODES = frozenset(
+    {
+        "insufficient_quota",
+        "insufficient_quota_error",
+        "credit_balance_exhausted",
+        "organization_spend_limit_exceeded",
+        "project_spend_limit_exceeded",
+        "organization_usage_limit_exceeded",
+        "billing_hard_limit_reached",
+        "quota_exceeded",
+    }
+)
+
+# Error codes meaning the input or output was blocked by a content filter (OpenAI/Azure
+# ``content_filter``, Gemini block reasons).
+CONTENT_FILTER_CODES = frozenset({"content_filter", "content_policy_violation"})
+
+
+def error_body_codes(response: Any) -> list[str]:
+    """Machine-readable codes in a JSON error body: ``error.code``, ``error.type``,
+    ``error.status`` and Google ``details[].reason`` / ``details[].violations[].quotaId``.
+
+    Never the free-text message. Empty when the body is not JSON or was never read.
+    """
+    try:
+        data = response.json()
+    except Exception:
+        return []
+    error = data.get("error") if isinstance(data, dict) else None
+    if not isinstance(error, dict):
+        return []
+    codes: list[str] = []
+    for key in ("code", "type", "status"):
+        value = error.get(key)
+        if isinstance(value, str) and value:
+            codes.append(value)
+    for detail in error.get("details") or []:
+        if not isinstance(detail, dict):
+            continue
+        reason = detail.get("reason")
+        if isinstance(reason, str) and reason:
+            codes.append(reason)
+        for violation in detail.get("violations") or []:
+            if isinstance(violation, dict) and isinstance(violation.get("quotaId"), str):
+                codes.append(violation["quotaId"])
+    return codes
+
+
+def google_retry_delay(response: Any) -> float | None:
+    """Seconds from a Google ``google.rpc.RetryInfo`` detail (``"retryDelay": "37s"``).
+
+    Gemini sends its 429 wait time in the JSON body, not in a ``Retry-After`` header.
+    """
+    try:
+        data = response.json()
+    except Exception:
+        return None
+    error = data.get("error") if isinstance(data, dict) else None
+    if not isinstance(error, dict):
+        return None
+    for detail in error.get("details") or []:
+        if not isinstance(detail, dict):
+            continue
+        if not str(detail.get("@type", "")).endswith("google.rpc.RetryInfo"):
+            continue
+        delay = detail.get("retryDelay")
+        if isinstance(delay, str) and delay.endswith("s"):
+            return parse_retry_after(delay[:-1])
+    return None
+
+
+def is_quota_code(codes: list[str]) -> bool:
+    """True when a 429's codes say a quota or spend limit is exhausted (not a throttle)."""
+    for code in codes:
+        lowered = code.lower()
+        if lowered in QUOTA_ERROR_CODES or "perday" in lowered:
+            return True
+    return False
 
 
 def parse_retry_after(value: str | None) -> float | None:
@@ -241,23 +382,46 @@ def http_status_error(
     retry_after: str | None = None,
     original_error: BaseException | None = None,
     detail: str | None = None,
+    codes: list[str] | None = None,
+    retry_after_seconds: float | None = None,
 ) -> _SDKProviderError:
     """Build the typed error for a failed HTTP status other than authentication.
 
-    429 becomes a rate-limit error carrying ``retry_after``, 5xx a
-    :class:`ProviderServerError`, a 4xx about the context window a
-    :class:`ProviderContextLengthError`, and other 4xx a :class:`ProviderClientError`.
+    429 becomes a rate-limit error carrying ``retry_after`` (a
+    :class:`ProviderQuotaExceededError`, not retried, when ``codes`` name an exhausted quota),
+    5xx a :class:`ProviderServerError` (also carrying ``retry_after``), a 4xx about the context
+    window a :class:`ProviderContextLengthError`, a 4xx whose ``codes`` name a content filter a
+    :class:`ProviderContentFilterError`, and other 4xx a :class:`ProviderClientError`.
     ``detail`` (for example the start of the response body) is used only to recognise a
-    context-window error; it never appears in the message.
+    context-window error; it never appears in the message. ``codes`` are the body's
+    machine-readable error codes (see :func:`error_body_codes`). ``retry_after_seconds`` is a
+    delay the caller already parsed (for example Google's ``RetryInfo``); the header wins.
     """
+    seconds = parse_retry_after(retry_after)
+    if seconds is None:
+        seconds = retry_after_seconds
     if status_code == 429:
-        seconds = parse_retry_after(retry_after)
-        detail = f" (Retry-After: {seconds:g}s)" if seconds is not None else ""
+        suffix = f" (Retry-After: {seconds:g}s)" if seconds is not None else ""
+        if codes and is_quota_code(codes):
+            code = next(c for c in codes if is_quota_code([c]))
+            return ProviderQuotaExceededError(
+                f"{message} [{code}: quota or spend limit exhausted; not retried]{suffix}",
+                code=code,
+                retry_after=seconds,
+                original_error=original_error,
+            )
         return ProviderRateLimitedError(
-            message + detail, retry_after=seconds, original_error=original_error
+            message + suffix, retry_after=seconds, original_error=original_error
         )
     if status_code >= 500:
-        return ProviderServerError(message, original_error=original_error)
+        return ProviderServerError(message, retry_after=seconds, original_error=original_error)
+    if codes and any(c.lower() in CONTENT_FILTER_CODES for c in codes):
+        reason = next(c for c in codes if c.lower() in CONTENT_FILTER_CODES)
+        return ProviderContentFilterError(
+            f"{message} (blocked by the provider's content filter)",
+            reason=reason,
+            original_error=original_error,
+        )
     if status_code in (400, 413, 422) and is_context_length_message(f"{message} {detail or ''}"):
         if not is_context_length_message(message):
             message += " (the prompt exceeds the model's context window)"

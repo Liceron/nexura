@@ -1,0 +1,42 @@
+{
+  "source": "https://docs.ollama.com/api/openai-compatibility",
+  "retrieved": "2026-10-21",
+  "note": "",
+  "response": {
+    "status": 200,
+    "headers": {},
+    "json": {
+      "id": "chatcmpl-272",
+      "object": "chat.completion",
+      "created": 1761004800,
+      "model": "qwen3:0.6b",
+      "system_fingerprint": "fp_ollama",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_n1kq6b2u",
+                "index": 0,
+                "type": "function",
+                "function": {
+                  "name": "get_current_weather",
+                  "arguments": "{\"format\":\"celsius\",\"location\":\"Paris, FR\"}"
+                }
+              }
+            ]
+          },
+          "finish_reason": "tool_calls"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 120,
+        "completion_tokens": 24,
+        "total_tokens": 144
+      }
+    }
+  }
+}

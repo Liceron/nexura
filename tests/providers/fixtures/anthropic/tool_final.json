@@ -1,0 +1,28 @@
+{
+  "source": "https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons",
+  "retrieved": "2026-10-21",
+  "note": "",
+  "response": {
+    "status": 200,
+    "headers": {},
+    "json": {
+      "id": "msg_01XFDUDYJgAACzvnptvVoYEL",
+      "type": "message",
+      "role": "assistant",
+      "model": "claude-haiku-5-5",
+      "content": [
+        {
+          "type": "text",
+          "text": "Paris is 18C and London is 14C."
+        }
+      ],
+      "stop_reason": "end_turn",
+      "stop_sequence": null,
+      "stop_details": null,
+      "usage": {
+        "input_tokens": 600,
+        "output_tokens": 15
+      }
+    }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "source": "https://docs.sarvam.ai/api-reference/chat/chat-completions-v1.md",
+  "retrieved": "2026-10-21",
+  "note": "",
+  "response": {
+    "status": 500,
+    "headers": {},
+    "json": {
+      "error": {
+        "message": "Internal server error.",
+        "code": "internal_server_error",
+        "request_id": "20250101_5e6f7a8b"
+      }
+    }
+  }
+}

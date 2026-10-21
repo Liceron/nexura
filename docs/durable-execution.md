@@ -10,7 +10,8 @@ on those stores, and S4 adds effect resolution over REST and the TypeScript clie
 and [Resolving an unknown effect](#resolving-an-unknown-effect-s4)). S5 puts the SDK
 `Runner` on the journal (see [SDK agents on the journal](#sdk-agents-on-the-journal-s5)).
 S6 puts top-level `WorkflowEngine` runs on it (see
-[Workflows on the journal](#workflows-on-the-journal-s6)). The trigger worker does not use
+[Workflows on the journal](#workflows-on-the-journal-s6)), and S8 adds a Postgres workflow
+store (see [Workflows on Postgres](#workflows-on-postgres-s8)). The trigger worker does not use
 the journal yet, so its retry behavior is unchanged. The A6 design report
 (`P35_A6_DURABLE_EXECUTION_DESIGN.md`, an internal planning record that is not part of
 the public repository) gives today's behavior per path in §1 and the implementation
@@ -534,8 +535,8 @@ graph reads; the journal records the lease and what was dispatched. User guide a
   the run fails. `WorkflowRunResult` has `pause_reason` and `pending_effect`;
   `WorkflowCheckpoint` has `pending_effect`, `revision` and a `pause_reason` property.
 
-Limits: `SQLiteWorkflowStore` is single-host and there is no Postgres workflow store yet
-(S8); the service still marks runs interrupted with its startup sweep and has no recover
+Limits: `SQLiteWorkflowStore` is single-host (for several hosts use
+`PostgresWorkflowStore`, S8 below); the service still marks runs interrupted with its startup sweep and has no recover
 endpoint (S9); trigger reclaim still starts a new run (S10); budgets are not yet linked to
 intents (S11).
 
@@ -582,6 +583,92 @@ User guide and example:
 Limits: recover top-level runs (`parent_run_id` is `None`); `list_recoverable()` also lists
 child runs, which their parent recovers. A part in doubt is reported one at a time. The
 effects REST route lists and resolves a child's effects under the child's run id.
+
+## Workflows on Postgres (S8)
+
+`nexura_postgres.PostgresWorkflowStore` (package `nexura-postgres`) is the workflow store
+for several hosts sharing one database. It has the same protocol as `SQLiteWorkflowStore`,
+so everything in the S6 and S7 sections works unchanged on it:
+
+- **Checkpoints and revisions.** The latest checkpoint of each run, saved with a revision
+  compare-and-swap when the checkpoint carries a revision (`WorkflowConflictError`
+  otherwise), last writer wins when it does not. `create()` is create-if-absent (one winner
+  among concurrent starts with the same id).
+- **History.** Every saved checkpoint is appended to `nexura_workflow_checkpoint_history`,
+  for `WorkflowEngine.history`, replay and `fork`.
+- **Approvals.** `claim_approval` moves a `paused` run to `running` once; an approval past
+  its `expires_at` is never claimed. Expiry is judged by the database clock.
+- **Listing.** `list_children(parent_id)` (natural child order) and
+  `list_incomplete(limit=100, *, workspace_id=None)`: top-level runs whose latest
+  checkpoint is `running`, oldest first, the candidates for `recover()`. The memory and
+  SQLite stores have the same method.
+- **Journal on the same pool.** `await store.open_execution_store()` (or the
+  `store.execution_store` property) is a `PostgresExecutionStore` on the store's own pool,
+  so the run lease, intents and effects live in the same database. Its `close()` does
+  nothing; `store.close()` closes the pool.
+- **Transactions.** Every write is one transaction under a per-run advisory lock, with the
+  row read `FOR UPDATE`; times come from `clock_timestamp()`.
+- **Migrations.** Tables are created on first use (or `await store.init_db()`) by
+  versioned migrations recorded in `nexura_workflow_migrations`, under an advisory lock
+  so several processes can start together. A database migrated by a newer
+  `nexura-postgres` is refused with `WorkflowError`.
+- **Workspaces.** Without `workspace_id`, one store serves every workspace and
+  `WorkflowEngine` checks each run's owner, as with SQLite.
+  `PostgresWorkflowStore(dsn, workspace_id="team-a")` scopes the store: runs of other
+  workspaces are invisible to it and cannot be written or claimed through it.
+- **Pools.** Give a DSN (a pool is created on first use, `max_pool_size=10`) or an asyncpg
+  `pool=` you own. A pool belongs to one event loop: a pool the store created is replaced
+  when the store is used from another loop, and opened again after `close()`.
+
+```python notest
+import asyncio
+
+from nexura_postgres import PostgresWorkflowStore
+from nexura_runtime.workflow import ModuleRegistry, WorkflowEngine, WorkflowNode, WorkflowSpec
+
+
+async def main() -> None:
+    store = PostgresWorkflowStore("postgresql://nexura:secret@db.internal:5432/nexura")
+    registry = ModuleRegistry()
+    registry.register("note", lambda state: {"noted": True}, effect="pure")
+    spec = WorkflowSpec(
+        name="hello", entry_node="a", nodes={"a": WorkflowNode(id="a", handler="note")},
+        terminal_nodes=["a"],
+    )
+    try:
+        engine = WorkflowEngine(spec, registry, store=store, workspace_id="team-a")
+        result = await engine.run({}, workflow_run_id="hello-1")
+        print(result.status, await store.list_incomplete())
+        # After a crash, any host recovers the run once its lease has expired:
+        # await engine.recover("hello-1")
+    finally:
+        await store.close()
+
+
+asyncio.run(main())
+```
+
+**The service.** `create_api_app(workflow_state_url="postgresql://...")`,
+`nexura-runtime serve --workflow-state-url postgresql://...` (also `nexura-runtime worker`),
+or the environment variable `NEXURA_WORKFLOW_STATE_URL` keep workflow checkpoints, their
+history and the workflow runs' journal in Postgres. Unset (the default), they stay in the
+SQLite database given by `--db`. The tables are migrated when the app starts. Unless
+`execution_store=` is passed, the effects API reads the same Postgres journal. Studio run
+records, triggers, sessions and the other service tables stay in SQLite. A URL that is not
+`postgresql://` is refused at startup (exit code 2 from the CLI) without echoing it, and a
+missing `nexura-postgres` package raises `MissingDependencyError` naming
+`pip install nexura-postgres`. An explicit empty `workflow_state_url=""` keeps SQLite even
+when the environment variable is set; `workflow_state_url` together with your own `store=`
+raises `ValueError` (give that `StudioStore` its `checkpoint_store=` instead).
+
+Tests: one contract suite runs against memory, SQLite and Postgres
+(`tests/workflows/test_workflow_store_contract.py`), and the workflow kill rows in
+`tests/durability` run on Postgres when `NEXURA_TEST_POSTGRES_URI` names a disposable
+database.
+
+Limits: the service's startup sweep and Studio run records are still SQLite-only (S9),
+so two service hosts sharing one Postgres workflow state are not yet supported; the
+trigger worker keeps its SQLite job store (S10b).
 
 ## See also
 

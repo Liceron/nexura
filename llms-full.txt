@@ -7511,7 +7511,8 @@ on those stores, and S4 adds effect resolution over REST and the TypeScript clie
 and [Resolving an unknown effect](#resolving-an-unknown-effect-s4)). S5 puts the SDK
 `Runner` on the journal (see [SDK agents on the journal](#sdk-agents-on-the-journal-s5)).
 S6 puts top-level `WorkflowEngine` runs on it (see
-[Workflows on the journal](#workflows-on-the-journal-s6)). The trigger worker does not use
+[Workflows on the journal](#workflows-on-the-journal-s6)), and S8 adds a Postgres workflow
+store (see [Workflows on Postgres](#workflows-on-postgres-s8)). The trigger worker does not use
 the journal yet, so its retry behavior is unchanged. The A6 design report
 (`P35_A6_DURABLE_EXECUTION_DESIGN.md`, an internal planning record that is not part of
 the public repository) gives today's behavior per path in §1 and the implementation
@@ -8035,8 +8036,8 @@ graph reads; the journal records the lease and what was dispatched. User guide a
   the run fails. `WorkflowRunResult` has `pause_reason` and `pending_effect`;
   `WorkflowCheckpoint` has `pending_effect`, `revision` and a `pause_reason` property.
 
-Limits: `SQLiteWorkflowStore` is single-host and there is no Postgres workflow store yet
-(S8); the service still marks runs interrupted with its startup sweep and has no recover
+Limits: `SQLiteWorkflowStore` is single-host (for several hosts use
+`PostgresWorkflowStore`, S8 below); the service still marks runs interrupted with its startup sweep and has no recover
 endpoint (S9); trigger reclaim still starts a new run (S10); budgets are not yet linked to
 intents (S11).
 
@@ -8083,6 +8084,92 @@ User guide and example:
 Limits: recover top-level runs (`parent_run_id` is `None`); `list_recoverable()` also lists
 child runs, which their parent recovers. A part in doubt is reported one at a time. The
 effects REST route lists and resolves a child's effects under the child's run id.
+
+## Workflows on Postgres (S8)
+
+`nexura_postgres.PostgresWorkflowStore` (package `nexura-postgres`) is the workflow store
+for several hosts sharing one database. It has the same protocol as `SQLiteWorkflowStore`,
+so everything in the S6 and S7 sections works unchanged on it:
+
+- **Checkpoints and revisions.** The latest checkpoint of each run, saved with a revision
+  compare-and-swap when the checkpoint carries a revision (`WorkflowConflictError`
+  otherwise), last writer wins when it does not. `create()` is create-if-absent (one winner
+  among concurrent starts with the same id).
+- **History.** Every saved checkpoint is appended to `nexura_workflow_checkpoint_history`,
+  for `WorkflowEngine.history`, replay and `fork`.
+- **Approvals.** `claim_approval` moves a `paused` run to `running` once; an approval past
+  its `expires_at` is never claimed. Expiry is judged by the database clock.
+- **Listing.** `list_children(parent_id)` (natural child order) and
+  `list_incomplete(limit=100, *, workspace_id=None)`: top-level runs whose latest
+  checkpoint is `running`, oldest first, the candidates for `recover()`. The memory and
+  SQLite stores have the same method.
+- **Journal on the same pool.** `await store.open_execution_store()` (or the
+  `store.execution_store` property) is a `PostgresExecutionStore` on the store's own pool,
+  so the run lease, intents and effects live in the same database. Its `close()` does
+  nothing; `store.close()` closes the pool.
+- **Transactions.** Every write is one transaction under a per-run advisory lock, with the
+  row read `FOR UPDATE`; times come from `clock_timestamp()`.
+- **Migrations.** Tables are created on first use (or `await store.init_db()`) by
+  versioned migrations recorded in `nexura_workflow_migrations`, under an advisory lock
+  so several processes can start together. A database migrated by a newer
+  `nexura-postgres` is refused with `WorkflowError`.
+- **Workspaces.** Without `workspace_id`, one store serves every workspace and
+  `WorkflowEngine` checks each run's owner, as with SQLite.
+  `PostgresWorkflowStore(dsn, workspace_id="team-a")` scopes the store: runs of other
+  workspaces are invisible to it and cannot be written or claimed through it.
+- **Pools.** Give a DSN (a pool is created on first use, `max_pool_size=10`) or an asyncpg
+  `pool=` you own. A pool belongs to one event loop: a pool the store created is replaced
+  when the store is used from another loop, and opened again after `close()`.
+
+```python notest
+import asyncio
+
+from nexura_postgres import PostgresWorkflowStore
+from nexura_runtime.workflow import ModuleRegistry, WorkflowEngine, WorkflowNode, WorkflowSpec
+
+
+async def main() -> None:
+    store = PostgresWorkflowStore("postgresql://nexura:secret@db.internal:5432/nexura")
+    registry = ModuleRegistry()
+    registry.register("note", lambda state: {"noted": True}, effect="pure")
+    spec = WorkflowSpec(
+        name="hello", entry_node="a", nodes={"a": WorkflowNode(id="a", handler="note")},
+        terminal_nodes=["a"],
+    )
+    try:
+        engine = WorkflowEngine(spec, registry, store=store, workspace_id="team-a")
+        result = await engine.run({}, workflow_run_id="hello-1")
+        print(result.status, await store.list_incomplete())
+        # After a crash, any host recovers the run once its lease has expired:
+        # await engine.recover("hello-1")
+    finally:
+        await store.close()
+
+
+asyncio.run(main())
+```
+
+**The service.** `create_api_app(workflow_state_url="postgresql://...")`,
+`nexura-runtime serve --workflow-state-url postgresql://...` (also `nexura-runtime worker`),
+or the environment variable `NEXURA_WORKFLOW_STATE_URL` keep workflow checkpoints, their
+history and the workflow runs' journal in Postgres. Unset (the default), they stay in the
+SQLite database given by `--db`. The tables are migrated when the app starts. Unless
+`execution_store=` is passed, the effects API reads the same Postgres journal. Studio run
+records, triggers, sessions and the other service tables stay in SQLite. A URL that is not
+`postgresql://` is refused at startup (exit code 2 from the CLI) without echoing it, and a
+missing `nexura-postgres` package raises `MissingDependencyError` naming
+`pip install nexura-postgres`. An explicit empty `workflow_state_url=""` keeps SQLite even
+when the environment variable is set; `workflow_state_url` together with your own `store=`
+raises `ValueError` (give that `StudioStore` its `checkpoint_store=` instead).
+
+Tests: one contract suite runs against memory, SQLite and Postgres
+(`tests/workflows/test_workflow_store_contract.py`), and the workflow kill rows in
+`tests/durability` run on Postgres when `NEXURA_TEST_POSTGRES_URI` names a disposable
+database.
+
+Limits: the service's startup sweep and Studio run records are still SQLite-only (S9),
+so two service hosts sharing one Postgres workflow state are not yet supported; the
+trigger worker keeps its SQLite job store (S10b).
 
 ## See also
 
@@ -9829,6 +9916,62 @@ print(agent.run("Summarize our refund policy in one line.").final_output)
 
 Set the key in your environment first (`export OPENAI_API_KEY=...`) or pass `api_key=` to the provider class. Do not put keys in source files.
 
+## Provider conformance
+
+Each adapter is checked against the providers' current API documentation by a conformance suite (`tests/providers/conformance/`). The suite replays recorded request and response fixtures (`tests/providers/fixtures/<provider>/`, each naming the documentation page it was taken from and the date it was read) through mock HTTP transports, so it runs offline and in CI without keys. For every provider it checks a plain reply, a tool-call round trip (parallel calls where the API has them), structured output, streamed text and streamed tool-call arguments, usage mapping and the budget settlement it produces, the mapping of errors to Nexura's error types, and the shape of the request Nexura sends.
+
+| Provider (class) | Fixture-verified (2026-10-21) | Live-verified |
+|---|---|---|
+| OpenAI Chat Completions (`OpenAIProvider`) | reply, parallel tool calls, `response_format` json_schema (strict), streaming text and tool arguments, usage (cached, cache-write, reasoning tokens), auth, 429 with `Retry-After`, quota 429 (not retried), 503 overloaded, context too long, content filter, refusal | never |
+| OpenAI Responses API (`OpenAIResponsesProvider`) | reply, parallel function calls with reasoning items sent back (also after streaming), `text.format` json_schema, streaming events, usage, `incomplete` (max tokens, content filter), `failed`, in-stream errors | never |
+| Anthropic Messages (`AnthropicNativeProvider`) | reply, parallel `tool_use` with thinking blocks kept, `output_config.format` JSON outputs (forced-tool fallback for older models), streaming text and `input_json_delta`, cumulative `message_delta` usage, prompt-cache usage, stop reasons (`refusal`, `model_context_window_exceeded`, `pause_turn`), 401, 429 with `retry-after`, 529 and in-stream `overloaded_error`, prompt too long, 413 | never |
+| Gemini API (`GeminiNativeProvider`) | reply with thought summaries hidden, parallel `functionCall` with ids and `thoughtSignature`, `systemInstruction`, `responseSchema`, streaming, `usageMetadata` (cached, thoughts, tool-use prompt), `MAX_TOKENS`, blocked prompts and `SAFETY` stops, `API_KEY_INVALID`, 429 with `RetryInfo`, per-day quota (not retried), 503, context too long | **2026-10-20** (`gemini-2.5-flash`: reply, one tool call, streaming, structured answer) |
+| Vertex AI (`VertexAIProvider`, `nexura-vertex`) | the Gemini wire format on the Vertex endpoint with an OAuth token, errors | **2026-10-08** (`gemini-2.5-flash`: reply, tool call, streaming) |
+| Ollama, local (`OpenAIProvider` at `localhost:11434/v1`) | reply, tool call, a tool call streamed in one chunk, usage, `max_tokens` (not `max_completion_tokens`) | never |
+| Sarvam (`SarvamProvider`) | reply (reasoning text kept out of the answer), streaming with the final usage chunk, reasoning tokens, quota 429 (not retried), 403, 500 | never |
+| LiteLLM (`LiteLLMModel`) | OpenAI-shaped replies with tool calls and usage through an injected `completion`, quota and content-policy errors | never (offline mock responses only) |
+
+"Fixture-verified" means the adapter handles the documented wire format; it does not prove a live model behaves the same. Only the two live checks above have been run against real APIs.
+
+## Live canaries (opt-in)
+
+`scripts/live_canary.py` runs one tiny fixed scenario per provider against the real API: a plain reply, one tool call and its follow-up, a streamed reply and a structured answer, each capped at 256 output tokens. That is roughly 600 to 2,000 tokens per provider, well under one US cent at October 2026 list prices of the default small models; Ollama runs locally and costs nothing.
+
+It sends nothing unless `NEXURA_LIVE_CANARY=1` is set and the provider's credential is present (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` or `GOOGLE_API_KEY`, `SARVAM_API_KEY`; Vertex AI needs `NEXURA_CANARY_VERTEX_PROJECT` and Application Default Credentials; a local Ollama needs `NEXURA_CANARY_OLLAMA_MODEL`). CI never sets `NEXURA_LIVE_CANARY`, and a test fails if a workflow does.
+
+```bash notest
+export NEXURA_LIVE_CANARY=1 ANTHROPIC_API_KEY=...
+uv run python scripts/live_canary.py --provider anthropic
+```
+
+Each provider that ran writes `evidence/live_canary/live_canary_<provider>_<date>.json` with the model, every check and its usage, pass or fail and the UTC time. The key is never written: the file names the variable and a masked value such as `sk-...(164 chars)`.
+
+## OpenAI Responses API
+
+`OpenAIResponsesProvider` talks to `POST /v1/responses`, which OpenAI recommends for new work. It takes the same arguments as `OpenAIProvider` plus `store` (default `False`). It sends the whole conversation every turn, system messages as `instructions`, tools as Responses function tools (`strict: false` unless your tool sets it) and a schema as `text.format`. Reasoning items that come back next to function calls are sent back with the tool outputs, as the API requires: from the message's `provider_data` for whole responses, and from the provider's own record of recent calls for streamed ones (so keep using the same provider object across the turns of a streamed run).
+
+```python notest
+from nexura_agents import Agent
+from nexura_agents.providers.openai import OpenAIResponsesProvider
+
+agent = Agent(name="Support", instructions="Be brief.", model=OpenAIResponsesProvider("gpt-5.4-nano"))
+print(agent.run("Summarize our refund policy in one line.").final_output)
+```
+
+`OpenAIProvider` sends `max_completion_tokens` to api.openai.com (reasoning models reject the deprecated `max_tokens`) and `max_tokens` to any other `base_url`, such as Ollama, vLLM or LM Studio. Set the instance attribute `max_tokens_param` to override.
+
+## Errors you can catch
+
+| Error (`nexura_agents.providers.errors` unless noted) | When | Retried by `RetryModel` |
+|---|---|---|
+| `ProviderAuthError` (`nexura_agents.errors`) | 401/403, Gemini `API_KEY_INVALID` | no |
+| `ProviderRateLimitedError` | 429 throttling; `retry_after` from `Retry-After` or Gemini `RetryInfo` | yes |
+| `ProviderQuotaExceededError` | 429 for an exhausted quota, credit balance or spend limit (`insufficient_quota`, Gemini per-day quotas, Sarvam `insufficient_quota_error`); still a `ProviderRateLimitError` | no |
+| `ProviderServerError` | 5xx, Anthropic 529 and in-stream `overloaded_error`; `retry_after` when the server sent one | yes |
+| `ProviderContextLengthError` | the prompt is longer than the context window | no (see `trim_history`) |
+| `ProviderContentFilterError` | a blocked prompt, or an answer withheld with nothing returned (`reason` holds the provider's code) | no |
+| `ProviderClientError` | other 4xx | no |
+
 ## Vertex AI
 
 `VertexAIProvider` serves Gemini models from Google Cloud. It signs requests with OAuth access tokens, not API keys. By default it uses Application Default Credentials (ADC) through `google-auth`, which the `nexura-vertex` package installs:
@@ -10139,7 +10282,9 @@ assert model.calls[1]["model_settings"] is None  # reset to auto after the call
 
 Some models spend hidden "thinking" tokens before they answer. When the provider reports them, `Usage.reasoning_tokens` holds the count. It is read from OpenAI's `reasoning_tokens` and from Gemini and Vertex AI's `thoughtsTokenCount`. These tokens are already counted in `completion_tokens` (the Gemini adapter adds `thoughtsTokenCount` to the visible output count; OpenAI's completion count includes them), so do not add the two together. If the provider does not report them, the field is `None`, not zero.
 
-The Anthropic and Sarvam adapters in this SDK do not fill `reasoning_tokens`. The SDK does not currently have a setting to turn on or size a model's reasoning; it only reports what the provider returns.
+OpenAI (both APIs), Sarvam and LiteLLM also fill `reasoning_tokens` from `completion_tokens_details`/`output_tokens_details`. The Anthropic adapter does not: Anthropic reports thinking only inside `output_tokens`. `ModelSettings(reasoning_effort=...)` is sent as `reasoning_effort` (Chat Completions), `reasoning.effort` (Responses) and `output_config.effort` (Anthropic); `thinking_budget_tokens` sizes Gemini thinking and Anthropic extended thinking on models before Claude 4.7.
+
+Cache usage follows one rule for every provider: `prompt_tokens` is the whole prompt, including the tokens read from a cache (`cached_prompt_tokens`, `cache_read_input_tokens`) and written to one (`cache_creation_input_tokens`). Anthropic reports `input_tokens` without them, so the adapter adds them back; cost settlement prices each part at its own rate.
 
 ## Retry and fallback
 
@@ -10318,8 +10463,8 @@ strings; `nexura-agents[litellm]` adds `"litellm:<provider>/<model>"` for others
 | `"vertex:gemini-2.5-flash"` | Google Vertex AI | `gcloud auth application-default login` (`pip install nexura-vertex`) |
 | `"gemini:gemini-2.5-flash"` | Gemini API | `GEMINI_API_KEY` |
 | `"openai:gpt-4.1-mini"` | OpenAI or any OpenAI-compatible server | `OPENAI_API_KEY` |
-| `"anthropic:claude-sonnet-4-5"` | Anthropic | `ANTHROPIC_API_KEY` |
-| `"sarvam:sarvam-m"` | Sarvam AI (Indian languages) | `SARVAM_API_KEY` |
+| `"anthropic:claude-haiku-5-5"` | Anthropic (the default model of `AnthropicNativeProvider`) | `ANTHROPIC_API_KEY` |
+| `"sarvam:sarvam-105b"` | Sarvam AI (Indian languages; the default model) | `SARVAM_API_KEY` |
 | `"ollama:llama3.1"` | Local Ollama | none |
 | `"test"` | Offline fake | none |
 | `"litellm:bedrock/..."` | Any provider LiteLLM supports | that provider's own (`[litellm]` extra) |
@@ -10430,7 +10575,7 @@ assert result.usage.is_complete
 
 | Field | Meaning |
 | --- | --- |
-| `prompt_tokens` | Input tokens. |
+| `prompt_tokens` | Input tokens: the whole prompt, including tokens read from or written to a prompt cache (for Anthropic the adapter adds the cache counts back to `input_tokens`). |
 | `completion_tokens` | Output tokens. |
 | `total_tokens` | Total as reported by the provider. |
 | `is_complete` | `False` if any turn did not report all three counts above. |
@@ -10929,6 +11074,9 @@ checkpoint.
 - `MemoryWorkflowStore()` keeps checkpoints in the process. Use it for tests.
 - `SQLiteWorkflowStore(path)` writes to a SQLite file (WAL mode). Close it with
   `await store.close()`, or use it as a context manager (`with` or `async with`).
+- `nexura_postgres.PostgresWorkflowStore(dsn)` (package `nexura-postgres`) keeps the same
+  checkpoints in Postgres, for several hosts sharing one database; see
+  [Workflows on Postgres](durable-execution.md#workflows-on-postgres-s8).
 
 A new engine built on the same database picks up where the old one stopped. The spec
 must be the same: resuming checks the spec's hash and raises
@@ -11225,7 +11373,8 @@ the step's key as the outbox de-duplication key, and connector writes send it as
 `Idempotency-Key` (the S3 connector, which signs its headers, does not). An explicit key
 always wins.
 
-Limits: `SQLiteWorkflowStore` is for one host; there is no Postgres workflow store yet.
+Limits: `SQLiteWorkflowStore` is for one host; several hosts need
+`nexura_postgres.PostgresWorkflowStore`, which behaves the same.
 `fork` is unchanged: it starts a new run that runs the forked step again. A child whose
 `recover` was asked for with `on_uncertain="fail"` fails, and the parent's step fails like
 any failed sub-workflow (`WorkflowExecutionError`).
@@ -11355,8 +11504,8 @@ asyncio.run(main())
 The pending approval expires `approval_ttl` seconds after it was created (an engine
 argument, default 3600). Resuming after that marks the run failed and raises
 `ApprovalExpiredError`. The expiry is checked before the claim, inside the claim
-(`MemoryWorkflowStore` and `SQLiteWorkflowStore` never claim an approval past its stored
-`expires_at`) and again right before the approved node runs, so a slow claim cannot run a
+(`MemoryWorkflowStore`, `SQLiteWorkflowStore` and `PostgresWorkflowStore` never claim an
+approval past its stored `expires_at`) and again right before the approved node runs, so a slow claim cannot run a
 node after its approval expired. A pending approval stored without `expires_at` (older
 checkpoints) expires `approval_ttl` after its `created_at`; one with no `created_at`
 either is treated as expired. Without a store, `resume` raises `WorkflowError`.
@@ -12941,7 +13090,7 @@ The command is `nexura-runtime` (installed by `nexura-runtime`). The bare `nexur
 belongs to the separate Nexura Cloud client package `nexura`, so this project does not install
 a command with that name.
 
-`nexura-runtime serve` takes `--host` (default `127.0.0.1`), `--port` (default `8765`), `--db` (default `./nexura_service.sqlite3`) and `--worker`, which also runs scheduled and webhook jobs (see [Schedules and webhooks](#schedules-and-webhooks)). It starts the `local-owner` profile: one user, no login. Keep it on `127.0.0.1`; do not expose this profile on a network. The open-source edition has one principal, the local owner (role `admin`): no logins, tokens, API keys or workspace members, and `X-Principal-*` headers are ignored. A shared or networked service needs authentication, which is in the Nexura enterprise edition; started on a non-loopback address without it, the service refuses to start unless you pass the explicit insecure opt-in. If `nexura-runtime serve` prints that it needs the `studio` extra, install it as shown above.
+`nexura-runtime serve` takes `--host` (default `127.0.0.1`), `--port` (default `8765`), `--db` (default `./nexura_service.sqlite3`), `--workflow-state-url` (a `postgresql://` URI that keeps workflow checkpoints and their execution journal in Postgres instead of the `--db` file; also `NEXURA_WORKFLOW_STATE_URL`; needs `nexura-postgres`, see [Workflows on Postgres](durable-execution.md#workflows-on-postgres-s8)) and `--worker`, which also runs scheduled and webhook jobs (see [Schedules and webhooks](#schedules-and-webhooks)). It starts the `local-owner` profile: one user, no login. Keep it on `127.0.0.1`; do not expose this profile on a network. The open-source edition has one principal, the local owner (role `admin`): no logins, tokens, API keys or workspace members, and `X-Principal-*` headers are ignored. A shared or networked service needs authentication, which is in the Nexura enterprise edition; started on a non-loopback address without it, the service refuses to start unless you pass the explicit insecure opt-in. If `nexura-runtime serve` prints that it needs the `studio` extra, install it as shown above.
 
 ### Per-session token
 
@@ -15524,7 +15673,7 @@ Features:
 
 ### `AnthropicProvider`
 
-class `AnthropicProvider(model: 'str' = 'claude-3-5-sonnet-20241022', *, api_key: 'str | None' = None, base_url: 'str' = 'https://api.anthropic.com', timeout: 'float' = 30.0, client: 'httpx.AsyncClient | None' = None, transport: 'httpx.AsyncBaseTransport | None' = None, capabilities: 'ProviderCapabilities | None' = None, default_max_tokens: 'int' = 4096, extra_headers: 'dict[str, str] | None' = None) -> 'None'`
+class `AnthropicProvider(model: 'str' = 'claude-haiku-5-5', *, api_key: 'str | None' = None, base_url: 'str' = 'https://api.anthropic.com', timeout: 'float' = 30.0, client: 'httpx.AsyncClient | None' = None, transport: 'httpx.AsyncBaseTransport | None' = None, capabilities: 'ProviderCapabilities | None' = None, default_max_tokens: 'int' = 4096, extra_headers: 'dict[str, str] | None' = None, structured_output: 'str' = 'auto') -> 'None'`
 
 ~~~text
 Native Anthropic provider adapter communicating with Anthropic Messages API.
@@ -15567,7 +15716,7 @@ Guarantees:
 
 ### `SarvamProvider`
 
-class `SarvamProvider(model: 'str' = 'sarvam-2b', *, api_key: 'str | None' = None, base_url: 'str' = 'https://api.sarvam.ai', timeout: 'float' = 30.0, max_input_length: 'int' = 25000, output_limit_bytes: 'int' = 2000000, client: 'httpx.AsyncClient | None' = None, transport: 'httpx.AsyncBaseTransport | None' = None, capabilities: 'ProviderCapabilities | None' = None, extra_headers: 'dict[str, str] | None' = None) -> 'None'`
+class `SarvamProvider(model: 'str' = 'sarvam-105b', *, api_key: 'str | None' = None, base_url: 'str' = 'https://api.sarvam.ai', timeout: 'float' = 30.0, max_input_length: 'int' = 25000, output_limit_bytes: 'int' = 2000000, client: 'httpx.AsyncClient | None' = None, transport: 'httpx.AsyncBaseTransport | None' = None, capabilities: 'ProviderCapabilities | None' = None, extra_headers: 'dict[str, str] | None' = None) -> 'None'`
 
 ~~~text
 Sarvam AI native provider for multilingual Indic text generation and translation.
@@ -17437,10 +17586,13 @@ Raised when provider authentication fails, ensuring credentials are masked.
 
 ### `ProviderServerError`
 
-class `ProviderServerError(message: str, *, original_error: BaseException | None = None) -> None`
+class `ProviderServerError(message: 'str', *, retry_after: 'float | None' = None, original_error: 'BaseException | None' = None) -> 'None'`
 
 ~~~text
 Raised for HTTP 5xx responses; transient, so ``RetryModel`` retries it.
+
+``retry_after`` holds the server's ``Retry-After`` seconds when it sent one (OpenAI 503
+``server_is_overloaded`` and Anthropic 529 ``overloaded_error`` may), else ``None``.
 ~~~
 
 
@@ -18170,6 +18322,8 @@ Its execution journal (leases, intents, effects) is a ``MemoryExecutionStore``, 
   Every checkpoint saved for the run, oldest first.
 - `list_children(self, parent_id: 'str') -> 'list[WorkflowCheckpoint]'`
   Latest checkpoint of every child run (ids starting ``<parent_id>/``), by id.
+- `list_incomplete(self, limit: 'int' = 100, *, workspace_id: 'str | None' = None) -> 'list[str]'`
+  Ids of top-level runs whose latest checkpoint is ``running``, oldest update first.
 - `open_execution_store(self) -> 'ExecutionStore'`
   The execution journal kept next to these checkpoints (created on first use).
 - `save(self, checkpoint: 'WorkflowCheckpoint') -> 'None'`
@@ -18200,6 +18354,8 @@ same database file, opened on first use with its own connection.
   Every checkpoint saved for the run, oldest first.
 - `list_children(self, parent_id: 'str') -> 'list[WorkflowCheckpoint]'`
   Latest checkpoint of every child run (ids starting ``<parent_id>/``), by id.
+- `list_incomplete(self, limit: 'int' = 100, *, workspace_id: 'str | None' = None) -> 'list[str]'`
+  Ids of top-level runs whose latest checkpoint is ``running``, oldest update first.
 - `open_execution_store(self) -> 'ExecutionStore'`
   The execution journal in the same database file (created on first use).
 - `save(self, checkpoint: 'WorkflowCheckpoint') -> 'None'`

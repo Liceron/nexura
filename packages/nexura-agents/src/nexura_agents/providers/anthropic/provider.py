@@ -20,11 +20,14 @@ from nexura_agents.errors import (
     ProviderResponseError,
 )
 from nexura_agents.limits import anthropic_tool_choice, apply_anthropic_settings
+from nexura_agents.models._streaming import _error_from_chunk
 from nexura_agents.providers.anthropic.types import (
     ANTHROPIC_THINKING_KEY,
+    anthropic_usage,
     extract_anthropic_response,
     map_anthropic_stop_reason,
     to_anthropic_messages,
+    to_anthropic_output_schema,
     to_anthropic_tools,
 )
 from nexura_agents.providers.base import BaseProvider
@@ -42,7 +45,7 @@ from nexura_agents.providers.types import (
     ProviderCapabilities,
     StreamDelta,
 )
-from nexura_agents.types import ModelResponse, Usage
+from nexura_agents.types import ModelResponse
 
 _ANTHROPIC_KEY_PATTERN = re.compile(r"sk-ant-[a-zA-Z0-9_-]{20,}", re.IGNORECASE)
 
@@ -96,6 +99,41 @@ def _structured_output_message(
     return msg, ("stop" if finish_reason in ("tool_use", "tool_calls") else finish_reason)
 
 
+_OUTPUT_FORMAT_MODEL = re.compile(
+    r"claude-(opus|sonnet|haiku|fable|mythos)-(\d+)(?:-(\d{1,2}))?(?!\d)"
+)
+
+
+def supports_output_format(model: str) -> bool:
+    """True for models whose docs list JSON outputs (``output_config.format``): Claude Opus,
+    Sonnet and Haiku 4.5 and later, and every Fable and Mythos model. Unknown names (custom
+    gateways, older models) keep the forced-tool path."""
+    match = _OUTPUT_FORMAT_MODEL.search(model.lower())
+    if match is None:
+        return False
+    family, major, minor = match.group(1), int(match.group(2)), int(match.group(3) or 0)
+    return family in ("fable", "mythos") or (major, minor) >= (4, 5)
+
+
+def _wrapped_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """An object schema for ``output_config.format`` (non-object answers go under "value")."""
+    wrapped: dict[str, Any] = _structured_output_tool(schema)["input_schema"]
+    return wrapped
+
+
+def _unwrap_output_text(text: str | None) -> str | None:
+    """``{"value": X}`` text from a wrapped native schema back to the JSON text of ``X``."""
+    if not text:
+        return text
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return text
+    if isinstance(data, dict) and set(data) == {_WRAPPED_KEY}:
+        return json.dumps(data[_WRAPPED_KEY], ensure_ascii=False)
+    return text
+
+
 class AnthropicNativeProvider(BaseProvider):
     """Native Anthropic provider adapter communicating with Anthropic Messages API.
 
@@ -109,14 +147,30 @@ class AnthropicNativeProvider(BaseProvider):
     - Credentials are redacted from representations and errors.
     """
 
-    # Native structured output via a forced synthetic tool (only when no other tools are
-    # offered: tool_choice can force one tool, so tool agents keep the prompt schema).
+    # Native structured output. Models that support JSON outputs (Claude 4.5 and later,
+    # Fable, Mythos) get ``output_config.format`` (works with tools and with streaming). Older
+    # models get a forced synthetic tool, which cannot be combined with other tools and is
+    # rejected by models that do not support forced tool use (Opus 5.5, Sonnet 5.5).
     supports_response_schema = True
-    response_schema_with_tools = False
+
+    @property
+    def structured_output_mode(self) -> str:
+        """``"native"`` (``output_config.format``) or ``"tool"`` (forced synthetic tool)."""
+        if self._structured_output == "auto":
+            return "native" if supports_output_format(self.model) else "tool"
+        return self._structured_output
+
+    @property
+    def response_schema_with_tools(self) -> bool:
+        return self.structured_output_mode == "native"
+
+    @property
+    def streams_response_schema(self) -> bool:
+        return self.structured_output_mode == "native"
 
     def __init__(
         self,
-        model: str = "claude-3-5-sonnet-20241022",
+        model: str = "claude-haiku-5-5",
         *,
         api_key: str | None = None,
         base_url: str = "https://api.anthropic.com",
@@ -126,7 +180,11 @@ class AnthropicNativeProvider(BaseProvider):
         capabilities: ProviderCapabilities | None = None,
         default_max_tokens: int = 4096,
         extra_headers: dict[str, str] | None = None,
+        structured_output: str = "auto",
     ) -> None:
+        if structured_output not in ("auto", "native", "tool"):
+            raise ValueError("structured_output must be 'auto', 'native' or 'tool'.")
+        self._structured_output = structured_output
         caps = capabilities or ProviderCapabilities(
             can_generate=True,
             can_stream=True,
@@ -214,6 +272,63 @@ class AnthropicNativeProvider(BaseProvider):
                 original_error=exc,
             ) from exc
 
+    def _build_payload(
+        self, request: GenerationRequest, cache_policy: Any, *, stream: bool
+    ) -> dict[str, Any]:
+        """The Messages API request body shared by generate() and stream()."""
+        system_prompt, messages = to_anthropic_messages(request.messages)
+        tools = to_anthropic_tools(request.tools)
+
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "max_tokens": request.max_tokens or self.default_max_tokens,
+            "messages": messages,
+        }
+        if stream:
+            payload["stream"] = True
+        if system_prompt:
+            if request.cache_plan or (cache_policy and getattr(cache_policy, "enabled", True)):
+                payload["system"] = [
+                    {
+                        "type": "text",
+                        "text": system_prompt,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ]
+            else:
+                payload["system"] = system_prompt
+        output_config: dict[str, Any] = {}
+        if request.schema and self.structured_output_mode == "native":
+            output_config["format"] = {
+                "type": "json_schema",
+                "schema": to_anthropic_output_schema(_wrapped_schema(request.schema)),
+            }
+        elif request.schema and not stream:
+            if tools:
+                raise CapabilityError(
+                    "Anthropic native structured output uses a forced tool and cannot be "
+                    "combined with other tools.",
+                    provider_name=self.model,
+                    capability="structured_output_with_tools",
+                )
+            tools = [_structured_output_tool(request.schema)]
+            payload["tool_choice"] = {"type": "tool", "name": STRUCTURED_OUTPUT_TOOL}
+        if request.reasoning_effort is not None:
+            # Claude 4.6+ steer adaptive thinking with output_config.effort.
+            output_config["effort"] = request.reasoning_effort
+        if output_config:
+            payload["output_config"] = output_config
+        if tools:
+            payload["tools"] = tools
+            if request.tool_choice is not None and "tool_choice" not in payload:
+                payload["tool_choice"] = anthropic_tool_choice(request.tool_choice)
+        if request.temperature is not None:
+            payload["temperature"] = request.temperature
+        if request.stop_sequences:
+            payload["stop_sequences"] = request.stop_sequences
+        apply_anthropic_settings(payload, request)
+        return payload
+
     async def _generate_internal(
         self,
         request: GenerationRequest,
@@ -245,44 +360,7 @@ class AnthropicNativeProvider(BaseProvider):
                     option="ttl_seconds",
                 )
 
-        system_prompt, messages = to_anthropic_messages(request.messages)
-        tools = to_anthropic_tools(request.tools)
-
-        payload: dict[str, Any] = {
-            "model": self.model,
-            "max_tokens": request.max_tokens or self.default_max_tokens,
-            "messages": messages,
-        }
-        if system_prompt:
-            if request.cache_plan or (cache_policy and getattr(cache_policy, "enabled", True)):
-                payload["system"] = [
-                    {
-                        "type": "text",
-                        "text": system_prompt,
-                        "cache_control": {"type": "ephemeral"},
-                    }
-                ]
-            else:
-                payload["system"] = system_prompt
-        if request.schema:
-            if tools:
-                raise CapabilityError(
-                    "Anthropic native structured output uses a forced tool and cannot be "
-                    "combined with other tools.",
-                    provider_name=self.model,
-                    capability="structured_output_with_tools",
-                )
-            tools = [_structured_output_tool(request.schema)]
-            payload["tool_choice"] = {"type": "tool", "name": STRUCTURED_OUTPUT_TOOL}
-        if tools:
-            payload["tools"] = tools
-            if request.tool_choice is not None and "tool_choice" not in payload:
-                payload["tool_choice"] = anthropic_tool_choice(request.tool_choice)
-        if request.temperature is not None:
-            payload["temperature"] = request.temperature
-        if request.stop_sequences:
-            payload["stop_sequences"] = request.stop_sequences
-        apply_anthropic_settings(payload, request)
+        payload = self._build_payload(request, cache_policy, stream=False)
 
         url = f"{self.base_url}/v1/messages"
         headers = self._build_headers()
@@ -312,8 +390,10 @@ class AnthropicNativeProvider(BaseProvider):
             ) from exc
 
         msg, usage, finish_reason, metadata = extract_anthropic_response(data)
-        if request.schema:
+        if request.schema and self.structured_output_mode == "tool":
             msg, finish_reason = _structured_output_message(msg, finish_reason, request.schema)
+        elif request.schema and _is_wrapped(request.schema) and not msg.tool_calls:
+            msg.content = _unwrap_output_text(msg.content)
         return ModelResponse(
             message=msg,
             usage=usage,
@@ -351,35 +431,7 @@ class AnthropicNativeProvider(BaseProvider):
                     option="ttl_seconds",
                 )
 
-        system_prompt, messages = to_anthropic_messages(request.messages)
-        tools = to_anthropic_tools(request.tools)
-
-        payload: dict[str, Any] = {
-            "model": self.model,
-            "max_tokens": request.max_tokens or self.default_max_tokens,
-            "messages": messages,
-            "stream": True,
-        }
-        if system_prompt:
-            if request.cache_plan or (cache_policy and getattr(cache_policy, "enabled", True)):
-                payload["system"] = [
-                    {
-                        "type": "text",
-                        "text": system_prompt,
-                        "cache_control": {"type": "ephemeral"},
-                    }
-                ]
-            else:
-                payload["system"] = system_prompt
-        if tools:
-            payload["tools"] = tools
-            if request.tool_choice is not None and "tool_choice" not in payload:
-                payload["tool_choice"] = anthropic_tool_choice(request.tool_choice)
-        if request.temperature is not None:
-            payload["temperature"] = request.temperature
-        if request.stop_sequences:
-            payload["stop_sequences"] = request.stop_sequences
-        apply_anthropic_settings(payload, request)
+        payload = self._build_payload(request, cache_policy, stream=True)
 
         url = f"{self.base_url}/v1/messages"
         headers = self._build_headers()
@@ -394,9 +446,7 @@ class AnthropicNativeProvider(BaseProvider):
             current_event: str | None = None
             active_tool_calls: dict[int, dict[str, Any]] = {}
             thinking_open: dict[int, dict[str, Any]] = {}  # thinking blocks being streamed
-            total_input_tokens: int | None = None
-            cache_creation_tokens: int | None = None
-            cache_read_tokens: int | None = None
+            usage_counts: dict[str, Any] = {}  # message_start usage, updated by message_delta
             stream_finished = False
 
             async for line in response.aiter_lines():
@@ -428,20 +478,25 @@ class AnthropicNativeProvider(BaseProvider):
                     event_type = event_data.get("type") or current_event
 
                     if event_type == "error":
+                        # Mid-stream errors after the 200 (streaming docs): overloaded_error
+                        # is the in-stream form of HTTP 529, so map the type like a status.
                         err = event_data.get("error", {})
-                        safe_msg = _redact_anthropic_secrets(
-                            err.get("message", "Anthropic stream error")
-                        )
-                        raise ProviderResponseError(
-                            f"Anthropic streaming error ({err.get('type')}): {safe_msg}"
+                        if not isinstance(err, dict):
+                            err = {}
+                        raise _error_from_chunk(
+                            {
+                                "type": err.get("type"),
+                                "message": "Anthropic streaming error "
+                                f"({err.get('type')}): {err.get('message') or 'stream error'}",
+                            },
+                            _redact_anthropic_secrets,
                         )
 
                     if event_type == "message_start":
                         msg_obj = event_data.get("message", {})
                         usage_obj = msg_obj.get("usage", {})
-                        total_input_tokens = usage_obj.get("input_tokens")
-                        cache_creation_tokens = usage_obj.get("cache_creation_input_tokens")
-                        cache_read_tokens = usage_obj.get("cache_read_input_tokens")
+                        if isinstance(usage_obj, dict):
+                            usage_counts.update(usage_obj)
                         continue
 
                     if event_type == "content_block_start":
@@ -505,22 +560,14 @@ class AnthropicNativeProvider(BaseProvider):
                         delta = event_data.get("delta", {})
                         stop_reason = delta.get("stop_reason")
                         finish_reason = map_anthropic_stop_reason(stop_reason)
-                        usage_obj = event_data.get("usage", {})
-                        output_tokens = usage_obj.get("output_tokens")
-
-                        total_tokens = None
-                        if total_input_tokens is not None or output_tokens is not None:
-                            total_tokens = (total_input_tokens or 0) + (output_tokens or 0)
-
-                        stream_usage = Usage(
-                            prompt_tokens=total_input_tokens,
-                            completion_tokens=output_tokens,
-                            total_tokens=total_tokens,
-                            is_complete=True,
-                            cached_prompt_tokens=cache_read_tokens,
-                            cache_creation_input_tokens=cache_creation_tokens,
-                            cache_read_input_tokens=cache_read_tokens,
-                        )
+                        # message_delta usage is cumulative and may repeat the input and
+                        # cache counts (server tools); later values replace earlier ones.
+                        usage_obj = event_data.get("usage")
+                        if isinstance(usage_obj, dict):
+                            usage_counts.update(
+                                {k: v for k, v in usage_obj.items() if v is not None}
+                            )
+                        stream_usage = anthropic_usage(usage_counts)
                         yield StreamDelta(
                             kind="finish",
                             finish_reason=finish_reason,

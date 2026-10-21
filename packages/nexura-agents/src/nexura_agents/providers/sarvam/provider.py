@@ -20,14 +20,17 @@ from nexura_agents.errors import (
     ProviderResponseError,
 )
 from nexura_agents.limits import merge_extra, warn_unsupported
+from nexura_agents.models._streaming import _error_from_chunk
 from nexura_agents.providers.base import BaseProvider
 from nexura_agents.providers.errors import (
     CapabilityError,
     StreamCancelledError,
+    error_body_codes,
     http_status_error,
     read_error_body,
     safe_response_text,
 )
+from nexura_agents.providers.openai.provider import openai_chat_usage
 from nexura_agents.providers.sarvam.types import (
     IdentifierPreserver,
     TranslationRequest,
@@ -64,7 +67,7 @@ class SarvamProvider(BaseProvider):
 
     def __init__(
         self,
-        model: str = "sarvam-2b",
+        model: str = "sarvam-105b",
         *,
         api_key: str | None = None,
         base_url: str = "https://api.sarvam.ai",
@@ -151,6 +154,7 @@ class SarvamProvider(BaseProvider):
                 f"Sarvam {what} (HTTP {status_code}): {safe_text}",
                 retry_after=exc.response.headers.get("retry-after"),
                 original_error=exc,
+                codes=error_body_codes(exc.response),
             ) from exc
 
     async def translate(
@@ -323,13 +327,7 @@ class SarvamProvider(BaseProvider):
 
         usage = None
         if "usage" in data and isinstance(data["usage"], dict):
-            u_dict = data["usage"]
-            usage = Usage(
-                prompt_tokens=u_dict.get("prompt_tokens"),
-                completion_tokens=u_dict.get("completion_tokens"),
-                total_tokens=u_dict.get("total_tokens"),
-                is_complete=True,
-            )
+            usage = openai_chat_usage(data["usage"])
 
         return ModelResponse(
             message=Message(role="assistant", content=content),
@@ -350,6 +348,8 @@ class SarvamProvider(BaseProvider):
             "model": self.model,
             "messages": api_messages,
             "stream": True,
+            # Sarvam sends usage (with reasoning_tokens) in a final chunk with no choices.
+            "stream_options": {"include_usage": True},
         }
         if request.temperature is not None:
             payload["temperature"] = request.temperature
@@ -368,6 +368,8 @@ class SarvamProvider(BaseProvider):
         headers = self._build_headers()
 
         response = None
+        stream_done = False
+        finish_seen = False
         try:
             req = self._client.build_request("POST", url, json=payload, headers=headers)
             response = await self._client.send(req, stream=True)
@@ -384,32 +386,41 @@ class SarvamProvider(BaseProvider):
                 clean = line.strip()
                 if not clean or not clean.startswith("data:"):
                     continue
-
                 data_str = clean[len("data:") :].strip()
                 if data_str == "[DONE]":
+                    stream_done = True
                     break
-
                 try:
                     event = json.loads(data_str)
                 except json.JSONDecodeError:
                     continue
-
-                choices = event.get("choices", [])
+                if not isinstance(event, dict):
+                    continue
+                if event.get("error") is not None:
+                    raise _error_from_chunk(event["error"], _redact_sarvam_secrets)
+                if isinstance(event.get("usage"), dict):
+                    yield StreamDelta(kind="finish", usage=openai_chat_usage(event["usage"]))
+                choices = event.get("choices") or []
                 if not choices:
                     continue
-
                 choice = choices[0]
-                delta = choice.get("delta", {})
+                delta = choice.get("delta") or {}
                 finish = choice.get("finish_reason")
-
                 if "content" in delta and delta["content"]:
                     yield StreamDelta(kind="text_delta", text=delta["content"])
-
                 if finish:
+                    finish_seen = True
                     yield StreamDelta(kind="finish", finish_reason=finish)
-
+            if not (stream_done or finish_seen):
+                raise ProviderResponseError("Sarvam stream ended before completion")
         except httpx.HTTPStatusError as exc:
             self._handle_http_error(exc)
+        except httpx.RequestError as exc:
+            safe_err = _redact_sarvam_secrets(str(exc))
+            raise ProviderRequestError(
+                f"Network request to Sarvam chat endpoint failed: {safe_err}",
+                original_error=exc,
+            ) from exc
         except (asyncio.CancelledError, GeneratorExit):
             raise
         finally:

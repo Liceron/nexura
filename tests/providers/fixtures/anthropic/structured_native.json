@@ -1,0 +1,28 @@
+{
+  "source": "https://platform.claude.com/docs/en/build-with-claude/structured-outputs",
+  "retrieved": "2026-10-21",
+  "note": "JSON outputs: the JSON is the text block of the response.",
+  "response": {
+    "status": 200,
+    "headers": {},
+    "json": {
+      "id": "msg_01XFDUDYJgAACzvnptvVoYEL",
+      "type": "message",
+      "role": "assistant",
+      "model": "claude-haiku-5-5",
+      "content": [
+        {
+          "type": "text",
+          "text": "{\"order_id\":\"ORD-7\",\"status\":\"delivered\"}"
+        }
+      ],
+      "stop_reason": "end_turn",
+      "stop_sequence": null,
+      "stop_details": null,
+      "usage": {
+        "input_tokens": 120,
+        "output_tokens": 20
+      }
+    }
+  }
+}

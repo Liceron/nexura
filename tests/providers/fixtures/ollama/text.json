@@ -1,0 +1,31 @@
+{
+  "source": "https://docs.ollama.com/api/openai-compatibility",
+  "retrieved": "2026-10-21",
+  "note": "OpenAI-compatible /v1/chat/completions reply from a local Ollama.",
+  "response": {
+    "status": 200,
+    "headers": {},
+    "json": {
+      "id": "chatcmpl-271",
+      "object": "chat.completion",
+      "created": 1761004800,
+      "model": "qwen3:0.6b",
+      "system_fingerprint": "fp_ollama",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "Hello! How can I help you today?"
+          },
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 11,
+        "completion_tokens": 18,
+        "total_tokens": 29
+      }
+    }
+  }
+}

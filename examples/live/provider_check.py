@@ -12,6 +12,9 @@ Add --model NAME to choose a model. The defaults are small models; Sarvam uses t
 provider's own default. Vertex AI has its
 own script (vertex_check.py) because it uses Google Cloud credentials instead of a key.
 
+scripts/live_canary.py runs the same scenario for every provider with a key, writes dated
+evidence files with masked keys, and only runs when NEXURA_LIVE_CANARY=1 is set.
+
 Each run sends up to four short requests: a plain reply, a tool call, a streamed reply
 (skipped for providers without streaming) and a structured (typed) answer. Expect a few
 hundred to about two thousand tokens in total. The script prints a JSON report; send it
@@ -40,7 +43,7 @@ PROVIDERS: dict[str, tuple[str, tuple[str, ...], str]] = {
         "nexura_agents.providers.openai:OpenAIProvider",
     ),
     "anthropic": (
-        "claude-3-5-haiku-latest",
+        "claude-haiku-5-5",
         ("ANTHROPIC_API_KEY",),
         "nexura_agents.providers.anthropic:AnthropicNativeProvider",
     ),

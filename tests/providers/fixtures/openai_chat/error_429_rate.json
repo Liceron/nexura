@@ -1,0 +1,22 @@
+{
+  "source": "https://developers.openai.com/api/docs/guides/rate-limits.md",
+  "retrieved": "2026-10-21",
+  "note": "",
+  "response": {
+    "status": 429,
+    "headers": {
+      "retry-after": "20",
+      "x-ratelimit-limit-requests": "500",
+      "x-ratelimit-remaining-requests": "0",
+      "x-ratelimit-reset-requests": "20s"
+    },
+    "json": {
+      "error": {
+        "message": "Rate limit reached for gpt-5.4-nano on requests per min (RPM): Limit 500, Used 500, Requested 1.",
+        "type": "requests",
+        "param": null,
+        "code": "rate_limit_exceeded"
+      }
+    }
+  }
+}

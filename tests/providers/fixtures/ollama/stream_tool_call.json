@@ -1,0 +1,80 @@
+{
+  "source": "https://docs.ollama.com/api/openai-compatibility",
+  "retrieved": "2026-10-21",
+  "note": "Ollama streams a whole tool call in one chunk; usage with include_usage.",
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "text/event-stream"
+    },
+    "sse": [
+      {
+        "data": {
+          "id": "chatcmpl-273",
+          "object": "chat.completion.chunk",
+          "created": 1761004800,
+          "model": "qwen3:0.6b",
+          "system_fingerprint": "fp_ollama",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                  {
+                    "id": "call_x9",
+                    "index": 0,
+                    "type": "function",
+                    "function": {
+                      "name": "get_current_weather",
+                      "arguments": "{\"format\":\"celsius\",\"location\":\"Paris, FR\"}"
+                    }
+                  }
+                ]
+              },
+              "finish_reason": null
+            }
+          ]
+        }
+      },
+      {
+        "data": {
+          "id": "chatcmpl-273",
+          "object": "chat.completion.chunk",
+          "created": 1761004800,
+          "model": "qwen3:0.6b",
+          "system_fingerprint": "fp_ollama",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "role": "assistant",
+                "content": ""
+              },
+              "finish_reason": "tool_calls"
+            }
+          ]
+        }
+      },
+      {
+        "data": {
+          "id": "chatcmpl-273",
+          "object": "chat.completion.chunk",
+          "created": 1761004800,
+          "model": "qwen3:0.6b",
+          "system_fingerprint": "fp_ollama",
+          "choices": [],
+          "usage": {
+            "prompt_tokens": 120,
+            "completion_tokens": 24,
+            "total_tokens": 144
+          }
+        }
+      },
+      {
+        "data": "[DONE]"
+      }
+    ]
+  }
+}

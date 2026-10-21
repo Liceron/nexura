@@ -1,0 +1,207 @@
+{
+  "source": "https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events.md",
+  "retrieved": "2026-10-21",
+  "note": "Parallel tool calls streamed with fragmented arguments keyed by index.",
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "text/event-stream"
+    },
+    "sse": [
+      {
+        "data": {
+          "id": "chatcmpl-123",
+          "object": "chat.completion.chunk",
+          "created": 1694268190,
+          "model": "gpt-5.4-nano",
+          "system_fingerprint": "fp_44709d6fcb",
+          "obfuscation": "r4N7vQ2m",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [
+                  {
+                    "index": 0,
+                    "id": "call_a1",
+                    "type": "function",
+                    "function": {
+                      "name": "get_weather",
+                      "arguments": ""
+                    }
+                  }
+                ]
+              },
+              "logprobs": null,
+              "finish_reason": null
+            }
+          ],
+          "usage": null
+        }
+      },
+      {
+        "data": {
+          "id": "chatcmpl-123",
+          "object": "chat.completion.chunk",
+          "created": 1694268190,
+          "model": "gpt-5.4-nano",
+          "system_fingerprint": "fp_44709d6fcb",
+          "obfuscation": "r4N7vQ2m",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "tool_calls": [
+                  {
+                    "index": 0,
+                    "function": {
+                      "arguments": "{\"loc"
+                    }
+                  }
+                ]
+              },
+              "logprobs": null,
+              "finish_reason": null
+            }
+          ],
+          "usage": null
+        }
+      },
+      {
+        "data": {
+          "id": "chatcmpl-123",
+          "object": "chat.completion.chunk",
+          "created": 1694268190,
+          "model": "gpt-5.4-nano",
+          "system_fingerprint": "fp_44709d6fcb",
+          "obfuscation": "r4N7vQ2m",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "tool_calls": [
+                  {
+                    "index": 0,
+                    "function": {
+                      "arguments": "ation\": \"Paris\"}"
+                    }
+                  }
+                ]
+              },
+              "logprobs": null,
+              "finish_reason": null
+            }
+          ],
+          "usage": null
+        }
+      },
+      {
+        "data": {
+          "id": "chatcmpl-123",
+          "object": "chat.completion.chunk",
+          "created": 1694268190,
+          "model": "gpt-5.4-nano",
+          "system_fingerprint": "fp_44709d6fcb",
+          "obfuscation": "r4N7vQ2m",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "tool_calls": [
+                  {
+                    "index": 1,
+                    "id": "call_b2",
+                    "type": "function",
+                    "function": {
+                      "name": "get_weather",
+                      "arguments": ""
+                    }
+                  }
+                ]
+              },
+              "logprobs": null,
+              "finish_reason": null
+            }
+          ],
+          "usage": null
+        }
+      },
+      {
+        "data": {
+          "id": "chatcmpl-123",
+          "object": "chat.completion.chunk",
+          "created": 1694268190,
+          "model": "gpt-5.4-nano",
+          "system_fingerprint": "fp_44709d6fcb",
+          "obfuscation": "r4N7vQ2m",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "tool_calls": [
+                  {
+                    "index": 1,
+                    "function": {
+                      "arguments": "{\"location\": \"London\"}"
+                    }
+                  }
+                ]
+              },
+              "logprobs": null,
+              "finish_reason": null
+            }
+          ],
+          "usage": null
+        }
+      },
+      {
+        "data": {
+          "id": "chatcmpl-123",
+          "object": "chat.completion.chunk",
+          "created": 1694268190,
+          "model": "gpt-5.4-nano",
+          "system_fingerprint": "fp_44709d6fcb",
+          "obfuscation": "r4N7vQ2m",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {},
+              "logprobs": null,
+              "finish_reason": "tool_calls"
+            }
+          ],
+          "usage": null
+        }
+      },
+      {
+        "data": {
+          "id": "chatcmpl-123",
+          "object": "chat.completion.chunk",
+          "created": 1694268190,
+          "model": "gpt-5.4-nano",
+          "system_fingerprint": "fp_44709d6fcb",
+          "obfuscation": "r4N7vQ2m",
+          "choices": [],
+          "usage": {
+            "prompt_tokens": 19,
+            "completion_tokens": 10,
+            "total_tokens": 29,
+            "prompt_tokens_details": {
+              "cached_tokens": 0,
+              "audio_tokens": 0
+            },
+            "completion_tokens_details": {
+              "reasoning_tokens": 0,
+              "audio_tokens": 0
+            }
+          }
+        }
+      },
+      {
+        "data": "[DONE]"
+      }
+    ]
+  }
+}

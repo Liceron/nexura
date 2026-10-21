@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections import OrderedDict
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -23,14 +24,22 @@ from nexura_agents.limits import apply_gemini_settings, gemini_tool_config
 from nexura_agents.providers.base import BaseProvider
 from nexura_agents.providers.errors import (
     CapabilityError,
+    ProviderContentFilterError,
+    error_body_codes,
+    google_retry_delay,
     http_status_error,
     read_error_body,
     response_excerpt,
 )
 from nexura_agents.providers.gemini.types import (
+    CONTENT_FILTER_FINISH,
+    GEMINI_SIGNATURES_KEY,
     GeminiThoughtMetadata,
+    extract_gemini_signatures,
     extract_gemini_tool_calls,
-    to_gemini_contents,
+    map_gemini_finish_reason,
+    synthetic_call_id,
+    to_gemini_request,
     to_gemini_tools,
 )
 from nexura_agents.providers.types import (
@@ -46,6 +55,58 @@ _INVALID_CLI_ALIASES = {"gemini-cli", "cli", "gemini", "gemini-code", "antigravi
 
 
 _CODE = re.compile(r"^[A-Z][A-Z0-9_]{2,63}$")
+
+# Gemini 3 and later reject a turn whose first function call lost its thoughtSignature.
+_SIGNATURE_ENFORCED = re.compile(r"gemini-(\d+)")
+
+# Google's documented dummy signature for function calls the API did not generate.
+SKIP_SIGNATURE_VALIDATOR = "skip_thought_signature_validator"
+
+# Error reasons that mean the API key itself is bad (Gemini answers 400, not 401).
+_AUTH_REASONS = frozenset({"API_KEY_INVALID", "API_KEY_EXPIRED", "API_KEY_SERVICE_BLOCKED"})
+
+_SIGNATURE_CACHE_SIZE = 2048
+
+
+def _signatures_enforced(model: str) -> bool:
+    match = _SIGNATURE_ENFORCED.search(model.lower())
+    return match is not None and int(match.group(1)) >= 3
+
+
+def gemini_usage(um: dict[str, Any]) -> Usage:
+    """``usageMetadata`` as a Nexura ``Usage``.
+
+    ``promptTokenCount`` already includes ``cachedContentTokenCount``; tool-use prompt tokens
+    (``toolUsePromptTokenCount``) are billed as input and added to ``prompt_tokens``. Thinking
+    tokens are billed as output and added to ``completion_tokens`` (and reported in
+    ``reasoning_tokens``). ``totalTokenCount`` covers all of them.
+    """
+    cached_tokens = um.get("cachedContentTokenCount")
+    prompt = um.get("promptTokenCount")
+    tool_prompt = um.get("toolUsePromptTokenCount")
+    if isinstance(tool_prompt, int) and tool_prompt:
+        prompt = (prompt or 0) + tool_prompt
+    return Usage(
+        prompt_tokens=prompt,
+        completion_tokens=_billed_output_tokens(um),
+        total_tokens=um.get("totalTokenCount"),
+        reasoning_tokens=um.get("thoughtsTokenCount"),
+        cached_prompt_tokens=cached_tokens,
+        cache_read_input_tokens=cached_tokens,
+        is_complete=True,
+    )
+
+
+def _blocked_prompt_error(data: dict[str, Any]) -> ProviderContentFilterError | None:
+    """The typed error for a prompt Gemini blocked (no candidates, ``blockReason`` set)."""
+    feedback = data.get("promptFeedback")
+    reason = feedback.get("blockReason") if isinstance(feedback, dict) else None
+    if not isinstance(reason, str) or not reason:
+        return None
+    safe = reason if _CODE.match(reason) else "BLOCKED"
+    return ProviderContentFilterError(
+        f"Gemini blocked the prompt (promptFeedback.blockReason: {safe})", reason=safe
+    )
 
 
 def _billed_output_tokens(usage_metadata: dict[str, Any]) -> int | None:
@@ -93,6 +154,12 @@ class GeminiNativeProvider(BaseProvider):
     streams_response_schema = True  # stream() sends the schema too (partial output events)
     response_schema_with_tools = False
 
+    # Sent as the thoughtSignature of a model turn's first function call when the real one is
+    # unknown (a call restored from storage after a streamed run, or added by hand), for models
+    # that enforce signatures (Gemini 3+). Google documents this value for calls the API did not
+    # generate. Set to None to send no signature instead.
+    unsigned_call_signature: str | None = SKIP_SIGNATURE_VALIDATOR
+
     def __init__(
         self,
         model: str = "gemini-2.5-flash",
@@ -133,6 +200,35 @@ class GeminiNativeProvider(BaseProvider):
         self.transport = transport
         self.extra_headers = extra_headers or {}
         self._internal_client: httpx.AsyncClient | None = None
+        # thoughtSignatures of recent function calls, by call id: streamed turns cannot carry
+        # them in Message.provider_data, so they are re-attached from here on the next call.
+        self._signatures: OrderedDict[str, str] = OrderedDict()
+
+    def _remember_signatures(self, signatures: dict[str, str]) -> None:
+        for call_id, signature in signatures.items():
+            self._signatures[call_id] = signature
+            self._signatures.move_to_end(call_id)
+        while len(self._signatures) > _SIGNATURE_CACHE_SIZE:
+            self._signatures.popitem(last=False)
+
+    def _request_body(self, request: GenerationRequest) -> dict[str, Any]:
+        """``systemInstruction``, ``contents`` and ``tools`` shared by generate and stream."""
+        system_instruction, contents = to_gemini_request(
+            request.messages,
+            self._signatures,
+            unsigned_call_signature=self.unsigned_call_signature
+            if _signatures_enforced(self.model)
+            else None,
+        )
+        payload: dict[str, Any] = {"contents": contents}
+        if system_instruction is not None:
+            payload["systemInstruction"] = system_instruction
+        tools = to_gemini_tools(request.tools)
+        if tools:
+            payload["tools"] = tools
+            if request.tool_choice is not None:
+                payload["toolConfig"] = gemini_tool_config(request.tool_choice)
+        return payload
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is not None:
@@ -162,7 +258,11 @@ class GeminiNativeProvider(BaseProvider):
 
     def _handle_error_response(self, response: httpx.Response) -> None:
         """Map Gemini error status codes into typed exceptions."""
-        if response.status_code in (401, 403):
+        codes = error_body_codes(response) if response.status_code >= 400 else []
+        if response.status_code in (401, 403) or (
+            response.status_code == 400 and _AUTH_REASONS.intersection(codes)
+        ):
+            # An invalid key is a 400 INVALID_ARGUMENT with reason API_KEY_INVALID.
             raise ProviderAuthError(
                 "Gemini authentication failed: invalid API key or access denied"
                 + _google_error_codes(response)
@@ -179,6 +279,9 @@ class GeminiNativeProvider(BaseProvider):
                 + suffix,
                 detail=response_excerpt(response),
                 retry_after=response.headers.get("Retry-After"),
+                # Gemini sends its wait time as google.rpc.RetryInfo in the body.
+                retry_after_seconds=google_retry_delay(response),
+                codes=codes,
             )
 
     async def _generate_internal(
@@ -214,16 +317,9 @@ class GeminiNativeProvider(BaseProvider):
         headers = self._build_headers()
         url = f"{self.base_url}/models/{self.model}:generateContent"
 
-        contents = to_gemini_contents(request.messages)
-        tools = to_gemini_tools(request.tools)
-
-        payload: dict[str, Any] = {"contents": contents}
+        payload = self._request_body(request)
         if request.cache_plan and getattr(request.cache_plan, "cache_id", None):
             payload["cachedContent"] = request.cache_plan.cache_id
-        if tools:
-            payload["tools"] = tools
-            if request.tool_choice is not None:
-                payload["toolConfig"] = gemini_tool_config(request.tool_choice)
 
         gen_config: dict[str, Any] = {}
         if request.temperature is not None:
@@ -272,48 +368,52 @@ class GeminiNativeProvider(BaseProvider):
                 "Malformed JSON response from Gemini", original_error=exc
             ) from exc
 
-        candidates = data.get("candidates", [])
+        candidates = data.get("candidates", []) if isinstance(data, dict) else []
         if not candidates or not isinstance(candidates, list):
+            blocked = _blocked_prompt_error(data) if isinstance(data, dict) else None
+            if blocked is not None:
+                raise blocked
             raise ProviderResponseError("Gemini response missing valid candidates list")
 
         first_cand = candidates[0]
-        content_dict = first_cand.get("content", {})
-        parts = content_dict.get("parts", [])
+        content_dict = first_cand.get("content", {}) or {}
+        parts = content_dict.get("parts", []) or []
 
         text_pieces: list[str] = []
         thought_metadata: GeminiThoughtMetadata | None = None
         for p in parts:
+            if p.get("thought") is True:
+                continue  # a thought summary (includeThoughts), never part of the answer
             if "text" in p:
                 text_pieces.append(p["text"])
             if "thought" in p:
                 thought_metadata = GeminiThoughtMetadata(
                     thought=p["thought"],
-                    signature=p.get("signature"),
+                    signature=p.get("thoughtSignature") or p.get("signature"),
                 )
                 _ = thought_metadata  # Preserved in parse
 
         tool_calls = extract_gemini_tool_calls(parts)
-        finish_reason = first_cand.get("finishReason", "STOP").lower()
+        signatures = extract_gemini_signatures(parts, tool_calls)
+        self._remember_signatures(signatures)
+        raw_finish = first_cand.get("finishReason") or "STOP"
+        finish_reason = map_gemini_finish_reason(raw_finish)
+        if str(raw_finish).upper() in CONTENT_FILTER_FINISH and not text_pieces and not tool_calls:
+            safe = raw_finish if _CODE.match(str(raw_finish)) else "SAFETY"
+            raise ProviderContentFilterError(
+                f"Gemini withheld the answer (finishReason: {safe})", reason=safe
+            )
 
         usage: Usage | None = None
         if "usageMetadata" in data and isinstance(data["usageMetadata"], dict):
-            um = data["usageMetadata"]
-            cached_tokens = um.get("cachedContentTokenCount")
-            usage = Usage(
-                prompt_tokens=um.get("promptTokenCount"),
-                completion_tokens=_billed_output_tokens(um),
-                total_tokens=um.get("totalTokenCount"),
-                reasoning_tokens=um.get("thoughtsTokenCount"),
-                cached_prompt_tokens=cached_tokens,
-                cache_read_input_tokens=cached_tokens,
-                is_complete=True,
-            )
+            usage = gemini_usage(data["usageMetadata"])
 
         resp_content = "".join(text_pieces) if text_pieces else None
         msg = Message(
             role="assistant",
             content=resp_content,
             tool_calls=tool_calls if tool_calls else None,
+            provider_data={GEMINI_SIGNATURES_KEY: signatures} if signatures else None,
         )
 
         return ModelResponse(
@@ -341,13 +441,7 @@ class GeminiNativeProvider(BaseProvider):
         headers["Accept"] = "text/event-stream"
         url = f"{self.base_url}/models/{self.model}:streamGenerateContent?alt=sse"
 
-        contents = to_gemini_contents(request.messages)
-        tools = to_gemini_tools(request.tools)
-        payload: dict[str, Any] = {"contents": contents}
-        if tools:
-            payload["tools"] = tools
-            if request.tool_choice is not None:
-                payload["toolConfig"] = gemini_tool_config(request.tool_choice)
+        payload = self._request_body(request)
         # Same generation options as generate(): sampling, limits, stop and schema.
         gen_config: dict[str, Any] = {}
         if request.temperature is not None:
@@ -366,6 +460,7 @@ class GeminiNativeProvider(BaseProvider):
         async def _generator() -> AsyncIterator[StreamDelta]:
             tool_call_count = 0
             saw_finish = False
+            saw_output = False
             try:
                 async with client.stream(
                     "POST",
@@ -408,6 +503,10 @@ class GeminiNativeProvider(BaseProvider):
                             raise ProviderResponseError(text)
 
                         candidates = chunk.get("candidates") or []
+                        if not candidates:
+                            blocked = _blocked_prompt_error(chunk)
+                            if blocked is not None:
+                                raise blocked
                         for cand in candidates:
                             if not isinstance(cand, dict):
                                 raise ProviderResponseError("Malformed candidate from Gemini")
@@ -416,13 +515,17 @@ class GeminiNativeProvider(BaseProvider):
                             for p in parts:
                                 if not isinstance(p, dict):
                                     raise ProviderResponseError("Malformed part from Gemini")
-                                if "text" in p:
+                                is_thought = p.get("thought") is True
+                                if "text" in p and not is_thought:
+                                    if p["text"]:
+                                        saw_output = True
                                     yield StreamDelta(kind="text_delta", text=p["text"])
                                 if "thought" in p:
                                     yield StreamDelta(
                                         kind="continuation_delta",
                                         continuation=ContinuationPart(
-                                            token=p.get("signature", "thought_sig"),
+                                            token=p.get("thoughtSignature")
+                                            or p.get("signature", "thought_sig"),
                                             provider_metadata={"thought": p["thought"]},
                                         ),
                                     )
@@ -436,10 +539,20 @@ class GeminiNativeProvider(BaseProvider):
                                     )
                                     call_idx = tool_call_count
                                     tool_call_count += 1
+                                    given_id = fn.get("id")
+                                    call_id = (
+                                        given_id
+                                        if isinstance(given_id, str) and given_id
+                                        else synthetic_call_id(fn.get("name", "tool"), call_idx)
+                                    )
+                                    signature = p.get("thoughtSignature")
+                                    if isinstance(signature, str) and signature:
+                                        self._remember_signatures({call_id: signature})
+                                    saw_output = True
                                     yield StreamDelta(
                                         kind="tool_call_delta",
                                         tool_call_index=call_idx,
-                                        tool_call_id=f"call_{fn.get('name', 'tool')}_{call_idx}",
+                                        tool_call_id=call_id,
                                         tool_name=fn.get("name"),
                                         tool_arguments_delta=args_str,
                                     )
@@ -447,23 +560,22 @@ class GeminiNativeProvider(BaseProvider):
                             finish_reason = cand.get("finishReason")
                             if finish_reason:
                                 saw_finish = True
+                                if (
+                                    str(finish_reason).upper() in CONTENT_FILTER_FINISH
+                                    and not saw_output
+                                ):
+                                    safe = finish_reason if _CODE.match(finish_reason) else "SAFETY"
+                                    raise ProviderContentFilterError(
+                                        f"Gemini withheld the answer (finishReason: {safe})",
+                                        reason=safe,
+                                    )
                                 yield StreamDelta(
                                     kind="finish",
-                                    finish_reason=finish_reason.lower(),
+                                    finish_reason=map_gemini_finish_reason(finish_reason),
                                 )
 
                         if "usageMetadata" in chunk and isinstance(chunk["usageMetadata"], dict):
-                            um = chunk["usageMetadata"]
-                            cached_tokens = um.get("cachedContentTokenCount")
-                            usage = Usage(
-                                prompt_tokens=um.get("promptTokenCount"),
-                                completion_tokens=_billed_output_tokens(um),
-                                total_tokens=um.get("totalTokenCount"),
-                                reasoning_tokens=um.get("thoughtsTokenCount"),
-                                cached_prompt_tokens=cached_tokens,
-                                cache_read_input_tokens=cached_tokens,
-                                is_complete=True,
-                            )
+                            usage = gemini_usage(chunk["usageMetadata"])
                             yield StreamDelta(kind="finish", usage=usage)
                 if not saw_finish:
                     raise ProviderResponseError(

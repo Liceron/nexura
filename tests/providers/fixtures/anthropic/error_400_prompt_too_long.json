@@ -1,0 +1,17 @@
+{
+  "source": "https://platform.claude.com/docs/en/api/errors",
+  "retrieved": "2026-10-21",
+  "note": "",
+  "response": {
+    "status": 400,
+    "headers": {},
+    "json": {
+      "type": "error",
+      "error": {
+        "type": "invalid_request_error",
+        "message": "prompt is too long: 1048577 tokens > 1000000 maximum"
+      },
+      "request_id": "req_011CSHoEeqs5C35K2UUqR7Fy"
+    }
+  }
+}

@@ -152,6 +152,9 @@ checkpoint.
 - `MemoryWorkflowStore()` keeps checkpoints in the process. Use it for tests.
 - `SQLiteWorkflowStore(path)` writes to a SQLite file (WAL mode). Close it with
   `await store.close()`, or use it as a context manager (`with` or `async with`).
+- `nexura_postgres.PostgresWorkflowStore(dsn)` (package `nexura-postgres`) keeps the same
+  checkpoints in Postgres, for several hosts sharing one database; see
+  [Workflows on Postgres](durable-execution.md#workflows-on-postgres-s8).
 
 A new engine built on the same database picks up where the old one stopped. The spec
 must be the same: resuming checks the spec's hash and raises
@@ -448,7 +451,8 @@ the step's key as the outbox de-duplication key, and connector writes send it as
 `Idempotency-Key` (the S3 connector, which signs its headers, does not). An explicit key
 always wins.
 
-Limits: `SQLiteWorkflowStore` is for one host; there is no Postgres workflow store yet.
+Limits: `SQLiteWorkflowStore` is for one host; several hosts need
+`nexura_postgres.PostgresWorkflowStore`, which behaves the same.
 `fork` is unchanged: it starts a new run that runs the forked step again. A child whose
 `recover` was asked for with `on_uncertain="fail"` fails, and the parent's step fails like
 any failed sub-workflow (`WorkflowExecutionError`).
@@ -578,8 +582,8 @@ asyncio.run(main())
 The pending approval expires `approval_ttl` seconds after it was created (an engine
 argument, default 3600). Resuming after that marks the run failed and raises
 `ApprovalExpiredError`. The expiry is checked before the claim, inside the claim
-(`MemoryWorkflowStore` and `SQLiteWorkflowStore` never claim an approval past its stored
-`expires_at`) and again right before the approved node runs, so a slow claim cannot run a
+(`MemoryWorkflowStore`, `SQLiteWorkflowStore` and `PostgresWorkflowStore` never claim an
+approval past its stored `expires_at`) and again right before the approved node runs, so a slow claim cannot run a
 node after its approval expired. A pending approval stored without `expires_at` (older
 checkpoints) expires `approval_ttl` after its `created_at`; one with no `created_at`
 either is treated as expired. Without a store, `resume` raises `WorkflowError`.

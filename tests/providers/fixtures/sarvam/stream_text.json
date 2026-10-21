@@ -1,0 +1,68 @@
+{
+  "source": "https://docs.sarvam.ai/api-reference/chat/chat-completions-v1.md",
+  "retrieved": "2026-10-21",
+  "note": "stream_options.include_usage: final usage chunk with an empty choices array.",
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "text/event-stream"
+    },
+    "sse": [
+      {
+        "data": {
+          "id": "s1",
+          "object": "chat.completion.chunk",
+          "created": 1735689600,
+          "model": "sarvam-105b",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "role": "assistant",
+                "content": "नमस्ते"
+              },
+              "finish_reason": null
+            }
+          ]
+        }
+      },
+      {
+        "data": {
+          "id": "s1",
+          "object": "chat.completion.chunk",
+          "created": 1735689600,
+          "model": "sarvam-105b",
+          "choices": [
+            {
+              "index": 0,
+              "delta": {
+                "content": "!"
+              },
+              "finish_reason": "stop"
+            }
+          ]
+        }
+      },
+      {
+        "data": {
+          "id": "s1",
+          "object": "chat.completion.chunk",
+          "created": 1735689600,
+          "model": "sarvam-105b",
+          "choices": [],
+          "usage": {
+            "completion_tokens": 12,
+            "prompt_tokens": 9,
+            "total_tokens": 21,
+            "completion_tokens_details": {
+              "reasoning_tokens": 4
+            }
+          }
+        }
+      },
+      {
+        "data": "[DONE]"
+      }
+    ]
+  }
+}

@@ -89,6 +89,10 @@ from nexura_runtime.service.extensions import (
 )
 from nexura_runtime.service.repro_capture import FailedRunCapture, capture_failed_runs_enabled
 from nexura_runtime.service.triggers.store import TriggerStore
+from nexura_runtime.service.workflow_state import (
+    open_workflow_state_store,
+    resolve_workflow_state_url,
+)
 from nexura_runtime.service.workspaces.repository import WorkspaceRepository, ensure_private_file
 from nexura_runtime.studio.api.traces import router as traces_router
 from nexura_runtime.studio.builtin_modules import get_default_registry
@@ -190,6 +194,7 @@ def create_api_app(
     embeddings_dimensions: int | None = None,
     capture_failed_runs: bool | None = None,
     execution_store: ExecutionStore | None = None,
+    workflow_state_url: str | None = None,
 ) -> FastAPI:
     """Create a configured FastAPI application exposing the Nexura REST API.
 
@@ -263,11 +268,31 @@ def create_api_app(
             and ``POST .../effects/{effect_id}/resolve``. Default: a ``SQLiteExecutionStore``
             on ``db_path``, closed with the app; a supplied store (for example
             ``PostgresExecutionStore``) stays caller-owned. See ``docs/durable-execution.md``.
+        workflow_state_url: where workflow checkpoints, their history and the execution
+            journal of workflow runs live. ``None`` reads ``NEXURA_WORKFLOW_STATE_URL``;
+            unset or empty keeps them in the SQLite database at ``db_path`` (the default).
+            A ``postgresql://`` URI keeps them in Postgres
+            (``nexura_postgres.PostgresWorkflowStore``, ``pip install nexura-postgres``);
+            unless ``execution_store`` is given, the effects API then reads that journal.
+            Studio run records, triggers and sessions stay in SQLite. Applies to the store
+            this function creates: passing it together with ``store`` raises ``ValueError``.
+            The tables are created (migrated) when the app starts.
     """
     requested_extensions = check_extensions(
         [*extensions, *load_entry_point_extensions(enabled_extensions)],
         taken=BUILTIN_EXTENSION_NAMES,
     )
+    if store is not None and workflow_state_url:
+        raise ValueError(
+            "workflow_state_url applies to the store create_api_app creates; give the "
+            "StudioStore its checkpoint_store instead."
+        )
+    # Checked before any file is created: an unusable URL fails fast.
+    workflow_state_store: Any = None
+    if store is None:
+        state_url = resolve_workflow_state_url(workflow_state_url)
+        if state_url is not None:
+            workflow_state_store = open_workflow_state_store(state_url)
     effective_registry = registry if registry is not None else get_default_registry()
     if store is None and str(db_path) == ":memory:":
         # StudioStore shares one file across threads, so ":memory:" would otherwise
@@ -279,7 +304,17 @@ def create_api_app(
         # Create the database owner-only (0600): it holds webhook secrets, runs and chat history.
         # SQLite gives the -wal/-shm sidecar files the same mode as the main file.
         ensure_private_file(db_path or "./nexura_service.sqlite3")
-    effective_store = store or StudioStore(db_path or "./nexura_service.sqlite3")
+    effective_store = store or StudioStore(
+        db_path or "./nexura_service.sqlite3", checkpoint_store=workflow_state_store
+    )
+
+    def default_execution_store() -> ExecutionStore:
+        # Workflow runs journal next to their checkpoints: the effects API reads that journal.
+        if workflow_state_store is not None:
+            journal: ExecutionStore = workflow_state_store.execution_store
+            return journal
+        return SQLiteExecutionStore(effective_store.db_path)
+
     effective_ws_repo = workspace_repo or WorkspaceRepository()
 
     # Bind database to workspace repository for durable ownership and workspaces
@@ -412,9 +447,16 @@ def create_api_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if execution_store is None and app.state.execution_store_closed:
             # The app is started again after a shutdown closed its own journal store.
-            app.state.execution_store = SQLiteExecutionStore(effective_store.db_path)
+            app.state.execution_store = default_execution_store()
             app.state.execution_store_closed = False
-        await app.state.execution_store.init_db()
+        if workflow_state_store is not None:
+            # Migrate the Postgres workflow tables and their journal before serving.
+            await workflow_state_store.init_db()
+        if (
+            workflow_state_store is None
+            or app.state.execution_store is not workflow_state_store.execution_store
+        ):
+            await app.state.execution_store.init_db()
         # Startup phase: reconcile missed schedule triggers after restart
         with contextlib.suppress(Exception):
             app_trigger_manager.reconcile_missed_runs()
@@ -517,7 +559,9 @@ def create_api_app(
     # Attach state
     app.state.registry = effective_registry
     app.state.store = effective_store
-    app.state.execution_store = execution_store or SQLiteExecutionStore(effective_store.db_path)
+    app.state.execution_store = execution_store or default_execution_store()
+    # Where workflow checkpoints live (SQLite on db_path, or Postgres, A6 S8).
+    app.state.workflow_state_store = getattr(effective_store, "checkpoint_store", None)
     app.state.execution_store_closed = False
     app.state.session_store = SQLiteSessionStore(effective_store.db_path)
     app.state.chat_models = ChatModelRegistry(chat_models)

@@ -30,6 +30,12 @@ _STRING_CODE_STATUS: dict[str, int] = {
     "server_error": 500,
     "overloaded": 503,
     "overloaded_error": 529,
+    "api_error": 500,
+    "server_is_overloaded": 503,
+    "service_unavailable_error": 503,
+    "credit_balance_exhausted": 429,
+    "invalid_request_error": 400,
+    "request_too_large": 413,
 }
 
 
@@ -53,7 +59,12 @@ def _error_from_chunk(err: Any, redact: Callable[[str], str]) -> BaseException:
         if status in (401, 403):
             return ProviderAuthError(f"Provider authentication failed (HTTP {status}): {text}")
         if status >= 400:
-            return http_status_error(status, f"Provider returned error HTTP {status}: {text}")
+            codes = [
+                str(err.get(k)) for k in ("code", "type") if isinstance(err, dict) and err.get(k)
+            ]
+            return http_status_error(
+                status, f"Provider returned error HTTP {status}: {text}", codes=codes
+            )
     return ProviderResponseError(f"Provider stream error: {text}")
 
 

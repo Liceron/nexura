@@ -1,0 +1,23 @@
+{
+  "source": "https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons",
+  "retrieved": "2026-10-21",
+  "note": "",
+  "response": {
+    "status": 200,
+    "headers": {},
+    "json": {
+      "id": "msg_01XFDUDYJgAACzvnptvVoYEL",
+      "type": "message",
+      "role": "assistant",
+      "model": "claude-haiku-5-5",
+      "content": [],
+      "stop_reason": "refusal",
+      "stop_sequence": null,
+      "stop_details": null,
+      "usage": {
+        "input_tokens": 30,
+        "output_tokens": 0
+      }
+    }
+  }
+}

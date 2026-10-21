@@ -23,7 +23,7 @@ assert result.usage.is_complete
 
 | Field | Meaning |
 | --- | --- |
-| `prompt_tokens` | Input tokens. |
+| `prompt_tokens` | Input tokens: the whole prompt, including tokens read from or written to a prompt cache (for Anthropic the adapter adds the cache counts back to `input_tokens`). |
 | `completion_tokens` | Output tokens. |
 | `total_tokens` | Total as reported by the provider. |
 | `is_complete` | `False` if any turn did not report all three counts above. |

@@ -1,0 +1,23 @@
+{
+  "source": "https://developers.openai.com/api/reference/resources/responses/streaming-events.md",
+  "retrieved": "2026-10-21",
+  "note": "",
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "text/event-stream"
+    },
+    "sse": [
+      {
+        "event": "error",
+        "data": {
+          "type": "error",
+          "code": "rate_limit_exceeded",
+          "message": "Rate limit reached for gpt-5.4-nano.",
+          "param": null,
+          "sequence_number": 1
+        }
+      }
+    ]
+  }
+}

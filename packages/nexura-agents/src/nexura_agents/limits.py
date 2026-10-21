@@ -290,9 +290,8 @@ def apply_anthropic_settings(payload: dict[str, Any], request: Any) -> None:
     if budget:  # 0 (like None) leaves extended thinking off
         _check_anthropic_thinking(payload, budget)
         payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
-    warn_unsupported(
-        "Anthropic", request, ("seed", "presence_penalty", "frequency_penalty", "reasoning_effort")
-    )
+    # reasoning_effort is sent as output_config.effort by the provider (Claude 4.6+).
+    warn_unsupported("Anthropic", request, ("seed", "presence_penalty", "frequency_penalty"))
     if getattr(request, "extra", None):
         merge_extra(payload, request.extra)
 

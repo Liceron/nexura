@@ -1,0 +1,82 @@
+{
+  "source": "https://ai.google.dev/api/generate-content",
+  "retrieved": "2026-10-21",
+  "note": "streamGenerateContent?alt=sse; usageMetadata is cumulative; final chunk has finishReason.",
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "text/event-stream"
+    },
+    "sse": [
+      {
+        "data": {
+          "candidates": [
+            {
+              "content": {
+                "role": "model",
+                "parts": [
+                  {
+                    "text": "Thinking about counting",
+                    "thought": true
+                  }
+                ]
+              },
+              "index": 0
+            }
+          ],
+          "usageMetadata": {
+            "promptTokenCount": 6,
+            "totalTokenCount": 6
+          }
+        }
+      },
+      {
+        "data": {
+          "candidates": [
+            {
+              "content": {
+                "role": "model",
+                "parts": [
+                  {
+                    "text": "1, 2, "
+                  }
+                ]
+              },
+              "index": 0
+            }
+          ],
+          "usageMetadata": {
+            "promptTokenCount": 6,
+            "candidatesTokenCount": 4,
+            "totalTokenCount": 10
+          }
+        }
+      },
+      {
+        "data": {
+          "candidates": [
+            {
+              "content": {
+                "role": "model",
+                "parts": [
+                  {
+                    "text": "3",
+                    "thoughtSignature": "c2lnLXRleHQ="
+                  }
+                ]
+              },
+              "finishReason": "STOP",
+              "index": 0
+            }
+          ],
+          "usageMetadata": {
+            "promptTokenCount": 6,
+            "candidatesTokenCount": 7,
+            "thoughtsTokenCount": 18,
+            "totalTokenCount": 31
+          }
+        }
+      }
+    ]
+  }
+}

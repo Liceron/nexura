@@ -35,14 +35,16 @@ if TYPE_CHECKING:
         CapabilityError,
         MalformedToolCallArgumentsError,
         ProviderAuthError,
+        ProviderContentFilterError,
         ProviderError,
+        ProviderQuotaExceededError,
         ProviderTimeoutError,
         StreamCancelledError,
     )
     from nexura_agents.providers.fake import StreamingFakeProvider
     from nexura_agents.providers.gemini import GeminiNativeProvider, GeminiThoughtMetadata
     from nexura_agents.providers.module import ModelProviderModule
-    from nexura_agents.providers.openai import OpenAIProvider
+    from nexura_agents.providers.openai import OpenAIProvider, OpenAIResponsesProvider
     from nexura_agents.providers.sarvam import (
         SarvamProvider,
         TranslationRequest,
@@ -92,6 +94,9 @@ _EXPORTS: dict[str, str] = {
     "MalformedToolCallArgumentsError": "nexura_agents.providers.errors",
     "ModelProviderModule": "nexura_agents.providers.module",
     "OpenAIProvider": "nexura_agents.providers.openai",
+    "OpenAIResponsesProvider": "nexura_agents.providers.openai",
+    "ProviderContentFilterError": "nexura_agents.providers.errors",
+    "ProviderQuotaExceededError": "nexura_agents.providers.errors",
     "ProviderAuthError": "nexura_agents.providers.errors",
     "ProviderCapabilities": "nexura_agents.providers.types",
     "ProviderError": "nexura_agents.providers.errors",
@@ -145,9 +150,12 @@ __all__ = [
     "MalformedToolCallArgumentsError",
     "ModelProviderModule",
     "OpenAIProvider",
+    "OpenAIResponsesProvider",
     "ProviderAuthError",
     "ProviderCapabilities",
+    "ProviderContentFilterError",
     "ProviderError",
+    "ProviderQuotaExceededError",
     "ProviderMessage",
     "ProviderProtocol",
     "ProviderTimeoutError",

@@ -1,4 +1,4 @@
-"""A6 S0: ``WorkflowEngine`` with ``SQLiteWorkflowStore`` under real SIGKILL.
+"""A6 S0: ``WorkflowEngine`` on SQLite and Postgres workflow stores under real SIGKILL.
 
 The workflow is ``a`` (handler ``note``) -> ``b`` (handler ``pay``, optionally behind an
 approval gate). Each handler performs one effect through the external effect service.
@@ -6,8 +6,9 @@ Neither declares an effect class, so by founder decision 1 (design §6) both cou
 ``non_idempotent``: after a crash they must not repeat silently.
 
 ``WorkflowEngine.recover`` (A6 S6) continues a top-level ``running`` run under the
-execution contract; ``fork`` still re-runs the node (a new run). Postgres rows wait for
-``PostgresWorkflowStore`` (A6 S8).
+execution contract; ``fork`` still re-runs the node (a new run). The Postgres rows run the
+same scenarios on ``nexura_postgres.PostgresWorkflowStore`` (A6 S8; skipped without
+``NEXURA_TEST_POSTGRES_URI``).
 
 The composite rows (A6 S7, design §4 "sub-workflow child / map item") run one step over
 three parts: a map over items 0-2, a parallel step with branches a-c, or a sub-workflow
@@ -19,59 +20,64 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import pytest
-from durability_harness import POSTGRES_STORES, Backend, Harness
+from durability_harness import Backend, Harness
 
 pytestmark = pytest.mark.durability
 
-ON_BACKENDS = pytest.mark.parametrize(
-    "backend",
-    [
-        "sqlite",
-        pytest.param(
-            "postgres",
-            marks=pytest.mark.xfail(
-                strict=True, raises=AssertionError, reason=POSTGRES_STORES["workflow"][1]
-            ),
-        ),
-    ],
-    indirect=True,
-)
+ON_BACKENDS = pytest.mark.parametrize("backend", ["sqlite", "postgres"], indirect=True)
 
 
 def _run_id() -> str:
     return f"wf-{uuid.uuid4().hex[:12]}"
 
 
-def _checkpoint(harness: Harness, run_id: str) -> Any:
-    from nexura_runtime.workflow import SQLiteWorkflowStore
+def _with_store(harness: Harness, use: Callable[[Any], Awaitable[Any]]) -> Any:
+    """Open the backend's workflow store in the test process, use it, close it."""
 
-    store = SQLiteWorkflowStore(harness.db_path)
-    try:
-        return asyncio.run(store.get(run_id))
-    finally:
-        store.close_sync()
+    async def go() -> Any:
+        store: Any
+        if harness.backend.name == "sqlite":
+            from nexura_runtime.workflow import SQLiteWorkflowStore
+
+            store = SQLiteWorkflowStore(harness.db_path)
+        else:
+            from nexura_postgres import PostgresWorkflowStore
+
+            store = PostgresWorkflowStore(harness.backend.dsn)
+        try:
+            return await use(store)
+        finally:
+            await store.close()
+
+    return asyncio.run(go())
+
+
+def _checkpoint(harness: Harness, run_id: str) -> Any:
+    return _with_store(harness, lambda store: store.get(run_id))
 
 
 def _resume_in_parent(harness: Harness, run_id: str, approval_id: str, gated: bool) -> str:
     """Resume in the test process (only for refusals: no handler runs); the error type."""
     from durability_child import WORKSPACE, workflow_registry, workflow_spec
 
-    from nexura_runtime.workflow import SQLiteWorkflowStore, WorkflowEngine
+    from nexura_runtime.workflow import WorkflowEngine
 
-    store = SQLiteWorkflowStore(harness.db_path)
-    engine = WorkflowEngine(
-        workflow_spec(gated), workflow_registry(), store=store, workspace_id=WORKSPACE
-    )
-    try:
-        asyncio.run(engine.resume(run_id, approval_id))
-    except Exception as exc:
-        return type(exc).__name__
-    finally:
-        store.close_sync()
-    return "no error"
+    async def resume(store: Any) -> str:
+        engine = WorkflowEngine(
+            workflow_spec(gated), workflow_registry(), store=store, workspace_id=WORKSPACE
+        )
+        try:
+            await engine.resume(run_id, approval_id)
+        except Exception as exc:
+            return type(exc).__name__
+        return "no error"
+
+    result: str = _with_store(harness, resume)
+    return result
 
 
 def _step(harness: Harness, name: str, run_id: str, mode: str, **params: Any) -> dict[str, Any]:

@@ -178,8 +178,7 @@ def _open_workflow_store(config: dict[str, Any]) -> Any:
         return _point_workflow_store(SQLiteWorkflowStore)(config["db"])
     import nexura_postgres
 
-    # A6 S8 adds this store; confirm its constructor when it lands.
-    base = nexura_postgres.PostgresWorkflowStore  # type: ignore[attr-defined]
+    base = nexura_postgres.PostgresWorkflowStore
     return _point_workflow_store(base)(dsn=backend["dsn"])
 
 
@@ -296,9 +295,16 @@ def _describe_workflow(result: Any) -> dict[str, Any]:
 
 
 async def scenario_workflow(config: dict[str, Any]) -> dict[str, Any]:
+    store = _open_workflow_store(config)
+    try:
+        return await _workflow_scenario(config, store)
+    finally:
+        await store.close()
+
+
+async def _workflow_scenario(config: dict[str, Any], store: Any) -> dict[str, Any]:
     from nexura_runtime.workflow import WorkflowEngine
 
-    store = _open_workflow_store(config)
     shape = config.get("shape", "line")
     if shape == "line":
         spec, registry, initial = (

@@ -1,0 +1,17 @@
+{
+  "source": "https://developers.openai.com/api/docs/guides/error-codes.md",
+  "retrieved": "2026-10-21",
+  "note": "Azure OpenAI / OpenAI-compatible content filter rejection.",
+  "response": {
+    "status": 400,
+    "headers": {},
+    "json": {
+      "error": {
+        "message": "The response was filtered due to the prompt triggering the content management policy.",
+        "type": "invalid_request_error",
+        "param": "prompt",
+        "code": "content_filter"
+      }
+    }
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "source": "https://developers.openai.com/api/docs/guides/error-codes.md",
+  "retrieved": "2026-10-21",
+  "note": "Billing error: retrying does not help (rate-limits guide).",
+  "response": {
+    "status": 429,
+    "headers": {},
+    "json": {
+      "error": {
+        "message": "You exceeded your current quota, please check your plan and billing details.",
+        "type": "insufficient_quota",
+        "param": null,
+        "code": "insufficient_quota"
+      }
+    }
+  }
+}

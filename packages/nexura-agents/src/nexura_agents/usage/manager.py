@@ -310,7 +310,11 @@ class RunBudget(BudgetInterface):
         exact = self._fallback_cost()
         if usage is not None and usage.is_reported:
             prompt = usage.prompt_tokens or 0
-            cached = min(prompt, usage.cached_prompt_tokens or usage.cache_read_input_tokens or 0)
+            # The prompt includes cache writes, which are priced at the write rate below.
+            written = min(prompt, usage.cache_creation_input_tokens or 0)
+            cached = min(
+                prompt - written, usage.cached_prompt_tokens or usage.cache_read_input_tokens or 0
+            )
             cached_rate = pricing.cached_prompt_cost_per_million
             if cached_rate is None:
                 cached_rate = pricing.input_cost_per_million
@@ -318,7 +322,7 @@ class RunBudget(BudgetInterface):
             if write_rate is None:
                 write_rate = pricing.input_cost_per_million
             exact = (
-                Decimal(prompt - cached) * pricing.input_cost_per_million
+                Decimal(prompt - written - cached) * pricing.input_cost_per_million
                 + Decimal(cached) * cached_rate
                 + Decimal(usage.completion_tokens or 0) * pricing.output_cost_per_million
                 + Decimal(usage.cache_creation_input_tokens or 0) * write_rate

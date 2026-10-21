@@ -1,0 +1,36 @@
+{
+  "source": "https://google.aip.dev/193 (google.rpc ErrorInfo/RetryInfo/QuotaFailure, as Gemini generateContent returns them)",
+  "retrieved": "2026-10-21",
+  "note": "Per-day quota: the RetryInfo delay is misleading; not retryable.",
+  "response": {
+    "status": 429,
+    "headers": {},
+    "json": {
+      "error": {
+        "code": 429,
+        "message": "You exceeded your current quota, please check your plan and billing details.",
+        "status": "RESOURCE_EXHAUSTED",
+        "details": [
+          {
+            "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+            "violations": [
+              {
+                "quotaMetric": "generativelanguage.googleapis.com/generate_content_free_tier_requests",
+                "quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier",
+                "quotaDimensions": {
+                  "location": "global",
+                  "model": "gemini-3.8-flash"
+                },
+                "quotaValue": "250"
+              }
+            ]
+          },
+          {
+            "@type": "type.googleapis.com/google.rpc.RetryInfo",
+            "retryDelay": "34s"
+          }
+        ]
+      }
+    }
+  }
+}

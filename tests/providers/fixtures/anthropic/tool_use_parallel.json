@@ -1,0 +1,49 @@
+{
+  "source": "https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons",
+  "retrieved": "2026-10-21",
+  "note": "Adaptive thinking block, text and two tool_use blocks.",
+  "response": {
+    "status": 200,
+    "headers": {},
+    "json": {
+      "id": "msg_01XFDUDYJgAACzvnptvVoYEL",
+      "type": "message",
+      "role": "assistant",
+      "model": "claude-haiku-5-5",
+      "content": [
+        {
+          "type": "thinking",
+          "thinking": "Two cities, call the tool twice.",
+          "signature": "EqQBCgIYAhIM1gbcDa9GJwZA2b3hGgxBdjrkzLoky3dl1pkiMOYds"
+        },
+        {
+          "type": "text",
+          "text": "I'll check both cities."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01A09q90qw90lq917835lq9",
+          "name": "get_weather",
+          "input": {
+            "location": "Paris"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01PjgRJLbXrXEMZwDNYLnBqk",
+          "name": "get_weather",
+          "input": {
+            "location": "London"
+          }
+        }
+      ],
+      "stop_reason": "tool_use",
+      "stop_sequence": null,
+      "stop_details": null,
+      "usage": {
+        "input_tokens": 472,
+        "output_tokens": 89
+      }
+    }
+  }
+}

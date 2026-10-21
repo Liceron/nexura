@@ -1,0 +1,41 @@
+{
+  "source": "https://docs.sarvam.ai/api-reference/chat/chat-completions-v1.md",
+  "retrieved": "2026-10-21",
+  "note": "Chat Completion V1 example; reasoning_content is never part of the answer.",
+  "response": {
+    "status": 200,
+    "headers": {},
+    "json": {
+      "id": "20250101_0a1b2c3d-1234-5678-9abc-def012345678",
+      "object": "chat.completion",
+      "created": 1735689600,
+      "model": "sarvam-105b",
+      "choices": [
+        {
+          "finish_reason": "stop",
+          "index": 0,
+          "message": {
+            "content": "नमस्ते! मैं आपकी कैसे मदद कर सकता हूँ?",
+            "role": "assistant",
+            "refusal": null,
+            "reasoning_content": "Greet in Hindi.",
+            "tool_calls": null
+          },
+          "logprobs": {}
+        }
+      ],
+      "system_fingerprint": null,
+      "usage": {
+        "completion_tokens": 24,
+        "prompt_tokens": 18,
+        "total_tokens": 42,
+        "completion_tokens_details": {
+          "reasoning_tokens": 10
+        },
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      }
+    }
+  }
+}

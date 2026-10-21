@@ -44,6 +44,12 @@ TRANSIENT_ERRORS: tuple[type[BaseException], ...] = (
 )
 
 
+def _retryable(error: BaseException) -> bool:
+    """False for errors that say retrying cannot help (``retryable = False``, e.g. an
+    exhausted quota or spend limit reported as HTTP 429)."""
+    return getattr(error, "retryable", True) is not False
+
+
 def _stream_kwargs(stream_fn: Any, model_settings: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
     """Forward ``model_settings`` only to a ``stream`` that declares it."""
     if model_settings is not None:
@@ -191,7 +197,7 @@ class RetryModel:
                 self.turns_trimmed += 1
                 messages = shorter  # trimming is not a transient retry: no backoff, no attempt
             except self.retry_on as exc:
-                if attempt == self.max_attempts:
+                if attempt == self.max_attempts or not _retryable(exc):
                     raise
                 await asyncio.sleep(self._delay(attempt, exc))
                 attempt += 1
@@ -230,7 +236,7 @@ class RetryModel:
                 args = (shorter, *args[1:])
                 continue  # not a transient retry: no backoff, no attempt consumed
             except self.retry_on as exc:
-                if yielded or attempt == self.max_attempts:
+                if yielded or attempt == self.max_attempts or not _retryable(exc):
                     raise
                 delay = self._delay(attempt, exc)
             finally:

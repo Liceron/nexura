@@ -224,11 +224,14 @@ def serve_command(args: argparse.Namespace) -> int:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
 
+    from nexura_agents.contracts import MissingDependencyError
+
     from nexura_runtime.service.auth import UnauthenticatedNetworkError
 
     try:
         app = create_api_app(
             db_path=args.db,
+            workflow_state_url=getattr(args, "workflow_state_url", None),
             chat_models=chat_models,
             profile="local-owner",
             run_trigger_worker=bool(args.worker),
@@ -239,7 +242,7 @@ def serve_command(args: argparse.Namespace) -> int:
                 getattr(args, "insecure_allow_unauthenticated_network", False)
             ),
         )
-    except UnauthenticatedNetworkError as exc:
+    except (UnauthenticatedNetworkError, ValueError, MissingDependencyError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
     # The token itself is not printed: Studio reads it from its own origin.
@@ -272,7 +275,18 @@ def worker_command(args: argparse.Namespace) -> int:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
-    app = create_api_app(db_path=args.db, profile="local-owner", registry=registry)
+    from nexura_agents.contracts import MissingDependencyError
+
+    try:
+        app = create_api_app(
+            db_path=args.db,
+            profile="local-owner",
+            registry=registry,
+            workflow_state_url=getattr(args, "workflow_state_url", None),
+        )
+    except (ValueError, MissingDependencyError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
     try:
         worker = TriggerWorker(
             app.state,
@@ -590,6 +604,12 @@ HANDLERS_HELP = (
     "that registers handlers); repeatable"
 )
 
+WORKFLOW_STATE_HELP = (
+    "Keep workflow checkpoints and their execution journal in Postgres "
+    "(postgresql://...; needs nexura-postgres). Also NEXURA_WORKFLOW_STATE_URL. "
+    "Default: the SQLite database (--db)."
+)
+
 
 def sandbox_install_runtime_command(args: argparse.Namespace) -> int:
     """Install only the operator-supplied pinned WASI archive; no network access."""
@@ -697,6 +717,9 @@ def build_parser() -> argparse.ArgumentParser:
     serve_p.add_argument("--port", type=int, default=8765, help="Port (default: 8765)")
     serve_p.add_argument("--db", default="./nexura_service.sqlite3", help="SQLite database path")
     serve_p.add_argument(
+        "--workflow-state-url", default=None, metavar="POSTGRES_URI", help=WORKFLOW_STATE_HELP
+    )
+    serve_p.add_argument(
         "--worker", action="store_true", help="Also run the trigger worker (schedules, webhooks)"
     )
     serve_p.add_argument(
@@ -737,6 +760,9 @@ def build_parser() -> argparse.ArgumentParser:
         "worker", help="Run scheduled and webhook trigger jobs against a SQLite database"
     )
     worker_p.add_argument("--db", default="./nexura_service.sqlite3", help="SQLite database path")
+    worker_p.add_argument(
+        "--workflow-state-url", default=None, metavar="POSTGRES_URI", help=WORKFLOW_STATE_HELP
+    )
     worker_p.add_argument(
         "--poll-interval", type=float, default=1.0, help="Poll interval in seconds"
     )

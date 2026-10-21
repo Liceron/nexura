@@ -23,7 +23,9 @@ from nexura_agents.models._streaming import _error_from_chunk
 from nexura_agents.providers.base import BaseProvider
 from nexura_agents.providers.errors import (
     CapabilityError,
+    ProviderContentFilterError,
     _mask_secrets,
+    error_body_codes,
     http_status_error,
     read_error_body,
     response_excerpt,
@@ -47,6 +49,38 @@ def _reasoning_tokens(usage: dict[str, Any]) -> int | None:
     return value if isinstance(value, int) else None
 
 
+def openai_chat_usage(u_dict: dict[str, Any]) -> Usage:
+    """Chat Completions ``usage`` as a Nexura ``Usage``.
+
+    ``prompt_tokens`` already includes ``prompt_tokens_details.cached_tokens`` (read from the
+    cache) and ``cache_write_tokens`` (written to it), so they are reported as breakdowns and
+    never added on top. ``reasoning_tokens`` is likewise inside ``completion_tokens``.
+    """
+    details = u_dict.get("prompt_tokens_details")
+    cached: int | None = None
+    written: int | None = None
+    if isinstance(details, dict):
+        value = details.get("cached_tokens")
+        cached = value if isinstance(value, int) else None
+        value = details.get("cache_write_tokens")
+        written = value if isinstance(value, int) else None
+    return Usage(
+        prompt_tokens=u_dict.get("prompt_tokens"),
+        completion_tokens=u_dict.get("completion_tokens"),
+        reasoning_tokens=_reasoning_tokens(u_dict),
+        total_tokens=u_dict.get("total_tokens"),
+        cached_prompt_tokens=cached,
+        cache_read_input_tokens=cached,
+        cache_creation_input_tokens=written,
+    )
+
+
+def _is_official_openai(base_url: str) -> bool:
+    """True for api.openai.com (and its regional hosts); False for compatible servers."""
+    host = httpx.URL(base_url).host
+    return host == "api.openai.com" or host.endswith(".api.openai.com")
+
+
 class OpenAIProvider(BaseProvider):
     """Adapter for OpenAI, Ollama, vLLM, LocalAI, and other OpenAI-compatible endpoints.
 
@@ -66,6 +100,13 @@ class OpenAIProvider(BaseProvider):
     supports_response_schema = True
     streams_response_schema = True  # stream() sends the schema too (partial output events)
     response_schema_with_tools = True
+
+    # The request field for the output-token limit. OpenAI deprecated ``max_tokens`` for
+    # ``max_completion_tokens`` (which also counts reasoning tokens) and reasoning models
+    # reject ``max_tokens``; compatible servers such as Ollama document only ``max_tokens``.
+    # ``None`` (the default) picks ``max_completion_tokens`` for api.openai.com and
+    # ``max_tokens`` for any other ``base_url``. Set the instance attribute to override.
+    max_tokens_param: str | None = None
 
     def __init__(
         self,
@@ -162,6 +203,11 @@ class OpenAIProvider(BaseProvider):
 
         return formatted
 
+    def _max_tokens_field(self) -> str:
+        if self.max_tokens_param:
+            return self.max_tokens_param
+        return "max_completion_tokens" if _is_official_openai(self.base_url) else "max_tokens"
+
     def _handle_error_response(self, response: httpx.Response) -> None:
         """Map HTTP error status codes into typed exceptions with secret masking."""
         if response.status_code == 401:
@@ -174,6 +220,7 @@ class OpenAIProvider(BaseProvider):
                 else f"Provider returned error HTTP {response.status_code}",
                 retry_after=response.headers.get("Retry-After"),
                 detail=response_excerpt(response),
+                codes=error_body_codes(response),
             )
 
     async def _generate_internal(
@@ -228,7 +275,7 @@ class OpenAIProvider(BaseProvider):
         if request.schema and self.capabilities.can_structured_output:
             payload["response_format"] = openai_response_format(request.schema)
         if request.max_tokens:
-            payload["max_tokens"] = request.max_tokens
+            payload[self._max_tokens_field()] = request.max_tokens
         if request.temperature is not None:
             payload["temperature"] = request.temperature
         if request.stop_sequences:
@@ -288,6 +335,14 @@ class OpenAIProvider(BaseProvider):
             finish_reason = "refusal"
 
         if content is None and not raw_tool_calls and not refusal:
+            if finish_reason == "content_filter":
+                # The answer was withheld by the content filter; the same input is blocked
+                # again, so this is not a retryable malformed response.
+                raise ProviderContentFilterError(
+                    "The provider's content filter withheld the answer "
+                    "(finish_reason: content_filter)",
+                    reason="content_filter",
+                )
             raise ProviderResponseError("Provider message has neither content nor tool calls")
 
         tool_calls: list[ToolCall] | None = None
@@ -331,20 +386,7 @@ class OpenAIProvider(BaseProvider):
 
         usage: Usage | None = None
         if "usage" in data and isinstance(data["usage"], dict):
-            u_dict = data["usage"]
-            cached_tokens: int | None = None
-            prompt_details = u_dict.get("prompt_tokens_details")
-            if isinstance(prompt_details, dict):
-                cached_tokens = prompt_details.get("cached_tokens")
-
-            usage = Usage(
-                prompt_tokens=u_dict.get("prompt_tokens"),
-                completion_tokens=u_dict.get("completion_tokens"),
-                reasoning_tokens=_reasoning_tokens(u_dict),
-                total_tokens=u_dict.get("total_tokens"),
-                cached_prompt_tokens=cached_tokens,
-                cache_read_input_tokens=cached_tokens,
-            )
+            usage = openai_chat_usage(data["usage"])
 
         return ModelResponse(
             message=Message(
@@ -389,7 +431,7 @@ class OpenAIProvider(BaseProvider):
         if request.schema and self.capabilities.can_structured_output:
             payload["response_format"] = openai_response_format(request.schema)
         if request.max_tokens:
-            payload["max_tokens"] = request.max_tokens
+            payload[self._max_tokens_field()] = request.max_tokens
         if request.temperature is not None:
             payload["temperature"] = request.temperature
         if request.stop_sequences:
@@ -525,20 +567,7 @@ class OpenAIProvider(BaseProvider):
 
                         # Top-level stream usage
                         if "usage" in chunk and isinstance(chunk["usage"], dict):
-                            u = chunk["usage"]
-                            cached_tokens: int | None = None
-                            prompt_details = u.get("prompt_tokens_details")
-                            if isinstance(prompt_details, dict):
-                                cached_tokens = prompt_details.get("cached_tokens")
-
-                            usage_obj = Usage(
-                                prompt_tokens=u.get("prompt_tokens"),
-                                completion_tokens=u.get("completion_tokens"),
-                                reasoning_tokens=_reasoning_tokens(u),
-                                total_tokens=u.get("total_tokens"),
-                                cached_prompt_tokens=cached_tokens,
-                                cache_read_input_tokens=cached_tokens,
-                            )
+                            usage_obj = openai_chat_usage(chunk["usage"])
                             yield StreamDelta(kind="finish", usage=usage_obj)
                     if not (stream_done or finish_seen):
                         raise ProviderResponseError("Provider stream ended before completion")

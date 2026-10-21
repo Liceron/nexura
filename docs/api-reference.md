@@ -1036,7 +1036,7 @@ Features:
 
 ### `AnthropicProvider`
 
-class `AnthropicProvider(model: 'str' = 'claude-3-5-sonnet-20241022', *, api_key: 'str | None' = None, base_url: 'str' = 'https://api.anthropic.com', timeout: 'float' = 30.0, client: 'httpx.AsyncClient | None' = None, transport: 'httpx.AsyncBaseTransport | None' = None, capabilities: 'ProviderCapabilities | None' = None, default_max_tokens: 'int' = 4096, extra_headers: 'dict[str, str] | None' = None) -> 'None'`
+class `AnthropicProvider(model: 'str' = 'claude-haiku-5-5', *, api_key: 'str | None' = None, base_url: 'str' = 'https://api.anthropic.com', timeout: 'float' = 30.0, client: 'httpx.AsyncClient | None' = None, transport: 'httpx.AsyncBaseTransport | None' = None, capabilities: 'ProviderCapabilities | None' = None, default_max_tokens: 'int' = 4096, extra_headers: 'dict[str, str] | None' = None, structured_output: 'str' = 'auto') -> 'None'`
 
 ~~~text
 Native Anthropic provider adapter communicating with Anthropic Messages API.
@@ -1079,7 +1079,7 @@ Guarantees:
 
 ### `SarvamProvider`
 
-class `SarvamProvider(model: 'str' = 'sarvam-2b', *, api_key: 'str | None' = None, base_url: 'str' = 'https://api.sarvam.ai', timeout: 'float' = 30.0, max_input_length: 'int' = 25000, output_limit_bytes: 'int' = 2000000, client: 'httpx.AsyncClient | None' = None, transport: 'httpx.AsyncBaseTransport | None' = None, capabilities: 'ProviderCapabilities | None' = None, extra_headers: 'dict[str, str] | None' = None) -> 'None'`
+class `SarvamProvider(model: 'str' = 'sarvam-105b', *, api_key: 'str | None' = None, base_url: 'str' = 'https://api.sarvam.ai', timeout: 'float' = 30.0, max_input_length: 'int' = 25000, output_limit_bytes: 'int' = 2000000, client: 'httpx.AsyncClient | None' = None, transport: 'httpx.AsyncBaseTransport | None' = None, capabilities: 'ProviderCapabilities | None' = None, extra_headers: 'dict[str, str] | None' = None) -> 'None'`
 
 ~~~text
 Sarvam AI native provider for multilingual Indic text generation and translation.
@@ -2949,10 +2949,13 @@ Raised when provider authentication fails, ensuring credentials are masked.
 
 ### `ProviderServerError`
 
-class `ProviderServerError(message: str, *, original_error: BaseException | None = None) -> None`
+class `ProviderServerError(message: 'str', *, retry_after: 'float | None' = None, original_error: 'BaseException | None' = None) -> 'None'`
 
 ~~~text
 Raised for HTTP 5xx responses; transient, so ``RetryModel`` retries it.
+
+``retry_after`` holds the server's ``Retry-After`` seconds when it sent one (OpenAI 503
+``server_is_overloaded`` and Anthropic 529 ``overloaded_error`` may), else ``None``.
 ~~~
 
 
@@ -3682,6 +3685,8 @@ Its execution journal (leases, intents, effects) is a ``MemoryExecutionStore``, 
   Every checkpoint saved for the run, oldest first.
 - `list_children(self, parent_id: 'str') -> 'list[WorkflowCheckpoint]'`
   Latest checkpoint of every child run (ids starting ``<parent_id>/``), by id.
+- `list_incomplete(self, limit: 'int' = 100, *, workspace_id: 'str | None' = None) -> 'list[str]'`
+  Ids of top-level runs whose latest checkpoint is ``running``, oldest update first.
 - `open_execution_store(self) -> 'ExecutionStore'`
   The execution journal kept next to these checkpoints (created on first use).
 - `save(self, checkpoint: 'WorkflowCheckpoint') -> 'None'`
@@ -3712,6 +3717,8 @@ same database file, opened on first use with its own connection.
   Every checkpoint saved for the run, oldest first.
 - `list_children(self, parent_id: 'str') -> 'list[WorkflowCheckpoint]'`
   Latest checkpoint of every child run (ids starting ``<parent_id>/``), by id.
+- `list_incomplete(self, limit: 'int' = 100, *, workspace_id: 'str | None' = None) -> 'list[str]'`
+  Ids of top-level runs whose latest checkpoint is ``running``, oldest update first.
 - `open_execution_store(self) -> 'ExecutionStore'`
   The execution journal in the same database file (created on first use).
 - `save(self, checkpoint: 'WorkflowCheckpoint') -> 'None'`

@@ -1,0 +1,16 @@
+{
+  "source": "https://docs.sarvam.ai/api-reference/chat/chat-completions-v1.md",
+  "retrieved": "2026-10-21",
+  "note": "",
+  "response": {
+    "status": 403,
+    "headers": {},
+    "json": {
+      "error": {
+        "message": "Invalid API subscription key.",
+        "code": "invalid_api_key_error",
+        "request_id": "20250101_1a2b3c4d"
+      }
+    }
+  }
+}

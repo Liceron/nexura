@@ -91,15 +91,21 @@ class PricingTable:
         cache_write_tokens = usage.cache_creation_input_tokens or 0
 
         def _calc_input_cost(p_tokens: int) -> tuple[Decimal, int, int]:
+            # prompt_tokens is the whole prompt: it includes the tokens read from the cache
+            # and the tokens written to it (adapters report it that way for every provider).
+            # Cache writes are priced separately at the write rate, so they are taken out of
+            # the uncached remainder here instead of being charged twice.
+            written = min(cache_write_tokens, p_tokens)
             if cached_tokens > 0 and pricing.cached_prompt_cost_per_million is not None:
-                actual_cached = min(cached_tokens, p_tokens)
-                uncached = max(0, p_tokens - actual_cached)
+                actual_cached = min(cached_tokens, p_tokens - written)
+                uncached = max(0, p_tokens - written - actual_cached)
                 c_cost = (
                     (Decimal(uncached) * pricing.input_cost_per_million)
                     + (Decimal(actual_cached) * pricing.cached_prompt_cost_per_million)
                 ) / _ONE_MILLION
                 return c_cost, uncached, actual_cached
-            return (Decimal(p_tokens) * pricing.input_cost_per_million) / _ONE_MILLION, p_tokens, 0
+            uncached = p_tokens - written
+            return (Decimal(uncached) * pricing.input_cost_per_million) / _ONE_MILLION, uncached, 0
 
         write_cost = Decimal("0")
         if cache_write_tokens > 0:
@@ -148,7 +154,7 @@ class PricingTable:
             # Prompt reported, completion unknown -> partial usage
             input_cost, uncached_p, cached_p = _calc_input_cost(prompt_tokens)
             conservative_output = conservative_fallback_cost or Decimal("0.01")
-            total_cost = input_cost + conservative_output + pricing.per_request_cost
+            total_cost = input_cost + conservative_output + pricing.per_request_cost + write_cost
             return CostEstimate(
                 amount_usd=total_cost.quantize(_MICRO_CENT, rounding=ROUND_HALF_UP),
                 currency=pricing.currency,

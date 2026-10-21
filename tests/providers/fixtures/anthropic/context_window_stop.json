@@ -1,0 +1,28 @@
+{
+  "source": "https://platform.claude.com/docs/en/build-with-claude/handling-stop-reasons",
+  "retrieved": "2026-10-21",
+  "note": "",
+  "response": {
+    "status": 200,
+    "headers": {},
+    "json": {
+      "id": "msg_01XFDUDYJgAACzvnptvVoYEL",
+      "type": "message",
+      "role": "assistant",
+      "model": "claude-haiku-5-5",
+      "content": [
+        {
+          "type": "text",
+          "text": "Partial answer"
+        }
+      ],
+      "stop_reason": "model_context_window_exceeded",
+      "stop_sequence": null,
+      "stop_details": null,
+      "usage": {
+        "input_tokens": 999000,
+        "output_tokens": 1000
+      }
+    }
+  }
+}

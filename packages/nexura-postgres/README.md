@@ -25,6 +25,14 @@ assert isinstance(repository, StorageRepository)  # same protocol as SQLiteRepos
 print(type(repository).__name__, repository.dsn)
 ```
 
+## Durable workflows and agents
+
+`PostgresWorkflowStore(dsn)` is the workflow checkpoint store for `WorkflowEngine` on several
+hosts (revisioned checkpoints, history, single-use approvals and the execution journal on the
+same pool); `nexura-runtime serve --workflow-state-url postgresql://...` uses it for the
+service. `PostgresCheckpointStore(dsn)` does the same for SDK agent runs. See
+[Durable execution](https://github.com/Liceron/nexura/blob/main/docs/durable-execution.md).
+
 ## Status and limits
 
 > Status: **alpha** (0.4), Python 3.12 (the same as `nexura-runtime`). Tested against a local

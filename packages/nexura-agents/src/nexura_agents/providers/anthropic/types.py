@@ -51,10 +51,102 @@ def map_anthropic_stop_reason(stop_reason: str | None) -> str:
         "end_turn": "stop",
         "tool_use": "tool_calls",
         "max_tokens": "length",
+        # The answer filled the context window: truncated, like max_tokens.
+        "model_context_window_exceeded": "length",
         "stop_sequence": "stop",
         "refusal": "refusal",
+        # A server-tool loop hit its iteration limit; the turn must be sent back to continue.
+        "pause_turn": "pause_turn",
     }
     return mapping.get(stop_reason, "stop")
+
+
+def anthropic_usage(usage_data: dict[str, Any]) -> Usage | None:
+    """Anthropic ``usage`` as a Nexura ``Usage``.
+
+    Anthropic's ``input_tokens`` counts only the tokens after the last cache breakpoint; the
+    full prompt is ``input_tokens + cache_read_input_tokens + cache_creation_input_tokens``
+    (prompt-caching docs). Nexura's ``prompt_tokens`` is the full prompt (as OpenAI and Gemini
+    report it), with the cache reads and writes as breakdowns, so cost and token budgets see
+    every input token. ``None`` when no count is reported.
+    """
+
+    def count(key: str) -> int | None:
+        value = usage_data.get(key)
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+    input_tokens = count("input_tokens")
+    output_tokens = count("output_tokens")
+    cache_creation = count("cache_creation_input_tokens")
+    cache_read = count("cache_read_input_tokens")
+    if all(v is None for v in (input_tokens, output_tokens, cache_creation, cache_read)):
+        return None
+    prompt: int | None = None
+    if any(v is not None for v in (input_tokens, cache_creation, cache_read)):
+        prompt = (input_tokens or 0) + (cache_creation or 0) + (cache_read or 0)
+    return Usage(
+        prompt_tokens=prompt,
+        completion_tokens=output_tokens,
+        total_tokens=(prompt or 0) + (output_tokens or 0),
+        is_complete=True,
+        cached_prompt_tokens=cache_read,
+        cache_creation_input_tokens=cache_creation,
+        cache_read_input_tokens=cache_read,
+    )
+
+
+# JSON Schema keywords Anthropic JSON outputs reject with a 400 (structured-outputs docs).
+# They are dropped from the wire schema only; the runner still validates the answer against
+# the original schema and retries on a mismatch.
+_UNSUPPORTED_OUTPUT_KEYWORDS = frozenset(
+    {
+        "minimum",
+        "maximum",
+        "exclusiveMinimum",
+        "exclusiveMaximum",
+        "multipleOf",
+        "minLength",
+        "maxLength",
+        "maxItems",
+        "uniqueItems",
+        "minProperties",
+        "maxProperties",
+    }
+)
+
+
+def to_anthropic_output_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """A schema Anthropic JSON outputs accept: every object gets ``additionalProperties:
+    false`` and unsupported constraint keywords are removed (``minItems`` above 1 too)."""
+
+    def convert(node: Any) -> Any:
+        if isinstance(node, list):
+            return [convert(n) for n in node]
+        if not isinstance(node, dict):
+            return node
+        out: dict[str, Any] = {}
+        for key, value in node.items():
+            if key in _UNSUPPORTED_OUTPUT_KEYWORDS:
+                continue
+            if key == "minItems" and not (isinstance(value, int) and value in (0, 1)):
+                continue
+            if key in ("properties", "$defs", "definitions") and isinstance(value, dict):
+                out[key] = {name: convert(sub) for name, sub in value.items()}
+            elif key in ("items", "anyOf", "allOf", "oneOf", "prefixItems"):
+                out[key] = convert(value)
+            elif key == "additionalProperties" and value is not False:
+                continue  # only false is accepted; set below for objects
+            else:
+                out[key] = value
+        is_object = out.get("type") == "object" or (
+            isinstance(out.get("type"), list) and "object" in out["type"]
+        )
+        if is_object or "properties" in out:
+            out["additionalProperties"] = False
+        return out
+
+    result = convert(schema)
+    return result if isinstance(result, dict) else schema
 
 
 def to_anthropic_tools(tools: Sequence[dict[str, Any]] | None) -> list[dict[str, Any]]:
@@ -390,24 +482,7 @@ def extract_anthropic_response(
         output_tokens = usage_data.get("output_tokens")
         cache_creation = usage_data.get("cache_creation_input_tokens")
         cache_read = usage_data.get("cache_read_input_tokens")
-
-        total = 0
-        has_metric = False
-        for val in [input_tokens, output_tokens, cache_creation, cache_read]:
-            if val is not None:
-                total += val
-                has_metric = True
-
-        if has_metric:
-            usage = Usage(
-                prompt_tokens=input_tokens,
-                completion_tokens=output_tokens,
-                total_tokens=total,
-                is_complete=True,
-                cached_prompt_tokens=cache_read,
-                cache_creation_input_tokens=cache_creation,
-                cache_read_input_tokens=cache_read,
-            )
+        usage = anthropic_usage(usage_data)
 
     metadata = AnthropicMetadata(
         message_id=resp_dict.get("id"),

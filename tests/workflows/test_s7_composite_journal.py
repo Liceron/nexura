@@ -76,10 +76,13 @@ async def snapshot(store: Any, run_id: str) -> Any:
     return await journal.get(ExecutionId("default", run_id))
 
 
-@pytest.fixture(params=["memory", "sqlite"])
+@pytest.fixture(params=["memory", "sqlite", "postgres"])
 def store(request: pytest.FixtureRequest, tmp_path: Path) -> Any:
     if request.param == "memory":
         yield MemoryWorkflowStore()
+        return
+    if request.param == "postgres":  # A6 S8; needs NEXURA_TEST_POSTGRES_URI
+        yield request.getfixturevalue("postgres_workflow_store")
         return
     sqlite = SQLiteWorkflowStore(tmp_path / "wf.sqlite3")
     yield sqlite

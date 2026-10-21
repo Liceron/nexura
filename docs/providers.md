@@ -73,6 +73,62 @@ print(agent.run("Summarize our refund policy in one line.").final_output)
 
 Set the key in your environment first (`export OPENAI_API_KEY=...`) or pass `api_key=` to the provider class. Do not put keys in source files.
 
+## Provider conformance
+
+Each adapter is checked against the providers' current API documentation by a conformance suite (`tests/providers/conformance/`). The suite replays recorded request and response fixtures (`tests/providers/fixtures/<provider>/`, each naming the documentation page it was taken from and the date it was read) through mock HTTP transports, so it runs offline and in CI without keys. For every provider it checks a plain reply, a tool-call round trip (parallel calls where the API has them), structured output, streamed text and streamed tool-call arguments, usage mapping and the budget settlement it produces, the mapping of errors to Nexura's error types, and the shape of the request Nexura sends.
+
+| Provider (class) | Fixture-verified (2026-10-21) | Live-verified |
+|---|---|---|
+| OpenAI Chat Completions (`OpenAIProvider`) | reply, parallel tool calls, `response_format` json_schema (strict), streaming text and tool arguments, usage (cached, cache-write, reasoning tokens), auth, 429 with `Retry-After`, quota 429 (not retried), 503 overloaded, context too long, content filter, refusal | never |
+| OpenAI Responses API (`OpenAIResponsesProvider`) | reply, parallel function calls with reasoning items sent back (also after streaming), `text.format` json_schema, streaming events, usage, `incomplete` (max tokens, content filter), `failed`, in-stream errors | never |
+| Anthropic Messages (`AnthropicNativeProvider`) | reply, parallel `tool_use` with thinking blocks kept, `output_config.format` JSON outputs (forced-tool fallback for older models), streaming text and `input_json_delta`, cumulative `message_delta` usage, prompt-cache usage, stop reasons (`refusal`, `model_context_window_exceeded`, `pause_turn`), 401, 429 with `retry-after`, 529 and in-stream `overloaded_error`, prompt too long, 413 | never |
+| Gemini API (`GeminiNativeProvider`) | reply with thought summaries hidden, parallel `functionCall` with ids and `thoughtSignature`, `systemInstruction`, `responseSchema`, streaming, `usageMetadata` (cached, thoughts, tool-use prompt), `MAX_TOKENS`, blocked prompts and `SAFETY` stops, `API_KEY_INVALID`, 429 with `RetryInfo`, per-day quota (not retried), 503, context too long | **2026-10-20** (`gemini-2.5-flash`: reply, one tool call, streaming, structured answer) |
+| Vertex AI (`VertexAIProvider`, `nexura-vertex`) | the Gemini wire format on the Vertex endpoint with an OAuth token, errors | **2026-10-08** (`gemini-2.5-flash`: reply, tool call, streaming) |
+| Ollama, local (`OpenAIProvider` at `localhost:11434/v1`) | reply, tool call, a tool call streamed in one chunk, usage, `max_tokens` (not `max_completion_tokens`) | never |
+| Sarvam (`SarvamProvider`) | reply (reasoning text kept out of the answer), streaming with the final usage chunk, reasoning tokens, quota 429 (not retried), 403, 500 | never |
+| LiteLLM (`LiteLLMModel`) | OpenAI-shaped replies with tool calls and usage through an injected `completion`, quota and content-policy errors | never (offline mock responses only) |
+
+"Fixture-verified" means the adapter handles the documented wire format; it does not prove a live model behaves the same. Only the two live checks above have been run against real APIs.
+
+## Live canaries (opt-in)
+
+`scripts/live_canary.py` runs one tiny fixed scenario per provider against the real API: a plain reply, one tool call and its follow-up, a streamed reply and a structured answer, each capped at 256 output tokens. That is roughly 600 to 2,000 tokens per provider, well under one US cent at October 2026 list prices of the default small models; Ollama runs locally and costs nothing.
+
+It sends nothing unless `NEXURA_LIVE_CANARY=1` is set and the provider's credential is present (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` or `GOOGLE_API_KEY`, `SARVAM_API_KEY`; Vertex AI needs `NEXURA_CANARY_VERTEX_PROJECT` and Application Default Credentials; a local Ollama needs `NEXURA_CANARY_OLLAMA_MODEL`). CI never sets `NEXURA_LIVE_CANARY`, and a test fails if a workflow does.
+
+```bash notest
+export NEXURA_LIVE_CANARY=1 ANTHROPIC_API_KEY=...
+uv run python scripts/live_canary.py --provider anthropic
+```
+
+Each provider that ran writes `evidence/live_canary/live_canary_<provider>_<date>.json` with the model, every check and its usage, pass or fail and the UTC time. The key is never written: the file names the variable and a masked value such as `sk-...(164 chars)`.
+
+## OpenAI Responses API
+
+`OpenAIResponsesProvider` talks to `POST /v1/responses`, which OpenAI recommends for new work. It takes the same arguments as `OpenAIProvider` plus `store` (default `False`). It sends the whole conversation every turn, system messages as `instructions`, tools as Responses function tools (`strict: false` unless your tool sets it) and a schema as `text.format`. Reasoning items that come back next to function calls are sent back with the tool outputs, as the API requires: from the message's `provider_data` for whole responses, and from the provider's own record of recent calls for streamed ones (so keep using the same provider object across the turns of a streamed run).
+
+```python notest
+from nexura_agents import Agent
+from nexura_agents.providers.openai import OpenAIResponsesProvider
+
+agent = Agent(name="Support", instructions="Be brief.", model=OpenAIResponsesProvider("gpt-5.4-nano"))
+print(agent.run("Summarize our refund policy in one line.").final_output)
+```
+
+`OpenAIProvider` sends `max_completion_tokens` to api.openai.com (reasoning models reject the deprecated `max_tokens`) and `max_tokens` to any other `base_url`, such as Ollama, vLLM or LM Studio. Set the instance attribute `max_tokens_param` to override.
+
+## Errors you can catch
+
+| Error (`nexura_agents.providers.errors` unless noted) | When | Retried by `RetryModel` |
+|---|---|---|
+| `ProviderAuthError` (`nexura_agents.errors`) | 401/403, Gemini `API_KEY_INVALID` | no |
+| `ProviderRateLimitedError` | 429 throttling; `retry_after` from `Retry-After` or Gemini `RetryInfo` | yes |
+| `ProviderQuotaExceededError` | 429 for an exhausted quota, credit balance or spend limit (`insufficient_quota`, Gemini per-day quotas, Sarvam `insufficient_quota_error`); still a `ProviderRateLimitError` | no |
+| `ProviderServerError` | 5xx, Anthropic 529 and in-stream `overloaded_error`; `retry_after` when the server sent one | yes |
+| `ProviderContextLengthError` | the prompt is longer than the context window | no (see `trim_history`) |
+| `ProviderContentFilterError` | a blocked prompt, or an answer withheld with nothing returned (`reason` holds the provider's code) | no |
+| `ProviderClientError` | other 4xx | no |
+
 ## Vertex AI
 
 `VertexAIProvider` serves Gemini models from Google Cloud. It signs requests with OAuth access tokens, not API keys. By default it uses Application Default Credentials (ADC) through `google-auth`, which the `nexura-vertex` package installs:
@@ -383,7 +439,9 @@ assert model.calls[1]["model_settings"] is None  # reset to auto after the call
 
 Some models spend hidden "thinking" tokens before they answer. When the provider reports them, `Usage.reasoning_tokens` holds the count. It is read from OpenAI's `reasoning_tokens` and from Gemini and Vertex AI's `thoughtsTokenCount`. These tokens are already counted in `completion_tokens` (the Gemini adapter adds `thoughtsTokenCount` to the visible output count; OpenAI's completion count includes them), so do not add the two together. If the provider does not report them, the field is `None`, not zero.
 
-The Anthropic and Sarvam adapters in this SDK do not fill `reasoning_tokens`. The SDK does not currently have a setting to turn on or size a model's reasoning; it only reports what the provider returns.
+OpenAI (both APIs), Sarvam and LiteLLM also fill `reasoning_tokens` from `completion_tokens_details`/`output_tokens_details`. The Anthropic adapter does not: Anthropic reports thinking only inside `output_tokens`. `ModelSettings(reasoning_effort=...)` is sent as `reasoning_effort` (Chat Completions), `reasoning.effort` (Responses) and `output_config.effort` (Anthropic); `thinking_budget_tokens` sizes Gemini thinking and Anthropic extended thinking on models before Claude 4.7.
+
+Cache usage follows one rule for every provider: `prompt_tokens` is the whole prompt, including the tokens read from a cache (`cached_prompt_tokens`, `cache_read_input_tokens`) and written to one (`cache_creation_input_tokens`). Anthropic reports `input_tokens` without them, so the adapter adds them back; cost settlement prices each part at its own rate.
 
 ## Retry and fallback
 
@@ -562,8 +620,8 @@ strings; `nexura-agents[litellm]` adds `"litellm:<provider>/<model>"` for others
 | `"vertex:gemini-2.5-flash"` | Google Vertex AI | `gcloud auth application-default login` (`pip install nexura-vertex`) |
 | `"gemini:gemini-2.5-flash"` | Gemini API | `GEMINI_API_KEY` |
 | `"openai:gpt-4.1-mini"` | OpenAI or any OpenAI-compatible server | `OPENAI_API_KEY` |
-| `"anthropic:claude-sonnet-4-5"` | Anthropic | `ANTHROPIC_API_KEY` |
-| `"sarvam:sarvam-m"` | Sarvam AI (Indian languages) | `SARVAM_API_KEY` |
+| `"anthropic:claude-haiku-5-5"` | Anthropic (the default model of `AnthropicNativeProvider`) | `ANTHROPIC_API_KEY` |
+| `"sarvam:sarvam-105b"` | Sarvam AI (Indian languages; the default model) | `SARVAM_API_KEY` |
 | `"ollama:llama3.1"` | Local Ollama | none |
 | `"test"` | Offline fake | none |
 | `"litellm:bedrock/..."` | Any provider LiteLLM supports | that provider's own (`[litellm]` extra) |

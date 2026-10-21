@@ -26,6 +26,7 @@ from nexura_agents.models._streaming import ChatChunkDecoder
 from nexura_agents.models.base import ModelProtocol
 from nexura_agents.models.openai import OpenAIChatModel
 from nexura_agents.providers.errors import (
+    QUOTA_ERROR_CODES,
     ProviderContextLengthError,
     _mask_secrets,
     http_status_error,
@@ -71,7 +72,11 @@ def _usage_from_litellm(u: dict[str, Any]) -> Usage:
         cached_prompt_tokens=_int_or_none(prompt_details.get("cached_tokens"))
         if isinstance(prompt_details, dict)
         else None,
-        cache_creation_input_tokens=_int_or_none(u.get("cache_creation_input_tokens")),
+        cache_creation_input_tokens=_int_or_none(u.get("cache_creation_input_tokens"))
+        if u.get("cache_creation_input_tokens") is not None
+        else _int_or_none(prompt_details.get("cache_write_tokens"))
+        if isinstance(prompt_details, dict)
+        else None,
         cache_read_input_tokens=_int_or_none(u.get("cache_read_input_tokens")),
     )
 
@@ -106,6 +111,20 @@ def _redact(text: str, api_key: str | None) -> str:
     if api_key:
         text = text.replace(api_key, "[REDACTED_SECRET]")
     return _mask_secrets(text)
+
+
+def _error_codes(exc: BaseException, names: set[str], message: str) -> list[str]:
+    """Machine codes of a LiteLLM exception: its ``code`` attribute, a content-policy class,
+    and quota codes the provider message names (LiteLLM keeps the provider's text)."""
+    codes: list[str] = []
+    code = getattr(exc, "code", None)
+    if isinstance(code, str) and code:
+        codes.append(code)
+    if "ContentPolicyViolationError" in names:
+        codes.append("content_policy_violation")
+    lowered = message.lower()
+    codes.extend(c for c in sorted(QUOTA_ERROR_CODES) if c in lowered)
+    return codes
 
 
 def map_litellm_exception(
@@ -145,6 +164,7 @@ def map_litellm_exception(
             f"Provider returned error HTTP {status}: {message}",
             retry_after=retry_after,
             original_error=safe_original,
+            codes=_error_codes(exc, names, message),
         )
     if "ServiceUnavailableError" in names or "InternalServerError" in names:
         return http_status_error(

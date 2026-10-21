@@ -34,11 +34,10 @@ from nexura_agents.types import Message, ModelResponse, ToolCall, Usage
 
 
 def _usage_from_openai(u_dict: dict[str, Any]) -> Usage:
-    return Usage(
-        prompt_tokens=u_dict.get("prompt_tokens"),
-        completion_tokens=u_dict.get("completion_tokens"),
-        total_tokens=u_dict.get("total_tokens"),
-    )
+    """Same mapping as ``OpenAIProvider``: cached, cache-write and reasoning breakdowns too."""
+    from nexura_agents.providers.openai.provider import openai_chat_usage
+
+    return openai_chat_usage(u_dict)
 
 
 _RESERVED_BODY_KEYS = frozenset(
@@ -352,12 +351,7 @@ class OpenAIChatModel(ModelProtocol):
         # Extract usage if present; distinguish from unknown
         usage: Usage | None = None
         if "usage" in data and isinstance(data["usage"], dict):
-            u_dict = data["usage"]
-            usage = Usage(
-                prompt_tokens=u_dict.get("prompt_tokens"),
-                completion_tokens=u_dict.get("completion_tokens"),
-                total_tokens=u_dict.get("total_tokens"),
-            )
+            usage = _usage_from_openai(data["usage"])
 
         return ModelResponse(
             message=Message(

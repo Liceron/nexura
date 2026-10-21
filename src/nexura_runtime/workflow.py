@@ -1627,6 +1627,25 @@ class MemoryWorkflowStore:
                 if run_id.startswith(prefix)
             ]
 
+    async def list_incomplete(
+        self, limit: int = 100, *, workspace_id: str | None = None
+    ) -> list[str]:
+        """Ids of top-level runs whose latest checkpoint is ``running``, oldest update first.
+
+        The candidates for ``WorkflowEngine.recover`` (a run is only taken over once its
+        journal lease is free or expired). Sub-workflow children are left out: their
+        parent's ``recover`` continues them. ``workspace_id`` narrows the list.
+        """
+        async with self._lock:
+            found = sorted(
+                (cp.updated_at, run_id)
+                for run_id, cp in self._checkpoints.items()
+                if cp.status == "running"
+                and "/" not in run_id
+                and (workspace_id is None or cp.workspace_id == workspace_id)
+            )
+        return [run_id for _, run_id in found[: max(int(limit), 0)]]
+
     async def claim_approval(self, workflow_run_id: str, approval_id: str) -> bool:
         """Atomically claim a pending approval or interrupt; ``False`` if already claimed."""
         async with self._lock:
@@ -2000,6 +2019,21 @@ class SQLiteWorkflowStore:
                 checkpoint.revision = new_revision
             return True
 
+    def _list_incomplete_sync(self, limit: int, workspace_id: str | None) -> list[str]:
+        with self._lock:
+            rows = (
+                self._ensure_open()
+                .execute(
+                    "SELECT workflow_run_id FROM nexura_workflow_checkpoints "
+                    "WHERE status = 'running' AND instr(workflow_run_id, '/') = 0 "
+                    "AND (? IS NULL OR workspace_id = ?) "
+                    "ORDER BY updated_at, workflow_run_id LIMIT ?",
+                    (workspace_id, workspace_id, max(int(limit), 0)),
+                )
+                .fetchall()
+            )
+        return [str(row[0]) for row in rows]
+
     def _claim_approval_sync(self, workflow_run_id: str, approval_id: str) -> bool:
         with self._lock:
             conn = self._ensure_open()
@@ -2052,6 +2086,17 @@ class SQLiteWorkflowStore:
     async def list_children(self, parent_id: str) -> list[WorkflowCheckpoint]:
         """Latest checkpoint of every child run (ids starting ``<parent_id>/``), by id."""
         return await asyncio.to_thread(self._list_children_sync, parent_id)
+
+    async def list_incomplete(
+        self, limit: int = 100, *, workspace_id: str | None = None
+    ) -> list[str]:
+        """Ids of top-level runs whose latest checkpoint is ``running``, oldest update first.
+
+        The candidates for ``WorkflowEngine.recover`` (a run is only taken over once its
+        journal lease is free or expired). Sub-workflow children are left out: their
+        parent's ``recover`` continues them. ``workspace_id`` narrows the list.
+        """
+        return await asyncio.to_thread(self._list_incomplete_sync, limit, workspace_id)
 
     async def claim_approval(self, workflow_run_id: str, approval_id: str) -> bool:
         """Atomically claim a pending approval or interrupt; ``False`` if already claimed."""
@@ -2973,7 +3018,7 @@ class WorkflowEngine:
         if self.store is None or not hasattr(self.store, "history"):
             raise WorkflowError(
                 "Checkpoint history needs a store with history(), such as "
-                "MemoryWorkflowStore or SQLiteWorkflowStore."
+                "MemoryWorkflowStore, SQLiteWorkflowStore or PostgresWorkflowStore."
             )
         records: list[WorkflowCheckpoint] = await self.store.history(workflow_run_id)
         if records:
@@ -3072,10 +3117,10 @@ class WorkflowEngine:
         Contract v1, A6 S6).
 
         Needs a store with an execution journal (``MemoryWorkflowStore``,
-        ``SQLiteWorkflowStore``). The caller takes the run's lease: at once when the owner
-        was a process on this host that has exited, otherwise only after the lease expired;
-        while another worker holds it, ``WorkflowError`` is raised. Then, for the node at the
-        stored cursor:
+        ``SQLiteWorkflowStore``, ``nexura_postgres.PostgresWorkflowStore``). The caller
+        takes the run's lease: at once when the owner was a process on this host that has
+        exited, otherwise only after the lease expired; while another worker holds it,
+        ``WorkflowError`` is raised. Then, for the node at the stored cursor:
 
         - its outcome was committed (the checkpoint save was lost): the outcome is applied
           and the run continues from the next node;
@@ -3236,7 +3281,7 @@ class WorkflowEngine:
         if self.store is None or not self._journaled_store():
             raise WorkflowError(
                 "recover() needs a store with an execution journal, such as "
-                "MemoryWorkflowStore or SQLiteWorkflowStore."
+                "MemoryWorkflowStore, SQLiteWorkflowStore or PostgresWorkflowStore."
             )
         checkpoint = await self.store.get(workflow_run_id)
         if checkpoint is None:

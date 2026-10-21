@@ -1,0 +1,34 @@
+{
+  "source": "https://ai.google.dev/api/generate-content",
+  "retrieved": "2026-10-21",
+  "note": "A streamed answer stopped by SAFETY before any part.",
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "text/event-stream"
+    },
+    "sse": [
+      {
+        "data": {
+          "candidates": [
+            {
+              "finishReason": "SAFETY",
+              "index": 0,
+              "safetyRatings": [
+                {
+                  "category": "HARM_CATEGORY_HARASSMENT",
+                  "probability": "HIGH",
+                  "blocked": true
+                }
+              ]
+            }
+          ],
+          "usageMetadata": {
+            "promptTokenCount": 8,
+            "totalTokenCount": 8
+          }
+        }
+      }
+    ]
+  }
+}

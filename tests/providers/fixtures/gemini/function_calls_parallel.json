@@ -1,0 +1,49 @@
+{
+  "source": "https://ai.google.dev/gemini-api/docs/generate-content/thought-signatures",
+  "retrieved": "2026-10-21",
+  "note": "Gemini 3 parallel calls: only the first functionCall part carries the thoughtSignature; ids per FunctionCall.id.",
+  "response": {
+    "status": 200,
+    "headers": {},
+    "json": {
+      "candidates": [
+        {
+          "content": {
+            "role": "model",
+            "parts": [
+              {
+                "functionCall": {
+                  "id": "fc-7q3k",
+                  "name": "get_current_temperature",
+                  "args": {
+                    "location": "Paris"
+                  }
+                },
+                "thoughtSignature": "<Signature_A>"
+              },
+              {
+                "functionCall": {
+                  "id": "fc-9x1m",
+                  "name": "get_current_temperature",
+                  "args": {
+                    "location": "London"
+                  }
+                }
+              }
+            ]
+          },
+          "finishReason": "STOP",
+          "index": 0
+        }
+      ],
+      "usageMetadata": {
+        "promptTokenCount": 80,
+        "candidatesTokenCount": 30,
+        "thoughtsTokenCount": 25,
+        "totalTokenCount": 135
+      },
+      "modelVersion": "gemini-3.8-flash",
+      "responseId": "mn3WaMv5LZeU1dkP6c2X2Ao"
+    }
+  }
+}

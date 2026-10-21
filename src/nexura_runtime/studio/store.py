@@ -138,7 +138,13 @@ def _owner_is_gone(owner: str | None) -> bool:
 class StudioStore:
     """Manages SQLite storage for Studio definitions, runs, and event streams."""
 
-    def __init__(self, db_path: str | Path) -> None:
+    def __init__(self, db_path: str | Path, *, checkpoint_store: Any = None) -> None:
+        """Open the Studio database at ``db_path``.
+
+        ``checkpoint_store``: where workflow checkpoints live (for example
+        ``nexura_postgres.PostgresWorkflowStore``); the store then owns it and closes it
+        with ``close()``. Default: a ``SQLiteWorkflowStore`` on the same database file.
+        """
         self.db_path = Path(db_path).resolve()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
@@ -290,8 +296,11 @@ class StudioStore:
                     ),
                 )
 
-        # Re-use M2 SQLiteWorkflowStore against the same database file
-        self.checkpoint_store = SQLiteWorkflowStore(self.db_path)
+        # Re-use M2 SQLiteWorkflowStore against the same database file, unless the
+        # workflow state lives elsewhere (a Postgres workflow store, A6 S8).
+        self.checkpoint_store: Any = (
+            checkpoint_store if checkpoint_store is not None else SQLiteWorkflowStore(self.db_path)
+        )
 
     def _ensure_open(self) -> sqlite3.Connection:
         if self._closed or self._conn is None:
@@ -794,13 +803,16 @@ class StudioStore:
                 "updated_at": u_at,
             }
 
-    def _close_sync(self) -> None:
+    def _close_connection(self) -> None:
         with self._lock:
             if not self._closed:
                 self._closed = True
                 if self._conn is not None:
                     self._conn.close()
                     self._conn = None
+
+    def _close_sync(self) -> None:
+        self._close_connection()
         self.checkpoint_store.close_sync()
 
     # -------------------------------------------------------------------------
@@ -921,4 +933,9 @@ class StudioStore:
         return await asyncio.to_thread(self._get_run_sync, run_id)
 
     async def close(self) -> None:
-        await asyncio.to_thread(self._close_sync)
+        if isinstance(self.checkpoint_store, SQLiteWorkflowStore):
+            await asyncio.to_thread(self._close_sync)
+            return
+        # Another checkpoint store (Postgres) closes on the event loop its pool runs on.
+        await asyncio.to_thread(self._close_connection)
+        await self.checkpoint_store.close()

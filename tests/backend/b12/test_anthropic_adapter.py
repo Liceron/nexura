@@ -319,7 +319,12 @@ async def test_anthropic_cache_metadata_preserved() -> None:
     }
     msg, usage, finish_reason, metadata = extract_anthropic_response(cached_payload)
     assert usage is not None
-    assert usage.prompt_tokens == 50
+    # P37 B3: Anthropic's input_tokens excludes cache reads and writes (prompt-caching docs:
+    # total input = cache_read + cache_creation + input_tokens). prompt_tokens is the full
+    # prompt, as OpenAI and Gemini report it, so pricing sees every input token.
+    assert usage.prompt_tokens == 50 + 1000 + 2500
+    assert usage.cache_read_input_tokens == 2500
+    assert usage.cache_creation_input_tokens == 1000
     assert usage.completion_tokens == 20
     # Total includes input + output + cache_creation + cache_read
     assert usage.total_tokens == 50 + 20 + 1000 + 2500

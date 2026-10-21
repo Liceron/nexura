@@ -1,0 +1,35 @@
+{
+  "source": "https://platform.claude.com/docs/en/build-with-claude/prompt-caching",
+  "retrieved": "2026-10-21",
+  "note": "Usage example from the prompt-caching docs: input_tokens excludes cache reads and writes.",
+  "response": {
+    "status": 200,
+    "headers": {},
+    "json": {
+      "id": "msg_01XFDUDYJgAACzvnptvVoYEL",
+      "type": "message",
+      "role": "assistant",
+      "model": "claude-haiku-5-5",
+      "content": [
+        {
+          "type": "text",
+          "text": "Refunds are accepted within 30 days."
+        }
+      ],
+      "stop_reason": "end_turn",
+      "stop_sequence": null,
+      "stop_details": null,
+      "usage": {
+        "input_tokens": 50,
+        "cache_creation_input_tokens": 248,
+        "cache_read_input_tokens": 1800,
+        "output_tokens": 503,
+        "cache_creation": {
+          "ephemeral_5m_input_tokens": 248,
+          "ephemeral_1h_input_tokens": 0
+        },
+        "service_tier": "standard"
+      }
+    }
+  }
+}

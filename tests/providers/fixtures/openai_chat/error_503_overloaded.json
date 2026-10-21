@@ -1,0 +1,19 @@
+{
+  "source": "https://developers.openai.com/api/docs/guides/error-codes.md",
+  "retrieved": "2026-10-21",
+  "note": "",
+  "response": {
+    "status": 503,
+    "headers": {
+      "retry-after": "3"
+    },
+    "json": {
+      "error": {
+        "message": "The model is currently overloaded. Please try again later.",
+        "type": "service_unavailable_error",
+        "param": null,
+        "code": "server_is_overloaded"
+      }
+    }
+  }
+}

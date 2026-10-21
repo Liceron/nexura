@@ -1,0 +1,40 @@
+{
+  "source": "https://ai.google.dev/api/generate-content",
+  "retrieved": "2026-10-21",
+  "note": "includeThoughts: a thought-summary part (thought: true) and the answer; signature on the last part.",
+  "response": {
+    "status": 200,
+    "headers": {},
+    "json": {
+      "candidates": [
+        {
+          "content": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "The user wants the refund window.",
+                "thought": true
+              },
+              {
+                "text": "Refunds are accepted within 30 days.",
+                "thoughtSignature": "CiQB0e2Kb2tleTEyMw=="
+              }
+            ]
+          },
+          "finishReason": "STOP",
+          "index": 0
+        }
+      ],
+      "usageMetadata": {
+        "promptTokenCount": 1200,
+        "cachedContentTokenCount": 1024,
+        "candidatesTokenCount": 12,
+        "thoughtsTokenCount": 40,
+        "toolUsePromptTokenCount": 30,
+        "totalTokenCount": 1282
+      },
+      "modelVersion": "gemini-3.8-flash",
+      "responseId": "mn3WaMv5LZeU1dkP6c2X2Ao"
+    }
+  }
+}

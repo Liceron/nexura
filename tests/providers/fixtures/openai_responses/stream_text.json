@@ -1,0 +1,206 @@
+{
+  "source": "https://developers.openai.com/api/reference/resources/responses/streaming-events.md",
+  "retrieved": "2026-10-21",
+  "note": "",
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "text/event-stream"
+    },
+    "sse": [
+      {
+        "event": "response.created",
+        "data": {
+          "type": "response.created",
+          "response": {
+            "id": "resp_67ccd2bed1ec8190b14f964abc0542670bb6a6b452d3795b",
+            "object": "response",
+            "created_at": 1761004800,
+            "status": "in_progress",
+            "completed_at": 1761004801,
+            "error": null,
+            "incomplete_details": null,
+            "instructions": null,
+            "max_output_tokens": null,
+            "model": "gpt-5.4-nano",
+            "output": [],
+            "parallel_tool_calls": true,
+            "previous_response_id": null,
+            "reasoning": {
+              "effort": "low",
+              "summary": null
+            },
+            "store": false,
+            "temperature": 1.0,
+            "text": {
+              "format": {
+                "type": "text"
+              }
+            },
+            "tool_choice": "auto",
+            "tools": [],
+            "top_p": 1.0,
+            "truncation": "disabled",
+            "usage": null,
+            "user": null,
+            "metadata": {}
+          },
+          "sequence_number": 0
+        }
+      },
+      {
+        "event": "response.output_item.added",
+        "data": {
+          "type": "response.output_item.added",
+          "output_index": 0,
+          "item": {
+            "id": "msg_123",
+            "status": "in_progress",
+            "type": "message",
+            "role": "assistant",
+            "content": []
+          },
+          "sequence_number": 1
+        }
+      },
+      {
+        "event": "response.content_part.added",
+        "data": {
+          "type": "response.content_part.added",
+          "item_id": "msg_123",
+          "output_index": 0,
+          "content_index": 0,
+          "part": {
+            "type": "output_text",
+            "text": "",
+            "annotations": []
+          },
+          "sequence_number": 2
+        }
+      },
+      {
+        "event": "response.output_text.delta",
+        "data": {
+          "type": "response.output_text.delta",
+          "item_id": "msg_123",
+          "output_index": 0,
+          "content_index": 0,
+          "delta": "Hello",
+          "logprobs": [],
+          "sequence_number": 3
+        }
+      },
+      {
+        "event": "response.output_text.delta",
+        "data": {
+          "type": "response.output_text.delta",
+          "item_id": "msg_123",
+          "output_index": 0,
+          "content_index": 0,
+          "delta": " there",
+          "logprobs": [],
+          "sequence_number": 4
+        }
+      },
+      {
+        "event": "response.output_text.done",
+        "data": {
+          "type": "response.output_text.done",
+          "item_id": "msg_123",
+          "output_index": 0,
+          "content_index": 0,
+          "text": "Hello there",
+          "logprobs": [],
+          "sequence_number": 5
+        }
+      },
+      {
+        "event": "response.output_item.done",
+        "data": {
+          "type": "response.output_item.done",
+          "output_index": 0,
+          "item": {
+            "id": "msg_67ccd2bf17f0819081ff3bb2cf6508e6",
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [
+              {
+                "type": "output_text",
+                "text": "Hello there",
+                "annotations": [],
+                "logprobs": []
+              }
+            ]
+          },
+          "sequence_number": 6
+        }
+      },
+      {
+        "event": "response.completed",
+        "data": {
+          "type": "response.completed",
+          "response": {
+            "id": "resp_67ccd2bed1ec8190b14f964abc0542670bb6a6b452d3795b",
+            "object": "response",
+            "created_at": 1761004800,
+            "status": "completed",
+            "completed_at": 1761004801,
+            "error": null,
+            "incomplete_details": null,
+            "instructions": null,
+            "max_output_tokens": null,
+            "model": "gpt-5.4-nano",
+            "output": [
+              {
+                "id": "msg_67ccd2bf17f0819081ff3bb2cf6508e6",
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                  {
+                    "type": "output_text",
+                    "text": "Hello there",
+                    "annotations": [],
+                    "logprobs": []
+                  }
+                ]
+              }
+            ],
+            "parallel_tool_calls": true,
+            "previous_response_id": null,
+            "reasoning": {
+              "effort": "low",
+              "summary": null
+            },
+            "store": false,
+            "temperature": 1.0,
+            "text": {
+              "format": {
+                "type": "text"
+              }
+            },
+            "tool_choice": "auto",
+            "tools": [],
+            "top_p": 1.0,
+            "truncation": "disabled",
+            "usage": {
+              "input_tokens": 19,
+              "input_tokens_details": {
+                "cached_tokens": 0
+              },
+              "output_tokens": 10,
+              "output_tokens_details": {
+                "reasoning_tokens": 0
+              },
+              "total_tokens": 29
+            },
+            "user": null,
+            "metadata": {}
+          },
+          "sequence_number": 7
+        }
+      }
+    ]
+  }
+}

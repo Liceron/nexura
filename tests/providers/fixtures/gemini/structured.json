@@ -1,0 +1,33 @@
+{
+  "source": "https://ai.google.dev/api/generate-content",
+  "retrieved": "2026-10-21",
+  "note": "",
+  "response": {
+    "status": 200,
+    "headers": {},
+    "json": {
+      "candidates": [
+        {
+          "content": {
+            "role": "model",
+            "parts": [
+              {
+                "text": "{\"order_id\": \"ORD-7\", \"status\": \"delivered\"}"
+              }
+            ]
+          },
+          "finishReason": "STOP",
+          "index": 0
+        }
+      ],
+      "usageMetadata": {
+        "promptTokenCount": 43,
+        "candidatesTokenCount": 16,
+        "thoughtsTokenCount": 59,
+        "totalTokenCount": 118
+      },
+      "modelVersion": "gemini-3.8-flash",
+      "responseId": "mn3WaMv5LZeU1dkP6c2X2Ao"
+    }
+  }
+}

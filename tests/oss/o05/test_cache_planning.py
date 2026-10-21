@@ -267,7 +267,9 @@ class TestAnthropicWireContract:
 
         # Verify observed response metrics
         assert resp.usage is not None
-        assert resp.usage.prompt_tokens == 1024
+        # P37 B3: Anthropic input_tokens excludes cache reads/writes; prompt_tokens is the
+        # full prompt (input + cache_creation + cache_read), per the prompt-caching docs.
+        assert resp.usage.prompt_tokens == 1024 + 512 + 512
         assert resp.usage.completion_tokens == 150
         assert resp.usage.cache_creation_input_tokens == 512
         assert resp.usage.cache_read_input_tokens == 512

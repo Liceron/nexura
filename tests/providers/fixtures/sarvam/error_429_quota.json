@@ -1,0 +1,16 @@
+{
+  "source": "https://docs.sarvam.ai/api-reference/chat/chat-completions-v1.md",
+  "retrieved": "2026-10-21",
+  "note": "",
+  "response": {
+    "status": 429,
+    "headers": {},
+    "json": {
+      "error": {
+        "message": "Quota exceeded for this API key.",
+        "code": "insufficient_quota_error",
+        "request_id": "20250101_9f8e7d6c"
+      }
+    }
+  }
+}

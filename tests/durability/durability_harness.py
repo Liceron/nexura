@@ -37,7 +37,7 @@ from typing import Any
 CHILD_SCRIPT = Path(__file__).with_name("durability_child.py")
 POSTGRES_ENV = "NEXURA_TEST_POSTGRES_URI"
 
-# Postgres stores the A6 steps add (design §5 "API changes"); absent today.
+# Postgres stores of each path (design §5 "API changes"); the trigger one is still absent.
 POSTGRES_STORES: dict[str, tuple[str, str]] = {
     "agent": ("PostgresCheckpointStore", "A6 S5: no Postgres SDK checkpoint store yet"),
     "workflow": ("PostgresWorkflowStore", "A6 S8: no PostgresWorkflowStore yet"),

@@ -1,0 +1,44 @@
+{
+  "source": "https://ai.google.dev/gemini-api/docs/generate-content/thought-signatures",
+  "retrieved": "2026-10-21",
+  "note": "A streamed function call arrives whole in one part, with its signature.",
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "text/event-stream"
+    },
+    "sse": [
+      {
+        "data": {
+          "candidates": [
+            {
+              "content": {
+                "role": "model",
+                "parts": [
+                  {
+                    "functionCall": {
+                      "id": "fc-s1",
+                      "name": "check_flight",
+                      "args": {
+                        "flight": "AA100"
+                      }
+                    },
+                    "thoughtSignature": "<Signature A>"
+                  }
+                ]
+              },
+              "finishReason": "STOP",
+              "index": 0
+            }
+          ],
+          "usageMetadata": {
+            "promptTokenCount": 50,
+            "candidatesTokenCount": 10,
+            "thoughtsTokenCount": 20,
+            "totalTokenCount": 80
+          }
+        }
+      }
+    ]
+  }
+}
