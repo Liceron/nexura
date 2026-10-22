@@ -6,6 +6,7 @@ requires-python = "==3.12.*"
 members = [
     "nexura-agents",
     "nexura-connectors",
+    "nexura-guardrails",
     "nexura-postgres",
     "nexura-qdrant",
     "nexura-runtime",
@@ -842,6 +843,26 @@ requires-dist = [
 provides-extras = ["postgres"]
 
 [[package]]
+name = "nexura-guardrails"
+version = "0.4.0"
+source = { editable = "packages/nexura-guardrails" }
+dependencies = [
+    { name = "nexura-agents" },
+]
+
+[package.optional-dependencies]
+yaml = [
+    { name = "pyyaml" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "nexura-agents", editable = "packages/nexura-agents" },
+    { name = "pyyaml", marker = "extra == 'yaml'", specifier = ">=6" },
+]
+provides-extras = ["judge", "yaml"]
+
+[[package]]
 name = "nexura-postgres"
 version = "0.4.0"
 source = { editable = "packages/nexura-postgres" }
@@ -905,6 +926,7 @@ dev = [
     { name = "fastapi" },
     { name = "mypy" },
     { name = "nexura-connectors" },
+    { name = "nexura-guardrails", extra = ["yaml"] },
     { name = "nexura-postgres" },
     { name = "nexura-qdrant" },
     { name = "nexura-sandbox", extra = ["wasi"] },
@@ -939,6 +961,7 @@ dev = [
     { name = "fastapi", specifier = ">=0.111.0,<1.0.0" },
     { name = "mypy", specifier = ">=1.10.0,<2.0.0" },
     { name = "nexura-connectors", editable = "packages/nexura-connectors" },
+    { name = "nexura-guardrails", extras = ["yaml"], editable = "packages/nexura-guardrails" },
     { name = "nexura-postgres", editable = "packages/nexura-postgres" },
     { name = "nexura-qdrant", editable = "packages/nexura-qdrant" },
     { name = "nexura-sandbox", extras = ["wasi"], editable = "packages/nexura-sandbox" },

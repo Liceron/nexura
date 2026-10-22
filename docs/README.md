@@ -18,7 +18,7 @@ one owner's projects. They do not add accounts or tenant isolation.
 
 ## Start here
 
-- [Packages and installation](packages.md): the eight Python packages, TypeScript client,
+- [Packages and installation](packages.md): the nine Python packages, TypeScript client,
   source/wheel installs, supported versions and optional backend requirements.
 - [Getting started](getting-started.md): install, first agent, first tool, in five minutes.
 - [Quickstart in 10 minutes](quickstart-10-minutes.md): from install to an approval-gated
@@ -61,6 +61,8 @@ one owner's projects. They do not add accounts or tenant isolation.
   shapes; review a bundle before sharing it.
 - [Guardrails, hooks and limits](guardrails-hooks-limits.md): input, output and tool
   guardrails, lifecycle hooks, usage caps.
+- [Guardrails package](guardrails-package.md): `nexura-guardrails`, an LLM judge that
+  fails closed, fast pre-filters, tiered and parallel checks, a category taxonomy.
 - [Serving agents over MCP](serving-over-mcp.md): make your agents usable from Claude
   Desktop, Cursor and other MCP clients.
 - [Agent2Agent (A2A)](a2a.md): serve agents to other frameworks and call remote A2A agents
@@ -82,6 +84,9 @@ one owner's projects. They do not add accounts or tenant isolation.
   research team, approvals, reports, extraction) you can browse and instantiate from Studio.
 - [Service and Studio](studio-and-service.md): REST API, TypeScript client and the visual
   Studio.
+- [Run Nexura on a server (single operator)](remote-single-operator.md): one operator token
+  on every request, a TLS reverse proxy (Caddy, nginx) and Studio sign-in; multi-user is in
+  the enterprise edition.
 - [Agents in Studio](agents-in-studio.md): saved workspace agents (declarative specs, no
   code), the `nexura.agents.agent` node, approvals for write tools, chat, evals and red-team.
 - [Credentials and local secrets](local-secrets.md): env-var credential references and the

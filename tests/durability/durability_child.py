@@ -22,6 +22,104 @@ from nexura_agents import RunContext
 
 TRIGGER_JOB_ID = "job-1"
 WORKSPACE = "durability"
+# A6 S11: the SDK budget scope of agent runs (the SDK's budget scope is not the run id).
+AGENT_BUDGET_SCOPE = "durability-agent-budget"
+BUDGET_MAX_TOKENS = 1_000_000
+# The budget the handlers and tools of this process reserve against (None: no budget).
+_BUDGET: dict[str, Any] = {}
+
+
+def usage_ledger_path(db: str | Path) -> Path:
+    """The SQLite usage ledger next to the test's database (shared by all its processes)."""
+    return Path(db).with_name("usage-ledger.sqlite3")
+
+
+def open_budget(config: dict[str, Any], scope: str, *, create: bool) -> Any:
+    """The run budget of ``scope`` on the shared ledger: created by the process that starts
+    the run, restored with ``manager.get_run_budget(scope)`` by every later one."""
+    if not config.get("budget"):
+        return None
+    from nexura_agents.usage import BudgetConfig, BudgetManager, UsageLedger
+
+    manager = BudgetManager(ledger=UsageLedger(str(usage_ledger_path(config["db"]))))
+    if create:
+        budget = manager.create_run_budget(
+            WORKSPACE,
+            scope,
+            config=BudgetConfig(max_tokens=BUDGET_MAX_TOKENS),
+            default_model="fake-model",
+        )
+    else:
+        budget = manager.get_run_budget(scope)
+        if budget is None:
+            raise h.HarnessError(f"budget scope {scope!r} was not restored from the ledger")
+    _BUDGET["budget"] = budget
+    return budget
+
+
+def ledger_reservations(db: str | Path, run_id: str) -> list[dict[str, Any]]:
+    """Every reservation made for a run's steps (any status), with its settlement entry.
+
+    Read in the test process from the shared usage ledger; each row has ``status``,
+    ``step_key``, ``tracked``, ``estimated_cost_usd``, ``estimated_tokens`` and, when
+    settled, ``settlement`` (``entry_type``, ``usage_state``, ``amount_usd``, ``tokens``,
+    ``settled_by``).
+    """
+    from nexura_agents.usage import UsageLedger
+    from nexura_agents.usage.linkage import frames_of
+
+    ledger = UsageLedger(str(usage_ledger_path(db)))
+    entries = {
+        e.reservation_id: e
+        for e in ledger.get_entries()
+        if e.reservation_id and e.entry_type in ("reconcile", "release")
+    }
+    rows = []
+    for res in ledger._reservations.values():
+        frame = next((f for f in frames_of(res.metadata) if f.run_id == run_id), None)
+        if frame is None:
+            continue
+        entry = entries.get(res.reservation_id)
+        rows.append(
+            {
+                "status": res.status,
+                "for": res.metadata.get("for"),
+                "step_key": frame.step_key,
+                "tracked": frame.tracked,
+                "estimated_cost_usd": res.estimated_cost_usd,
+                "estimated_tokens": res.estimated_tokens,
+                "settlement": None
+                if entry is None
+                else {
+                    "entry_type": entry.entry_type,
+                    "usage_state": entry.usage_state,
+                    "amount_usd": entry.amount_usd,
+                    "tokens": entry.tokens,
+                    "settled_by": entry.metadata.get("settled_by"),
+                },
+            }
+        )
+    return sorted(rows, key=lambda row: str(row["step_key"]))
+
+
+def spend(name: str) -> Any:
+    """Reserve a model call against the process's budget before an effect (a tool or
+    handler that calls a model); returns the reservation to settle, or None."""
+    budget = _BUDGET.get("budget")
+    if budget is None:
+        return None
+    return budget.admit_provider_call("fake-model", estimated_tokens=100, metadata={"for": name})
+
+
+def settle(reservation: Any) -> None:
+    budget = _BUDGET.get("budget")
+    if budget is None or reservation is None:
+        return
+    from nexura_agents import Usage
+
+    budget.settle_provider_call(
+        reservation, usage=Usage(prompt_tokens=60, completion_tokens=20, total_tokens=80)
+    )
 
 
 async def outcome(
@@ -53,6 +151,12 @@ def _point_checkpoint_store(base: type) -> type:
                 name = f"after_{phase}"
             h.point(name, run_id=run_id)
 
+        async def consume_approval(self, approval_id: str, payload: str) -> bool:
+            consumed: bool = await super().consume_approval(approval_id, payload)
+            if consumed:
+                h.point("after_consume_approval", approval_id=approval_id)
+            return consumed
+
     return PointCheckpointStore
 
 
@@ -76,9 +180,11 @@ def _agent_tools(config: dict[str, Any]) -> list[Any]:
     @tool
     def charge(ctx: RunContext[Any], order_id: str) -> str:
         """Charge a card (not idempotent)."""
+        reservation = spend("charge")
         h.effect("charge", extra={"runtime_key": getattr(ctx, "idempotency_key", None)})
         h.point("in_tool", run_id=ctx.run_id)
         time.sleep(delay)
+        settle(reservation)
         return f"charged {order_id}"
 
     @tool(idempotent=True)
@@ -94,12 +200,25 @@ def _agent_tools(config: dict[str, Any]) -> list[Any]:
         time.sleep(delay)
         return f"reserved {order_id}"
 
-    return [charge, reserve]
+    @tool(requires_approval=True)
+    def pay(ctx: RunContext[Any], order_id: str) -> str:
+        """Pay an order (not idempotent; a person approves each call)."""
+        reservation = spend("pay")
+        h.effect("pay", extra={"approval": True})
+        h.point("in_tool", run_id=ctx.run_id)
+        settle(reservation)
+        return f"paid {order_id}"
+
+    return [charge, reserve, pay]
 
 
 def _describe_agent(result: Any) -> dict[str, Any]:
     interruption = result.interruption
+    budget = _BUDGET.get("budget")
     return {
+        "interruption_id": interruption.interruption_id if interruption is not None else None,
+        "interruption_json": interruption.to_json() if interruption is not None else None,
+        "budget_max_tokens": budget.config.max_tokens if budget is not None else None,
         "status": result.status,
         "final_output": result.final_output,
         "reason": interruption.reason if interruption is not None else None,
@@ -113,9 +232,12 @@ async def scenario_agent(config: dict[str, Any]) -> dict[str, Any]:
 
     store = _open_checkpoint_store(config)
     tools = _agent_tools(config)
+    budget = open_budget(config, AGENT_BUDGET_SCOPE, create=config["mode"] == "run")
     # The run lease must be shorter than the takeover wait of the stale-owner row (K6,
     # claim_wait=10): a frozen owner stops renewing and its lease expires after this.
-    runner = Runner(checkpoint_store=store, lease_ttl=float(config.get("lease_ttl", 2.0)))
+    runner = Runner(
+        checkpoint_store=store, lease_ttl=float(config.get("lease_ttl", 2.0)), budget=budget
+    )
     if config["mode"] == "run":
         model = FakeModel(
             responses=[
@@ -125,6 +247,27 @@ async def scenario_agent(config: dict[str, Any]) -> dict[str, Any]:
         )
         agent = Agent(name="Billing", instructions="Bill orders.", model=model, tools=tools)
         return await outcome(lambda: runner.run_async(agent, "Bill A1"), _describe_agent)
+
+    if config["mode"] == "resume":  # approve the stored interruption from this process
+        from nexura_agents.durable import decode_checkpoint
+        from nexura_agents.types import RunInterruption
+
+        if config.get("interruption"):  # the one a person holds (a replay, for example)
+            interruption = RunInterruption.from_json(config["interruption"])
+        else:
+            raw = await store.load(config["run_id"])
+            if raw is None:
+                raise h.HarnessError(f"no checkpoint for {config['run_id']}")
+            _, interruption = decode_checkpoint(raw, config["run_id"])
+        agent = Agent(
+            name="Billing",
+            instructions="Bill orders.",
+            model=FakeModel(responses=["done"]),
+            tools=tools,
+        )
+        return await outcome(
+            lambda: runner.resume_async(agent, interruption, approve=True), _describe_agent
+        )
 
     h.point("ready")  # a "go" block here lines up racing recoverers
     agent = Agent(
@@ -189,13 +332,17 @@ def workflow_registry() -> Any:
     registry = ModuleRegistry()
 
     async def note(state: dict[str, Any]) -> dict[str, Any]:
+        reservation = spend("note")
         h.effect("note")
         h.point("in_note")
+        settle(reservation)
         return {"noted": True}
 
     async def pay(state: dict[str, Any]) -> dict[str, Any]:
+        reservation = spend("pay")
         h.effect("pay")
         h.point("in_pay")
+        settle(reservation)
         return {"paid": True}
 
     registry.register("note", note)
@@ -315,7 +462,20 @@ async def _workflow_scenario(config: dict[str, Any], store: Any) -> dict[str, An
     else:
         spec, registry = composite_spec(shape), composite_registry(config.get("effect"))
         initial = {"items": [0, 1, 2]}
-    engine = WorkflowEngine(spec, registry, store=store, workspace_id=WORKSPACE)
+    run_id = config["run_id"]
+    mode = config["mode"]
+    # The service's convention: a workflow run's budget scope is its run id.
+    budget = open_budget(config, run_id, create=mode == "run")
+    engine = WorkflowEngine(spec, registry, store=store, workspace_id=WORKSPACE, budget=budget)
+    result = await _workflow_mode(config, engine, store, initial)
+    if budget is not None:
+        result["budget_max_tokens"] = engine.budget.config.max_tokens  # restored policy
+    return result
+
+
+async def _workflow_mode(
+    config: dict[str, Any], engine: Any, store: Any, initial: dict[str, Any]
+) -> dict[str, Any]:
     run_id = config["run_id"]
     mode = config["mode"]
     if mode == "run":

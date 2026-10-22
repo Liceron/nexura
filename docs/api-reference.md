@@ -655,7 +655,7 @@ is_complete indicates whether all turns reported complete token metrics.
 
 ### `ModelResponse`
 
-class `ModelResponse(message: 'Message', usage: 'Usage | None' = None, finish_reason: 'str | None' = None) -> None`
+class `ModelResponse(message: 'Message', usage: 'Usage | None' = None, finish_reason: 'str | None' = None, response_id: 'str | None' = None, response_model: 'str | None' = None) -> None`
 
 ~~~text
 Standardized response from an LLM model.
@@ -757,7 +757,8 @@ Outcome of one guardrail check. ``tripwire=True`` stops the run.
 function `detect_pii(text: 'str', kinds: 'Iterable[str] | None' = None) -> 'list[PIIFinding]'`
 
 ~~~text
-Find personal data and secrets in ``text`` (heuristic, see the module docstring).
+Find personal data and secrets in ``text`` (a fast heuristic pre-filter, see the
+module docstring for what it misses).
 
 Kinds: ``email``, ``phone`` (Indian mobile with optional +91/91/0 prefix, or
 E.164 with a leading ``+``), ``aadhaar`` (12 digits, not starting with 0 or 1,
@@ -789,8 +790,9 @@ Replace detected PII in ``text``. ``{kind}`` in ``mask`` becomes the finding kin
 function `block_pii(kinds: 'Iterable[str] | None' = None, on: "Literal['input', 'output']" = 'input') -> 'GuardrailFn'`
 
 ~~~text
-Guardrail that trips when ``detect_pii`` finds any of ``kinds`` (default: all).
+Pre-filter guardrail that trips when ``detect_pii`` finds any of ``kinds`` (default: all).
 
+Regex and checksum only, so it has the misses listed in the module docstring.
 ``on`` labels the stage the guardrail is meant for; pass the result to
 ``input_guardrails`` or ``output_guardrails`` accordingly. Typed outputs are
 scanned as JSON. Evidence holds kinds, spans and masked previews only.
@@ -801,9 +803,10 @@ scanned as JSON. Evidence holds kinds, spans and masked previews only.
 function `redact_output_pii(kinds: 'Iterable[str] | None' = None, mask: 'str' = '[REDACTED:{kind}]', on_structured: "Literal['trip', 'pass']" = 'trip') -> 'GuardrailFn'`
 
 ~~~text
-Output guardrail that rewrites text output with PII redacted instead of tripping.
+Output pre-filter that rewrites text output with PII redacted instead of tripping.
 
-It returns ``GuardrailResult.rewritten(...)``, which the runner applies to the final
+It redacts only what ``detect_pii`` finds (see its misses). It returns
+``GuardrailResult.rewritten(...)``, which the runner applies to the final
 text before it is returned, stored in the session or emitted. The rewrite hook works
 for text output only. For an agent with ``output_type``, output containing PII
 cannot be rewritten safely, so by default the guardrail trips (``on_structured="trip"``);
@@ -815,7 +818,7 @@ cannot be rewritten safely, so by default the guardrail trips (``on_structured="
 function `no_prompt_injection(extra_patterns: 'Sequence[str | re.Pattern[str]]' = (), threshold: 'float' = 0.5) -> 'GuardrailFn'`
 
 ~~~text
-Heuristic prompt-injection guardrail. Trips when the summed signal score >= ``threshold``.
+Fast prompt-injection pre-filter. Trips when the summed signal score >= ``threshold``.
 
 Signals (each counted once): instruction-override phrases ("ignore previous
 instructions"), system-prompt exfiltration requests, jailbreak and role-play
@@ -824,8 +827,11 @@ Hinglish; plus hidden-text tricks: zero-width characters, bidi overrides, Unicod
 tag characters and long base64 blobs. Strong phrases score 0.5-0.8, weak role-play
 markers 0.3, each ``extra_patterns`` match 1.0. Lower ``threshold`` to be stricter.
 
-Paraphrases, other languages and encoded attacks are missed. Evidence lists signal
-ids, offsets and the score, not the matched text.
+Paraphrases, spaced-out words, other languages (French, Spanish, Tamil, Bengali),
+Hindi and Hinglish paraphrases, short base64, markdown fake turns, role-play and
+indirect injection are missed, and benign text quoting the phrases can trip it. Put a
+model-based check behind it. Evidence lists signal ids, offsets and the score, not
+the matched text.
 ~~~
 
 ### `max_length`
@@ -844,12 +850,14 @@ characters per token), not a real tokenizer. Works for input and output.
 function `allowed_topics(keywords: 'Iterable[str]' = (), deny: 'Iterable[str]' = ()) -> 'GuardrailFn'`
 
 ~~~text
-Keyword topic filter. This is lexical matching, not semantic understanding.
+Keyword topic pre-filter. This is lexical matching, not semantic understanding.
 
 With ``keywords``, text must contain at least one (whole word, case-insensitive) or
 the guardrail trips; empty text passes. With ``deny``, text containing any denied
 word trips. A paraphrase that avoids every keyword defeats both checks, and an
-allowed keyword can appear in an off-topic message.
+allowed keyword can appear in an off-topic message. Measured: ``deny=["bomb"]``
+passes "b0mb", "explosive device" and the Hindi word; ``keywords=["emi"]`` trips on
+"How much is my monthly instalment?" and on the same question in Hindi.
 ~~~
 
 ### `json_output_only`

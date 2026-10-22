@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Liceron
-import { selectStyle } from '../../components/Input';
 import { InlineConfirm } from '../../components/InlineConfirm';
-import { Icon } from '../../components/Icon';
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useId, useRef, useState } from 'react';
+import { formatApiError } from '../../api/errors';
 import { useApi } from '../../api/context';
 import { moduleCredentialTypes } from '../modules/connectors';
 import { useCredentials } from './useCredentials';
@@ -15,11 +14,11 @@ import {
   CredentialType,
   WorkspaceRole,
 } from './types';
-import { Badge, BadgeVariant } from '../../components/Badge';
 import { Button } from '../../components/Button';
 import { Input } from '../../components/Input';
 import { Modal } from '../../components/Modal';
-import { Alert } from '../../components/Alert';
+import { PageHeader, PageLayout } from '../../components/PageHeader';
+import { WorkflowTabs } from '../../components/WorkflowTabs';
 import { useI18n } from '../../i18n';
 
 export function CredentialsView() {
@@ -62,13 +61,20 @@ export function CredentialsView() {
     if (!membersAvailable && activeTab === 'members') setActiveTab('credentials');
   }, [membersAvailable, activeTab]);
   const [modalOpen, setModalOpen] = useState(false);
+  const ids = useId();
+  const panelId = `${ids}-panel`;
+  const addButtonRef = useRef<HTMLButtonElement>(null);
 
   // Transient form state — cleared immediately upon submit/close
   const [formId, setFormId] = useState('');
   const [formType, setFormType] = useState<CredentialType>('api_key');
   const [formProvider, setFormProvider] = useState<CredentialProvider>('openai');
   const [formDesc, setFormDesc] = useState('');
-  const [formSecret, setFormSecret] = useState('');
+  // The secret field is uncontrolled: its value never goes through React state or the DOM value
+  // attribute, only the live input (read once on submit, then cleared) (review minor 1).
+  const secretRef = useRef<HTMLInputElement>(null);
+  const [hasSecret, setHasSecret] = useState(false);
+  const [referenceTaken, setReferenceTaken] = useState(false);
   const [formEnv, setFormEnv] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -86,38 +92,53 @@ export function CredentialsView() {
     setFormType('api_key');
     setFormProvider('openai');
     setFormDesc('');
-    setFormSecret('');
+    setHasSecret(false);
+    setReferenceTaken(false);
     setFormEnv('');
     setActionError(null);
     setModalOpen(true);
   };
 
+  const clearSecret = () => {
+    if (secretRef.current) secretRef.current.value = '';
+    setHasSecret(false);
+  };
+
   const handleCloseModal = () => {
     // SECURITY: Purge transient secret immediately
-    setFormSecret('');
+    clearSecret();
     setModalOpen(false);
   };
 
   const handleCreateCredential = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!formId.trim() || !formSecret.trim()) return;
+    const secret = secretRef.current?.value.trim() ?? '';
+    if (!formId.trim() || !secret) return;
 
     try {
       setSubmitting(true);
       setActionError(null);
+      setReferenceTaken(false);
       await createCredential({
         credential_id: formId.trim(),
         credential_type: formType,
         provider: formProvider,
         description: formDesc.trim(),
-        secret: formSecret.trim(),
+        secret,
         environment_variable: formEnv.trim() || undefined,
       });
-      // SECURITY: Immediate zeroing of secret in state
-      setFormSecret('');
+      // SECURITY: Immediate zeroing of the secret field
+      clearSecret();
       setModalOpen(false);
-    } catch (err: any) {
-      setActionError(err?.message || t('credentials.registerFailed'));
+    } catch (err: unknown) {
+      // One plain-language error, at the top of the dialog (review minor 2).
+      const code = (err as { code?: string })?.code;
+      if (code === 'CREDENTIAL_EXISTS' || (err as { statusCode?: number })?.statusCode === 409) {
+        setReferenceTaken(true);
+        setActionError(t('credentials.errorExists'));
+      } else {
+        setActionError(err instanceof Error || code ? formatApiError(err, t) : t('credentials.registerFailed'));
+      }
     } finally {
       setSubmitting(false);
     }
@@ -139,313 +160,200 @@ export function CredentialsView() {
     }
   };
 
-  const roleBadgeVariant: Record<WorkspaceRole, BadgeVariant> = {
-    admin: 'success',
-    editor: 'info',
-    viewer: 'neutral',
-  };
-
-  const statusBadgeVariant: Record<string, BadgeVariant> = {
-    active: 'success',
-    revoked: 'danger',
-    expired: 'warning',
-  };
+  const statusVariant = (status: string) =>
+    status === 'revoked' || status === 'invalid' ? 'danger' : status === 'expired' ? 'warning' : status === 'active' || status === 'valid' ? 'success' : 'neutral';
+  const roleLabel = (role: WorkspaceRole) => t(`credentialLabels.role.${role}`);
+  const matrix: { key: string; admin: boolean; editor: boolean; viewer: boolean }[] = [
+    { key: 'ui.executeWorkflowsRun', admin: true, editor: true, viewer: false },
+    { key: 'ui.modifyWorkflowsModulesEdit', admin: true, editor: true, viewer: false },
+    { key: 'ui.approvalGatesDecisionApprove', admin: true, editor: false, viewer: false },
+    { key: 'ui.registerDeleteCredentials', admin: true, editor: true, viewer: false },
+    { key: 'ui.revokeCredentialsFailClosed', admin: true, editor: false, viewer: false },
+    { key: 'ui.manageMembersRolesAdmin', admin: true, editor: false, viewer: false },
+  ];
+  const storageHelp = (
+    <details className="resource-help-disclosure" data-testid="credential-storage-help">
+      <summary>{t('ui.zeroSecretVaultArchitecture')}</summary>
+      <p>{t('credentials.storageHelp')}</p>
+    </details>
+  );
+  const tabs = [
+    { id: 'credentials', label: `${t('credentials.tabCredentials')} (${credentials.length})` },
+    ...(membersAvailable ? [{ id: 'members', label: `${t('credentials.tabMembers')} (${members.length})` }] : []),
+    { id: 'matrix', label: t('credentials.tabMatrix') },
+  ];
+  const activeLabel = tabs.find((tab) => tab.id === activeTab)?.label;
 
   return (
-    <div data-testid="credentials-view" style={{ padding: '24px 32px', maxWidth: 1280, margin: '0 auto' }}>
-      {/* Header & Role/Profile Bar */}
-      <div className="studio-mobile-wrap" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 20, rowGap: 12 }}>
-        <div className="studio-mobile-content">
-          <h1 style={{ margin: 0, fontSize: 24, fontWeight: 600 }}>
-            {t('credentials.title', 'Credential References & Access Control')}
-          </h1>
-          <p style={{ margin: '6px 0 0', color: 'var(--text-secondary)', fontSize: 14 }}>
-            {t('credentials.subtitle', 'Workspace-scoped secret references, role-based capabilities, and identity governance.')}
-          </p>
-        </div>
-
-        <div className="studio-mobile-wrap" style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-          <Badge variant="neutral">
-            <Icon name="organisation" /> {t('credentials.workspace', 'Workspace')}: <strong>{myMembership.workspace_id}</strong>
-          </Badge>
-          <Badge variant={myMembership.profile === 'authenticated-shared-service' ? 'warning' : 'neutral'}>
-            <Icon name="globe" /> {myMembership.profile === 'authenticated-shared-service' ? t('ui.sharedService') : t('ui.localOwner')}
-          </Badge>
-          <Badge variant={roleBadgeVariant[myMembership.role]} data-testid="current-role-badge">
-            <Icon name="user" /> {t(`credentialLabels.role.${myMembership.role}`)}
-          </Badge>
-        </div>
-      </div>
-
-      {/* Security & Secrecy Notice */}
-      <Alert
-        variant="info"
-        title={t('ui.zeroSecretVaultArchitecture')}
-        style={{ marginBottom: 20 }}
-      >
-        {t('ui.rawSecretsAreSubmittedTransientlyOverSecureChannelsStoredExclusivelyInTheIsola') + " "}<strong>{t('ui.neverWrittenToLocalstorageBrowserCachesExportArchivesOrExecutionLogs')}</strong>{t('ui.clientComponentsOnlyHoldOpaqueReferences')}
-      </Alert>
-
-      {/* Viewer Restriction Alert */}
-      {isViewer && (
-        <Alert
-          variant="warning"
-          title={t('ui.viewerModeReadOnlyAccess')}
-          style={{ marginBottom: 20 }}
-          data-testid="viewer-restriction-banner"
-        >
-          {t('ui.yourCurrentIdentityHasThe') + " "}<strong>{t('ui.viewer')}</strong> {t('ui.roleInThisWorkspaceYouCanSeeMemberRostersButListingCreatingRevokingOrDeletin')}
-        </Alert>
-      )}
-
-      {error && !isViewer && (
-        <Alert variant="danger" title={t('ui.error')} style={{ marginBottom: 20 }}>
-          {error}
-        </Alert>
-      )}
-
-      {actionError && (
-        <Alert variant="danger" title={t('ui.actionFailed')} style={{ marginBottom: 20 }}>
-          {actionError}
-        </Alert>
-      )}
-
-      {/* Tab Navigation */}
-      <div role="tablist" style={{ display: 'flex', gap: 8, borderBottom: '1px solid var(--border-subtle)', marginBottom: 20 }}>
-        <button
-          data-testid="tab-credentials"
-          role="tab"
-          aria-selected={activeTab === 'credentials'}
-          onClick={() => setActiveTab('credentials')}
-          style={{
-            padding: '10px 16px',
-            border: 'none',
-            background: 'none',
-            cursor: 'pointer',
-            fontSize: 14,
-            fontWeight: 500,
-            borderBottom: activeTab === 'credentials' ? '2px solid var(--accent-primary)' : '2px solid transparent',
-            color: activeTab === 'credentials' ? 'var(--text-primary)' : 'var(--text-secondary)',
-          }}
-        >
-          <Icon name="credentials" /> {t('credentials.tabCredentials', 'Credential References')} ({credentials.length})
-        </button>
-        {membersAvailable && <button
-          data-testid="tab-members"
-          role="tab"
-          aria-selected={activeTab === 'members'}
-          onClick={() => setActiveTab('members')}
-          style={{
-            padding: '10px 16px',
-            border: 'none',
-            background: 'none',
-            cursor: 'pointer',
-            fontSize: 14,
-            fontWeight: 500,
-            borderBottom: activeTab === 'members' ? '2px solid var(--accent-primary)' : '2px solid transparent',
-            color: activeTab === 'members' ? 'var(--text-primary)' : 'var(--text-secondary)',
-          }}
-        >
-          <Icon name="user" /> {t('credentials.tabMembers', 'Workspace Members')} ({members.length})
-        </button>}
-        <button
-          data-testid="tab-matrix"
-          role="tab"
-          aria-selected={activeTab === 'matrix'}
-          onClick={() => setActiveTab('matrix')}
-          style={{
-            padding: '10px 16px',
-            border: 'none',
-            background: 'none',
-            cursor: 'pointer',
-            fontSize: 14,
-            fontWeight: 500,
-            borderBottom: activeTab === 'matrix' ? '2px solid var(--accent-primary)' : '2px solid transparent',
-            color: activeTab === 'matrix' ? 'var(--text-primary)' : 'var(--text-secondary)',
-          }}
-        >
-          <Icon name="approvals" /> {t('credentials.tabMatrix', 'Role & Permission Matrix')}
-        </button>
-      </div>
-
-      {/* Tab 1: Credential References */}
-      {activeTab === 'credentials' && (
-        <div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-            <h3 style={{ margin: 0, fontSize: 16 }}>{t('credentials.registeredCredentials', 'Registered Credential References')}</h3>
+    <PageLayout data-testid="credentials-view">
+      <PageHeader
+        title={t('credentials.title')}
+        metadata={
+          <span>
+            {t('credentials.yourRole')}{' '}
+            <span data-testid="current-role-badge">{roleLabel(myMembership.role)}</span>
+            {' · '}
+            {myMembership.profile === 'authenticated-shared-service' ? t('ui.sharedService') : t('ui.localOwner')}
+          </span>
+        }
+        description={t('credentials.subtitle')}
+        actions={
+          activeTab === 'credentials' ? (
             <Button
+              ref={addButtonRef}
               variant="primary"
               data-testid="register-credential-button"
               disabled={isViewer || loading}
               onClick={handleOpenModal}
             >
-              <Icon name="plus" /> {t('credentials.registerNew', 'Register Credential Reference')}
+              {t('credentials.registerNew')}
             </Button>
-          </div>
+          ) : undefined
+        }
+      />
 
-          {credentials.length === 0 ? (
-            <div
-              style={{
-                padding: 40,
-                textAlign: 'center',
-                backgroundColor: 'var(--bg-surface)',
-                borderRadius: 'var(--radius-lg)',
-                border: '1px dashed var(--border-subtle)',
-              }}
-            >
-              <p style={{ margin: '0 0 12px', color: 'var(--text-secondary)' }}>
-                {t('credentials.noCredentials', 'No credential references registered in this workspace yet.')}
-              </p>
-              {!isViewer && (
-                <Button variant="secondary" onClick={handleOpenModal}>
-                  <Icon name="plus" /> {t('credentials.registerFirst', 'Register First Credential')}
-                </Button>
-              )}
-            </div>
-          ) : (
-            <div style={{ overflowX: 'auto', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-md)' }}>
-              <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: 13 }}>
-                <thead>
-                  <tr style={{ backgroundColor: 'var(--bg-surface-elevated)', borderBottom: '1px solid var(--border-subtle)' }}>
-                    <th style={{ padding: '12px 16px' }}>{t('ui.credentialId')}</th>
-                    <th style={{ padding: '12px 16px' }}>{t('ui.provider')}</th>
-                    <th style={{ padding: '12px 16px' }}>{t('ui.kindType')}</th>
-                    <th style={{ padding: '12px 16px' }}>{t('ui.status')}</th>
-                    <th style={{ padding: '12px 16px' }}>{t('credentials.maskedValue', 'Stored value (masked)')}</th>
-                    <th style={{ padding: '12px 16px' }}>{t('ui.envFallback')}</th>
-                    <th style={{ padding: '12px 16px' }}>{t('ui.verificationStatus')}</th>
-                    <th style={{ padding: '12px 16px', textAlign: 'right' }}>{t('ui.actions')}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {credentials.map((cred) => {
-                    const verification = verificationMap[cred.credential_id];
-                    return (
-                      <tr
-                        key={cred.credential_id}
-                        data-testid={`cred-row-${cred.credential_id}`}
-                        style={{ borderBottom: '1px solid var(--border-subtle)' }}
-                      >
-                        <td style={{ padding: '12px 16px', fontWeight: 600 }}>
-                          <span data-testid={`cred-id-${cred.credential_id}`}>{cred.credential_id}</span>
-                          {cred.description && (
-                            <div style={{ fontSize: 11, color: 'var(--text-secondary)', fontWeight: 400 }}>
-                              {cred.description}
-                            </div>
-                          )}
-                        </td>
-                        <td style={{ padding: '12px 16px' }}>
-                          <Badge variant="neutral">
-                            {cred.provider.toUpperCase()}
-                          </Badge>
-                        </td>
-                        <td style={{ padding: '12px 16px' }}>
-                          <code>{cred.credential_type}</code>
-                        </td>
-                        <td style={{ padding: '12px 16px' }}>
-                          <Badge variant={statusBadgeVariant[cred.status] || 'neutral'} data-testid={`status-${cred.credential_id}`}>
-                            {t(`credentialLabels.status.${cred.status}`, cred.status.toUpperCase())}
-                          </Badge>
-                        </td>
-                        <td style={{ padding: '12px 16px' }}>
-                          <code data-testid={`cred-hint-${cred.credential_id}`}>{cred.masked_hint || '—'}</code>
-                        </td>
-                        <td style={{ padding: '12px 16px', color: 'var(--text-secondary)' }}>
-                          {cred.environment_variable ? <code>${cred.environment_variable}</code> : '—'}
-                        </td>
-                        <td style={{ padding: '12px 16px' }}>
-                          {verification ? (
-                            <div>
-                              <Badge
-                                variant={verification.status === 'valid' ? 'success' : 'danger'}
-                                data-testid={`verification-badge-${cred.credential_id}`}
-                              >
-                                {t(`credentialLabels.status.${verification.status}`, verification.status.toUpperCase())}
-                              </Badge>
-                              <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 4 }}>
-                                {verification.message}
-                              </div>
-                            </div>
-                          ) : cred.last_verified_at ? (
-                            <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
-                              {t('ui.verified') + " "}{new Date(cred.last_verified_at * 1000).toLocaleTimeString(locale)}
+      <div className="resource-notices">
+        {isViewer && (
+          <div className="inline-notice inline-notice--warning" data-testid="viewer-restriction-banner" role="note">
+            <strong className="inline-notice-title">{t('ui.viewerModeReadOnlyAccess')}</strong>
+            {t('credentials.viewerHelp')}
+          </div>
+        )}
+        {error && !isViewer && !modalOpen && (
+          <div role="alert" className="inline-notice inline-notice--danger">
+            <span>{error}</span>
+          </div>
+        )}
+        {actionError && !modalOpen && (
+          <div role="alert" className="inline-notice inline-notice--danger">
+            <span>{actionError}</span>
+          </div>
+        )}
+      </div>
+
+      <WorkflowTabs tabs={tabs} active={activeTab} onChange={(id) => setActiveTab(id as typeof activeTab)} label={t('credentials.tabsLabel')} panelId={panelId} />
+
+      <div role="tabpanel" id={panelId} aria-label={activeLabel} tabIndex={0} style={{ minWidth: 0 }}>
+        {activeTab === 'credentials' && (
+          <>
+            <div style={{ marginBottom: 16 }}>{storageHelp}</div>
+            {credentials.length === 0 ? (
+              <p className="inspection-empty">{t('credentials.noCredentials')}</p>
+            ) : (
+              <div className="inspection-table-scroll" role="region" aria-label={t('credentials.registeredCredentials')} tabIndex={0}>
+                <table className="inspection-table settings-table settings-table--credentials settings-table--stack" role="table">
+                  <caption className="studio-sr-only">{t('credentials.registeredCredentials')}</caption>
+                  <thead>
+                    <tr role="row">
+                      <th role="columnheader" scope="col">{t('ui.credentialId')}</th>
+                      <th role="columnheader" scope="col">{t('ui.kindType')}</th>
+                      <th role="columnheader" scope="col">{t('ui.status')}</th>
+                      <th role="columnheader" scope="col">{t('credentials.maskedValue')}</th>
+                      <th role="columnheader" scope="col">{t('ui.envFallback')}</th>
+                      <th role="columnheader" scope="col">{t('ui.verificationStatus')}</th>
+                      <th role="columnheader" scope="col"><span className="studio-sr-only">{t('ui.actions')}</span></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {credentials.map((cred) => {
+                      const verification = verificationMap[cred.credential_id];
+                      return (
+                        <tr role="row" key={cred.credential_id} data-testid={`cred-row-${cred.credential_id}`}>
+                          <td role="cell" data-label={t('ui.credentialId')}>
+                            <code data-testid={`cred-id-${cred.credential_id}`} className="settings-table-name">{cred.credential_id}</code>
+                            {cred.description && <div className="resource-help">{cred.description}</div>}
+                          </td>
+                          <td role="cell" data-label={t('ui.kindType')}>
+                            <code>{cred.credential_type}</code>
+                            <div className="resource-help">{t(`credentialLabels.provider.${cred.provider}`, cred.provider)}</div>
+                          </td>
+                          <td role="cell" data-label={t('ui.status')}>
+                            <span className={`run-status run-status--${statusVariant(cred.status)}`} data-testid={`status-${cred.credential_id}`}>
+                              <span aria-hidden="true">●</span> {t(`credentialLabels.status.${cred.status}`, cred.status)}
                             </span>
-                          ) : (
-                            <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>{t('ui.notYetChecked')}</span>
-                          )}
-                        </td>
-                        <td style={{ padding: '12px 16px', textAlign: 'right' }}>
-                          <div style={{ display: 'inline-flex', gap: 6 }}>
-                            <Button
-                              variant="secondary"
-                              size="sm"
-                              data-testid={`verify-cred-${cred.credential_id}`}
-                              onClick={() => verifyCredential(cred.credential_id)}
-                            >
-                              <Icon name="check" /> {t('ui.verify')}
-                            </Button>
-                            {isAdmin && cred.status !== 'revoked' && (
-                              <InlineConfirm key={`revoke-${cred.credential_id}`} consequence={t('confirmation.revokeCredential')}>
+                          </td>
+                          <td role="cell" data-label={t('credentials.maskedValue')}>
+                            <code data-testid={`cred-hint-${cred.credential_id}`}>{cred.masked_hint || '—'}</code>
+                          </td>
+                          <td role="cell" data-label={t('ui.envFallback')}>{cred.environment_variable ? <code>${cred.environment_variable}</code> : '—'}</td>
+                          <td role="cell" data-label={t('ui.verificationStatus')}>
+                            {verification ? (
+                              <>
+                                <span className={`run-status run-status--${statusVariant(verification.status)}`} data-testid={`verification-badge-${cred.credential_id}`}>
+                                  <span aria-hidden="true">●</span> {t(`credentialLabels.status.${verification.status}`, verification.status)}
+                                </span>
+                                <div className="resource-help">{verification.message}</div>
+                              </>
+                            ) : cred.last_verified_at ? (
+                              <span className="resource-help">
+                                {t('ui.verified') + ' '}
+                                {new Date(cred.last_verified_at * 1000).toLocaleTimeString(locale)}
+                              </span>
+                            ) : (
+                              <span className="resource-help">{t('ui.notYetChecked')}</span>
+                            )}
+                          </td>
+                          <td role="cell" data-label={t('ui.actions')}>
+                            <div className="settings-row-actions">
+                              <Button
+                                size="sm"
+                                data-testid={`verify-cred-${cred.credential_id}`}
+                                aria-label={`${t('ui.verify')} ${cred.credential_id}`}
+                                onClick={() => verifyCredential(cred.credential_id)}
+                              >
+                                {t('ui.verify')}
+                              </Button>
+                              {isAdmin && cred.status !== 'revoked' && (
+                                <InlineConfirm key={`revoke-${cred.credential_id}`} consequence={t('confirmation.revokeCredential')}>
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="workflow-danger-action"
+                                    data-testid={`revoke-cred-${cred.credential_id}`}
+                                    aria-label={`${t('ui.revoke')} ${cred.credential_id}`}
+                                    onClick={() => revokeCredential(cred.credential_id)}
+                                  >
+                                    {t('ui.revoke')}
+                                  </Button>
+                                </InlineConfirm>
+                              )}
+                              <InlineConfirm key={`delete-${cred.credential_id}`} consequence={t('confirmation.deleteCredential')}>
                                 <Button
-                                  variant="secondary"
+                                  variant="ghost"
                                   size="sm"
-                                  data-testid={`revoke-cred-${cred.credential_id}`}
-                                  onClick={() => revokeCredential(cred.credential_id)}
+                                  className="workflow-danger-action"
+                                  data-testid={`delete-cred-${cred.credential_id}`}
+                                  aria-label={`${t('ui.delete')} ${cred.credential_id}`}
+                                  disabled={isViewer}
+                                  onClick={() => deleteCredential(cred.credential_id)}
                                 >
-                                  <Icon name="stop" /> {t('ui.revoke')}
+                                  {t('ui.delete')}
                                 </Button>
                               </InlineConfirm>
-                            )}
-                            <InlineConfirm key={`delete-${cred.credential_id}`} consequence={t('confirmation.deleteCredential')}>
-                              <Button
-                                variant="danger"
-                                size="sm"
-                                data-testid={`delete-cred-${cred.credential_id}`}
-                                disabled={isViewer}
-                                onClick={() => deleteCredential(cred.credential_id)}
-                              >
-                                <Icon name="trash" /> {t('ui.delete')}
-                              </Button>
-                            </InlineConfirm>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-      )}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </>
+        )}
 
-      {/* Tab 2: Workspace Members */}
-      {membersAvailable && activeTab === 'members' && (
-        <div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 20 }}>
-            <div>
-              <h3 style={{ margin: 0, fontSize: 16 }}>{t('ui.workspaceTeamMembership')}</h3>
-              <p style={{ margin: '4px 0 0', fontSize: 13, color: 'var(--text-secondary)' }}>
-                {t('ui.principalsAuthorizedToOperateWithinWorkspace') + " "}<code>{myMembership.workspace_id}</code>.
-              </p>
-            </div>
-          </div>
-
-          {isAdmin && (
-            <div
-              style={{
-                padding: 16,
-                marginBottom: 20,
-                backgroundColor: 'var(--bg-surface-elevated)',
-                borderRadius: 'var(--radius-md)',
-                border: '1px solid var(--border-subtle)',
-              }}
-            >
-              <h4 style={{ margin: '0 0 12px', fontSize: 14 }}>{t('ui.addPrincipalToWorkspace')}</h4>
-              <form onSubmit={handleAddMember} style={{ display: 'flex', gap: 12, alignItems: 'flex-end' }}>
-                <div style={{ flex: 1 }}>
-                  <Input
-                    label={t('ui.principalUserId')}
+        {membersAvailable && activeTab === 'members' && (
+          <>
+            <p className="knowledge-panel-help">
+              {t('ui.principalsAuthorizedToOperateWithinWorkspace') + ' '}
+              <code>{myMembership.workspace_id}</code>
+            </p>
+            {isAdmin && (
+              <form onSubmit={handleAddMember} className="resource-inline-form" style={{ marginBottom: 24 }} aria-label={t('ui.addPrincipalToWorkspace')}>
+                <div className="resource-field">
+                  <label htmlFor={`${ids}-principal`}>{t('ui.principalUserId')}</label>
+                  <input
+                    id={`${ids}-principal`}
                     value={newPrincipalId}
                     onChange={(e) => setNewPrincipalId(e.target.value)}
                     placeholder={t('ui.eGDevSarahOrSrvIndexer')}
@@ -453,285 +361,207 @@ export function CredentialsView() {
                     required
                   />
                 </div>
-                <div style={{ width: 180 }}>
-                  <label style={{ display: 'block', fontSize: 12, fontWeight: 500, marginBottom: 4 }}>{t('ui.role')}</label>
-                  <select
-                    value={newRole}
-                    onChange={(e) => setNewRole(e.target.value as WorkspaceRole)}
-                    data-testid="new-member-role-select"
-                    style={{
-                      width: '100%',
-                      padding: '8px 10px',
-                      borderRadius: 'var(--radius-md)',
-                      backgroundColor: 'var(--bg-surface)',
-                      border: '1px solid var(--border-subtle)',
-                      color: 'var(--text-primary)',
-                      fontSize: 13,
-                    }}
-                  >
+                <div className="resource-field" style={{ flex: '0 1 180px' }}>
+                  <label htmlFor={`${ids}-role`}>{t('ui.role')}</label>
+                  <select id={`${ids}-role`} value={newRole} onChange={(e) => setNewRole(e.target.value as WorkspaceRole)} data-testid="new-member-role-select">
                     <option value="admin">{t('ui.admin')}</option>
                     <option value="editor">{t('ui.editor')}</option>
                     <option value="viewer">{t('ui.viewer')}</option>
                   </select>
                 </div>
-                <Button
-                  type="submit"
-                  variant="primary"
-                  data-testid="add-member-button"
-                  disabled={memberSubmitting || !newPrincipalId.trim()}
-                >
-                  <Icon name="plus" /> {t('ui.addMember')}
+                <Button type="submit" variant="primary" data-testid="add-member-button" loading={memberSubmitting} disabled={!newPrincipalId.trim()}>
+                  {t('ui.addMember')}
                 </Button>
               </form>
+            )}
+            <div className="inspection-table-scroll" role="region" aria-label={t('credentials.tabMembers')} tabIndex={0}>
+              <table className="inspection-table settings-table settings-table--stack" role="table">
+                <caption className="studio-sr-only">{t('credentials.tabMembers')}</caption>
+                <thead>
+                  <tr role="row">
+                    <th role="columnheader" scope="col">{t('ui.principalId')}</th>
+                    <th role="columnheader" scope="col">{t('ui.role')}</th>
+                    <th role="columnheader" scope="col">{t('ui.permissions')}</th>
+                    <th role="columnheader" scope="col">{t('ui.joinedAt')}</th>
+                    {isAdmin && <th role="columnheader" scope="col"><span className="studio-sr-only">{t('ui.actions')}</span></th>}
+                  </tr>
+                </thead>
+                <tbody>
+                  {members.map((member) => (
+                    <tr role="row" key={member.principal_id} data-testid={`member-row-${member.principal_id}`}>
+                      <td role="cell" data-label={t('ui.principalId')}>
+                        <code data-testid={`member-id-${member.principal_id}`}>{member.principal_id}</code>
+                        {member.principal_id === myMembership.principal_id && <span className="resource-help"> {t('ui.you2')}</span>}
+                      </td>
+                      <td role="cell" data-label={t('ui.role')}>{roleLabel(member.role)}</td>
+                      <td role="cell" data-label={t('ui.permissions')} className="resource-help">{ROLE_DEFINITIONS[member.role].permissions.join(', ')}</td>
+                      <td role="cell" data-label={t('ui.joinedAt')}>{new Date(member.joined_at * 1000).toLocaleDateString(locale)}</td>
+                      {isAdmin && (
+                        <td role="cell" data-label={t('ui.actions')}>
+                          <div className="settings-row-actions">
+                            <select
+                              value={member.role}
+                              aria-label={`${t('ui.role')} ${member.principal_id}`}
+                              onChange={(e) => updateMemberRole(member.principal_id, e.target.value as WorkspaceRole)}
+                              data-testid={`role-select-${member.principal_id}`}
+                            >
+                              <option value="admin">{t('ui.admin')}</option>
+                              <option value="editor">{t('ui.editor')}</option>
+                              <option value="viewer">{t('ui.viewer')}</option>
+                            </select>
+                            <InlineConfirm key={member.principal_id} consequence={t('confirmation.removeMember')}>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="workflow-danger-action"
+                                data-testid={`remove-member-${member.principal_id}`}
+                                onClick={() => removeMember(member.principal_id)}
+                              >
+                                {t('ui.remove')}
+                              </Button>
+                            </InlineConfirm>
+                          </div>
+                        </td>
+                      )}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
-          )}
+          </>
+        )}
 
-          <div style={{ overflowX: 'auto', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-md)' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: 13 }}>
+        {activeTab === 'matrix' && (
+          <div className="inspection-table-scroll" role="region" aria-label={t('ui.authoritativeRolePermissionMatrix')} tabIndex={0}>
+            <table className="inspection-table settings-table settings-table--stack" role="table">
+              <caption className="studio-sr-only">{t('ui.authoritativeRolePermissionMatrix')}</caption>
               <thead>
-                <tr style={{ backgroundColor: 'var(--bg-surface-elevated)', borderBottom: '1px solid var(--border-subtle)' }}>
-                  <th style={{ padding: '12px 16px' }}>{t('ui.principalId')}</th>
-                  <th style={{ padding: '12px 16px' }}>{t('ui.role')}</th>
-                  <th style={{ padding: '12px 16px' }}>{t('ui.permissions')}</th>
-                  <th style={{ padding: '12px 16px' }}>{t('ui.joinedAt')}</th>
-                  {isAdmin && <th style={{ padding: '12px 16px', textAlign: 'right' }}>{t('ui.actions')}</th>}
+                <tr role="row">
+                  <th role="columnheader" scope="col">{t('ui.capabilityAction')}</th>
+                  <th role="columnheader" scope="col">{t('ui.admin')}</th>
+                  <th role="columnheader" scope="col">{t('ui.editor')}</th>
+                  <th role="columnheader" scope="col">{t('ui.viewer')}</th>
                 </tr>
               </thead>
               <tbody>
-                {members.map((member) => (
-                  <tr
-                    key={member.principal_id}
-                    data-testid={`member-row-${member.principal_id}`}
-                    style={{ borderBottom: '1px solid var(--border-subtle)' }}
-                  >
-                    <td style={{ padding: '12px 16px', fontWeight: 600 }}>
-                      <span data-testid={`member-id-${member.principal_id}`}>{member.principal_id}</span>
-                      {member.principal_id === myMembership.principal_id && (
-                        <span style={{ marginLeft: 8, fontSize: 11, color: 'var(--accent-primary)' }}>{t('ui.you2')}</span>
-                      )}
-                    </td>
-                    <td style={{ padding: '12px 16px' }}>
-                      <Badge variant={roleBadgeVariant[member.role]}>{t(`credentialLabels.roleUpper.${member.role}`)}</Badge>
-                    </td>
-                    <td style={{ padding: '12px 16px', color: 'var(--text-secondary)' }}>
-                      {ROLE_DEFINITIONS[member.role].permissions.join(', ')}
-                    </td>
-                    <td style={{ padding: '12px 16px', color: 'var(--text-secondary)' }}>
-                      {new Date(member.joined_at * 1000).toLocaleDateString(locale)}
-                    </td>
-                    {isAdmin && (
-                      <td style={{ padding: '12px 16px', textAlign: 'right' }}>
-                        <div style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
-                          <select
-                            value={member.role}
-                            onChange={(e) => updateMemberRole(member.principal_id, e.target.value as WorkspaceRole)}
-                            data-testid={`role-select-${member.principal_id}`}
-                            style={{
-                              padding: '4px 8px',
-                              borderRadius: 'var(--radius-sm)',
-                              backgroundColor: 'var(--bg-surface)',
-                              border: '1px solid var(--border-subtle)',
-                              fontSize: 12,
-                              color: 'var(--text-primary)',
-                            }}
-                          >
-                            <option value="admin">{t('ui.admin')}</option>
-                            <option value="editor">{t('ui.editor')}</option>
-                            <option value="viewer">{t('ui.viewer')}</option>
-                          </select>
-                          <InlineConfirm key={member.principal_id} consequence={t('confirmation.removeMember')} >
-                            <Button
-                              variant="danger"
-                              size="sm"
-                              data-testid={`remove-member-${member.principal_id}`}
-                              onClick={() => removeMember(member.principal_id)}
-                            >
-                              {t('ui.remove')}
-                            </Button>
-                          </InlineConfirm>
-                        </div>
+                {matrix.map((row) => (
+                  <tr role="row" key={row.key}>
+                    <th role="rowheader" scope="row" style={{ fontWeight: 500, color: 'var(--text-primary)' }}>{t(row.key)}</th>
+                    {(['admin', 'editor', 'viewer'] as const).map((role) => (
+                      <td role="cell" data-label={t(`ui.${role}`)} key={role} style={row[role] ? undefined : { color: 'var(--text-muted)' }}>
+                        {row[role] ? t('ui.yes') : t('ui.denied')}
                       </td>
-                    )}
+                    ))}
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
-        </div>
-      )}
+        )}
+      </div>
 
-      {/* Tab 3: Security & Role Matrix */}
-      {activeTab === 'matrix' && (
-        <div>
-          <h3 style={{ margin: '0 0 16px', fontSize: 16 }}>{t('ui.authoritativeRolePermissionMatrix')}</h3>
-          <div style={{ overflowX: 'auto', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-md)' }}>
-            <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: 13 }}>
-              <thead>
-                <tr style={{ backgroundColor: 'var(--bg-surface-elevated)', borderBottom: '1px solid var(--border-subtle)' }}>
-                  <th style={{ padding: '12px 16px' }}>{t('ui.capabilityAction')}</th>
-                  <th style={{ padding: '12px 16px' }}>{t('ui.admin')}</th>
-                  <th style={{ padding: '12px 16px' }}>{t('ui.editor')}</th>
-                  <th style={{ padding: '12px 16px' }}>{t('ui.viewer')}</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr style={{ borderBottom: '1px solid var(--border-subtle)' }}>
-                  <td style={{ padding: '12px 16px', fontWeight: 500 }}>{t('ui.executeWorkflowsRun')}</td>
-                  <td style={{ padding: '12px 16px' }}><Icon name="check" /> {t('ui.yes')}</td>
-                  <td style={{ padding: '12px 16px' }}><Icon name="check" /> {t('ui.yes')}</td>
-                  <td style={{ padding: '12px 16px', color: 'var(--text-muted)' }}><Icon name="close" /> {t('ui.denied')}</td>
-                </tr>
-                <tr style={{ borderBottom: '1px solid var(--border-subtle)' }}>
-                  <td style={{ padding: '12px 16px', fontWeight: 500 }}>{t('ui.modifyWorkflowsModulesEdit')}</td>
-                  <td style={{ padding: '12px 16px' }}><Icon name="check" /> {t('ui.yes')}</td>
-                  <td style={{ padding: '12px 16px' }}><Icon name="check" /> {t('ui.yes')}</td>
-                  <td style={{ padding: '12px 16px', color: 'var(--text-muted)' }}><Icon name="close" /> {t('ui.denied')}</td>
-                </tr>
-                <tr style={{ borderBottom: '1px solid var(--border-subtle)' }}>
-                  <td style={{ padding: '12px 16px', fontWeight: 500 }}>{t('ui.approvalGatesDecisionApprove')}</td>
-                  <td style={{ padding: '12px 16px' }}><Icon name="check" /> {t('ui.yes')}</td>
-                  <td style={{ padding: '12px 16px', color: 'var(--text-muted)' }}><Icon name="close" /> {t('ui.denied')}</td>
-                  <td style={{ padding: '12px 16px', color: 'var(--text-muted)' }}><Icon name="close" /> {t('ui.denied')}</td>
-                </tr>
-                <tr style={{ borderBottom: '1px solid var(--border-subtle)' }}>
-                  <td style={{ padding: '12px 16px', fontWeight: 500 }}>{t('ui.registerDeleteCredentials')}</td>
-                  <td style={{ padding: '12px 16px' }}><Icon name="check" /> {t('ui.yes')}</td>
-                  <td style={{ padding: '12px 16px' }}><Icon name="check" /> {t('ui.yes')}</td>
-                  <td style={{ padding: '12px 16px', color: 'var(--text-muted)' }}><Icon name="close" /> {t('ui.denied')}</td>
-                </tr>
-                <tr style={{ borderBottom: '1px solid var(--border-subtle)' }}>
-                  <td style={{ padding: '12px 16px', fontWeight: 500 }}>{t('ui.revokeCredentialsFailClosed')}</td>
-                  <td style={{ padding: '12px 16px' }}><Icon name="check" /> {t('ui.yes')}</td>
-                  <td style={{ padding: '12px 16px', color: 'var(--text-muted)' }}><Icon name="close" /> {t('ui.denied')}</td>
-                  <td style={{ padding: '12px 16px', color: 'var(--text-muted)' }}><Icon name="close" /> {t('ui.denied')}</td>
-                </tr>
-                <tr>
-                  <td style={{ padding: '12px 16px', fontWeight: 500 }}>{t('ui.manageMembersRolesAdmin')}</td>
-                  <td style={{ padding: '12px 16px' }}><Icon name="check" /> {t('ui.yes')}</td>
-                  <td style={{ padding: '12px 16px', color: 'var(--text-muted)' }}><Icon name="close" /> {t('ui.denied')}</td>
-                  <td style={{ padding: '12px 16px', color: 'var(--text-muted)' }}><Icon name="close" /> {t('ui.denied')}</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {/* Register Credential Modal */}
       <Modal
         open={modalOpen}
         onClose={handleCloseModal}
         title={t('ui.registerCredentialReference')}
+        maxWidth={640}
+        footer={
+          <>
+            <Button type="button" variant="ghost" onClick={handleCloseModal}>
+              {t('ui.cancel')}
+            </Button>
+            <Button
+              type="submit"
+              form={`${ids}-credential-form`}
+              variant="primary"
+              data-testid="submit-credential-button"
+              loading={submitting}
+              disabled={!formId.trim() || !hasSecret}
+            >
+              {t('ui.registerSecurely')}
+            </Button>
+          </>
+        }
       >
-        <form onSubmit={handleCreateCredential} data-testid="register-credential-form">
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-            <Input
-              label={t('ui.credentialId')}
-              value={formId}
-              onChange={(e) => setFormId(e.target.value)}
-              placeholder={t('ui.eGOpenaiProdOrWhatsappApi')}
-              helperText={t('ui.credentialIdHelp')}
-              data-testid="cred-id-input"
-              required
-            />
-
-            <div>
-              <label style={{ display: 'block', fontSize: 12, fontWeight: 500, marginBottom: 4 }}>
-                {t('ui.credentialKindType')}
-              </label>
-              <select
-                value={formType}
-                onChange={(e) => setFormType(e.target.value as CredentialType)}
-                data-testid="cred-type-select"
-                style={{
-                  width: '100%',
-                  ...selectStyle,
-                }}
-              >
-                {CREDENTIAL_TYPES.map((kind) => (
-                  <option key={kind.id} value={kind.id}>
-                    {t(`credentialLabels.type.${kind.id}`, kind.label)}
-                  </option>
-                ))}
-                {extraTypes.map((m) => (
-                  <option key={m} value={m}>
-                    {m}
-                  </option>
-                ))}
-              </select>
+        <form id={`${ids}-credential-form`} onSubmit={handleCreateCredential} data-testid="register-credential-form" className="resource-form" style={{ gap: 16 }}>
+          {actionError && (
+            <div role="alert" id={`${ids}-form-error`} className="inline-notice inline-notice--danger" data-testid="credential-form-error">
+              <span>{actionError}</span>
             </div>
-
-            <div>
-              <label style={{ display: 'block', fontSize: 12, fontWeight: 500, marginBottom: 4 }}>
-                {t('ui.serviceProvider')}
-              </label>
-              <select
-                value={formProvider}
-                onChange={(e) => setFormProvider(e.target.value as CredentialProvider)}
-                data-testid="cred-provider-select"
-                style={{
-                  width: '100%',
-                  ...selectStyle,
-                }}
-              >
-                {CREDENTIAL_PROVIDERS.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {t(`credentialLabels.provider.${p.id}`, p.label)}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <Input
-              label={t('ui.description')}
-              value={formDesc}
-              onChange={(e) => setFormDesc(e.target.value)}
-              placeholder={t('ui.scopePurposeOrEnvironment')}
-              data-testid="cred-desc-input"
-            />
-
-            <Input
-              label={t('ui.secretValueApiKeyToken')}
+          )}
+          {storageHelp}
+          <Input
+            label={t('ui.credentialId')}
+            value={formId}
+            onChange={(e) => {
+              setFormId(e.target.value);
+              setReferenceTaken(false);
+            }}
+            aria-invalid={referenceTaken || undefined}
+            aria-describedby={referenceTaken ? `${ids}-form-error` : undefined}
+            placeholder={t('ui.eGOpenaiProdOrWhatsappApi')}
+            helperText={t('ui.credentialIdHelp')}
+            data-testid="cred-id-input"
+            required
+          />
+          <div className="resource-field">
+            <label htmlFor={`${ids}-type`}>{t('ui.credentialKindType')}</label>
+            <select id={`${ids}-type`} value={formType} onChange={(e) => setFormType(e.target.value as CredentialType)} data-testid="cred-type-select">
+              {CREDENTIAL_TYPES.map((kind) => (
+                <option key={kind.id} value={kind.id}>
+                  {t(`credentialLabels.type.${kind.id}`, kind.label)}
+                </option>
+              ))}
+              {extraTypes.map((m) => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="resource-field">
+            <label htmlFor={`${ids}-provider`}>{t('ui.serviceProvider')}</label>
+            <select id={`${ids}-provider`} value={formProvider} onChange={(e) => setFormProvider(e.target.value as CredentialProvider)} data-testid="cred-provider-select">
+              {CREDENTIAL_PROVIDERS.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {t(`credentialLabels.provider.${p.id}`, p.label)}
+                </option>
+              ))}
+            </select>
+          </div>
+          <Input
+            label={`${t('ui.description')} (${t('credentials.optional')})`}
+            value={formDesc}
+            onChange={(e) => setFormDesc(e.target.value)}
+            placeholder={t('ui.scopePurposeOrEnvironment')}
+            data-testid="cred-desc-input"
+          />
+          <div className="resource-field">
+            <label htmlFor={`${ids}-secret`}>{t('ui.secretValueApiKeyToken')}</label>
+            <input
+              ref={secretRef}
+              id={`${ids}-secret`}
               type="password"
-              value={formSecret}
-              onChange={(e) => setFormSecret(e.target.value)}
+              autoComplete="off"
+              spellCheck={false}
+              onChange={(e) => setHasSecret(e.target.value.trim().length > 0)}
               placeholder={t('ui.pasteRawSecretToken')}
-              helperText={t('ui.secretHelp')}
+              aria-describedby={`${ids}-secret-help`}
               data-testid="cred-secret-input"
               required
             />
-
-            <Input
-              label={t('ui.environmentVariableFallbackOptional')}
-              value={formEnv}
-              onChange={(e) => setFormEnv(e.target.value)}
-              placeholder={t('ui.eGOpenaiApiKey')}
-              helperText={t('ui.envHelp')}
-              data-testid="cred-env-input"
-            />
-
-            {actionError && (
-              <div style={{ color: 'var(--danger)', fontSize: 12 }}>
-                {actionError}
-              </div>
-            )}
-
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 10 }}>
-              <Button type="button" variant="secondary" onClick={handleCloseModal}>
-                {t('ui.cancel')}
-              </Button>
-              <Button
-                type="submit"
-                variant="primary"
-                data-testid="submit-credential-button"
-                disabled={submitting || !formId.trim() || !formSecret.trim()}
-              >
-                {submitting ? t('ui.registering') : t('ui.registerSecurely')}
-              </Button>
-            </div>
+            <span id={`${ids}-secret-help`} className="resource-help">{t('ui.secretHelp')}</span>
           </div>
+          <Input
+            label={t('ui.environmentVariableFallbackOptional')}
+            value={formEnv}
+            onChange={(e) => setFormEnv(e.target.value)}
+            placeholder={t('ui.eGOpenaiApiKey')}
+            helperText={t('ui.envHelp')}
+            data-testid="cred-env-input"
+          />
         </form>
       </Modal>
-    </div>
+    </PageLayout>
   );
 }

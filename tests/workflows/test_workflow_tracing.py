@@ -73,9 +73,12 @@ async def test_run_node_spans_and_attributes(exporter: InMemorySpanExporter) -> 
     result = await WorkflowEngine(spec, registry()).run({}, workflow_run_id="run-1")
     assert result.status == "completed"
 
-    run = one(exporter, "workflow pipeline")
+    run = one(exporter, "invoke_workflow pipeline")
     assert run.attributes is not None
-    assert run.attributes["gen_ai.operation.name"] == "workflow"
+    assert run.attributes["gen_ai.operation.name"] == "invoke_workflow"
+    assert run.attributes["gen_ai.workflow.name"] == "pipeline"
+    # Deprecated alias of the operation value used before 0.4.0 (removed in 0.5.0).
+    assert run.attributes["nexura.operation.name"] == "workflow"
     assert run.attributes["nexura.workflow.run_id"] == "run-1"
     assert run.attributes["nexura.workflow.status"] == "completed"
     assert run.attributes["nexura.workflow.step_count"] == 2
@@ -126,7 +129,7 @@ async def test_failing_node_marks_node_and_workflow_as_error(
     with pytest.raises(WorkflowExecutionError):
         await WorkflowEngine(spec, reg).run({})
     node = one(exporter, "workflow.node b")
-    run = one(exporter, "workflow failing")
+    run = one(exporter, "invoke_workflow failing")
     assert node.status.status_code is StatusCode.ERROR
     assert any(e.name == "exception" for e in node.events)
     assert run.status.status_code is StatusCode.ERROR
@@ -143,7 +146,7 @@ async def test_approval_pause_and_resume(exporter: InMemorySpanExporter) -> None
     paused = await engine.run({}, workflow_run_id="g1")
     assert paused.status == "paused" and paused.pending_approval is not None
 
-    run = one(exporter, "workflow gated")
+    run = one(exporter, "invoke_workflow gated")
     assert run.status.status_code is not StatusCode.ERROR
     assert run.attributes is not None and run.attributes["nexura.workflow.status"] == "paused"
     gate = one(exporter, "workflow.node n2")
@@ -155,7 +158,7 @@ async def test_approval_pause_and_resume(exporter: InMemorySpanExporter) -> None
     exporter.clear()
     done = await engine.resume("g1", paused.pending_approval.approval_id, actor_role="admin")
     assert done.status == "completed"
-    resumed = one(exporter, "workflow gated")
+    resumed = one(exporter, "invoke_workflow gated")
     assert resumed.attributes is not None
     assert resumed.attributes["nexura.workflow.operation"] == "resume"
     assert resumed.attributes["nexura.workflow.status"] == "completed"
@@ -173,7 +176,7 @@ async def test_rejected_approval_has_a_resume_span(exporter: InMemorySpanExporte
         "g2", paused.pending_approval.approval_id, decision="reject", actor_role="admin"
     )
     assert rejected.status == "rejected"
-    span = one(exporter, "workflow gated")
+    span = one(exporter, "invoke_workflow gated")
     assert span.attributes is not None
     assert span.attributes["nexura.workflow.status"] == "rejected"
 
@@ -191,14 +194,14 @@ async def test_interrupt_pause_resume_interrupt_and_fork(exporter: InMemorySpanE
     exporter.clear()
     done = await engine.resume_interrupt("i1", paused.interrupt["interrupt_id"], "Asha")
     assert done.status == "completed"
-    run = one(exporter, "workflow asking")
+    run = one(exporter, "invoke_workflow asking")
     assert run.attributes is not None
     assert run.attributes["nexura.workflow.operation"] == "resume_interrupt"
 
     exporter.clear()
     forked = await engine.fork("i1", 0, new_run_id="i1-fork")
     assert forked.status == "paused"
-    fork = one(exporter, "workflow asking")
+    fork = one(exporter, "invoke_workflow asking")
     assert fork.attributes is not None
     assert fork.attributes["nexura.workflow.operation"] == "fork"
     assert fork.attributes["nexura.workflow.run_id"] == "i1-fork"
@@ -212,9 +215,9 @@ async def test_sub_workflow_nests_under_its_parent_node(exporter: InMemorySpanEx
         WorkflowNode(id="after", handler="two"),
     )
     await WorkflowEngine(spec, registry(), store=MemoryWorkflowStore()).run({})
-    parent_run = one(exporter, "workflow parent")
+    parent_run = one(exporter, "invoke_workflow parent")
     sub_node = one(exporter, "workflow.node sub")
-    child_run = one(exporter, "workflow child")
+    child_run = one(exporter, "invoke_workflow child")
     child_node = one(exporter, "workflow.node c1")
     assert parent_of(sub_node) == parent_run.context.span_id
     assert parent_of(child_run) == sub_node.context.span_id
@@ -305,7 +308,7 @@ async def test_capture_content_records_redacted_state() -> None:
         )
     finally:
         tracing.uninstrument()
-    run = one(memory, "workflow plain")
+    run = one(memory, "invoke_workflow plain")
     event = next(e for e in run.events if e.name == "nexura.workflow.input")
     assert event.attributes is not None
     state = str(event.attributes["nexura.workflow.state"])

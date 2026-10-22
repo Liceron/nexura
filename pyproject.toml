@@ -71,6 +71,7 @@ build-backend = "hatchling.build"
 members = [
     "packages/nexura-agents",
     "packages/nexura-connectors",
+    "packages/nexura-guardrails",
     "packages/nexura-postgres",
     "packages/nexura-qdrant",
     "packages/nexura-sandbox",
@@ -83,6 +84,7 @@ exclude = ["enterprise"]
 [tool.uv.sources]
 nexura-agents = { workspace = true }
 nexura-connectors = { workspace = true }
+nexura-guardrails = { workspace = true }
 nexura-postgres = { workspace = true }
 nexura-qdrant = { workspace = true }
 nexura-sandbox = { workspace = true }
@@ -109,9 +111,10 @@ exclude = [
 dev = [
     # Separate packages under packages/ that depend on this one (the 15 SaaS connectors, the
     # PostgreSQL and Qdrant backends, the WASI/bubblewrap/gVisor sandbox backends with
-    # wasmtime, the Studio launcher, the Vertex AI provider); installed for development so the
-    # whole suite runs.
+    # wasmtime, the Studio launcher, the Vertex AI provider, the guardrails package); installed
+    # for development so the whole suite runs.
     "nexura-connectors",
+    "nexura-guardrails[yaml]",
     "nexura-postgres",
     "nexura-qdrant",
     "nexura-sandbox[wasi]",

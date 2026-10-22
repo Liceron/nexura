@@ -67,8 +67,12 @@ class TriggerManager:
         event: WebhookEvent,
         *,
         current_time: float | None = None,
+        refuse_legacy: bool = False,
     ) -> tuple[bool, DurableTriggerJob]:
         """Verify webhook signature, enforce replay window, deduplicate, and enqueue job.
+
+        ``refuse_legacy`` refuses v1 signatures even for an endpoint that allows them (remote
+        single-operator mode does).
 
         Returns:
             Tuple of (is_new, job). If is_new is False, the webhook was a duplicate.
@@ -83,7 +87,7 @@ class TriggerManager:
             event,
             replay_window_seconds=cfg.replay_window_seconds,
             current_time=current_time,
-            allow_legacy=cfg.allow_legacy_signature,
+            allow_legacy=cfg.allow_legacy_signature and not refuse_legacy,
         )
 
         now = current_time if current_time is not None else time.time()

@@ -94,7 +94,7 @@ export function Header({ onOpenNavigation, navigationOpen = false }: {
         <div className="studio-connection-failure" role="status">
           <button className="studio-utility-button" type="button" onClick={() => setSettingsOpen(true)}
             style={{ color: 'var(--status-danger)' }}>
-            <Icon name="warning" />{t(`connection.${connection.status}`)}
+            <Icon name="warning" />{connection.status === 'unauthorized' && connection.httpStatus === 403 ? t('connection.forbidden') : connection.status === 'unauthorized' && connection.httpStatus === 429 ? t('connection.rateLimitedStatus') : t(`connection.${connection.status}`)}
           </button>
         </div>
       )}

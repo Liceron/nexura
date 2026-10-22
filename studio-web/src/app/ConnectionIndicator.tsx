@@ -27,7 +27,12 @@ export function ConnectionIndicator() {
     connected: t('connection.connected'),
     connecting: t('connection.connecting'),
     offline: t('connection.offline'),
-    unauthorized: t('connection.unauthorized'),
+    unauthorized:
+      connection.httpStatus === 403
+        ? t('connection.forbidden')
+        : connection.httpStatus === 429
+          ? t('connection.rateLimitedStatus')
+          : t('connection.unauthorized'),
   };
 
   const handleSave = (e: React.FormEvent) => {

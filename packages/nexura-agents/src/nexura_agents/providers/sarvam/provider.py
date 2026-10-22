@@ -43,7 +43,7 @@ from nexura_agents.providers.types import (
     ProviderCapabilities,
     StreamDelta,
 )
-from nexura_agents.types import Message, ModelResponse, Usage
+from nexura_agents.types import Message, ModelResponse, Usage, response_identity
 
 _SARVAM_KEY_PATTERN = re.compile(r"(sarvam-[a-zA-Z0-9_-]{16,}|bearer\s+[a-zA-Z0-9_-]{16,})", re.I)
 
@@ -333,6 +333,7 @@ class SarvamProvider(BaseProvider):
             message=Message(role="assistant", content=content),
             usage=usage,
             finish_reason=finish_reason,
+            **response_identity(data),
         )
 
     async def _stream_internal(

@@ -138,7 +138,7 @@ export function WorkflowRunsPanel({ workflowId }: { workflowId: string }) {
                 <td style={cell}>
                   <a href={runHref(run.run_id)} data-testid="workflow-run-open">
                     {t('runs.open')}
-                    <span className="sr-only" style={{ position: 'absolute', left: -9999 }}>
+                    <span className="studio-sr-only">
                       {' '}
                       {run.run_id}
                     </span>

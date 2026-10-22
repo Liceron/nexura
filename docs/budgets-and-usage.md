@@ -184,10 +184,12 @@ workspace or explicit parent is rejected; repeated creation does not reset caps.
   It does not refund work whose billing outcome is uncertain.
 - Abrupt worker/process death cannot run cleanup. With SQLite, the outstanding
   reservation remains charged against admission after restart, even after its
-  timeout. Recovery must settle it with observed usage or conservative cancellation;
-  elapsed time alone never restores allowance. An in-memory ledger cannot survive
-  process death. An unresolved durable reservation is a retained commitment, not
-  an automatically released lease.
+  timeout; elapsed time alone never restores allowance. An in-memory ledger cannot
+  survive process death. Durable runs end it on recovery (see
+  [Reservations across a crash](#reservations-across-a-crash)): settled as unknown
+  usage at its estimate when its step was or may have been dispatched, released when
+  the journal proves the step never dispatched. A reservation outside a durable run
+  stays a retained commitment until you settle it.
 - Settlement is idempotent by reservation ID: concurrent or contradictory repeats
   return the first persisted amount/state and do not add usage again. A SQLite
   transaction updates the reservation and its settlement entry together.
@@ -355,6 +357,81 @@ Two caveats from the source:
   The service uses its durable SQLite store to restore this handle automatically.
   In-memory ledgers do not survive restart. `RunBudget` turn/tool-call counters
   remain in memory; persistent admission covers tokens and monetary estimates.
+
+## Reservations across a crash
+
+A reservation made while a run dispatches a step is linked to that step. The runtimes
+covered are `Runner` model and tool calls, `WorkflowEngine` nodes, branches and items, and
+`DurableExecutionEngine` nodes. The link is in `reservation.metadata["execution"]`, the
+path of enclosing runs with their step keys, plus `metadata["step_key"]` for the innermost
+step. `Reservation.run_id` stays the budget scope.
+
+When a run is taken over after a crash, the new owner ends that run's open reservations
+before any step runs. This covers `Runner.recover`, `WorkflowEngine.recover` and
+`resume`, `DurableExecutionEngine.claim_run` and a trigger job continuing its run.
+
+- The step was dispatched, or may have been: it is **settled as unknown usage at the
+  estimate** (`usage_state="unknown"`, the reserved cost and tokens). That is a step
+  whose intent is in the journal, a model call or a pure step (they write no intent),
+  or a run without a journal.
+- The step writes an intent before it dispatches and none is in the journal: it never
+  dispatched, so the reservation is **released**.
+
+A run that reaches a terminal status ends its open reservations the same way, just before
+its terminal commit. A run's own work cannot leave an `active` reservation behind a
+completed or failed run. That includes history processors, instructions and guardrails,
+which reserve under the run scope `run`. The exception is a tool thread that outlives
+the run after a timeout: a reservation it makes after the run ended stays open.
+Settlement stays idempotent: an owner that settles later with real usage gets the first
+settlement back, and usage above the estimate is not recorded.
+
+```python
+from nexura_agents.usage import BudgetConfig, BudgetManager
+from nexura_agents.usage.linkage import dispatch_scope
+
+manager = BudgetManager()
+budget = manager.create_run_budget("ws", "scope-1", config=BudgetConfig(max_tokens=10_000))
+with dispatch_scope("ws", "run-7", "turn:2/call:c1", tracked=True):
+    reservation = budget.reserve(800)
+assert reservation.metadata["step_key"] == "turn:2/call:c1"
+assert reservation.metadata["execution"][0]["run_id"] == "run-7"
+open_ones = manager.ledger.open_reservations("ws", "run-7")
+assert [r.reservation_id for r in open_ones] == [reservation.reservation_id]
+```
+
+The run's budget policy has to be attached before a recovered or resumed run continues.
+A run started under a `RunBudget` records its scope in its journal.
+
+- `WorkflowEngine` continues under the recorded scope's persisted policy
+  (`manager.get_run_budget(<recorded scope>)`). An engine budget of another scope is
+  replaced by it with a warning, or refused when its ledger does not know the recorded
+  scope. The service builds its engines that way.
+- With the SDK `Runner`, pass `Runner(budget=manager.get_run_budget(scope))`.
+- `DurableExecutionEngine.claim_run` refuses a run started under a budget when the engine
+  has none.
+- Continuing such a run without any budget raises `UsageError` (SDK), `WorkflowError`
+  (workflows) or `DurableExecutionError` (`DurableExecutionEngine`). It does so before
+  anything runs and before any approval is claimed or consumed.
+- Only a `RunBudget` passed directly is recorded. A run started under a combined budget,
+  a custom budget object or an inherited (ambient) budget records no scope, so it is not
+  refused without one.
+- A recorded run continued under a combined budget that does not contain its scope:
+  - workflows enforce the recorded scope's persisted policy alongside the combined budget
+    (with a warning), or warn when that policy is not found;
+  - the Runner warns and continues without it.
+  - Counting: each run scope counts a call once, but a shared workspace counts it once per
+    scope of the combination. This conservative over-count can refuse earlier, never later.
+- Each reservation records the run-lease token of the owner that made it. A run's terminal
+  sweep ends only reservations of its own lease or older, after confirming the lease, so a
+  stale owner never ends the reservations of the owner that took the run over.
+  Unlinked reservations of a scope named after the run, made before that confirmation,
+  are ended too.
+- A transient store error while confirming the lease does not fail a finished run. The
+  confirmation is retried once, and then the sweep runs after the fenced terminal commit
+  succeeds. If that commit fails too, recovery settles what is left.
+
+The rules and their tests are in
+[Durable execution](durable-execution.md#budgets-and-approvals-across-a-takeover-s11).
 
 ## See also
 

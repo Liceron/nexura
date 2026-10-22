@@ -45,9 +45,23 @@ export function useChatSession() {
   const [interrupted, setInterrupted] = useState<string | null>(null);
   // Service code of the interrupted turn (e.g. AGENT_TURN_LIMIT), for a plain explanation.
   const [interruptedCode, setInterruptedCode] = useState<string | null>(null);
+  // Reply text of the current model turn, from the service's TEXT_DELTA events. Only a
+  // model that really streams sends them; the saved transcript replaces it on completion.
+  const [streamingText, setStreamingText] = useState<string>('');
 
   const isMountedRef = useRef<boolean>(true);
   const turnAbortRef = useRef<AbortController | null>(null);
+  // The session shown now. A turn only writes to the page while its session is still shown.
+  const currentSessionRef = useRef<string | null>(null);
+  const showSession = useCallback((id: string | null) => {
+    currentSessionRef.current = id;
+    setCurrentSessionId(id);
+  }, []);
+  // Leaving the session of a running turn stops it: the service saves a turn only when it
+  // completes, so nothing half-done is kept and nothing lands in the next session.
+  const leaveRunningTurn = useCallback(() => {
+    turnAbortRef.current?.abort();
+  }, []);
 
   useEffect(() => {
     isMountedRef.current = true;
@@ -80,10 +94,12 @@ export function useChatSession() {
       setLoadingSession(true);
       setError(null);
       setRefusedToolCalls([]); // they belong to the previous session's last turn
-      setCurrentSessionId(sessionId);
+      if (currentSessionRef.current !== sessionId) leaveRunningTurn();
+      showSession(sessionId);
       try {
         const detail: SessionDetail = await manager.client.sessions.get(sessionId);
-        if (!isMountedRef.current) return;
+        // A slower answer for a session the user already left must not replace the transcript.
+        if (!isMountedRef.current || currentSessionRef.current !== sessionId) return;
         setMessages(detail.messages || []);
       } catch (err: unknown) {
         if (!isMountedRef.current) return;
@@ -95,12 +111,13 @@ export function useChatSession() {
         }
       }
     },
-    [manager, t]
+    [manager, t, leaveRunningTurn, showSession]
   );
 
   const createSession = useCallback(
     async (customId?: string, title?: string) => {
       setError(null);
+      leaveRunningTurn();
       try {
         const newSession = await manager.client.sessions.create({
           session_id: customId,
@@ -108,7 +125,7 @@ export function useChatSession() {
         });
         await refreshSessions();
         if (!isMountedRef.current) return;
-        setCurrentSessionId(newSession.session_id);
+        showSession(newSession.session_id);
         setMessages([]);
         setRefusedToolCalls([]);
         setTraces([]);
@@ -122,16 +139,17 @@ export function useChatSession() {
         return null;
       }
     },
-    [manager, refreshSessions, t]
+    [manager, refreshSessions, t, leaveRunningTurn, showSession]
   );
 
   const deleteSession = useCallback(
     async (sessionId: string) => {
       setError(null);
       try {
+        if (currentSessionRef.current === sessionId) leaveRunningTurn();
         await manager.client.sessions.delete(sessionId);
-        if (currentSessionId === sessionId) {
-          setCurrentSessionId(null);
+        if (currentSessionRef.current === sessionId) {
+          showSession(null);
           setMessages([]);
           setRefusedToolCalls([]);
           setTraces([]);
@@ -145,7 +163,7 @@ export function useChatSession() {
         setError(t('chat.deleteFailed').replace('{message}', msg));
       }
     },
-    [manager, currentSessionId, refreshSessions, t]
+    [manager, refreshSessions, t, leaveRunningTurn, showSession]
   );
 
   const stopTurn = useCallback(() => {
@@ -158,7 +176,7 @@ export function useChatSession() {
       setError(null);
       setSending(true);
 
-      let targetSessionId = currentSessionId;
+      let targetSessionId = currentSessionRef.current;
       if (!targetSessionId) {
         const created = await createSession();
         if (!created) {
@@ -167,6 +185,8 @@ export function useChatSession() {
         }
         targetSessionId = created.session_id;
       }
+      const turnSession = targetSessionId;
+      const stillShown = () => currentSessionRef.current === turnSession;
 
       // Optimistically show user message
       const optimisticMsg: ChatMessage = {
@@ -192,7 +212,14 @@ export function useChatSession() {
         const stream = manager.client.sessions.chatStream(targetSessionId, request, { signal: abort.signal });
         for await (const ev of stream) {
           if (!isMountedRef.current) return;
+          if (!stillShown()) break;
           if (ev.kind === 'run_event') {
+            if (ev.type === 'TEXT_DELTA') {
+              const piece = typeof ev.data?.text === 'string' ? ev.data.text : '';
+              if (piece) setStreamingText((prev) => prev + piece);
+            } else if (ev.type === 'MODEL_STARTED') {
+              setStreamingText(''); // a new model turn writes a new reply
+            }
             setActivity(describeRunEvent(ev.type, ev.data, t));
           } else if (ev.kind === 'chat_completed') {
             completed = ev.response;
@@ -208,6 +235,16 @@ export function useChatSession() {
         turnAbortRef.current = null;
       }
       if (!isMountedRef.current) return;
+      setStreamingText('');
+
+      if (!stillShown()) {
+        // The user moved to another conversation: this turn's text, transcript and notices
+        // belong to a session that is no longer shown.
+        setActivity(null);
+        setSending(false);
+        await refreshSessions();
+        return;
+      }
 
       if (completed) {
         setMessages(completed.messages || []);
@@ -234,8 +271,14 @@ export function useChatSession() {
       setSending(false);
       await refreshSessions();
     },
-    [currentSessionId, sending, language, selectedModel, selectedAgentId, createSession, manager, refreshSessions, t]
+    [sending, language, selectedModel, selectedAgentId, createSession, manager, refreshSessions, t]
   );
+
+  // The delivery label describes the last reply of this session and model; a different
+  // choice has not answered yet.
+  useEffect(() => {
+    setDelivery(null);
+  }, [selectedModel, selectedAgentId, currentSessionId]);
 
   // Saved agents of the workspace for the agent selector (none: the demo only).
   useEffect(() => {
@@ -304,6 +347,7 @@ export function useChatSession() {
     activity,
     interrupted,
     interruptedCode,
+    streamingText,
     error,
     setLanguage,
     refreshSessions,
@@ -326,6 +370,8 @@ function describeRunEvent(type: string, data: Record<string, any>, t: Translate 
       return t('chat.toolCompleted').replace('{name}', String(data.tool_name ?? '')).replace('  ', ' ');
     case 'FINAL_OUTPUT':
       return t('chat.saving');
+    case 'TEXT_DELTA':
+      return t('chat.writing');
     default:
       return type.replace(/_/g, ' ').toLowerCase();
   }

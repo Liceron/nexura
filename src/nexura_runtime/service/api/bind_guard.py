@@ -4,9 +4,11 @@
 
 Both the REST service (``local-owner`` profile has ambient admin authority) and Studio
 (token optional on loopback) call :func:`assert_safe_bind` before they serve. Binding to
-anything but loopback without authentication fails with a clear message that points at the
-Nexura enterprise edition (the open-source edition has no authentication). The only opt-out is
-the loudly named flag ``allow_unauthenticated_network=True`` or the environment variable
+anything but loopback without authentication fails with a clear message. The open-source
+edition authenticates only the remote single-operator mode (one operator token,
+``nexura-runtime serve --auth token``, ``operator_token``); multi-user authentication is in the
+Nexura enterprise edition. The only opt-out is the loudly named flag
+``allow_unauthenticated_network=True`` or the environment variable
 ``NEXURA_INSECURE_ALLOW_UNAUTHENTICATED_NETWORK=I_UNDERSTAND_THIS_IS_UNSAFE``.
 """
 
@@ -59,9 +61,10 @@ def assert_safe_bind(
     raise UnauthenticatedNetworkError(
         f"{component} refuses to listen on non-loopback address {host!r} without "
         "authentication: anyone who can reach it could run workflows and read data. "
-        "Bind to 127.0.0.1. The open-source edition has no logins, tokens or API keys: a "
-        "shared or networked service needs authentication, which is in the Nexura enterprise "
-        "edition (Studio alone can use NEXURA_STUDIO_TOKEN). For throwaway local development "
-        f"only, set allow_unauthenticated_network=True or {INSECURE_ENV_VAR}="
+        "Bind to 127.0.0.1, or run the remote single-operator mode, where one operator token "
+        "authenticates every request (nexura-runtime serve --auth token, see "
+        "docs/remote-single-operator.md). Multi-user logins, roles and SSO are in the Nexura "
+        "enterprise edition (Studio alone can use NEXURA_STUDIO_TOKEN). For throwaway local "
+        f"development only, set allow_unauthenticated_network=True or {INSECURE_ENV_VAR}="
         f"{INSECURE_ENV_VALUE}."
     )

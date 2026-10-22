@@ -185,6 +185,8 @@ reservations: a dispatched intent without an outcome settles as **unknown usage
 at the estimate** and ends the reservation; a reservation with no intent is
 released because it never dispatched. Restore the run budget with
 `manager.get_run_budget(run_id)` before executing another step, shared with A1.
+How the runtimes do this is described in
+[Budgets and approvals across a takeover (S11)](#budgets-and-approvals-across-a-takeover-s11).
 
 The contract and memory/SQLite stores live in `nexura_agents`, using the standard
 library and existing SDK error types. Postgres remains optional in
@@ -479,8 +481,8 @@ in [Durable agent runs](durable-runs.md).
   deleted; a crash in between leaves a terminal row whose `completed` checkpoint
   `recover` replays (another phase is deleted with a "has already failed" error).
 
-Limits: budgets and approval records are not yet linked to intents (S11); teams and
-`AgentCoordinator` are outside the contract; the memory journal keeps finished runs'
+Limits: teams and `AgentCoordinator` are outside the contract (budget reservations and
+approval claims are linked to intents since S11, below); the memory journal keeps finished runs'
 rows for the life of the store.
 
 ## Workflows on the journal (S6)
@@ -538,7 +540,8 @@ graph reads; the journal records the lease and what was dispatched. User guide a
   `WorkflowCheckpoint` has `pending_effect`, `revision` and a `pause_reason` property.
 
 Limits: `SQLiteWorkflowStore` is single-host (for several hosts use
-`PostgresWorkflowStore`, S8 below); budgets are not yet linked to intents (S11). Trigger
+`PostgresWorkflowStore`, S8 below). Budget reservations are linked to intents (S11
+below). Trigger
 reclaim continues the run (S10 below). The service side (lease-based "interrupted" and
 `POST /runs/{id}/recover`) is S9 below.
 
@@ -811,6 +814,264 @@ Studio database (one host); leases themselves work across hosts.
 A worker that loses its job lease cancels its local run task; the reclaiming worker then
 recovers the run under the run lease, so a `non_idempotent` step that was mid-flight
 pauses `effect_unknown`.
+
+## Budgets and approvals across a takeover (S11)
+
+### Reservations are linked to the step they were made for
+
+Every runtime opens a *dispatch scope* around what it dispatches:
+
+- `Runner`: the whole run (`run`: history processors, instructions, guardrails and
+  anything else admitted while the run executes), and inside it each model call
+  (`turn:<n>/model`) and each tool call (`turn:<n>/call:<id>`); an inner scope replaces
+  the run's own entry;
+- `WorkflowEngine`: each node visit (`<node>#<step>`), parallel branch and mapped item;
+- `DurableExecutionEngine`: each node visit.
+
+A reservation the ledger makes inside a scope records it in its metadata:
+- `metadata["execution"]`: the path of enclosing steps, outermost first, one entry per run
+  with `workspace_id`, `run_id`, `step_key` and `tracked`;
+- `metadata["step_key"]`, `metadata["execution_run_id"]` and
+  `metadata["execution_workspace_id"]`: the innermost entry.
+
+Each entry also carries `fencing_token`: the run-lease token of the owner that
+dispatched. It is absent for a run without a lease.
+
+`tracked` means the dispatcher commits a `StepIntent` before the step dispatches. That
+covers non-pure tool calls and nodes on a journaled run. This holds for any reservation,
+including one a tool or handler makes itself. `Reservation.run_id` stays the budget
+scope. In the service the budget scope is the run id; in the SDK it is whatever scope you
+gave `create_run_budget`. The link is in `nexura_agents.usage.linkage`.
+
+### What a takeover does with open reservations
+
+Before any step runs, the new owner ends the run's `active` (or `expired`) reservations.
+This happens in `Runner.recover`, `WorkflowEngine.recover`, `resume` and
+`resume_interrupt`, `DurableExecutionEngine.claim_run` and a trigger job continuing its
+run.
+
+| The reservation's step | Action |
+|---|---|
+| tracked, intent in the journal without an outcome | settled as **unknown usage at its estimate** |
+| tracked, intent and outcome in the journal (the settlement was lost) | settled as unknown usage at its estimate |
+| tracked, no intent in the journal | **released**: it never dispatched |
+| a model call, a pure step or the run scope (`run`; no intent is written) | settled as unknown usage at its estimate: the reservation is taken right before the provider request |
+| a run without an execution journal | settled as unknown usage at its estimate |
+| no link, budget scope = the run id (workflows only; reservations made before S11) | settled as unknown usage at its estimate |
+
+A settlement is a `reconcile` ledger entry with `usage_state="unknown"`, the reservation's
+estimated cost and tokens, and `metadata["settled_by"] = "execution_takeover"`. A release
+is a `release` entry with no charge. Settlement is idempotent: a stale owner that wakes up
+and settles the same reservation with real usage gets the first settlement back, with no
+double charge. Its real usage above the estimate is then not recorded; this is the
+documented limit that the ledger is not a provider-invoice ceiling.
+
+When a run reaches a terminal status (completed or failed), every runtime ends the run's
+open reservations the same way, with `settled_by = "execution_terminal"`, just **before**
+the terminal commit. A crash between the two therefore cannot leave reservations that
+nothing would end (recover refuses a finished run). If the process dies after the sweep
+and before the commit, the takeover finds those reservations already ended: each one is
+settled exactly once.
+
+The terminal sweep is fenced:
+- It first confirms the run lease with a fenced store call (`renew`). On the legacy engine
+  it also checks the revision it read and the lease owner. A stale owner, whose run was
+  taken over, stops there.
+- It then ends only reservations made under a lease token no newer than its own.
+- Unlinked reservations of a budget scope named after the run (the service convention)
+  are ended too, if they were made before the lease was confirmed. A newer owner could
+  only have made them later. Other unlinked reservations are left to a takeover.
+- A transient store error while confirming the lease is a `RuntimeWarning`, and the
+  confirmation is retried once. If it fails again, the sweep is deferred until after the
+  terminal commit. A successful commit is fenced by the same lease, so it proves this
+  owner held the run, and the same token-filtered sweep then runs. If the commit fails
+  too, the checkpoint stays and recovery settles each open reservation exactly once.
+  Either way the run's result is still returned.
+
+A stale owner therefore never ends the in-flight reservation of the owner that took the
+run over, and that owner's real settlement stands. A takeover sweep has no such limit.
+
+A tool still running in its thread after a timeout is covered only for what it reserved
+before that point. A reservation it
+makes later stays `active`, and the real usage of one it settles later is lost to the
+first settlement. A failure to settle at the terminal status is a `RuntimeWarning`. On a
+takeover it is an error, and nothing is dispatched.
+
+`nexura_agents.usage.recovery.settle_run_reservations(ledger, workspace_id=, run_id=,
+steps=)` is the same rule for your own recovery code:
+
+```python
+from nexura_agents.contracts.execution import StepIntent
+from nexura_agents.execution_store import ExecutionStep
+from nexura_agents.usage import BudgetConfig, BudgetManager
+from nexura_agents.usage.linkage import dispatch_scope
+from nexura_agents.usage.recovery import settle_run_reservations
+
+manager = BudgetManager()
+budget = manager.create_run_budget(
+    "ws", "run-1", config=BudgetConfig(max_tokens=10_000), default_model="fake-model"
+)
+with dispatch_scope("ws", "run-1", "pay#2", tracked=True):
+    sent = budget.reserve(500)  # the step dispatched, then the process died
+with dispatch_scope("ws", "run-1", "ship#3", tracked=True):
+    never = budget.reserve(500)  # reserved, but the step never dispatched
+
+steps = {"pay#2": ExecutionStep(intent=StepIntent("pay#2", "digest", "nx-key"))}
+done = settle_run_reservations(manager.ledger, workspace_id="ws", run_id="run-1", steps=steps)
+assert {d.reservation_id: d.action for d in done} == {
+    sent.reservation_id: "settled_unknown",
+    never.reservation_id: "released",
+}
+status = budget.get_status()
+assert status.total_reserved_tokens == 0 and status.total_tokens == 500
+assert status.unknown_usage_count == 1
+```
+
+### The run's budget policy comes back first
+
+A run started under a `RunBudget` records its scope (`budget_scope`, workspace and scope
+id) in its journal.
+
+- `WorkflowEngine`: `resume`, `resume_interrupt` and `recover` continue under the
+  **recorded** scope, before the approval or interrupt answer is claimed and before any
+  step runs:
+  - an engine `RunBudget` of that scope is replaced by
+    `manager.get_run_budget(<recorded scope>)`, the persisted policy;
+  - an engine `RunBudget` of another scope is replaced by the recorded scope's persisted
+    policy from the same ledger, with a `RuntimeWarning`. When that ledger has no policy
+    for the recorded scope, `WorkflowError` is raised and nothing is claimed or run;
+  - a combined budget that contains the recorded scope is kept. If it does not, the
+    recorded scope's persisted policy (found through the ledger of one of its
+    `RunBudget`s) is enforced **alongside** it (`combine_budgets`), with a
+    `RuntimeWarning`. If no such policy is found, a `RuntimeWarning` says the recorded
+    policy is not enforced. A custom budget object is kept, with that warning.
+
+    Counting: each run scope counts a recovered call once. A shared workspace counts it
+    once per scope of the combination (the recorded scope and each combined one). This
+    is the existing `combine_budgets` rule for sibling scopes, and a conservative
+    over-count: it can refuse earlier, never later.
+
+  The service builds its engines with `get_run_budget(run_id)`, the recorded scope.
+- `Runner`: the budget is the one you pass. Restore it with
+  `Runner(budget=manager.get_run_budget(scope))`. Policies, hierarchy and spend survive a
+  restart with `UsageLedger(db_path=...)`. If the attached budget does not contain the
+  recorded scope, the Runner emits a `RuntimeWarning` and continues under the attached
+  budget, without the recorded policy. That covers another `RunBudget` scope, and a
+  combined budget, looked through, without it. The Runner cannot swap the budget of a
+  stream that has already started.
+- `DurableExecutionEngine`: `init_run` records the engine's `RunBudget` scope in the run
+  metadata (`budget_scope`), and `claim_run` refuses to take such a run without a budget.
+- Fail closed: continuing a run that was started under a budget, without any budget,
+  raises before anything runs, before any approval or answer is claimed or consumed and
+  before any journal write. The SDK raises `UsageError`, workflows raise `WorkflowError`,
+  and `DurableExecutionEngine.claim_run` raises `DurableExecutionError`.
+- Fail closed means the refusal is a read-only check:
+  - `Runner.resume` and `recover` check the journal state before the run lease is taken;
+  - workflows check it before the approval is claimed;
+  - the legacy engine checks it before its claim.
+- What is recorded: only a `RunBudget` given directly, as `Runner(budget=...)`,
+  `WorkflowEngine(budget=...)` or `DurableExecutionEngine(budget=...)`.
+  - A run *started* under a combined budget, a custom budget object or the *ambient*
+    budget it inherits from an enclosing run (for example `Agent.as_tool()` children or
+    nested runners) records no scope. Such a run can be continued without a budget; its
+    reservations are still linked and ended.
+  - A child run inheriting a budget is not recovered on its own: its parent's recovery
+    covers it.
+
+### SDK approvals: claim for dispatch
+
+With a journal-capable checkpoint store (memory, SQLite, Postgres), `Runner.resume`
+follows these steps:
+
+1. Reads the run's journal without writing. The approval is refused at once
+   (`ApprovalDecisionError`) when it expired, the run already finished, a dispatch was
+   made under it, or an earlier resume claimed it (then the error points to
+   `recover()`).
+2. Takes the run (its lease). A same-host owner process that died is released at once.
+   When the run cannot be taken (another caller holds it), nothing is consumed: the error
+   says the run is busy, and the approval stays usable.
+3. Records the claim in the run's journal: `approval_claim` holds the approval id, its
+   turn, its expiry and the decisions (approved calls with the reviewed digests and any
+   `ApproveWith` edits, rejections, answers, outcomes, actor). This is a fenced commit;
+   the run is `running` from here. Every claim is exact: decisions are normalised to
+   JSON first (tuples become lists). With a journal-capable store, a resume whose
+   decisions have no exact JSON form is refused with `ApprovalDecisionError` before
+   the run is taken or anything is written or consumed; examples are NaN or infinity,
+   mapping keys that are not strings, and arbitrary objects in `ApproveWith` arguments
+   or `ResolvedOutcome` results. There is one approval path.
+4. Consumes the approval in the approval store. If that fails, the earlier claim is put
+   back. A run that was waiting for a person waits again; any other run keeps its status
+   (it stays recoverable). The error is raised as before.
+5. Each approved call's `StepIntent` carries `approval_id`. The same fenced commit adds
+   `{"approval_id", "step_key"}` to the run's `consumed_approvals` (event
+   `tool_dispatched` with `approval_id`).
+
+On a takeover, `recover` can therefore tell a claimed approval that was used for a
+dispatch (an intent carries it) from one that was not (the claim alone):
+
+- Claimed, nothing dispatched, still valid: `recover` re-checks the stored envelope, the
+  action digests and the expiry, then dispatches under the same approval with the
+  recorded decisions. A second `resume` with that approval is refused and points to
+  `recover()`.
+- Claimed, nothing dispatched, expired: the run pauses again with a fresh interruption
+  for the same calls ("asks again"). The old approval is consumed first (best effort), so
+  a call never has two live approvals.
+- An approval whose pending calls already have an intent for that turn is refused: they
+  were sent under another approval and are never approved twice. An `effect_unknown`
+  pause or a re-approval of a `not_applied` call asks about a dispatched step on purpose,
+  so it is not refused.
+- The batch was checkpointed and some calls have no intent. The claim of that turn
+  decides them:
+  - a call it **rejected** stays rejected, and the model is told so;
+  - a call it answered gets that answer;
+  - a call it approved runs under it, and its intent carries the approval; once the claim
+    has expired, a call to a tool that requires approval is asked for again;
+  - a call to a tool that requires approval with no decision on record is never sent:
+    the run pauses for a fresh approval (`reason="effect_not_applied"`).
+- Intent dispatched: the effect-class rules apply. The approval is consumed, and
+  `not_applied` needs a fresh approval to send again. A resolution the claim recorded
+  for it is applied.
+- Resuming an `effect_unknown` pause: the batch holds every unanswered call, and only the
+  calls in doubt were asked about. The others are decided in the same way: an outcome
+  on record answers the call, the earlier claim's rejection or answer holds, and a gated
+  call without a decision is asked for again. A call a person rejected is never sent after
+  a crash.
+
+A paused agent run now also gives back its checkpoint claim with the pause commit. A
+process killed right after pausing does not block `resume` elsewhere until its claim
+expires. Workflows already recorded the approval with the node intent (S6).
+
+Tests:
+- `tests/p35/test_a6_s11_review_r*.py`: the review's repros (a rejected call after a
+  crash, a concurrent second resume, workflow scope restore and resume fail closed, a
+  history-processor reservation, a refused duplicate resume, the legacy engine fail
+  closed).
+- `tests/p35/test_a6_s11_budgets_approvals.py` (in-process): linkage, the decision
+  table, a stale owner, the restored policy and fail-closed refusals, `Runner`,
+  `WorkflowEngine`, `DurableExecutionEngine` and trigger continuation, the approval
+  claim windows, edits and expiry.
+- `tests/durability` rows run with a budget on a SQLite usage ledger shared by every
+  process, on SQLite and Postgres (with `NEXURA_TEST_POSTGRES_URI`). They assert that no
+  reservation is `active` after a terminal status (or a takeover pause), and that the
+  killed step was settled as unknown at its estimate:
+  - agent K3' and workflow K3';
+  - workflow K7 and K8;
+  - new agent K7 (paused, killed, approved elsewhere) and K8 (approval claimed and
+    consumed, killed, recovered once).
+
+Limits:
+- The usage ledger is SQLite or memory: there is no Postgres usage ledger, so processes
+  on different hosts do not share an allowance.
+- An unlinked reservation (made outside any dispatch scope, for example by a function
+  handler that reserves on a budget other than the engine's) is handled only when its
+  budget scope is the run id.
+- A stale owner's real usage above the estimate is lost to the first settlement; it is
+  not recorded as a separate adjustment.
+- Runs checkpointed before they had a journal keep the old recovery rules for the turns
+  before it: an unanswered call there may have been sent, so the claim rules above do not
+  apply to it.
+- Teams and `AgentCoordinator` runs are not journaled, so their reservations are ended
+  only by the provider settlement and the enclosing run's terminal sweep.
 
 ## See also
 

@@ -1112,6 +1112,15 @@ class TriggersClient:
     async def delete_webhook(self, endpoint_id: str) -> dict[str, Any]:
         return await self._root._request("DELETE", f"/triggers/webhooks/{_safe_quote(endpoint_id)}")
 
+    async def rotate_delivery_token(self, endpoint_id: str) -> dict[str, Any]:
+        """Issue a new delivery token for a webhook (remote single-operator mode only).
+
+        Returns ``{"endpoint_id", "delivery_token", ...}``; the old token stops working.
+        """
+        return await self._root._request(
+            "POST", f"/triggers/webhooks/{_safe_quote(endpoint_id)}/delivery-credential"
+        )
+
     async def test_webhook(
         self,
         endpoint_id: str,
@@ -1477,6 +1486,10 @@ class NexuraClient:
         ("POST", "/api/v1/triggers/webhooks"): ("triggers", "register_webhook"),
         ("DELETE", "/api/v1/triggers/webhooks/{endpoint_id}"): ("triggers", "delete_webhook"),
         ("POST", "/api/v1/triggers/webhooks/{endpoint_id}/test"): ("triggers", "test_webhook"),
+        ("POST", "/api/v1/triggers/webhooks/{endpoint_id}/delivery-credential"): (
+            "triggers",
+            "rotate_delivery_token",
+        ),
         ("GET", "/api/v1/triggers/jobs"): ("triggers", "list_jobs"),
         ("GET", "/api/v1/triggers/outbox"): ("triggers", "list_outbox"),
         ("POST", "/api/v1/triggers/outbox/test-dispatch"): ("triggers", "test_dispatch_outbox"),
@@ -1574,10 +1587,12 @@ class NexuraClient:
     async def fetch_session_token(self) -> str:
         """Read the local server's session token (``GET /api/v1/local-session``) and keep it."""
         client = await self._get_client()
-        response = await client.get(
-            f"{self.base_url}/api/v1/local-session",
-            headers={"Accept": "application/json", "X-Workspace-ID": self.workspace_id},
-        )
+        headers = {"Accept": "application/json", "X-Workspace-ID": self.workspace_id}
+        if self.api_key:
+            # A server in remote single-operator mode answers 404 to an authenticated probe
+            # instead of counting an unauthenticated one as a failed sign-in.
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        response = await client.get(f"{self.base_url}/api/v1/local-session", headers=headers)
         token = response.json().get("token") if response.status_code == 200 else None
         if not isinstance(token, str) or not token:
             raise NexuraApiError(

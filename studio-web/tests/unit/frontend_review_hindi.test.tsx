@@ -28,6 +28,7 @@ import { InlineConfirm } from '../../src/components/InlineConfirm';
 import { Button } from '../../src/components/Button';
 import { ChatPlayground } from '../../src/features/chat/ChatPlayground';
 import { ModuleDrawer } from '../../src/features/builder/ModuleDrawer';
+import { LocalOnboarding } from '../../src/features/onboarding/LocalOnboarding';
 import { removeMember } from '../../src/api/membership';
 import type { RunRecord, WorkflowSpec } from '@liceron/nexura-sdk';
 
@@ -52,8 +53,9 @@ const fixture = vi.hoisted(() => {
       listWebhooks: vi.fn(async () => ({ webhooks: [{ endpoint_id: 'एंडपॉइंट', workflow_id: 'वर्कफ़्लो', replay_window_seconds: 300 }], total: 1 })),
       listJobs: vi.fn(async () => ({ jobs: [] })), listOutbox: vi.fn(async () => ({ outbox: [], guarantee: 'DRY_RUN_ONLY' })),
       deleteSchedule: vi.fn(async () => ({})), deleteWebhook: vi.fn(async () => ({})),
+      rotateDeliveryToken: vi.fn(async () => ({ endpoint_id: 'एंडपॉइंट', delivery_token: 'टोकन-मान', delivery_token_header: 'Authorization: Bearer <delivery_token>' })),
     },
-    runs: { diagnostics: vi.fn(async () => ({ usage: { known_input_tokens: 1, known_output_tokens: 2, reported_attempts: 1, complete: false }, attempt_count: 1, truncated_attempts: 0, attempts: [{ id: 'प्रयास', node_id: 'नोड', module_id: 'मॉड्यूल', status: 'completed', duration_ms: 2, input_tokens: 1, output_tokens: 2 }] })), history: vi.fn(async () => ({ items: [] })), children: vi.fn(async () => ({ items: [] })) },
+    runs: { start: vi.fn(async () => ({ run_id: 'रन', status: 'completed', current_state: { reply: 'नमस्ते' } })), diagnostics: vi.fn(async () => ({ usage: { known_input_tokens: 1, known_output_tokens: 2, reported_attempts: 1, complete: false }, attempt_count: 1, truncated_attempts: 0, attempts: [{ id: 'प्रयास', node_id: 'नोड', module_id: 'मॉड्यूल', status: 'completed', duration_ms: 2, input_tokens: 1, output_tokens: 2 }] })), history: vi.fn(async () => ({ items: [] })), children: vi.fn(async () => ({ items: [] })) },
     request: vi.fn(async (): Promise<Record<string, unknown>> => ({ datasets: [], targets: [], runs: [], items: [], max_file_bytes: 5000000, max_workspace_bytes: 50000000, workspace_used_bytes: 0, max_top_k: 50 })),
   };
   const api = { manager: { client, clearCache: vi.fn(), abortSignal: new AbortController().signal, baseUrl: '/api' }, connection: { status: 'connected', workspace: 'कार्यस्थान', principal: 'स्वामी', profile: 'local-owner', baseUrl: '/api' }, changeWorkspace: vi.fn(), refreshConnection: vi.fn() };
@@ -170,12 +172,57 @@ describe('Hindi UI coverage (local mock API)', () => {
       expect(tabs.filter((item) => item.getAttribute('aria-selected') === 'true')).toHaveLength(1);
     }
   });
+  it('round 5: populated dataset, webhook tests, outbox mode and reported capabilities', async () => {
+    await show(<EvaluationsView />);
+    await click('dataset-item-डेटासेट'); assertHindi();
+    expect(screen.getByRole('table', { name: hi.evaluations.casesTable })).toBeInTheDocument();
+    cleanup();
+    await show(<TriggersView />);
+    await click('tab-webhooks');
+    fireEvent.click(within(screen.getByTestId('webhook-more-tests')).getByText(hi.triggers.moreTests)); assertHindi();
+    expect(screen.getByRole('table', { name: hi.ui.registeredWebhookEndpoints })).toBeInTheDocument();
+    await click('tab-outbox');
+    expect(screen.getByTestId('outbox-mode')).toHaveTextContent(hi.ui.zeroExternalDispatchGuarantee);
+    cleanup();
+    const previous = fixture.api.connection;
+    fixture.api.connection = { ...previous, capabilities: { sdk_version: '0.4.0', active_profile: 'local-owner', capabilities: { modules: true, validation: false } } } as typeof previous;
+    try {
+      await show(<SystemView />); assertHindi();
+      expect(screen.getByTestId('capability-modules')).toHaveTextContent(hi.system.enabled);
+      expect(screen.getByTestId('capability-validation')).toHaveTextContent(hi.system.disabled);
+      expect(screen.getByTestId('capability-live_events')).toHaveTextContent(hi.system.notReported);
+    } finally {
+      fixture.api.connection = previous;
+    }
+  });
+  it('remote token mode: rotate confirmation and the one-time delivery token panel', async () => {
+    // Studio is sending an operator token to this service (signed in, token mode).
+    (fixture.api.manager as { hasAuthToken?: boolean }).hasAuthToken = true;
+    try {
+      await show(<TriggersView />);
+      await click('tab-webhooks');
+      await click('btn-rotate-delivery-token-एंडपॉइंट');
+      expect(screen.getByText(hi.triggers.rotateConsequence)).toBeInTheDocument();
+      fireEvent.click(screen.getByTestId('btn-rotate-delivery-token-एंडपॉइंट-confirm'));
+      expect(await screen.findByTestId('delivery-token-panel')).toHaveTextContent(hi.triggers.deliveryTokenOnce);
+      assertHindi();
+      expect(screen.getByTestId('rotated-delivery-token-value')).not.toHaveTextContent('टोकन-मान');
+    } finally {
+      (fixture.api.manager as { hasAuthToken?: boolean }).hasAuthToken = false;
+    }
+  });
   it('both integration discovery views', async () => { await show(<IntegrationsView />); assertHindi(); await click('tab-openapi'); });
   it('knowledge ingestion, retrieval and grounded agent', async () => {
     await show(<KnowledgeView />); assertHindi();
     const tabs = within(screen.getByRole('tablist')).getAllByRole('tab');
-    expect(tabs).toHaveLength(2);
+    expect(tabs).toHaveLength(3);
+    expect(screen.getByTestId('tab-documents')).toHaveAttribute('aria-selected', 'true');
+    // The add-document form, its limits and samples are translated too.
+    await click('add-document-button');
+    expect(screen.getByTestId('knowledge-size-limit')).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('tab-retrieval')); assertHindi();
     expect(screen.getByTestId('tab-retrieval')).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByTestId('tab-documents')).toHaveAttribute('aria-selected', 'false');
     fireEvent.click(screen.getByTestId('tab-agent')); assertHindi();
     expect(screen.getByTestId('tab-agent')).toHaveAttribute('aria-selected', 'true');
     expect(screen.getByTestId('tab-retrieval')).toHaveAttribute('aria-selected', 'false');
@@ -227,6 +274,14 @@ describe('Hindi UI coverage (local mock API)', () => {
   it('workspace dialog and helper text', async () => { await show(<WorkspaceSelector />); fireEvent.click(screen.getByRole('button')); assertHindi(); });
   it('system feature descriptions', async () => { await show(<SystemView />); assertHindi(); });
   it('chat model labels, quick prompts and empty conversation', async () => { await show(<ChatPlayground />); assertHindi(); });
+  it('local example before and after a run (status, result and Open run)', async () => {
+    await show(<LocalOnboarding />); assertHindi();
+    fireEvent.click(screen.getByRole('button', { name: hi.onboarding.runButton }));
+    expect(await screen.findByRole('link', { name: 'रन खोलें' })).toHaveAttribute('href', '#/runs/%E0%A4%B0%E0%A4%A8');
+    expect(screen.getByLabelText(hi.onboarding.runStatus)).toHaveTextContent(hi.traces.status_completed);
+    expect(screen.getByRole('button', { name: hi.onboarding.runAgain })).toBeInTheDocument();
+    assertHindi();
+  });
   it('built-in module drawer labels', async () => { await show(<ModuleDrawer open onClose={noop} onAddNode={noop} />); assertHindi(); });
   it('send-answer action and sent state', async () => {
     const onSubmit = vi.fn(async () => {});

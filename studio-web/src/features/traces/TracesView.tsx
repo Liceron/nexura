@@ -99,8 +99,8 @@ export function TracesView({ runId }: { runId?: string | null }) {
             <td><RunStatus status={run.status} /></td>
             <td>{new Date(run.updated_at * 1000).toLocaleString(locale)}</td>
             <td><div className="inspection-actions">
-              <a href={'#/traces/' + encodeURIComponent(run.run_id)}>{t('traces.openTrace')}<span className="sr-only"> {run.run_id}</span></a>
-              <a href={runHref(run.run_id)} data-testid="trace-run-open">{t('runs.open')}<span className="sr-only"> {run.run_id}</span></a>
+              <a href={'#/traces/' + encodeURIComponent(run.run_id)}>{t('traces.openTrace')}<span className="studio-sr-only"> {run.run_id}</span></a>
+              <a href={runHref(run.run_id)} data-testid="trace-run-open">{t('runs.open')}<span className="studio-sr-only"> {run.run_id}</span></a>
             </div></td>
           </tr>)}
         </tbody></table>

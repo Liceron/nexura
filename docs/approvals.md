@@ -275,6 +275,32 @@ Invalid decisions/edits do not consume the approval. A failure after consumption
 does not refund it: investigate the durable checkpoint/uncertain outcome instead
 of replaying the grant.
 
+With these stores, resume first checks the run's execution journal without writing: an
+approval that was already used, or claimed by an earlier resume, is refused there. A
+resume that cannot take the run, because another resume holds it, consumes nothing. It
+then writes a claim to the run's execution journal: the approval id, its expiry and your
+decisions, including edits and rejections. Next it consumes the approval, and each
+approved call's step intent records the approval it was sent under.
+
+If the process dies after the claim and before anything was sent, use
+`runner.recover_async(agent, run_id)` instead of resuming again. Recovery dispatches
+under the same approval after checking it again, or pauses with a fresh interruption
+once that approval has expired. A second resume with the claimed approval is refused
+and points to `recover()`.
+
+With these stores your decisions are recorded with the run, so they must be
+representable as JSON: `ApproveWith` arguments, rejection reasons, answers and
+`ResolvedOutcome` results may hold only strings, finite numbers, booleans, `None`, lists
+and mappings with string keys. Tuples are turned into lists. Anything else (NaN, a
+non-string key, an arbitrary object) makes resume raise `ApprovalDecisionError` before it
+takes the run or consumes anything; resume again with JSON values. An approval whose
+calls were already sent under another approval is refused.
+
+Your rejections and answers hold across a crash. A call you rejected is never sent by
+recovery, and a call to a tool that requires approval with no decision on record is
+asked for again rather than sent. See
+[Durable execution](durable-execution.md#budgets-and-approvals-across-a-takeover-s11).
+
 For single use without run checkpointing, pass `approval_store=store`. Custom
 checkpoint stores must implement `nexura_agents.approvals.ApprovalStore` or provide
 a separate approval store; missing atomic methods fail closed. Consumption records

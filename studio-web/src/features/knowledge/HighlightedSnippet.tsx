@@ -17,11 +17,7 @@ export function HighlightedSnippet({ text, highlights, unit, testId }: Props) {
     <span data-testid={testId} style={{ whiteSpace: 'pre-wrap' }}>
       {segments.map((seg, i) =>
         seg.mark ? (
-          <mark
-            key={i}
-            data-testid="snippet-highlight"
-            style={{ backgroundColor: 'rgba(250, 204, 21, 0.45)', color: 'inherit', padding: '0 1px' }}
-          >
+          <mark key={i} data-testid="snippet-highlight" className="snippet-highlight">
             {seg.text}
           </mark>
         ) : (

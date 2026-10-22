@@ -73,10 +73,10 @@ describe('Shell & Localization', () => {
       expect(screen.getByText('Test Workflow')).toBeInTheDocument();
     });
 
-    // Short navigation name; capability page copy migrates in round five.
+    // Round five: the System page heading matches its navigation name.
     await user.click(screen.getByRole('button', { name: 'System' }));
     await waitFor(() => {
-      expect(screen.getByText('Service Capabilities')).toBeInTheDocument();
+      expect(screen.getByRole('heading', { level: 1, name: 'System' })).toBeInTheDocument();
       expect(screen.getByText('0.4.0')).toBeInTheDocument();
     });
   });

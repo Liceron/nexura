@@ -24,6 +24,12 @@ from nexura_runtime.service.api.models import (
     TestDispatchOutboxRequest,
     TestWebhookRequest,
 )
+from nexura_runtime.service.api.operator_token import (
+    DELIVERY_REFUSED_MESSAGE,
+    delivery_token_store,
+    record_delivery_failure,
+    single_operator_mode,
+)
 from nexura_runtime.service.auth.errors import PermissionDeniedError
 from nexura_runtime.service.auth.models import ActionPermission, Principal, WorkspaceRole
 from nexura_runtime.service.auth.permissions import check_permission
@@ -101,6 +107,23 @@ def _min_schedule_interval(request: Request) -> float:
         except ValueError:
             configured = DEFAULT_MIN_SCHEDULE_INTERVAL_SECONDS
     return float(max(configured, 0.01))
+
+
+def _delivery_refused(request: Request, reason: str, original: HTTPException) -> HTTPException:
+    """In remote single-operator mode every refused delivery is the same counted 401 (M3).
+
+    The answer for an unknown or inactive endpoint, a bad signature, an expired timestamp or a
+    malformed header is identical, so nobody can enumerate endpoint ids or tell which check
+    failed. Elsewhere the original, more specific error is kept.
+    """
+    if not single_operator_mode(request.app):
+        return original
+    record_delivery_failure(request.app, request.scope, reason)
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail={"code": "UNAUTHENTICATED", "message": DELIVERY_REFUSED_MESSAGE},
+        headers={"WWW-Authenticate": 'Bearer realm="nexura"'},
+    )
 
 
 def _bad_request(code: str, message: str) -> HTTPException:
@@ -416,7 +439,18 @@ async def register_webhook(request: Request, payload: RegisterWebhookRequest) ->
             detail={"code": "WEBHOOK_ID_CONFLICT", "message": str(exc)},
         ) from exc
 
+    extra: dict[str, Any] = {}
+    tokens = delivery_token_store(request.app)
+    if tokens is not None:
+        # Remote single-operator mode: senders authenticate with this endpoint's own delivery
+        # token, never the operator token. Shown here once; only its hash is stored.
+        extra = {
+            "delivery_token": tokens.issue(cfg.endpoint_id),
+            "delivery_token_header": "Authorization: Bearer <delivery_token>",
+        }
+
     return {
+        **extra,
         "success": True,
         "endpoint_id": cfg.endpoint_id,
         "workspace_id": cfg.workspace_id,
@@ -443,7 +477,45 @@ async def delete_webhook(request: Request, endpoint_id: str) -> dict[str, Any]:
             detail={"code": "WEBHOOK_NOT_FOUND", "message": f"Webhook '{endpoint_id}' not found."},
         )
     mgr.store.delete_webhook_config(endpoint_id)
+    tokens = delivery_token_store(request.app)
+    if tokens is not None:
+        tokens.delete(endpoint_id)
     return {"deleted": True, "endpoint_id": endpoint_id}
+
+
+@router.post(
+    "/webhooks/{endpoint_id}/delivery-credential",
+    summary="Issue a new delivery token for a webhook (remote single-operator mode)",
+    dependencies=[_require("edit")],
+)
+async def rotate_delivery_token(request: Request, endpoint_id: str) -> dict[str, Any]:
+    """Replace the endpoint's delivery token and return the new one, once.
+
+    Only in remote single-operator mode (``serve --auth token``); elsewhere 404
+    ``DELIVERY_TOKENS_NOT_USED``. The previous token stops working immediately.
+    """
+    tokens = delivery_token_store(request.app)
+    if tokens is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": "DELIVERY_TOKENS_NOT_USED",
+                "message": "Delivery tokens are only used in remote single-operator mode.",
+            },
+        )
+    workspace_id, _, _ = _get_caller_context(request)
+    mgr = _get_trigger_manager(request)
+    cfg = mgr.store.get_webhook_config(endpoint_id)
+    if not cfg or cfg.workspace_id != workspace_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "WEBHOOK_NOT_FOUND", "message": f"Webhook '{endpoint_id}' not found."},
+        )
+    return {
+        "endpoint_id": cfg.endpoint_id,
+        "delivery_token": tokens.issue(cfg.endpoint_id),
+        "delivery_token_header": "Authorization: Bearer <delivery_token>",
+    }
 
 
 @router.post("/webhooks/{endpoint_id}/deliver", summary="Deliver signed webhook event")
@@ -454,20 +526,30 @@ async def deliver_webhook(
     x_webhook_timestamp: str | None = Header(None, alias="X-Webhook-Timestamp"),
     x_webhook_event_id: str | None = Header(None, alias="X-Webhook-Event-ID"),
 ) -> dict[str, Any]:
-    """Ingest a cryptographically signed webhook event with deduplication."""
+    """Ingest a cryptographically signed webhook event with deduplication.
+
+    In remote single-operator mode the request already carried this endpoint's delivery token
+    (``OperatorTokenMiddleware``); legacy v1 signatures are refused and every failure below is
+    the same counted 401 (``_delivery_refused``).
+    """
     mgr = _get_trigger_manager(request)
+    remote = single_operator_mode(request.app)
 
     # 1. Enforce presence of security headers
     if not x_webhook_signature or not x_webhook_timestamp or not x_webhook_event_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={
-                "code": "MISSING_SIGNATURE_HEADERS",
-                "message": (
-                    "Webhook request missing required X-Webhook-Signature, X-Webhook-Timestamp, "
-                    "or X-Webhook-Event-ID header."
-                ),
-            },
+        raise _delivery_refused(
+            request,
+            "missing signature headers",
+            HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={
+                    "code": "MISSING_SIGNATURE_HEADERS",
+                    "message": (
+                        "Webhook request missing required X-Webhook-Signature, "
+                        "X-Webhook-Timestamp, or X-Webhook-Event-ID header."
+                    ),
+                },
+            ),
         )
 
     try:
@@ -475,11 +557,19 @@ async def deliver_webhook(
     except ValueError:
         timestamp = math.nan
     if not math.isfinite(timestamp):
-        raise _bad_request("INVALID_TIMESTAMP", "X-Webhook-Timestamp must be a finite number.")
+        raise _delivery_refused(
+            request,
+            "invalid timestamp",
+            _bad_request("INVALID_TIMESTAMP", "X-Webhook-Timestamp must be a finite number."),
+        )
     if not is_valid_event_id(x_webhook_event_id):
-        raise _bad_request(
-            "INVALID_EVENT_ID",
-            "X-Webhook-Event-ID must be 1-200 characters of [A-Za-z0-9_:-].",
+        raise _delivery_refused(
+            request,
+            "invalid event id",
+            _bad_request(
+                "INVALID_EVENT_ID",
+                "X-Webhook-Event-ID must be 1-200 characters of [A-Za-z0-9_:-].",
+            ),
         )
 
     body_bytes = await request.body()
@@ -493,7 +583,11 @@ async def deliver_webhook(
     except (ValueError, RecursionError):
         raw_body = None
     if not isinstance(raw_body, dict):
-        raise _bad_request("INVALID_BODY", "Webhook body must be a JSON object.")
+        raise _delivery_refused(
+            request,
+            "invalid body",
+            _bad_request("INVALID_BODY", "Webhook body must be a JSON object."),
+        )
 
     event = WebhookEvent(
         event_id=x_webhook_event_id,
@@ -504,21 +598,35 @@ async def deliver_webhook(
     )
 
     try:
-        is_new, job = mgr.handle_webhook(event)
+        # Remote mode: v2 signatures only, whatever the endpoint allows (v1 does not cover
+        # event_id, so a captured v1 delivery could be replayed under a new id).
+        is_new, job = mgr.handle_webhook(event, refuse_legacy=remote)
     except InvalidWebhookSignatureError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={"code": "INVALID_SIGNATURE", "message": str(exc)},
+        raise _delivery_refused(
+            request,
+            "invalid signature",
+            HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={"code": "INVALID_SIGNATURE", "message": str(exc)},
+            ),
         ) from exc
     except ReplayWindowExceededError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"code": "REPLAY_EXPIRED", "message": str(exc)},
+        raise _delivery_refused(
+            request,
+            "expired timestamp",
+            HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={"code": "REPLAY_EXPIRED", "message": str(exc)},
+            ),
         ) from exc
     except TriggerError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={"code": "TRIGGER_ERROR", "message": str(exc)},
+        raise _delivery_refused(
+            request,
+            "unknown or inactive endpoint",
+            HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail={"code": "TRIGGER_ERROR", "message": str(exc)},
+            ),
         ) from exc
 
     return {

@@ -70,6 +70,7 @@ describe('B39 review: Show all triggers keeps the secret panel', () => {
     await user.type(screen.getByTestId('input-new-webhook-id'), 'orders');
     await waitFor(() => expect(screen.getByTestId('select-new-webhook-wfid')).not.toBeDisabled());
     await user.click(screen.getByTestId('btn-submit-register-webhook'));
+    await user.click(await screen.findByTestId('webhook-secret-reveal'));
     expect(await screen.findByTestId('webhook-secret-value')).toHaveTextContent(SECRET);
 
     // What the link's href="#/triggers" does.

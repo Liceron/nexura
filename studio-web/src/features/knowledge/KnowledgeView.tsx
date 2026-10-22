@@ -2,8 +2,8 @@
 // Copyright (c) 2026 Liceron
 import { InlineConfirm } from '../../components/InlineConfirm';
 import { Icon } from '../../components/Icon';
-import { useRef, useState } from 'react';
-import type { DragEvent } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
+import type { DragEvent, FormEvent } from 'react';
 import { useKnowledge } from './useKnowledge';
 import { SAMPLE_DOCS } from './types';
 import type { HybridCitationItem } from './types';
@@ -13,6 +13,10 @@ import { formatBytes, ALLOWED_EXTENSIONS } from './fileUpload';
 import { useI18n } from '../../i18n';
 import { Button } from '../../components/Button';
 import { Spinner } from '../../components/Spinner';
+import { PageHeader, PageLayout } from '../../components/PageHeader';
+import { WorkflowTabs } from '../../components/WorkflowTabs';
+
+type KnowledgeTab = 'documents' | 'retrieval' | 'agent';
 
 export function KnowledgeView() {
   const { t } = useI18n();
@@ -41,7 +45,10 @@ export function KnowledgeView() {
     openChunk,
   } = useKnowledge();
 
-  const [activeTab, setActiveTab] = useState<'retrieval' | 'agent'>('retrieval');
+  const ids = useId();
+  const panelId = `${ids}-panel`;
+  const [activeTab, setActiveTab] = useState<KnowledgeTab>('documents');
+  const [adding, setAdding] = useState<boolean>(false);
   const [uploadFilename, setUploadFilename] = useState<string>('architecture_guide.md');
   const [uploadContent, setUploadContent] = useState<string>(SAMPLE_DOCS[0].content);
   const [newCollectionName, setNewCollectionName] = useState<string>('');
@@ -52,7 +59,24 @@ export function KnowledgeView() {
   const [agentLang, setAgentLang] = useState<'en' | 'hi'>('en');
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const chooseFilesRef = useRef<HTMLButtonElement>(null);
+  const addTriggerRef = useRef<HTMLButtonElement>(null);
+  const newCollectionRef = useRef<HTMLButtonElement>(null);
   const [dragOver, setDragOver] = useState<boolean>(false);
+  // The opened source chunk takes focus (it renders above the tabs); Close returns it.
+  const chunkPanelRef = useRef<HTMLDivElement>(null);
+  const chunkOpenerRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (focusedChunk) chunkPanelRef.current?.focus();
+  }, [focusedChunk]);
+  const closeChunkPanel = () => {
+    closeChunk();
+    const opener = chunkOpenerRef.current;
+    chunkOpenerRef.current = null;
+    requestAnimationFrame(() => {
+      if (opener?.isConnected) opener.focus();
+    });
+  };
 
   const handleFiles = async (files: FileList | File[] | null) => {
     if (!files) return;
@@ -67,7 +91,8 @@ export function KnowledgeView() {
     void handleFiles(e.dataTransfer.files);
   };
 
-  const handleUpload = async () => {
+  const handleUpload = async (e: FormEvent) => {
+    e.preventDefault();
     if (!uploadFilename.trim() || !uploadContent.trim()) return;
     const res = await uploadDocument(uploadFilename, uploadContent);
     if (res) {
@@ -76,12 +101,24 @@ export function KnowledgeView() {
     }
   };
 
-  const handleCreateCollection = async () => {
+  const openAddForm = () => {
+    setAdding(true);
+    // The trigger is replaced by the form; move focus into it.
+    requestAnimationFrame(() => chooseFilesRef.current?.focus());
+  };
+  const closeAddForm = () => {
+    setAdding(false);
+    requestAnimationFrame(() => addTriggerRef.current?.focus());
+  };
+
+  const handleCreateCollection = async (e: FormEvent) => {
+    e.preventDefault();
     if (!newCollectionName.trim()) return;
     const id = newCollectionName.toLowerCase().replace(/[^a-z0-9_-]/g, '-');
     await createCollection(id, newCollectionName);
     setNewCollectionName('');
     setShowNewCollection(false);
+    newCollectionRef.current?.focus();
   };
 
   const handleSelectSample = (sampleId: string) => {
@@ -92,837 +129,486 @@ export function KnowledgeView() {
     }
   };
 
+  const tabs = [
+    { id: 'documents', label: t('knowledge.documentsTab') },
+    { id: 'retrieval', label: t('ui.retrievalCitationsPreview') },
+    { id: 'agent', label: t('ui.groundedKnowledgeAgent') },
+  ];
+  const activeLabel = tabs.find((tab) => tab.id === activeTab)?.label;
+
   return (
-    <div
-      data-testid="knowledge-view"
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        height: 'calc(100vh - 120px)',
-        gap: 16,
-      }}
-    >
-      {limits.is_test_fixture && (
-        <p role="note" style={{ margin: 0, padding: 12, border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-lg)', backgroundColor: 'var(--bg-surface)' }}>
-          {t('knowledge.testEmbeddingsNotice')}
-        </p>
-      )}
-      {/* Top Bar: Collections & Tabs */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          flexWrap: 'wrap',
-          gap: 12,
-          backgroundColor: 'var(--bg-surface)',
-          padding: '12px 18px',
-          borderRadius: 'var(--radius-lg)',
-          border: '1px solid var(--border-subtle)',
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <span style={{ fontWeight: 600, fontSize: 13, color: 'var(--text-secondary)' }}>
-            {t('ui.collection')}
-          </span>
-          <select
-            value={selectedCollection}
-            onChange={(e) => setSelectedCollection(e.target.value)}
-            data-testid="collection-select"
-            style={{
-              padding: '5px 10px',
-              borderRadius: 'var(--radius-md)',
-              border: '1px solid var(--border-subtle)',
-              backgroundColor: 'var(--bg-canvas)',
-              color: 'var(--text-primary)',
-              fontSize: 13,
-            }}
-          >
-            {collections.map((c) => (
-              <option key={c} value={c}>
-                {c}
-              </option>
-            ))}
-          </select>
-
-          <Button
-            size="sm"
-            variant="secondary"
-            onClick={() => setShowNewCollection(!showNewCollection)}
-            data-testid="new-collection-btn"
-          >
-            {t('ui.newCollection')}
-          </Button>
-
-          {showNewCollection && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <input
-                type="text"
-                placeholder={t('ui.collectionName')}
-                value={newCollectionName}
-                onChange={(e) => setNewCollectionName(e.target.value)}
-                style={{
-                  padding: '4px 8px',
-                  borderRadius: 'var(--radius-sm)',
-                  border: '1px solid var(--border-subtle)',
-                  fontSize: 12,
-                }}
-              />
-              <Button size="sm" variant="primary" onClick={handleCreateCollection}>
-                {t('ui.create')}
-              </Button>
+    <PageLayout data-testid="knowledge-view" className="knowledge-page">
+      <PageHeader
+        title={t('nav.knowledge')}
+        actions={
+          <div className="knowledge-collection">
+            <div className="resource-field">
+              <label htmlFor={`${ids}-collection`}>{t('knowledge.collection')}</label>
+              <select
+                id={`${ids}-collection`}
+                value={selectedCollection}
+                onChange={(e) => setSelectedCollection(e.target.value)}
+                data-testid="collection-select"
+              >
+                {collections.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
             </div>
-          )}
-        </div>
+            <Button
+              ref={newCollectionRef}
+              variant="ghost"
+              aria-expanded={showNewCollection}
+              onClick={() => setShowNewCollection(!showNewCollection)}
+              data-testid="new-collection-btn"
+            >
+              {t('knowledge.newCollection')}
+            </Button>
+          </div>
+        }
+        filters={
+          showNewCollection ? (
+            <form className="resource-inline-form" onSubmit={handleCreateCollection}>
+              <div className="resource-field">
+                <label htmlFor={`${ids}-new-collection`}>{t('knowledge.collectionName')}</label>
+                <input
+                  id={`${ids}-new-collection`}
+                  type="text"
+                  autoFocus
+                  value={newCollectionName}
+                  onChange={(e) => setNewCollectionName(e.target.value)}
+                />
+              </div>
+              <Button type="submit" disabled={!newCollectionName.trim()}>
+                {t('knowledge.createCollection')}
+              </Button>
+              <Button type="button" variant="ghost" onClick={() => { setShowNewCollection(false); newCollectionRef.current?.focus(); }}>
+                {t('common.cancel')}
+              </Button>
+            </form>
+          ) : undefined
+        }
+      />
 
-        {/* View Switcher: Retrieval Preview vs Grounded Knowledge Agent */}
-        <div role="tablist"
-          style={{
-            display: 'inline-flex',
-            borderRadius: 'var(--radius-md)',
-            border: '1px solid var(--border-subtle)',
-            overflow: 'hidden',
-          }}
-        >
-          <button
-            role="tab"
-            aria-selected={activeTab === 'retrieval'}
-            onClick={() => setActiveTab('retrieval')}
-            data-testid="tab-retrieval"
-            style={{
-              padding: '6px 14px',
-              fontSize: 12,
-              fontWeight: activeTab === 'retrieval' ? 600 : 500,
-              backgroundColor:
-                activeTab === 'retrieval' ? 'var(--accent-subtle)' : 'transparent',
-              color:
-                activeTab === 'retrieval'
-                  ? 'var(--accent-primary)'
-                  : 'var(--text-secondary)',
-              border: 'none',
-              cursor: 'pointer',
-            }}
-          >
-            <Icon name="search" /> {t('ui.retrievalCitationsPreview')}
-          </button>
-          <button
-            role="tab"
-            aria-selected={activeTab === 'agent'}
-            onClick={() => setActiveTab('agent')}
-            data-testid="tab-agent"
-            style={{
-              padding: '6px 14px',
-              fontSize: 12,
-              fontWeight: activeTab === 'agent' ? 600 : 500,
-              backgroundColor:
-                activeTab === 'agent' ? 'var(--accent-subtle)' : 'transparent',
-              color:
-                activeTab === 'agent' ? 'var(--accent-primary)' : 'var(--text-secondary)',
-              border: 'none',
-              cursor: 'pointer',
-            }}
-          >
-            <Icon name="agents" /> {t('ui.groundedKnowledgeAgent')}
-          </button>
-        </div>
+      <div className="resource-notices">
+        {limits.is_test_fixture && (
+          <p role="note" className="inline-notice">
+            {t('knowledge.testEmbeddingsNotice')}
+          </p>
+        )}
+        {error && (
+          <div data-testid="knowledge-error-banner" role="alert" className="inline-notice inline-notice--danger">
+            <span>{error}</span>
+            <button type="button" className="studio-icon-button" onClick={clearError} aria-label={t('ui.dismissError')}>
+              <Icon name="close" />
+            </button>
+          </div>
+        )}
       </div>
-
-      {/* Error Alert */}
-      {error && (
-        <div
-          data-testid="knowledge-error-banner"
-          style={{
-            padding: '8px 16px',
-            backgroundColor: 'rgba(239, 68, 68, 0.1)',
-            borderRadius: 'var(--radius-md)',
-            border: '1px solid rgba(239, 68, 68, 0.3)',
-            color: 'var(--status-danger)',
-            fontSize: 12,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-          }}
-        >
-          <span><Icon name="warning" /> {error}</span>
-          <button
-            onClick={clearError}
-            aria-label={t('ui.dismissError')}
-            style={{
-              background: 'none',
-              border: 'none',
-              color: 'var(--status-danger)',
-              cursor: 'pointer',
-              fontSize: 14,
-            }}
-          >
-            <Icon name="close" />
-          </button>
-        </div>
-      )}
 
       {focusedChunk && (
         <div
+          ref={chunkPanelRef}
+          tabIndex={-1}
           data-testid="source-chunk-panel"
           role="region"
           aria-label={t('knowledge.sourceChunk', 'Source chunk')}
-          style={{
-            padding: '10px 16px',
-            borderRadius: 'var(--radius-md)',
-            border: '1px solid var(--accent-primary)',
-            backgroundColor: 'var(--bg-surface)',
-            fontSize: 12,
-          }}
+          className="knowledge-chunk"
         >
-          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+          <div className="knowledge-chunk-head">
             <strong data-testid="source-chunk-title">
               {focusedChunk.title} · {t('knowledge.chunk', 'Chunk')} {focusedChunk.chunk_index} ·{' '}
               {focusedChunk.start_char}..{focusedChunk.end_char}
             </strong>
-            <button type="button" onClick={closeChunk} data-testid="source-chunk-close" style={{ background: 'none', border: 'none', cursor: 'pointer' }}>
+            <Button variant="ghost" size="sm" onClick={closeChunkPanel} data-testid="source-chunk-close">
               {t('common.close', 'Close')}
-            </button>
+            </Button>
           </div>
-          <div data-testid="source-chunk-text" style={{ whiteSpace: 'pre-wrap' }}>
+          <div data-testid="source-chunk-text" style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
             {focusedChunk.text}
           </div>
         </div>
       )}
 
-      {/* Main Split Layout: Left = Documents & Ingestion; Right = Retrieval / Agent */}
-      <div className="studio-split" style={{ display: 'flex', flex: 1, gap: 16, overflow: 'hidden' }}>
-        {/* Left Panel: Document Management & Upload Form */}
-        <div
-          className="studio-split-secondary"
-          style={{
-            width: 380,
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 14,
-            overflowY: 'auto',
-          }}
-        >
-          {/* Upload Card */}
-          <div
-            style={{
-              backgroundColor: 'var(--bg-surface)',
-              padding: 16,
-              borderRadius: 'var(--radius-lg)',
-              border: '1px solid var(--border-subtle)',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: 10,
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <span style={{ fontWeight: 600, fontSize: 13, color: 'var(--text-primary)' }}>
-                {t('ui.ingestDocument')}
-              </span>
-              <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
-                {t('knowledge.maxShort', 'Max')} {formatBytes(limits.max_file_bytes)}
-              </span>
-            </div>
+      <WorkflowTabs
+        tabs={tabs}
+        active={activeTab}
+        onChange={(id) => setActiveTab(id as KnowledgeTab)}
+        label={t('knowledge.tabsLabel')}
+        panelId={panelId}
+      />
 
-            {/* Drag-and-drop / file picker */}
-            <div
-              data-testid="knowledge-dropzone"
-              onDragOver={(e) => {
-                e.preventDefault();
-                setDragOver(true);
-              }}
-              onDragLeave={() => setDragOver(false)}
-              onDrop={handleDrop}
-              style={{
-                border: `2px dashed ${dragOver ? 'var(--accent-primary)' : 'var(--border-subtle)'}`,
-                borderRadius: 'var(--radius-md)',
-                padding: 12,
-                textAlign: 'center',
-                fontSize: 12,
-                color: 'var(--text-secondary)',
-                backgroundColor: dragOver ? 'var(--accent-subtle)' : 'transparent',
-              }}
-            >
-              <div>{t('knowledge.dropHint', 'Drag and drop files here, or')}</div>
-              <Button
-                size="sm"
-                variant="secondary"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={uploading}
-                data-testid="knowledge-choose-files"
-              >
-                {t('knowledge.chooseFiles', 'Choose files')}
-              </Button>
-              <input
-                ref={fileInputRef}
-                type="file"
-                multiple
-                accept={ALLOWED_EXTENSIONS.join(',')}
-                data-testid="knowledge-file-input"
-                aria-label={t('knowledge.chooseFiles', 'Choose files')}
-                style={{ display: 'none' }}
-                onChange={(e) => {
-                  void handleFiles(e.target.files);
-                  e.target.value = '';
-                }}
-              />
-              <div data-testid="knowledge-size-limit" style={{ marginTop: 6, fontSize: 11, color: 'var(--text-tertiary)' }}>
-                {t('knowledge.typesHint', 'Text, Markdown, HTML, PDF')} ·{' '}
-                {t('knowledge.maxPerFile', 'Max per file')}: {formatBytes(limits.max_file_bytes)} ·{' '}
-                {t('knowledge.workspaceUsage', 'Workspace')}: {formatBytes(limits.workspace_used_bytes)} /{' '}
-                {formatBytes(limits.max_workspace_bytes)}
-              </div>
-            </div>
-
-            {/* Quick Samples */}
-            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-              <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{t('ui.samples')}</span>
-              <button
-                type="button"
-                onClick={() => handleSelectSample('sample-en-arch')}
-                data-testid="sample-en-btn"
-                style={{
-                  fontSize: 10,
-                  padding: '2px 6px',
-                  borderRadius: 4,
-                  border: '1px solid var(--border-subtle)',
-                  background: 'var(--bg-canvas)',
-                  cursor: 'pointer',
-                }}
-              >
-                {t('ui.englishSdk')}
-              </button>
-              <button
-                type="button"
-                onClick={() => handleSelectSample('sample-hi-guide')}
-                data-testid="sample-hi-btn"
-                style={{
-                  fontSize: 10,
-                  padding: '2px 6px',
-                  borderRadius: 4,
-                  border: '1px solid var(--border-subtle)',
-                  background: 'var(--bg-canvas)',
-                  cursor: 'pointer',
-                }}
-              >
-                {t('ui.guide')}
-              </button>
-            </div>
-
-            <div>
-              <label style={{ fontSize: 11, fontWeight: 500, color: 'var(--text-secondary)' }}>
-                {t('ui.filename')}
-              </label>
-              <input
-                type="text"
-                value={uploadFilename}
-                onChange={(e) => setUploadFilename(e.target.value)}
-                placeholder={t('ui.documentMdOrGuideTxt')}
-                data-testid="upload-filename-input"
-                style={{
-                  width: '100%',
-                  marginTop: 4,
-                  padding: '6px 10px',
-                  borderRadius: 'var(--radius-md)',
-                  border: '1px solid var(--border-subtle)',
-                  backgroundColor: 'var(--bg-canvas)',
-                  fontSize: 12,
-                  color: 'var(--text-primary)',
-                  boxSizing: 'border-box',
-                }}
-              />
-            </div>
-
-            <div>
-              <label style={{ fontSize: 11, fontWeight: 500, color: 'var(--text-secondary)' }}>
-                {t('ui.multilingualContent')}
-              </label>
-              <textarea
-                value={uploadContent}
-                onChange={(e) => setUploadContent(e.target.value)}
-                placeholder={t('ui.pasteDocumentTextInEnglishOrHindi')}
-                rows={4}
-                data-testid="upload-content-textarea"
-                style={{
-                  width: '100%',
-                  marginTop: 4,
-                  padding: '6px 10px',
-                  borderRadius: 'var(--radius-md)',
-                  border: '1px solid var(--border-subtle)',
-                  backgroundColor: 'var(--bg-canvas)',
-                  fontSize: 12,
-                  color: 'var(--text-primary)',
-                  resize: 'vertical',
-                  boxSizing: 'border-box',
-                  lineHeight: 1.4,
-                }}
-              />
-            </div>
-
-            <Button
-              variant="primary"
-              onClick={handleUpload}
-              disabled={!uploadFilename.trim() || !uploadContent.trim() || uploading}
-              data-testid="upload-document-button"
-            >
-              {uploading ? <Spinner size={14} /> : <><Icon name="workflows" /> {t('ui.ingestIndexDocument')}</>}
-            </Button>
-          </div>
-
-          {/* Documents List */}
-          <div
-            style={{
-              backgroundColor: 'var(--bg-surface)',
-              padding: 16,
-              borderRadius: 'var(--radius-lg)',
-              border: '1px solid var(--border-subtle)',
-              flex: 1,
-              display: 'flex',
-              flexDirection: 'column',
-              gap: 10,
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <span style={{ fontWeight: 600, fontSize: 13, color: 'var(--text-primary)' }}>
-                {t('ui.documents')}{documents.length})
-              </span>
-            </div>
-
-            {loading ? (
-              <div style={{ display: 'flex', justifyContent: 'center', padding: 24 }}>
-                <Spinner size={18} />
-              </div>
-            ) : documents.length === 0 ? (
-              <div
-                style={{
-                  textAlign: 'center',
-                  padding: '24px 12px',
-                  color: 'var(--text-tertiary)',
-                  fontSize: 12,
-                }}
-              >
-                {t('ui.noDocumentsIndexedInThisCollectionYet')}
-              </div>
-            ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                {documents.map((doc) => (
-                  <div
-                    key={doc.document_id}
-                    data-testid={`document-item-${doc.document_id}`}
-                    style={{
-                      padding: 10,
-                      borderRadius: 'var(--radius-md)',
-                      border: '1px solid var(--border-subtle)',
-                      backgroundColor: 'var(--bg-canvas)',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      gap: 4,
-                    }}
+      <div role="tabpanel" id={panelId} aria-label={activeLabel} tabIndex={0} style={{ minWidth: 0 }}>
+        {activeTab === 'documents' && (
+          <>
+            {adding ? (
+              <form className="knowledge-add-form" onSubmit={handleUpload} aria-labelledby={`${ids}-add-title`}>
+                <h2 id={`${ids}-add-title`}>{t('ui.ingestIndexDocument')}</h2>
+                <div
+                  data-testid="knowledge-dropzone"
+                  className={`knowledge-dropzone${dragOver ? ' knowledge-dropzone--active' : ''}`}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    setDragOver(true);
+                  }}
+                  onDragLeave={() => setDragOver(false)}
+                  onDrop={handleDrop}
+                >
+                  <span>{t('knowledge.dropHint', 'Drag and drop files here, or')}</span>
+                  <Button
+                    ref={chooseFilesRef}
+                    type="button"
+                    size="sm"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={uploading}
+                    data-testid="knowledge-choose-files"
                   >
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                      <span
-                        data-testid="doc-filename"
-                        style={{
-                          fontWeight: 600,
-                          fontSize: 12,
-                          color: 'var(--text-primary)',
-                          overflow: 'hidden',
-                          textOverflow: 'ellipsis',
-                          whiteSpace: 'nowrap',
-                          maxWidth: 240,
-                        }}
-                      >
-                        <Icon name="file" /> {doc.filename}
-                      </span>
-                      <InlineConfirm key={doc.document_id} consequence={t('confirmation.deleteDocument')} >
-                        <button
-                          onClick={() => deleteDocument(doc.document_id)}
-                          data-testid={`delete-doc-${doc.document_id}`}
-                          title={t('ui.deleteDocument')}
-                          style={{
-                            background: 'none',
-                            border: 'none',
-                            color: 'var(--status-danger)',
-                            cursor: 'pointer',
-                            fontSize: 12,
-                            padding: '2px 4px',
-                          }}
-                        >
-                          <Icon name="close" /> {t('ui.delete')}
-                        </button>
-                      </InlineConfirm>
-                    </div>
+                    {t('knowledge.chooseFiles', 'Choose files')}
+                  </Button>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    multiple
+                    accept={ALLOWED_EXTENSIONS.join(',')}
+                    data-testid="knowledge-file-input"
+                    aria-label={t('knowledge.chooseFiles', 'Choose files')}
+                    style={{ display: 'none' }}
+                    onChange={(e) => {
+                      void handleFiles(e.target.files);
+                      e.target.value = '';
+                    }}
+                  />
+                  <span data-testid="knowledge-size-limit" className="knowledge-limits">
+                    {t('knowledge.typesHint', 'Text, Markdown, HTML, PDF')} ·{' '}
+                    {t('knowledge.maxPerFile', 'Max per file')}: {formatBytes(limits.max_file_bytes)} ·{' '}
+                    {t('knowledge.workspaceUsage', 'Workspace')}: {formatBytes(limits.workspace_used_bytes)} /{' '}
+                    {formatBytes(limits.max_workspace_bytes)}
+                  </span>
+                </div>
 
-                    <div style={{ display: 'flex', gap: 10, fontSize: 11, color: 'var(--text-secondary)' }}>
-                      <span
-                        data-testid="doc-status"
-                        style={{
-                          padding: '0 6px',
-                          borderRadius: 8,
-                          backgroundColor: 'rgba(34, 197, 94, 0.15)',
-                          color: '#15803d',
-                        }}
-                      >
-                        {doc.status === 'indexed' || !doc.status
-                          ? t('knowledge.statusIndexed', 'Indexed')
-                          : doc.status}
-                      </span>
-                      <span>•</span>
-                      <span>{doc.text_length} {t('ui.chars')}</span>
-                      {typeof doc.chunk_count === 'number' && (
-                        <>
-                          <span>•</span>
-                          <span>{doc.chunk_count} {t('knowledge.chunks', 'chunks')}</span>
-                        </>
-                      )}
-                      <span>•</span>
-                      <span>{t('ui.hash') + " "}{doc.content_hash.substring(0, 8)}...</span>
-                    </div>
+                <div className="resource-field">
+                  <label htmlFor={`${ids}-filename`}>{t('knowledge.fileName')}</label>
+                  <input
+                    id={`${ids}-filename`}
+                    type="text"
+                    value={uploadFilename}
+                    onChange={(e) => setUploadFilename(e.target.value)}
+                    placeholder={t('ui.documentMdOrGuideTxt')}
+                    data-testid="upload-filename-input"
+                  />
+                </div>
+
+                <div className="resource-field">
+                  <label htmlFor={`${ids}-content`}>{t('knowledge.content')}</label>
+                  <textarea
+                    id={`${ids}-content`}
+                    value={uploadContent}
+                    onChange={(e) => setUploadContent(e.target.value)}
+                    placeholder={t('ui.pasteDocumentTextInEnglishOrHindi')}
+                    rows={5}
+                    data-testid="upload-content-textarea"
+                    style={{ fontFamily: 'inherit', fontSize: 'var(--type-body)' }}
+                  />
+                  <div className="knowledge-samples">
+                    <span>{t('ui.samples')}</span>
+                    <Button type="button" size="sm" variant="ghost" onClick={() => handleSelectSample('sample-en-arch')} data-testid="sample-en-btn">
+                      {t('ui.englishSdk')}
+                    </Button>
+                    <Button type="button" size="sm" variant="ghost" onClick={() => handleSelectSample('sample-hi-guide')} data-testid="sample-hi-btn">
+                      {t('ui.guide')}
+                    </Button>
                   </div>
-                ))}
+                </div>
+
+                <div className="resource-actions" style={{ justifyContent: 'flex-start' }}>
+                  <Button
+                    type="submit"
+                    variant="primary"
+                    loading={uploading}
+                    disabled={!uploadFilename.trim() || !uploadContent.trim()}
+                    data-testid="upload-document-button"
+                  >
+                    {t('ui.ingestIndexDocument')}
+                  </Button>
+                  <Button type="button" variant="ghost" onClick={closeAddForm}>
+                    {t('common.cancel')}
+                  </Button>
+                </div>
+              </form>
+            ) : (
+              <div className="knowledge-toolbar">
+                <Button ref={addTriggerRef} variant="primary" onClick={openAddForm} data-testid="add-document-button">
+                  {t('ui.ingestIndexDocument')}
+                </Button>
+                <span className="resource-help">
+                  {t('knowledge.typesHint', 'Text, Markdown, HTML, PDF')} · {t('knowledge.maxPerFile', 'Max per file')}:{' '}
+                  {formatBytes(limits.max_file_bytes)}
+                </span>
+                {!loading && documents.length > 0 && (
+                  <span className="knowledge-documents-count" data-testid="knowledge-document-count">
+                    {documents.length === 1
+                      ? t('knowledge.documentCountOne')
+                      : t('knowledge.documentCount').replace('{count}', String(documents.length))}
+                  </span>
+                )}
               </div>
             )}
-          </div>
-        </div>
 
-        {/* Right Panel: Retrieval Preview or Grounded Knowledge Agent */}
-        <div
-          className="studio-split-main"
-          style={{
-            flex: 1,
-            backgroundColor: 'var(--bg-surface)',
-            borderRadius: 'var(--radius-lg)',
-            border: '1px solid var(--border-subtle)',
-            display: 'flex',
-            flexDirection: 'column',
-            overflow: 'hidden',
-          }}
-        >
-          {activeTab === 'retrieval' ? (
-            /* Tab 1: Retrieval Preview */
-            <div style={{ display: 'flex', flexDirection: 'column', height: '100%', padding: 20 }}>
-              <div style={{ marginBottom: 16 }}>
-                <h3 style={{ fontSize: 15, fontWeight: 600, margin: '0 0 6px 0', color: 'var(--text-primary)' }}>
-                  {t('ui.hybridRetrievalPreview')}
-                </h3>
-                <p style={{ fontSize: 12, color: 'var(--text-secondary)', margin: 0 }}>
-                  {t('ui.searchIndexedChunksUsingFusedDenseVectorSimilarityLexicalBm25KeywordMatchingWi')}
-                </p>
+            {loading ? (
+              <div role="status" aria-busy="true" style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '16px 0' }}>
+                <Spinner size={16} /> <span>{t('common.loading')}</span>
               </div>
+            ) : documents.length === 0 ? (
+              <p className="inspection-empty">{t('ui.noDocumentsIndexedInThisCollectionYet')}</p>
+            ) : (
+              <div className="inspection-table-scroll" role="region" aria-label={t('knowledge.documentsTable')} tabIndex={0}>
+                <table className="inspection-table knowledge-documents">
+                  <caption className="studio-sr-only">{t('knowledge.documentsTable')}</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col">{t('knowledge.colFile')}</th>
+                      <th scope="col">{t('knowledge.colStatus')}</th>
+                      <th scope="col" style={{ textAlign: 'right' }}>{t('knowledge.colChars')}</th>
+                      <th scope="col" style={{ textAlign: 'right' }}>{t('knowledge.colChunks')}</th>
+                      <th scope="col">{t('knowledge.colHash')}</th>
+                      <th scope="col"><span className="studio-sr-only">{t('knowledge.colActions')}</span></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {documents.map((doc) => (
+                      <tr key={doc.document_id} data-testid={`document-item-${doc.document_id}`}>
+                        <td data-testid="doc-filename">{doc.filename}</td>
+                        <td data-testid="doc-status">
+                          {doc.status === 'indexed' || !doc.status ? t('knowledge.statusIndexed', 'Indexed') : doc.status}
+                        </td>
+                        <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{doc.text_length}</td>
+                        <td style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                          {typeof doc.chunk_count === 'number' ? doc.chunk_count : t('ui.unknown')}
+                        </td>
+                        <td><code>{doc.content_hash.substring(0, 8)}…</code></td>
+                        <td>
+                          <InlineConfirm key={doc.document_id} consequence={t('confirmation.deleteDocument')}>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="workflow-danger-action"
+                              onClick={() => deleteDocument(doc.document_id)}
+                              data-testid={`delete-doc-${doc.document_id}`}
+                              aria-label={`${t('ui.deleteDocument')} ${doc.filename}`}
+                            >
+                              {t('ui.delete')}
+                            </Button>
+                          </InlineConfirm>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </>
+        )}
 
-              {/* Search Form */}
-              <div style={{ display: 'flex', gap: 10, marginBottom: 16 }}>
+        {activeTab === 'retrieval' && (
+          <>
+            <h2 className="knowledge-panel-heading">{t('ui.hybridRetrievalPreview')}</h2>
+            <form
+              className="knowledge-query"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void runRetrieval(searchQuery);
+              }}
+            >
+              <div className="resource-field">
+                <label htmlFor={`${ids}-query`}>{t('knowledge.searchQuery')}</label>
                 <input
+                  id={`${ids}-query`}
                   type="text"
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   placeholder={t('ui.enterSearchQueryEnglishOrHindi')}
                   data-testid="retrieval-query-input"
-                  style={{
-                    flex: 1,
-                    padding: '8px 12px',
-                    borderRadius: 'var(--radius-md)',
-                    border: '1px solid var(--border-subtle)',
-                    backgroundColor: 'var(--bg-canvas)',
-                    color: 'var(--text-primary)',
-                    fontSize: 13,
-                  }}
                 />
-                <Button
-                  variant="primary"
-                  onClick={() => runRetrieval(searchQuery)}
-                  disabled={!searchQuery.trim() || retrieving}
-                  data-testid="search-retrieval-button"
-                >
-                  {retrieving ? <Spinner size={14} /> : <>{t('ui.search') + " "}<Icon name="search" /></>}
-                </Button>
               </div>
+              <Button
+                type="submit"
+                variant="primary"
+                loading={retrieving}
+                disabled={!searchQuery.trim()}
+                data-testid="search-retrieval-button"
+              >
+                {t('ui.search')}
+              </Button>
+            </form>
+            <details className="resource-help-disclosure">
+              <summary>{t('knowledge.howSearchWorks')}</summary>
+              <p>{t('ui.searchIndexedChunksUsingFusedDenseVectorSimilarityLexicalBm25KeywordMatchingWi')}</p>
+            </details>
 
-              {/* Retrieval Results */}
-              <div style={{ flex: 1, overflowY: 'auto' }}>
-                {!retrievalResult ? (
-                  <div style={{ textAlign: 'center', padding: 40, color: 'var(--text-tertiary)', fontSize: 13 }}>
-                    {t('ui.executeASearchQueryAboveToViewRetrievedChunksAndVerifiableCitations')}
-                  </div>
-                ) : !retrievalResult.has_sufficient_evidence || retrievalResult.citations.length === 0 ? (
-                  <div
-                    data-testid="insufficient-evidence-alert"
-                    style={{
-                      padding: 16,
-                      borderRadius: 'var(--radius-md)',
-                      backgroundColor: 'rgba(234, 179, 8, 0.1)',
-                      border: '1px solid rgba(234, 179, 8, 0.3)',
-                      color: '#b45309',
-                      fontSize: 13,
-                    }}
-                  >
-                    <Icon name="warning" /> {t('ui.insufficientEvidenceNoMatchingChunksFoundAboveThresholdInThisCollection')}
-                  </div>
-                ) : (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: 'var(--text-secondary)' }}>
-                      <span>{t('ui.found') + " "}<strong>{retrievalResult.citations.length}</strong> {t('ui.citations')}</span>
-                      <span>{t('ui.latency') + " "}<strong>{retrievalResult.latency_ms}ms</strong></span>
-                    </div>
-
-                    {(retrievalResult.citations as HybridCitationItem[]).map((cit, idx) => (
-                      <div
-                        key={cit.citation_id || idx}
-                        data-testid={`citation-card-${idx}`}
-                        style={{
-                          padding: 14,
-                          borderRadius: 'var(--radius-md)',
-                          border: '1px solid var(--border-subtle)',
-                          backgroundColor: 'var(--bg-canvas)',
-                          display: 'flex',
-                          flexDirection: 'column',
-                          gap: 6,
-                        }}
-                      >
-                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                          <span
-                            data-testid="citation-origin"
-                            style={{ fontWeight: 600, fontSize: 12, color: 'var(--accent-primary)' }}
-                          >
-                            {cit.citation_id} {t('ui.source') + " "}{cit.origin}
-                          </span>
-                          {typeof cit.chunk_index === 'number' && (
-                            <span data-testid="citation-chunk-index" style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
-                              {t('knowledge.chunk', 'Chunk')} {cit.chunk_index}
-                            </span>
-                          )}
-                          <span style={{ fontSize: 11, color: 'var(--text-tertiary)', fontFamily: 'monospace' }}>
-                            {t('ui.spanChars') + " "}{cit.start_char}..{cit.end_char}{cit.page_start != null ? t('ui.pageSuffix').replace('{page}', String(cit.page_start)) : ''}
-                          </span>
-                        </div>
-
-                        <div
-                          data-testid="citation-snippet"
-                          style={{
-                            fontSize: 12,
-                            lineHeight: 1.5,
-                            color: 'var(--text-primary)',
-                            whiteSpace: 'pre-wrap',
-                            backgroundColor: 'var(--bg-surface)',
-                            padding: 8,
-                            borderRadius: 'var(--radius-sm)',
-                            border: '1px solid var(--border-subtle)',
-                          }}
-                        >
-                          <HighlightedSnippet
-                            text={cit.snippet}
-                            highlights={cit.highlights_utf16 ?? cit.highlights}
-                            unit={cit.highlights_utf16 ? 'utf16' : 'codepoint'}
-                          />
-                        </div>
-                        <div style={{ display: 'flex', gap: 10, fontSize: 11, color: 'var(--text-tertiary)', alignItems: 'center' }}>
-                          {cit.source_uri &&
-                            (safeHref(cit.source_uri) ? (
-                              <a
-                                data-testid="citation-source-uri"
-                                href={safeHref(cit.source_uri) as string}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                              >
-                                {cit.source_uri}
-                              </a>
-                            ) : (
-                              <span data-testid="citation-source-uri">{cit.source_uri}</span>
-                            ))}
-                          {typeof cit.chunk_index === 'number' && (
-                            <button
-                              type="button"
-                              data-testid={`open-chunk-${idx}`}
-                              onClick={() => void openChunk(cit.document_id, cit.chunk_index as number)}
-                              style={{ background: 'none', border: 'none', color: 'var(--accent-primary)', cursor: 'pointer', fontSize: 11 }}
-                            >
-                              {t('citations.openChunk', 'Open source chunk')}
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-          ) : (
-            /* Tab 2: Grounded Knowledge Agent */
-            <div style={{ display: 'flex', flexDirection: 'column', height: '100%', padding: 20 }}>
-              <div style={{ marginBottom: 16 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
-                  <span
-                    data-testid="knowledge-agent-badge"
-                    style={{
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      gap: 6,
-                      padding: '4px 10px',
-                      borderRadius: 'var(--radius-sm)',
-                      backgroundColor: 'rgba(59, 130, 246, 0.1)',
-                      border: '1px solid rgba(59, 130, 246, 0.3)',
-                      color: '#2563eb',
-                      fontSize: 12,
-                      fontWeight: 600,
-                    }}
-                  >
-                    <span><Icon name="agents" /></span>
-                    <span>{t('ui.groundedKnowledgeAgentLocalOfflineFixture')}</span>
-                  </span>
+            {!retrievalResult ? (
+              <p className="inspection-empty">{t('ui.executeASearchQueryAboveToViewRetrievedChunksAndVerifiableCitations')}</p>
+            ) : !retrievalResult.has_sufficient_evidence || retrievalResult.citations.length === 0 ? (
+              <p data-testid="insufficient-evidence-alert" className="inline-notice inline-notice--warning" style={{ marginTop: 16, maxWidth: 800 }}>
+                {t('ui.insufficientEvidenceNoMatchingChunksFoundAboveThresholdInThisCollection')}
+              </p>
+            ) : (
+              <>
+                <div className="knowledge-summary" role="status">
+                  <span>{t('ui.found') + ' '}<strong>{retrievalResult.citations.length}</strong> {t('ui.citations')}</span>
+                  <span>{t('ui.latency') + ' '}{retrievalResult.latency_ms}ms</span>
                 </div>
-                <p style={{ fontSize: 12, color: 'var(--text-secondary)', margin: 0 }}>
-                  {t('ui.answersQuestionsStrictlyGroundedInVerifiableSourceCitationsIfNoEvidenceExistsE')}
-                </p>
-              </div>
+                <ol className="knowledge-results">
+                  {(retrievalResult.citations as HybridCitationItem[]).map((cit, idx) => (
+                    <li key={cit.citation_id || idx} data-testid={`citation-card-${idx}`}>
+                      <div className="knowledge-result-head">
+                        <span data-testid="citation-origin" className="knowledge-result-origin" title={cit.origin}>
+                          {cit.citation_id} {t('ui.source') + ' '}{cit.origin}
+                        </span>
+                        {typeof cit.chunk_index === 'number' && (
+                          <span data-testid="citation-chunk-index" className="resource-help">
+                            {t('knowledge.chunk', 'Chunk')} {cit.chunk_index}
+                          </span>
+                        )}
+                        <code className="resource-help">
+                          {t('ui.spanChars') + ' '}{cit.start_char}..{cit.end_char}
+                          {cit.page_start != null ? t('ui.pageSuffix').replace('{page}', String(cit.page_start)) : ''}
+                        </code>
+                      </div>
+                      <div data-testid="citation-snippet" className="knowledge-snippet">
+                        <HighlightedSnippet
+                          text={cit.snippet}
+                          highlights={cit.highlights_utf16 ?? cit.highlights}
+                          unit={cit.highlights_utf16 ? 'utf16' : 'codepoint'}
+                        />
+                      </div>
+                      <div className="knowledge-result-meta">
+                        {cit.matched_by && cit.matched_by.length > 0 && (
+                          <span>
+                            {t('knowledge.matchedBy').split('{methods}')[0]}
+                            <code>{cit.matched_by.join(', ')}</code>
+                            {t('knowledge.matchedBy').split('{methods}')[1] ?? ''}
+                          </span>
+                        )}
+                        {cit.source_uri &&
+                          (safeHref(cit.source_uri) ? (
+                            <a
+                              data-testid="citation-source-uri"
+                              href={safeHref(cit.source_uri) as string}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                            >
+                              {cit.source_uri}
+                            </a>
+                          ) : (
+                            <span data-testid="citation-source-uri">{cit.source_uri}</span>
+                          ))}
+                        {typeof cit.chunk_index === 'number' && (
+                          <button
+                            type="button"
+                            data-testid={`open-chunk-${idx}`}
+                            onClick={(e) => {
+                              chunkOpenerRef.current = e.currentTarget;
+                              void openChunk(cit.document_id, cit.chunk_index as number);
+                            }}
+                          >
+                            {t('citations.openChunk', 'Open source chunk')}
+                          </button>
+                        )}
+                      </div>
+                    </li>
+                  ))}
+                </ol>
+              </>
+            )}
+          </>
+        )}
 
-              {/* Agent Form */}
-              <div style={{ display: 'flex', gap: 10, marginBottom: 16, alignItems: 'center' }}>
+        {activeTab === 'agent' && (
+          <>
+            <h2 data-testid="knowledge-agent-badge" className="knowledge-panel-heading" style={{ marginBottom: 4 }}>
+              {t('ui.groundedKnowledgeAgentLocalOfflineFixture')}
+            </h2>
+            <p className="knowledge-panel-help">
+              {t('ui.answersQuestionsStrictlyGroundedInVerifiableSourceCitationsIfNoEvidenceExistsE')}
+            </p>
+            <form
+              className="knowledge-query"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void runAnswer(agentQuestion, agentLang);
+              }}
+            >
+              <div className="resource-field">
+                <label htmlFor={`${ids}-question`}>{t('knowledge.question')}</label>
                 <input
+                  id={`${ids}-question`}
                   type="text"
                   value={agentQuestion}
                   onChange={(e) => setAgentQuestion(e.target.value)}
                   placeholder={t('ui.askAQuestionGroundedInKnowledgeBase')}
                   data-testid="agent-question-input"
-                  style={{
-                    flex: 1,
-                    padding: '8px 12px',
-                    borderRadius: 'var(--radius-md)',
-                    border: '1px solid var(--border-subtle)',
-                    backgroundColor: 'var(--bg-canvas)',
-                    color: 'var(--text-primary)',
-                    fontSize: 13,
-                  }}
                 />
-
-                <div
-                  style={{
-                    display: 'inline-flex',
-                    borderRadius: 'var(--radius-sm)',
-                    border: '1px solid var(--border-subtle)',
-                    overflow: 'hidden',
-                  }}
-                >
-                  <button
-                    onClick={() => setAgentLang('en')}
-                    data-testid="agent-lang-en"
-                    style={{
-                      padding: '6px 10px',
-                      fontSize: 12,
-                      fontWeight: agentLang === 'en' ? 600 : 400,
-                      backgroundColor:
-                        agentLang === 'en' ? 'var(--accent-subtle)' : 'transparent',
-                      color:
-                        agentLang === 'en' ? 'var(--accent-primary)' : 'var(--text-secondary)',
-                      border: 'none',
-                      cursor: 'pointer',
-                    }}
-                  >
-                    EN
+              </div>
+              <div className="resource-field resource-field--fit">
+                <span className="resource-label" id={`${ids}-answer-lang`}>{t('knowledge.answerLanguage')}</span>
+                <div className="segmented" role="group" aria-labelledby={`${ids}-answer-lang`}>
+                  <button type="button" aria-pressed={agentLang === 'en'} onClick={() => setAgentLang('en')} data-testid="agent-lang-en">
+                    {t('ui.english')}
                   </button>
-                  <button
-                    onClick={() => setAgentLang('hi')}
-                    data-testid="agent-lang-hi"
-                    style={{
-                      padding: '6px 10px',
-                      fontSize: 12,
-                      fontWeight: agentLang === 'hi' ? 600 : 400,
-                      backgroundColor:
-                        agentLang === 'hi' ? 'var(--accent-subtle)' : 'transparent',
-                      color:
-                        agentLang === 'hi' ? 'var(--accent-primary)' : 'var(--text-secondary)',
-                      border: 'none',
-                      cursor: 'pointer',
-                    }}
-                  >
-                    HI
+                  <button type="button" aria-pressed={agentLang === 'hi'} onClick={() => setAgentLang('hi')} data-testid="agent-lang-hi" lang="hi">
+                    हिन्दी
                   </button>
                 </div>
-
-                <Button
-                  variant="primary"
-                  onClick={() => runAnswer(agentQuestion, agentLang)}
-                  disabled={!agentQuestion.trim() || answering}
-                  data-testid="ask-agent-button"
-                >
-                  {answering ? <Spinner size={14} /> : <>{t('ui.askAgent') + " "}<Icon name="send" /></>}
-                </Button>
               </div>
+              <Button
+                type="submit"
+                variant="primary"
+                loading={answering}
+                disabled={!agentQuestion.trim()}
+                data-testid="ask-agent-button"
+              >
+                {t('ui.send')}
+              </Button>
+            </form>
 
-              {/* Agent Answer View */}
-              <div style={{ flex: 1, overflowY: 'auto' }}>
-                {!answerResult ? (
-                  <div style={{ textAlign: 'center', padding: 40, color: 'var(--text-tertiary)', fontSize: 13 }}>
-                    {t('ui.askAQuestionAboveToReceiveACitationBackedGroundedAnswer')}
-                  </div>
-                ) : !answerResult.has_sufficient_evidence ? (
-                  <div
-                    data-testid="insufficient-evidence-banner"
-                    style={{
-                      padding: 16,
-                      borderRadius: 'var(--radius-md)',
-                      backgroundColor: 'rgba(234, 179, 8, 0.1)',
-                      border: '1px solid rgba(234, 179, 8, 0.3)',
-                      color: '#b45309',
-                      fontSize: 13,
-                      display: 'flex',
-                      flexDirection: 'column',
-                      gap: 4,
-                    }}
-                  >
-                    <strong><Icon name="warning" /> {t('ui.insufficientEvidence')}</strong>
-                    <span>{answerResult.answer}</span>
-                  </div>
-                ) : (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-                    <div
-                      data-testid="agent-answer-box"
-                      style={{
-                        padding: 16,
-                        borderRadius: 'var(--radius-lg)',
-                        backgroundColor: 'var(--bg-canvas)',
-                        border: '1px solid var(--border-subtle)',
-                        fontSize: 14,
-                        lineHeight: 1.6,
-                        color: 'var(--text-primary)',
-                      }}
-                    >
-                      <div style={{ fontWeight: 600, fontSize: 12, color: 'var(--text-secondary)', marginBottom: 6 }}>
-                        {t('ui.answer')}
-                      </div>
-                      <div data-testid="grounded-answer-text">{answerResult.answer}</div>
-                    </div>
-
-                    {/* Citations list */}
-                    {answerResult.citations.length > 0 && (
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                        <div style={{ fontWeight: 600, fontSize: 12, color: 'var(--text-secondary)' }}>
-                          {t('ui.verifiedReferenceCitations')}{answerResult.citations.length}):
-                        </div>
-                        {answerResult.citations.map((c, i) => (
-                          <div
-                            key={i}
-                            data-testid={`answer-citation-${i}`}
-                            style={{
-                              padding: 10,
-                              borderRadius: 'var(--radius-sm)',
-                              border: '1px solid var(--border-subtle)',
-                              backgroundColor: 'var(--bg-canvas)',
-                              fontSize: 12,
-                            }}
-                          >
-                            <span style={{ fontWeight: 600, color: 'var(--accent-primary)' }}>
-                              {c.citation_id} {c.origin}{c.page_start != null ? t('ui.pageSuffix').replace('{page}', String(c.page_start)) : ''}:
-                            </span>{' '}
-                            <span style={{ color: 'var(--text-secondary)' }}>{c.snippet}</span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
+            {!answerResult ? (
+              <p className="inspection-empty">{t('ui.askAQuestionAboveToReceiveACitationBackedGroundedAnswer')}</p>
+            ) : !answerResult.has_sufficient_evidence ? (
+              <div data-testid="insufficient-evidence-banner" className="inline-notice inline-notice--warning" style={{ marginTop: 16, maxWidth: 800 }}>
+                <strong className="inline-notice-title">{t('ui.insufficientEvidence')}</strong>
+                <span>{answerResult.answer}</span>
+              </div>
+            ) : (
+              <div className="knowledge-answer">
+                <section data-testid="agent-answer-box" aria-labelledby={`${ids}-answer`}>
+                  <h3 id={`${ids}-answer`} className="resource-label" style={{ marginBottom: 4 }}>{t('knowledge.answer')}</h3>
+                  <div data-testid="grounded-answer-text" className="knowledge-answer-text">{answerResult.answer}</div>
+                </section>
+                {answerResult.citations.length > 0 && (
+                  <section aria-labelledby={`${ids}-answer-sources`}>
+                    <h3 id={`${ids}-answer-sources`} className="resource-label" style={{ marginBottom: 4 }}>
+                      {t('ui.verifiedReferenceCitations')}{answerResult.citations.length})
+                    </h3>
+                    <ol className="knowledge-answer-citations">
+                      {answerResult.citations.map((c, i) => (
+                        <li key={i} data-testid={`answer-citation-${i}`}>
+                          <strong>
+                            {c.citation_id} {c.origin}
+                            {c.page_start != null ? t('ui.pageSuffix').replace('{page}', String(c.page_start)) : ''}:
+                          </strong>{' '}
+                          <span style={{ color: 'var(--text-secondary)' }}>{c.snippet}</span>
+                        </li>
+                      ))}
+                    </ol>
+                  </section>
                 )}
               </div>
-            </div>
-          )}
-        </div>
+            )}
+          </>
+        )}
       </div>
-    </div>
+    </PageLayout>
   );
 }

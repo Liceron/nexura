@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import { startTestCluster, TestCluster } from './harness';
 
 let cluster: TestCluster;
@@ -18,6 +18,24 @@ test.beforeEach(async ({ page }) => {
     localStorage.setItem('nexura_api_url', backendUrl);
   }, cluster.backendUrl);
 });
+
+
+async function expectNoPageOverflow(page: Page) {
+  const { scrollWidth, innerWidth } = await page.evaluate(() => ({
+    scrollWidth: document.documentElement.scrollWidth,
+    innerWidth: window.innerWidth,
+  }));
+  expect(scrollWidth).toBeLessThanOrEqual(innerWidth);
+}
+
+
+/** The element's box lies fully inside the 390px phone viewport (not pushed off to the side). */
+async function expectInPhoneView(locator: import('@playwright/test').Locator) {
+  const box = await locator.boundingBox();
+  expect(box).not.toBeNull();
+  expect(box!.x).toBeGreaterThanOrEqual(0);
+  expect(box!.x + box!.width).toBeLessThanOrEqual(390);
+}
 
 test.describe('Credential References, Ownership and Role UX (F11)', () => {
   test('manages local-owner credential references with zero secret leaks, verifies connection, and revokes keys', async ({
@@ -39,7 +57,11 @@ test.describe('Credential References, Ownership and Role UX (F11)', () => {
 
     // 2. Verify zero-secret storage guarantee banner and default admin role
     await expect(page.locator('[data-testid="current-role-badge"]')).toContainText(/Admin/i);
-    await expect(page.getByText('Zero-Secret Vault Architecture')).toBeVisible();
+    await expect(page.getByRole('heading', { level: 1, name: 'Credentials' })).toBeVisible();
+    // The storage explanation is a disclosure next to Add credential, not a banner.
+    const storageHelp = page.getByTestId('credential-storage-help');
+    await storageHelp.getByText('How credentials are stored', { exact: true }).click();
+    await expect(storageHelp).toContainText('never stores the secret in browser storage');
 
     // 3. Register credential reference
     const registerBtn = page.locator('[data-testid="register-credential-button"]');
@@ -47,6 +69,9 @@ test.describe('Credential References, Ownership and Role UX (F11)', () => {
 
     const form = page.locator('[data-testid="register-credential-form"]');
     await expect(form).toBeVisible();
+    await expect(page.getByRole('dialog', { name: 'Add credential' })).toBeVisible();
+    // The secret field is labelled, masked and write-only.
+    await expect(page.getByLabel('Secret value', { exact: true })).toHaveAttribute('type', 'password');
 
     await page.locator('[data-testid="cred-id-input"]').fill('openai_prod_key');
     await page.locator('[data-testid="cred-desc-input"]').fill('Production OpenAI key for LLM agents');
@@ -77,7 +102,8 @@ test.describe('Credential References, Ownership and Role UX (F11)', () => {
 
     const verifyBadge = page.locator('[data-testid="verification-badge-openai_prod_key"]');
     await expect(verifyBadge).toBeVisible({ timeout: 10000 });
-    await expect(verifyBadge).toContainText('VALID');
+    await expect(verifyBadge).toContainText('Valid');
+    await expect(verifyBadge).not.toContainText('Invalid');
 
     // 6. Test Key Revocation (fails closed)
     const revokeBtn = page.locator('[data-testid="revoke-cred-openai_prod_key"]');
@@ -85,11 +111,11 @@ test.describe('Credential References, Ownership and Role UX (F11)', () => {
     await page.getByRole('button', { name: 'Confirm', exact: true }).click();
 
     const statusBadge = page.locator('[data-testid="status-openai_prod_key"]');
-    await expect(statusBadge).toContainText('REVOKED', { timeout: 10000 });
+    await expect(statusBadge).toContainText('Revoked', { timeout: 10000 });
 
     // Subsequent verify must reflect revoked status
     await verifyBtn.click();
-    await expect(verifyBadge).toContainText('REVOKED', { timeout: 10000 });
+    await expect(verifyBadge).toContainText('Revoked', { timeout: 10000 });
 
     // 7. OSS has a single local owner (admin), without a members UI.
     await expect(page.locator('[data-testid="current-role-badge"]')).toContainText('Admin');
@@ -107,5 +133,48 @@ test.describe('Credential References, Ownership and Role UX (F11)', () => {
     await page.getByRole('button', { name: 'Confirm', exact: true }).click();
 
     await expect(credRow).not.toBeVisible({ timeout: 10000 });
+  });
+
+  test('phone: credentials fit the screen, each row keeps type, status and actions in view, and the secret is never shown', async ({ page }) => {
+    const SECRET = 'sk_phone_sentinel_5551234567';
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(`${cluster.frontendUrl}/#/credentials`);
+    await expect(page.getByRole('heading', { level: 1, name: 'Credentials' })).toBeVisible();
+    await expectNoPageOverflow(page);
+
+    await page.getByRole('button', { name: 'Add credential', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'Add credential' });
+    await expect(dialog).toBeVisible();
+    await dialog.getByLabel('Reference', { exact: true }).fill('phone_key');
+    await dialog.getByLabel('Secret value', { exact: true }).fill(SECRET);
+    await expectNoPageOverflow(page);
+    await dialog.getByRole('button', { name: 'Add credential', exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+
+    const row = page.getByTestId('cred-row-phone_key');
+    await expect(row).toBeVisible({ timeout: 10000 });
+    // Phones stack each credential (review M4): type, status and every action stay on screen.
+    await expectInPhoneView(row.getByTestId('cred-id-phone_key'));
+    await expectInPhoneView(row.getByRole('cell').filter({ hasText: 'api_key' }));
+    await expectInPhoneView(row.getByTestId('status-phone_key'));
+    await expect(row.getByTestId('status-phone_key')).toContainText('Active');
+    for (const action of ['verify-cred-phone_key', 'revoke-cred-phone_key', 'delete-cred-phone_key']) {
+      await expectInPhoneView(row.getByTestId(action));
+    }
+    await expectNoPageOverflow(page);
+    expect(await page.content()).not.toContain(SECRET);
+    expect(await page.evaluate(() => JSON.stringify(window.localStorage) + JSON.stringify(window.sessionStorage))).not.toContain(SECRET);
+
+    await page.getByRole('tab', { name: 'Permissions', exact: true }).click();
+    const matrix = page.getByRole('table', { name: 'Role permissions' });
+    await expect(matrix).toBeVisible();
+    // Every role's answer for an action is visible together, so roles can be compared.
+    const runRow = matrix.getByRole('row', { name: /Run workflows/ });
+    for (const [role, answer] of [['Admin', 'Yes'], ['Editor', 'Yes'], ['Viewer', 'Denied']]) {
+      const cell = runRow.locator(`td[data-label="${role}"]`);
+      await expectInPhoneView(cell);
+      await expect(cell).toHaveText(answer);
+    }
+    await expectNoPageOverflow(page);
   });
 });

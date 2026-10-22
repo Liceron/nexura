@@ -24,7 +24,7 @@ jobs:
       - run: >-
           uv run --frozen mypy src packages/nexura-agents/src packages/nexura-connectors/src
           packages/nexura-postgres/src packages/nexura-qdrant/src packages/nexura-sandbox/src
-          packages/nexura-studio/src packages/nexura-vertex/src
+          packages/nexura-studio/src packages/nexura-vertex/src packages/nexura-guardrails/src
       # The suite also checks the TypeScript client, installed wheels and the WASI sandbox.
       - run: npm ci && npm run build
         working-directory: clients/typescript
@@ -119,6 +119,18 @@ jobs:
           uv pip install --python /tmp/agents/bin/python dist/nexura_agents-*.whl
           cd /tmp && env -u PYTHONPATH /tmp/agents/bin/python -I -c \
             "import nexura_agents, importlib.util as u; from nexura_agents import Agent, Runner, tool; assert u.find_spec('nexura_runtime') is None"
+      - name: nexura-guardrails on nexura-agents alone (P39 G3)
+        run: |
+          dist="$PWD/dist"
+          uv venv /tmp/guardrails --python 3.12
+          py=/tmp/guardrails/bin/python
+          uv pip install --python $py --find-links "$dist" "$dist"/nexura_agents-*.whl
+          cd /tmp && env -u PYTHONPATH $py -I -c "import importlib.util as u; assert u.find_spec('nexura_guardrails') is None; from nexura_agents import block_pii"
+          uv pip install --python $py --find-links "$dist" "$dist"/nexura_guardrails-*.whl
+          cd /tmp && env -u PYTHONPATH $py -I -c "import asyncio, importlib.util as u; from nexura_agents import FakeModel; from nexura_guardrails import JudgeCheck, evaluate, injection, tiered
+          j = JudgeCheck(FakeModel(['{\"decision\": \"block\", \"categories\": [\"fraud\"], \"score\": 0.9, \"reason\": \"otp\"}']), 'Block OTP requests.', categories=['fraud', 'other'])
+          assert asyncio.run(evaluate(tiered(injection(), j), 'share your OTP')).decision == 'block'
+          assert u.find_spec('nexura_runtime') is None"
       # Each step runs as one shell script, so after "cd /tmp" a relative "dist" no longer
       # names the workspace's dist/; the absolute "$dist" does.
       - name: nexura-runtime without nexura-connectors, then with it
@@ -139,7 +151,7 @@ jobs:
           uv pip install --python $py --find-links "$dist" "$dist"/nexura_runtime-*.whl
           cd /tmp
           # Without them the runtime imports, and each feature names its package.
-          env -u PYTHONPATH $py -I -c "import importlib.util as u; assert not any(u.find_spec(n) for n in ('nexura_postgres', 'nexura_qdrant', 'nexura_sandbox', 'nexura_studio', 'nexura_vertex'))"
+          env -u PYTHONPATH $py -I -c "import importlib.util as u; assert not any(u.find_spec(n) for n in ('nexura_postgres', 'nexura_qdrant', 'nexura_sandbox', 'nexura_studio', 'nexura_vertex', 'nexura_guardrails'))"
           env -u PYTHONPATH $py -I -c "from nexura_runtime.storage import get_storage_repository as g; from nexura_agents.contracts import MissingDependencyError as E
           try: g('postgresql://u:p@localhost/db'); raise SystemExit('no error')
           except E as e: assert 'pip install nexura-postgres' in str(e)"

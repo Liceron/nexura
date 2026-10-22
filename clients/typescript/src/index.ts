@@ -129,6 +129,7 @@ export type {
   ScheduleConfig,
   CreateScheduleOptions,
   WebhookConfig,
+  DeliveryTokenResult,
   RegisterWebhookOptions,
   TestWebhookOptions,
   TestWebhookResult,

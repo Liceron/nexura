@@ -190,6 +190,23 @@ class ModelResponse:
     message: Message
     usage: Usage | None = None
     finish_reason: str | None = None
+    # The provider's id for this completion and the model that actually answered (it can
+    # differ from the requested one), when the provider reports them. Used for tracing.
+    response_id: str | None = None
+    response_model: str | None = None
+
+
+def response_identity(
+    data: Any, id_key: str = "id", model_key: str = "model"
+) -> dict[str, str | None]:
+    """``response_id`` / ``response_model`` keyword arguments from a provider JSON body."""
+    if not isinstance(data, dict):
+        return {"response_id": None, "response_model": None}
+    rid, model = data.get(id_key), data.get(model_key)
+    return {
+        "response_id": rid if isinstance(rid, str) and rid else None,
+        "response_model": model if isinstance(model, str) and model else None,
+    }
 
 
 @dataclass

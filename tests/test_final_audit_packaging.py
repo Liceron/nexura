@@ -108,7 +108,7 @@ def test_all_published_sdists_exclude_internal_material(tmp_path: Path) -> None:
         timeout=120,
     )
     sdists = sorted(tmp_path.glob("*.tar.gz"))
-    assert len(sdists) == len(workspace()) == 8
+    assert len(sdists) == len(workspace()) == 9
     for sdist in sdists:
         with tarfile.open(sdist) as archive:
             members = archive.getnames()

@@ -146,3 +146,26 @@ test('agents: create with the offline model, run it in a workflow node, chat wit
   inspector = await openWorkflowNode(page, workflowId);
   await expect(inspector.getByTestId('agent-node-missing')).toContainText(agentId);
 });
+
+test('agents on a phone: list and editor fit the screen, focus follows the opened agent', async ({ page }) => {
+  const created = await page.request.post(`${cluster.backendUrl}/api/v1/agents`, {
+    headers: cluster.apiHeaders,
+    data: { name: 'phone_helper', description: 'Answers order questions in English and Hindi for the phone layout check', instructions: 'Help.', model: 'fake-deterministic' },
+  });
+  expect(created.ok()).toBeTruthy();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`${cluster.frontendUrl}/#/agents`);
+  const fits = async () =>
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  const row = page.getByTestId('agent-row-phone_helper');
+  await expect(row).toBeVisible();
+  await fits();
+  await row.click();
+  await expect(page.getByRole('heading', { level: 2, name: 'phone_helper' })).toBeFocused();
+  await expect(page.getByTestId('agent-name')).toHaveValue('phone_helper');
+  await fits();
+  await page.getByRole('button', { name: 'Back to agents', exact: true }).click();
+  await expect(row).toBeFocused();
+  await fits();
+});
+

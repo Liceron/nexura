@@ -21,7 +21,7 @@ const skillMd = (name: string, body: string) =>
   `---\nname: ${name}\ndescription: Notes for ${name}.\n---\n${body}`;
 
 async function createViaUi(page: Page, markdown: string) {
-  await page.getByTestId('skills-new').click();
+  await page.getByRole('button', { name: 'Add skill', exact: true }).click();
   await page.getByTestId('skill-markdown').fill(markdown);
   await page.getByTestId('skill-create-submit').click();
 }
@@ -129,3 +129,25 @@ test('agent node inspector: pick skills and a label, saved on the node config', 
   expect(spec.nodes.start.config.skills).toEqual(['alpha']);
   expect(spec.nodes.start.config.skills_label).toBe('staging');
 });
+
+test('skills on a phone: list and detail fit the screen, focus follows the opened skill', async ({ page }) => {
+  const created = await page.request.post(`${cluster.backendUrl}/api/v1/skills`, {
+    headers: cluster.apiHeaders,
+    data: { markdown: skillMd('phone-notes', 'A long line of skill text that must wrap inside the phone screen without widening the page at all.') },
+  });
+  expect(created.status()).toBe(201);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`${cluster.frontendUrl}/#/skills`);
+  const fits = async () =>
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  const row = page.getByTestId('skill-row-phone-notes');
+  await expect(row).toBeVisible();
+  await fits();
+  await row.click();
+  await expect(page.getByRole('heading', { level: 2, name: 'phone-notes' })).toBeFocused();
+  await expect(page.getByTestId('skill-text')).toContainText('without widening the page');
+  await fits();
+  await page.getByRole('button', { name: 'Back to skills', exact: true }).click();
+  await expect(row).toBeFocused();
+});
+

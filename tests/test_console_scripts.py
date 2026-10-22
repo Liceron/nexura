@@ -45,6 +45,7 @@ def test_no_other_installed_distribution_of_this_project_claims_nexura() -> None
         "nexura-runtime",
         "nexura-agents",
         "nexura-connectors",
+        "nexura-guardrails",
         "nexura-postgres",
         "nexura-qdrant",
         "nexura-sandbox",

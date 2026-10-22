@@ -14,7 +14,7 @@ with a local REST service, a TypeScript API client and a browser Studio.
 > (`pip install nexura-agents`): the standalone agent SDK, two dependencies, offline-testable.
 > This repository's `nexura-runtime` is the full platform built on top of it.
 
-> **Guides:** [docs/](README.md) has 40 guides (agents, teams, tools, MCP and OpenAPI,
+> **Guides:** [docs/](README.md) has 42 guides (agents, teams, tools, MCP and OpenAPI,
 > A2A, memory, prompts, structured output, approvals, workflows, providers, tracing and
 > more) plus an index and a generated [API reference](api-reference.md). Every
 > offline example on those pages is run by the test suite; blocks needing a real model or
@@ -33,6 +33,7 @@ with a local REST service, a TypeScript API client and a browser Studio.
 | `packages/nexura-qdrant` | `nexura-qdrant` (Python, import `nexura_qdrant`) | The Qdrant vector store (`QdrantVectorStoreAdapter`) for the runtime's `VectorStore` protocol |
 | `packages/nexura-sandbox` | `nexura-sandbox` (Python, import `nexura_sandbox`) | The WASI, bubblewrap and gVisor code-execution backends. The runtime keeps the backend selection, `SandboxConfig` and the default Monty backend, and reports these backends unavailable ("pip install nexura-sandbox") without it |
 | `packages/nexura-vertex` | `nexura-vertex` (Python, import `nexura_vertex`) | The Google Vertex AI provider (`VertexAIProvider`, `"vertex:..."` model strings). Depends on `nexura-agents` only |
+| `packages/nexura-guardrails` | `nexura-guardrails` (Python, import `nexura_guardrails`) | Guardrail checks: verdicts and a category taxonomy, pre-filters over the `nexura-agents` built-ins, an LLM judge that fails closed, tiered and parallel composition ([docs/guardrails-package.md](guardrails-package.md)). Depends on `nexura-agents` only; extras `judge` (empty) and `yaml` |
 | `src/nexura_runtime/service` | same package, `[studio]` extra | Local REST API (`/api/v1/...`) that Studio web and the TS client call, plus a trigger worker that runs scheduled and webhook workflows |
 | `clients/typescript` | `@liceron/nexura-sdk` | TypeScript client for the REST API (no runtime of its own) |
 | `studio-web` | `nexura-studio-web` (private, not a package) | React Studio UI served by Vite; talks to the REST API |
@@ -96,6 +97,7 @@ pip install nexura-qdrant                # the Qdrant vector store
 pip install nexura-sandbox               # bubblewrap and gVisor sandbox backends
 pip install "nexura-sandbox[wasi]"       # + the WASI (WebAssembly) sandbox backend
 pip install nexura-vertex                # Google Vertex AI models ("vertex:...")
+pip install nexura-guardrails            # LLM judge, pre-filters, tiered checks
 pip install nexura-agents                # the agent SDK alone (Python 3.11 to 3.13)
 ```
 

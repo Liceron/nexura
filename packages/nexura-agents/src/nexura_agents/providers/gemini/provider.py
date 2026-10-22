@@ -51,7 +51,7 @@ from nexura_agents.providers.types import (
     ProviderCapabilities,
     StreamDelta,
 )
-from nexura_agents.types import Message, ModelResponse, Usage
+from nexura_agents.types import Message, ModelResponse, Usage, response_identity
 
 _INVALID_CLI_ALIASES = {"gemini-cli", "cli", "gemini", "gemini-code", "antigravity-gemini"}
 
@@ -424,6 +424,7 @@ class GeminiNativeProvider(BaseProvider):
             message=msg,
             usage=usage,
             finish_reason=finish_reason,
+            **response_identity(data, "responseId", "modelVersion"),
         )
 
     def _stream_internal(

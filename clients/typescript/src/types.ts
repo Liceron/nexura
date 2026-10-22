@@ -865,6 +865,15 @@ export interface WebhookConfig {
   secret: string;
   replay_window_seconds: number;
   created_at: number;
+  /** Remote single-operator mode only: this endpoint's delivery token, returned once. */
+  delivery_token?: string;
+}
+
+/** A new webhook delivery token (remote single-operator mode). */
+export interface DeliveryTokenResult {
+  endpoint_id: string;
+  delivery_token: string;
+  delivery_token_header: string;
 }
 
 export interface RegisterWebhookOptions {

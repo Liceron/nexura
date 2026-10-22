@@ -94,7 +94,7 @@ from nexura_agents.types import (
     ToolCall,
     Usage,
 )
-from nexura_agents.usage import admission
+from nexura_agents.usage import admission, linkage
 
 if TYPE_CHECKING:
     import asyncio
@@ -698,6 +698,16 @@ class _Decisions:
     resend: set[str] = field(default_factory=set)
     # Who decided (recorded on journal resolutions).
     actor: str = "sdk:resume"
+    # The approval (interruption id) these decisions consume, and the calls it approved:
+    # their intents carry it (A6 S11, design §2.7 "claim for dispatch").
+    approval_id: str | None = None
+    claimed: dict[str, str] = field(default_factory=dict)  # call id -> approval id
+    # Journal-capable stores: the claim recorded in the run's journal (fenced) before the
+    # approval is consumed, and the (interruption, envelope) still to consume.
+    claim: dict[str, Any] | None = None
+    consume: tuple[Any, str] | None = None
+    # The calls the interruption asked about (this resume decided exactly these).
+    pending_ids: set[str] = field(default_factory=set)
 
 
 _UNKNOWN_REASON = "outcome_unknown_after_crash"
@@ -707,6 +717,185 @@ _UNKNOWN_RESULT = (
     "The outcome of this action is unknown: the process stopped while it was running. "
     "It was not retried."
 )
+
+
+def _approval_claim(
+    interruption: RunInterruption,
+    decisions: _Decisions,
+    reject: dict[str, str],
+    outcomes: dict[str, Any],
+    edits: dict[str, ApproveWith],
+    actor: str,
+) -> dict[str, Any] | None:
+    """The decisions of a resume, as recorded in the run's journal before consumption.
+
+    ``None`` when they cannot be stored exactly as JSON: a journaled resume then refuses
+    them; one without a journal consumes the approval at once.
+    """
+    digests = interruption.pending_digests()
+    claim = {
+        "approval_id": interruption.interruption_id,
+        "turn": getattr(interruption, "turn", None),
+        "expires_at": interruption.expires_at,
+        "approve": {
+            call_id: {
+                "digest": digests.get(call_id),
+                "arguments": edits[call_id].arguments if call_id in edits else None,
+            }
+            for call_id in sorted(decisions.approved)
+        },
+        "reject": dict(reject),
+        "answers": dict(decisions.answers),
+        "outcomes": {
+            call_id: {"result": o.result, "resolution": o.resolution, "reason": o.reason}
+            for call_id, o in outcomes.items()
+        },
+        "actor": actor,
+    }
+    try:
+        # Exactly representable as JSON (no tuples, int keys or NaN), or not recorded (m3).
+        if json.loads(json.dumps(claim, allow_nan=False)) != claim:
+            return None
+    except (TypeError, ValueError):
+        return None
+    return claim
+
+
+def _json_normal(value: Any) -> Any:
+    """``value`` as plain JSON (tuples become lists); ``ValueError`` when it has none."""
+    if isinstance(value, (list, tuple)):
+        return [_json_normal(item) for item in value]
+    if isinstance(value, dict):
+        if not all(isinstance(key, str) for key in value):
+            raise ValueError("a mapping has a key that is not a string")
+        return {key: _json_normal(item) for key, item in value.items()}
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("a number is not finite (NaN or infinity)")
+        return value
+    raise ValueError(f"a {type(value).__name__} is not JSON")
+
+
+def _normalised_decisions(
+    approve: Any, outcomes: dict[str, ResolvedOutcome]
+) -> tuple[Any, dict[str, ResolvedOutcome]]:
+    """Edits and outcome results as plain JSON where they have one (round 3, F3-B1).
+
+    Tuples become lists, so what is recorded in the run's journal is what runs. Values
+    without a JSON form are left as they are; a resume that must record its claim
+    refuses them (see ``_approval_claim``).
+    """
+    if isinstance(approve, Mapping):
+        normal: dict[str, Any] = {}
+        for call_id, decision in approve.items():
+            if isinstance(decision, ApproveWith):
+                with contextlib.suppress(ValueError):
+                    decision = dataclasses.replace(
+                        decision, arguments=_json_normal(decision.arguments)
+                    )
+            normal[call_id] = decision
+        approve = normal
+    results: dict[str, ResolvedOutcome] = {}
+    for call_id, outcome in outcomes.items():
+        with contextlib.suppress(ValueError):
+            outcome = dataclasses.replace(outcome, result=_json_normal(outcome.result))
+        results[call_id] = outcome
+    return approve, results
+
+
+def _refuse_claimed(
+    state: Mapping[str, Any], steps: Mapping[str, Any], status: str, interruption: Any
+) -> None:
+    """Raise when a resume may not use this approval on a run with this journal (M2)."""
+    approval_id = interruption.interruption_id
+    if status in ("completed", "failed"):
+        raise ApprovalDecisionError("Interruption already consumed or expired; refusing replay.")
+    used = any(
+        isinstance(item, dict) and item.get("approval_id") == approval_id
+        for item in state.get("consumed_approvals") or []
+    ) or any(
+        getattr(step, "intent", None) is not None and step.intent.approval_id == approval_id
+        for step in steps.values()
+    )
+    if used:
+        raise ApprovalDecisionError("Interruption already consumed or expired; refusing replay.")
+    held = state.get("approval_claim")
+    if isinstance(held, dict) and held.get("approval_id") == approval_id:
+        raise ApprovalDecisionError(
+            "This approval was claimed by an earlier resume that stopped before it "
+            "dispatched anything; continue the run with recover()."
+        )
+    if getattr(interruption, "reason", None) not in (_UNKNOWN_REASON, _REAPPROVE_REASON):
+        # Round 3 (F3-B1): an approval pause asks about calls that were never sent. A call
+        # of its turn with an intent was sent under another approval: never twice.
+        from nexura_agents._agent_journal import parse_call_step_key
+
+        turn = getattr(interruption, "turn", None)
+        pending = {c.id for c in getattr(interruption, "pending", [])}
+        for key, step in steps.items():
+            if getattr(step, "intent", None) is None:
+                continue
+            try:
+                step_turn, call_id, _ = parse_call_step_key(str(key))
+            except ValueError:
+                continue
+            if step_turn == turn and call_id in pending:
+                raise ApprovalDecisionError(
+                    f"Call '{call_id}' of this interruption was already dispatched; refusing "
+                    "to approve it again."
+                )
+
+
+def _run_workspace(state: _RunState) -> str:
+    """The execution workspace of a run (its journal's; ``default`` without one)."""
+    return state.journal.eid.workspace_id if state.journal is not None else "default"
+
+
+def _lease_token(state: _RunState) -> int | None:
+    """The fencing token of the run lease this process holds (``None`` without one)."""
+    return state.journal.fencing_token if state.journal is not None else None
+
+
+def _model_frame(state: _RunState) -> tuple[str, str, str]:
+    """Dispatch scope of this turn's model call: ``turn:<n>/model`` (pure: no intent)."""
+    return _run_workspace(state), state.run_id, f"turn:{max(int(state.turn), 0)}/model"
+
+
+def _trace_approval_requested(state: _RunState, interruption: Any, pending: list[ToolCall]) -> None:
+    """``nexura.approval.requested`` on the run span (opt-in tracing; never raises)."""
+    tracing.approval_requested(
+        state.span,
+        interruption.interruption_id,
+        kind="tool_call",
+        reason=interruption.pause_reason,
+        tools=[c.name for c in pending],
+    )
+
+
+def _trace_approval_decided(span: Any, interruption: Any, decisions: _Decisions) -> None:
+    """``nexura.approval.decided`` once the decisions passed every check."""
+    approved = len(decisions.approved)
+    declined = len(decisions.rejected) + len(decisions.unknown)
+    tracing.approval_decided(
+        span,
+        interruption.interruption_id,
+        kind="tool_call",
+        decision=(
+            "mixed"
+            if approved and declined
+            else "approve"
+            if approved
+            else "reject"
+            if declined
+            else "answer"
+        ),
+        approved_count=approved,
+        rejected_count=declined,
+        answered_count=len(decisions.answers),
+        resolved_count=len(decisions.outcomes),
+    )
 
 
 def _warn_definition_changed(run_id: str, agent: Agent) -> None:
@@ -834,6 +1023,9 @@ class _RunState:
     span: Any = tracing.NOOP  # the invoke_agent span of this run
     memory_block: str = ""  # recalled memories, shown to the model but never saved
     checkpoint_store_failed: bool = False  # a checkpoint write failed: keep the last good one
+    # A terminal sweep whose lease check failed twice: (lease token, time), run after the
+    # terminal commit succeeds (A6 S11, F4-m1).
+    deferred_sweep: tuple[int | None, float] | None = None
     checkpoint_owner: str | None = None  # recovery lease holder; fences checkpoint writes
     checkpoint_interruption_id: str | None = None
     checkpoint_expires_at: float | None = None
@@ -1376,6 +1568,7 @@ class Runner:
         agent: Agent,
         interruption: RunInterruption,
         *,
+        _reclaim: tuple[AgentJournal, str | None] | None = None,
         approve: bool | Iterable[str] | Mapping[str, str | ApproveWith] = (),
         reject: Mapping[str, str] | None = None,
         answers: Mapping[str, str] | None = None,
@@ -1410,6 +1603,8 @@ class Runner:
                         f"outcomes['{call_id}'] must be a ResolvedOutcome, not "
                         f"{type(value).__name__}."
                     )
+        # What is recorded in the run's journal is what runs: plain JSON (F3-B1).
+        approve, resolved = _normalised_decisions(approve, resolved)
         if interruption.agent_name != agent.name:
             raise ApprovalDecisionError(
                 f"Interruption belongs to agent '{interruption.agent_name}', not '{agent.name}'."
@@ -1529,7 +1724,41 @@ class Runner:
             raise ApprovalDecisionError(
                 "approve=True requires a signed/stored interruption; pass reviewed digests."
             )
-        await self._consume_approval(interruption, envelope)
+        decisions.approval_id = interruption.interruption_id
+        decisions.claimed = {
+            call_id: interruption.interruption_id for call_id in decisions.approved
+        }
+        decisions.pending_ids = {c.id for c in interruption.pending}
+        if _reclaim is not None:
+            # Recovery of a claim a stopped resume recorded (A6 S11): the run is ours under
+            # the journal lease, the approval was checked again (digests, expiry) above.
+            state.journal, state.checkpoint_owner = _reclaim
+            if await self._reconsume_approval(interruption, envelope):
+                # The stopped resume never consumed it, so it recorded no decision event.
+                _trace_approval_decided(_span, interruption, decisions)
+        else:
+            claim = _approval_claim(
+                interruption, decisions, dict(reject or {}), resolved, edits, actor
+            )
+            from nexura_agents._agent_journal import journal_capable
+
+            if journal_capable(self.checkpoint_store):
+                if claim is None:
+                    # One approval path (round 3, F3-B1): the claim must record exactly what
+                    # runs. Refused before the run is taken or anything is written.
+                    raise ApprovalDecisionError(
+                        "Approval decisions must be representable as JSON to be recorded "
+                        "with the run: ApproveWith arguments, rejection reasons, answers and "
+                        "ResolvedOutcome results may hold only strings, numbers (finite), "
+                        "booleans, None, lists and string-keyed mappings. Nothing was "
+                        "consumed; resume again with JSON values."
+                    )
+                # Consumed only after the claim is in the run's journal (see _durable_loop).
+                _check_approval_expiry(interruption)
+                decisions.claim, decisions.consume = claim, (interruption, envelope)
+            else:
+                await self._consume_approval(interruption, envelope)
+                _trace_approval_decided(_span, interruption, decisions)
         async for event in self._loop(
             state,
             self._store(session_store),
@@ -1592,8 +1821,184 @@ class Runner:
         resume_batch: tuple[list[ToolCall], _Decisions] | None = None,
     ) -> AsyncGenerator[RunEvent, None]:
         if self.checkpoint_store is None:
-            return self._loop_body(state, store, hooks, stream_text, resume_batch)
-        return self._durable_loop(state, store, hooks, stream_text, resume_batch)
+            events = self._swept(
+                state, self._loop_body(state, store, hooks, stream_text, resume_batch)
+            )
+        else:
+            events = self._durable_loop(state, store, hooks, stream_text, resume_batch)
+        # A6 S11 (review M4): every reservation the run makes is linked to it, also those
+        # outside a model or tool call (history processors, instructions, guardrails).
+        # Model and tool calls open their own scope, which replaces this one.
+        return linkage.scoped_stream(
+            events,
+            self._planned_workspace(state),
+            state.run_id,
+            "run",
+            fencing_token=lambda: _lease_token(state),
+        )
+
+    def _planned_workspace(self, state: _RunState) -> str:
+        """The execution workspace of a run, also before its journal is opened."""
+        from nexura_agents._agent_journal import journal_capable
+
+        if state.journal is not None:
+            return state.journal.eid.workspace_id
+        if journal_capable(self.checkpoint_store):
+            return str(getattr(self.checkpoint_store, "workspace_id", None) or "default")
+        return "default"
+
+    async def _swept(
+        self, state: _RunState, events: AsyncGenerator[RunEvent, None]
+    ) -> AsyncGenerator[RunEvent, None]:
+        """A run without a checkpoint store: end its open reservations when it finishes."""
+        try:
+            async for event in events:
+                if event.type == RunEventType.RUN_COMPLETED:
+                    await self._settle_reservations(state, "terminal")
+                yield event
+        except Exception:
+            await self._settle_reservations(state, "terminal")
+            raise
+
+    async def _settle_reservations(
+        self,
+        state: _RunState,
+        context: str,
+        *,
+        proven: tuple[int | None, float] | None = None,
+    ) -> None:
+        """End the run's open budget reservations (design §2.7, A6 S11).
+
+        On a takeover (``context="takeover"``), before any step runs: errors propagate, so
+        nothing is dispatched while the ledger cannot be read. When the run reaches a
+        terminal status (``"terminal"``) an error is reported as a warning only.
+        """
+        from nexura_agents.usage.recovery import settle_run_reservations_async
+
+        budgets = (self._configured_budget, admission.active_budget.get())
+        if all(b is None for b in budgets):
+            return
+        journal = state.journal
+        max_token: int | None = None
+        confirmed_at: float | None = None
+        if proven is not None:
+            # After a successful fenced terminal commit (round 4, F4-m1): the commit proved
+            # this owner held the run under this token up to that moment.
+            max_token, confirmed_at = proven
+        elif context == "terminal" and journal is not None:
+            # Fenced (round 2, R2-M1): renew the lease first, so a stale owner stops here,
+            # and end only reservations made under a lease token no newer than ours.
+            from nexura_agents.contracts.execution import LeaseLostError
+
+            if journal.lease is None:
+                return
+            confirmed = False
+            for attempt in (1, 2):  # a transient store error is retried once (F4-m1)
+                try:
+                    await journal.renew()
+                    confirmed = True
+                    break
+                except LeaseLostError:
+                    return
+                except Exception as exc:
+                    # A transient store error must not fail a finished run (round 3).
+                    warnings.warn(
+                        f"Run '{state.run_id}' finished, but its run lease could not be "
+                        f"confirmed ({exc}); "
+                        + (
+                            "retrying once."
+                            if attempt == 1
+                            else "its open budget reservations are settled after the "
+                            "terminal commit, or left for recovery if that fails."
+                        ),
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+            if not confirmed:
+                # The fenced terminal commit that follows proves the lease; the same
+                # token-filtered sweep then runs after it (see _settle_deferred).
+                state.deferred_sweep = (journal.fencing_token, time.time())
+                return
+            max_token = journal.fencing_token
+            # A newer owner can reserve only after this lease expires (at least a ttl from
+            # now); the residual is an owner frozen here for longer than its ttl together
+            # with host clock skew larger than the ttl.
+            confirmed_at = time.time()
+        from nexura_agents.usage.recovery import budget_scope
+
+        workspace = _run_workspace(state)
+        # Unlinked reservations of a budget scope named after this run are its own (the
+        # service convention); a terminal sweep ends those older than its lease check.
+        own_scope = any(
+            budget_scope(b) == {"workspace_id": workspace, "run_id": state.run_id}
+            for b in admission._budgets(admission.combine_budgets(*budgets))
+        )
+        try:
+            await settle_run_reservations_async(
+                budgets,
+                workspace_id=workspace,
+                run_id=state.run_id,
+                steps=journal.steps if journal is not None else None,
+                include_unlinked=own_scope,
+                context=context,
+                max_fencing_token=max_token,
+                unlinked_before=confirmed_at,
+            )
+        except Exception as exc:
+            if context != "terminal":
+                raise
+            warnings.warn(
+                f"Run '{state.run_id}' finished, but its open budget reservations could not "
+                f"be settled: {exc}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+    async def _settle_deferred(self, state: _RunState, journal: AgentJournal | None) -> None:
+        """Run a deferred terminal sweep once the fenced terminal commit has succeeded.
+
+        If that commit failed too (the journal is not terminal), the reservations stay
+        open and recovery ends them (round 4, F4-m1).
+        """
+        deferred, state.deferred_sweep = state.deferred_sweep, None
+        if deferred is None or journal is None or journal.status not in ("completed", "failed"):
+            return
+        await self._settle_reservations(state, "terminal", proven=deferred)
+
+    def _check_budget_scope(self, run_id: str, journal_state: Mapping[str, Any] | None) -> None:
+        """A run started under a ``RunBudget`` is continued only under a budget (fail closed).
+
+        Called with the journal state read before the run is taken, so a refusal writes
+        nothing (round 2, minor 3).
+        """
+        from nexura_agents.usage.errors import UsageError
+        from nexura_agents.usage.recovery import budget_scope
+
+        recorded = journal_state.get("budget_scope") if journal_state is not None else None
+        if not isinstance(recorded, dict):
+            return
+        budget = self.budget
+        if budget is None:
+            raise UsageError(
+                f"Budget admission refused: run '{run_id}' was started under budget scope "
+                f"'{recorded.get('run_id')}' (workspace '{recorded.get('workspace_id')}'); "
+                "continue it with Runner(budget=manager.get_run_budget(...)) for that scope."
+            )
+        # Look through combined budgets (round 2, minor 1): the recorded scope must be one
+        # of the attached allowances, or the run continues without its policy.
+        scopes = [b for b in map(budget_scope, admission._budgets(budget)) if b is not None]
+        if recorded not in scopes:
+            under = (
+                ", ".join(str(sc) for sc in scopes)
+                if scopes
+                else "a budget without a RunBudget scope"
+            )
+            warnings.warn(
+                f"Run '{run_id}' was started under budget scope {recorded}; it continues "
+                f"under {under}, without the recorded scope's policy.",
+                RuntimeWarning,
+                stacklevel=3,
+            )
 
     async def _durable_loop(
         self,
@@ -1617,17 +2022,39 @@ class Runner:
         journal = state.journal
         if journal is None and journal_capable(self.checkpoint_store):
             # The original run, or resume: take the run before its first write.
+            from nexura_agents.usage.recovery import budget_scope
+
             journal = await AgentJournal.open(self.checkpoint_store, state.run_id, self.lease_ttl)
-            await journal.begin(
-                new_lease_owner(),
-                state.root.definition_digest(),
-                state.root.name,
-                # resume of a run checkpointed before it had a journal (H1)
-                pre_journal_turn=state.turn if resume_batch is not None else None,
-            )
+            if resume_batch is not None:
+                # Before any journal write: a missing budget is refused here.
+                stored = await journal.peek()
+                self._check_budget_scope(
+                    state.run_id, stored.run.state if stored is not None else None
+                )
+            pending = resume_batch[1].consume if resume_batch is not None else None
+            if pending is not None:
+                # Before any journal write: a spent or claimed approval is refused here.
+                await self._refuse_spent_approval(journal, pending[0])
+            try:
+                await journal.begin(
+                    new_lease_owner(),
+                    state.root.definition_digest(),
+                    state.root.name,
+                    # resume of a run checkpointed before it had a journal (H1)
+                    pre_journal_turn=state.turn if resume_batch is not None else None,
+                    budget_scope=budget_scope(self._configured_budget),
+                )
+            except Exception:
+                if pending is not None:
+                    # The run cannot be taken: the approval is not consumed (review M1). A
+                    # spent, claimed or expired one is reported as such; otherwise the
+                    # approval stays usable and the error says the run is busy.
+                    await self._refuse_spent_approval(journal, pending[0])
+                raise
             if journal.stored_digest != state.root.definition_digest():
                 _warn_definition_changed(state.run_id, state.root)
             state.journal = journal
+            journal.trace_span = state.span  # nexura.effect.* events go on the run span
             state.checkpoint_owner = journal.owner
         try:
             if journal is not None:
@@ -1636,25 +2063,37 @@ class Runner:
                 journal.on_lost = state.cancel.stop_for_lost_lease
                 if journal.lost is not None:
                     state.cancel.stop_for_lost_lease()
+                if resume_batch is not None:
+                    # Calls of the batch this resume did not decide (B1): an earlier claim's
+                    # rejections and answers hold; an undecided gated call is asked again.
+                    self._guard_resumed_batch(state, resume_batch)
+                if resume_batch is not None and resume_batch[1].consume is not None:
+                    await self._claim_approval(state, journal, resume_batch[1])
                 await journal.ensure_running()
                 journal.start_heartbeat()
             try:
                 async for event in self._loop_body(state, store, hooks, stream_text, resume_batch):
                     if event.type == RunEventType.RUN_COMPLETED:
+                        # Every step is finished: end open reservations before the terminal
+                        # commit, so a crash between the two cannot leak them (review m1).
+                        await self._settle_reservations(state, "terminal")
                         # The run is done and persisted: a failing delete must not turn it
                         # into an error. A stale "completed" checkpoint is finished by recover.
                         await self._delete_checkpoint(
                             state.run_id, state.checkpoint_owner, journal, "completed"
                         )
+                        await self._settle_deferred(state, journal)
                     yield event
             except Exception as exc:
                 if isinstance(exc, LeaseLostError):
                     state.checkpoint_store_failed = True  # another worker owns the run now
                 # A storage error is not a run failure: the previous checkpoint stays the truth.
                 if not state.checkpoint_store_failed:
+                    await self._settle_reservations(state, "terminal")
                     await self._delete_checkpoint(
                         state.run_id, state.checkpoint_owner, journal, "failed"
                     )
+                    await self._settle_deferred(state, journal)
                 raise
         finally:
             if journal is not None:
@@ -1746,10 +2185,7 @@ class Runner:
                     raise
                 holder: list[ModelResponse] = [from_hook] if from_hook is not None else []
                 chat = tracing.start_chat(state.span, agent.model) if not holder else tracing.NOOP
-                if chat.capturing:
-                    chat.content(
-                        tracing.EVENT_PROMPT, "gen_ai.prompt", tracing.messages_payload(messages)
-                    )
+                tracing.record_prompt(chat, messages)  # opt-in content only
                 try:
                     if from_hook is None:
                         async for delta_event in self._call_model(
@@ -1777,15 +2213,7 @@ class Runner:
                     if not holder:  # failed or abandoned before a response arrived
                         chat.end()
                 response = holder[0]
-                chat.set_usage(response.usage)
-                if response.finish_reason:
-                    chat.set(tracing.FINISH_REASONS, [str(response.finish_reason)])
-                if chat.capturing:
-                    chat.content(
-                        tracing.EVENT_COMPLETION,
-                        "gen_ai.completion",
-                        tracing.messages_payload([response.message]),
-                    )
+                tracing.record_response(chat, response)
                 chat.end()
                 billed = response.usage  # what the provider charged, kept if a hook replaces it
                 try:
@@ -1943,10 +2371,14 @@ class Runner:
                             "gen_ai.tool.call.arguments",
                             waiting.arguments,
                         )
+                        tracing.record_tool_content(
+                            pause_span, tracing.TOOL_CALL_ARGUMENTS, waiting.arguments
+                        )
                         pause_span.end()
                     # The whole batch waits; on resume the other calls run with the approved ones.
                     interruption = self._make_interruption(state, pending, copy_messages=True)
                     await self._remember_interruption(interruption)
+                    _trace_approval_requested(state, interruption, pending)
                     if self.checkpoint_store is not None:
                         await self._save_interruption(state, "paused", interruption)
                     yield RunEvent(
@@ -2039,8 +2471,12 @@ class Runner:
                         stream_extra["model_settings"] = settings
                     else:
                         _warn_settings_ignored(model, "stream")
-                legacy_stream = admission.stream(
-                    model, snapshot, tools_schema, timeout=remaining_timeout, **stream_extra
+                legacy_stream = linkage.scoped_stream(
+                    admission.stream(
+                        model, snapshot, tools_schema, timeout=remaining_timeout, **stream_extra
+                    ),
+                    *_model_frame(state),
+                    fencing_token=_lease_token(state),
                 )
                 async for event in self._consume_stream(
                     legacy_stream, state, holder, remaining_timeout
@@ -2058,15 +2494,21 @@ class Runner:
             call = admission.generate(
                 model, messages=snapshot, tools=tools_schema, timeout=remaining_timeout, **extra
             )
-            with chat.activated():
-                if remaining_timeout is not None:
-                    holder.append(
-                        await _until_cancelled(
-                            asyncio.wait_for(call, timeout=remaining_timeout), state.cancel
+            scope = linkage.enter_dispatch_scope(
+                *_model_frame(state), fencing_token=_lease_token(state)
+            )
+            try:
+                with chat.activated():
+                    if remaining_timeout is not None:
+                        holder.append(
+                            await _until_cancelled(
+                                asyncio.wait_for(call, timeout=remaining_timeout), state.cancel
+                            )
                         )
-                    )
-                else:
-                    holder.append(await _until_cancelled(call, state.cancel))
+                    else:
+                        holder.append(await _until_cancelled(call, state.cancel))
+            finally:
+                linkage.leave_dispatch_scope(scope)
             return
 
         # Provider models: pass settings and an ExecutionContext so budgets, cancellation
@@ -2103,18 +2545,28 @@ class Runner:
             native_schema is not None and not getattr(model, "streams_response_schema", False)
         ):
             call = admission.generate(model, request, context=exec_ctx)
-            with chat.activated():
-                if remaining_timeout is not None:
-                    holder.append(
-                        await _until_cancelled(
-                            asyncio.wait_for(call, timeout=remaining_timeout), state.cancel
+            scope = linkage.enter_dispatch_scope(
+                *_model_frame(state), fencing_token=_lease_token(state)
+            )
+            try:
+                with chat.activated():
+                    if remaining_timeout is not None:
+                        holder.append(
+                            await _until_cancelled(
+                                asyncio.wait_for(call, timeout=remaining_timeout), state.cancel
+                            )
                         )
-                    )
-                else:
-                    holder.append(await _until_cancelled(call, state.cancel))
+                    else:
+                        holder.append(await _until_cancelled(call, state.cancel))
+            finally:
+                linkage.leave_dispatch_scope(scope)
             return
 
-        stream = admission.stream(model, request, context=exec_ctx)
+        stream = linkage.scoped_stream(
+            admission.stream(model, request, context=exec_ctx),
+            *_model_frame(state),
+            fencing_token=_lease_token(state),
+        )
         async for event in self._consume_stream(stream, state, holder, remaining_timeout):
             yield event
 
@@ -2431,6 +2883,7 @@ class Runner:
             state, pending, copy_messages=True, reason=_REAPPROVE_REASON
         )
         await self._remember_interruption(interruption)
+        _trace_approval_requested(state, interruption, pending)
         if self.checkpoint_store is not None:
             await self._save_interruption(state, "paused", interruption)
         yield RunEvent(
@@ -2760,6 +3213,7 @@ class Runner:
         if span is tracing.NOOP:
             return await self._invoke_tool_inner(state, hooks, tc, tool, decisions)
         span.content("gen_ai.tool.call.arguments", "gen_ai.tool.call.arguments", tc.arguments)
+        tracing.record_tool_content(span, tracing.TOOL_CALL_ARGUMENTS, tc.arguments)
         span.attach()  # tool code (an agent used as a tool, HTTP clients) nests under it
         try:
             result, retry_reason = await self._invoke_tool_inner(state, hooks, tc, tool, decisions)
@@ -2773,6 +3227,7 @@ class Runner:
             if retry_reason is not None:
                 span.set("nexura.tool.retry_reason", retry_reason)
             span.content("gen_ai.tool.call.result", "gen_ai.tool.call.result", result)
+            tracing.record_tool_content(span, tracing.TOOL_CALL_RESULT, result)
             return result, retry_reason
         finally:
             span.end()
@@ -2824,7 +3279,14 @@ class Runner:
                     result = answered  # the hook answered: the tool does not run
                 else:
                     result = await self._execute_with_retry(
-                        state, tc, tool, tool_ctx, step_key=step_key
+                        state,
+                        tc,
+                        tool,
+                        tool_ctx,
+                        step_key=step_key,
+                        approval_id=(
+                            decisions.claimed.get(tc.id) if decisions is not None else None
+                        ),
                     )
                 if isinstance(result, _TimedOut):
                     return result.message, "tool_timeout"
@@ -2869,14 +3331,35 @@ class Runner:
         tool_ctx: RunContext[Any],
         *,
         step_key: StepKey | None = None,
+        approval_id: str | None = None,
     ) -> Any:
         """Run the tool (with its own timeout), retrying transient errors per ``tool.retry``.
 
         In a journaled durable run, a non-pure call's intent is committed first (fenced by
         the run lease), so a crash before this point is known to have dispatched nothing.
         """
+        tracked = False
         if state.journal is not None:
-            await self._record_intent(state, tc, tool, tool_ctx, step_key)
+            tracked = await self._record_intent(
+                state, tc, tool, tool_ctx, step_key, approval_id=approval_id
+            )
+        # A6 S11: budget reservations made by the tool are linked to this call's step.
+        key = step_key if step_key is not None else self._dispatch_key(state, tc)
+        scope = linkage.enter_dispatch_scope(
+            _run_workspace(state),
+            state.run_id,
+            str(key),
+            tracked=tracked,
+            fencing_token=_lease_token(state),
+        )
+        try:
+            return await self._execute_attempts(state, tc, tool, tool_ctx)
+        finally:
+            linkage.leave_dispatch_scope(scope)
+
+    async def _execute_attempts(
+        self, state: _RunState, tc: ToolCall, tool: Tool, tool_ctx: RunContext[Any]
+    ) -> Any:
         policy = tool.retry
         attempt = 0
         while True:
@@ -2940,8 +3423,7 @@ class Runner:
         """``nx-`` + 32 hex of sha256(workspace, run, step key, 0): stable across takeover."""
         from nexura_agents.contracts.execution import ExecutionId, default_idempotency_key
 
-        workspace = state.journal.eid.workspace_id if state.journal is not None else "default"
-        return default_idempotency_key(ExecutionId(workspace, state.run_id), step_key)
+        return default_idempotency_key(ExecutionId(_run_workspace(state), state.run_id), step_key)
 
     async def _record_intent(
         self,
@@ -2950,7 +3432,14 @@ class Runner:
         tool: Tool,
         tool_ctx: RunContext[Any],
         step_key: StepKey | None,
-    ) -> None:
+        *,
+        approval_id: str | None = None,
+    ) -> bool:
+        """Commit the call's intent (non-pure tools); True when an intent is on record.
+
+        A call approved by a person carries that approval (``approval_id``): the journal
+        records it as consumed by this dispatch in the same fenced commit as the intent.
+        """
         from nexura_agents.contracts.execution import EffectClass, StepIntent
 
         journal = state.journal
@@ -2958,16 +3447,18 @@ class Runner:
         journal.check()  # assert_lease: a worker that lost the run dispatches nothing
         effect = tool.effect_class()
         if effect is EffectClass.PURE:
-            return
+            return False
         key = step_key if step_key is not None else self._dispatch_key(state, tc)
         intent = StepIntent(
             step_key=key,
             payload_digest=RunInterruption.action_digest(tc),
             idempotency_key=tool_ctx.idempotency_key or self._idempotency_key(state, key),
             effect_class=effect,
+            approval_id=approval_id,
         )
         await journal.record_intent(intent, tc.name)
         state.dispatch_keys[tc.id] = key
+        return True
 
     @staticmethod
     def _state_from_interruption(
@@ -3154,6 +3645,108 @@ class Runner:
             )
         self._approval_snapshots.pop(interruption.interruption_id, None)
         self._approval_snapshot_expiries.pop(interruption.interruption_id, None)
+
+    async def _refuse_spent_approval(self, journal: AgentJournal, interruption: Any) -> None:
+        """Refuse, without consuming or writing, an approval that cannot be used here.
+
+        Raises ``ApprovalDecisionError`` when it expired, the run already finished, a
+        dispatch was made under it, or an earlier resume claimed it (then ``recover()``
+        continues the run). Otherwise returns: the approval is still usable.
+        """
+        _check_approval_expiry(interruption)
+        snapshot = await journal.peek()
+        if snapshot is not None:
+            _refuse_claimed(
+                dict(snapshot.run.state), dict(snapshot.steps), snapshot.run.status, interruption
+            )
+
+    def _guard_resumed_batch(
+        self, state: _RunState, resume_batch: tuple[list[ToolCall], _Decisions]
+    ) -> None:
+        """Calls of a resumed batch this resume did not decide (review B1).
+
+        The batch of an ``effect_unknown`` pause holds every unanswered call; only the ones
+        in doubt were asked about. For the others the journal and the earlier claim decide:
+        an outcome on record answers the call, the claim's rejection or answer holds, its
+        approval lets the call run under it, and a call to a tool that requires approval
+        with none of these is asked for again instead of being sent.
+        """
+        calls, decisions = resume_batch
+        if state.journal is None:
+            return
+        undecided = [c for c in calls if c.id not in decisions.pending_ids]
+        if undecided:
+            self._apply_claim(state, state.agent, undecided, decisions, answer_outcomes=True)
+            if decisions.claim is not None:
+                # The new claim keeps the earlier decisions it builds on.
+                decisions.claim["reject"] = {
+                    **{
+                        k: v
+                        for k, v in decisions.rejected.items()
+                        if k not in decisions.pending_ids
+                    },
+                    **decisions.claim.get("reject", {}),
+                }
+                decisions.claim["answers"] = {
+                    **{
+                        k: v for k, v in decisions.answers.items() if k not in decisions.pending_ids
+                    },
+                    **decisions.claim.get("answers", {}),
+                }
+
+    async def _reconsume_approval(self, interruption: ApprovalEnvelope, envelope: str) -> bool:
+        """Consume an approval a stopped owner claimed (it may have consumed it already).
+
+        True when this call consumed it (the stopped owner had not).
+        """
+        consumed = False
+        if self.approval_store is not None:
+            with contextlib.suppress(Exception):
+                consumed = bool(
+                    await self.approval_store.consume_approval(
+                        interruption.interruption_id, envelope
+                    )
+                )
+        self._approval_snapshots.pop(interruption.interruption_id, None)
+        self._approval_snapshot_expiries.pop(interruption.interruption_id, None)
+        return consumed
+
+    async def _claim_approval(
+        self, state: _RunState, journal: AgentJournal, decisions: _Decisions
+    ) -> None:
+        """Record the claim in the run's journal (fenced), then consume the approval.
+
+        A takeover then tells a claimed approval that was used for a dispatch (an intent
+        carries it) from one that was not (the claim alone): see ``_recover_claimed``.
+        """
+        assert decisions.consume is not None and decisions.claim is not None
+        interruption, envelope = decisions.consume
+        decisions.consume = None
+        # Checked again under the lease, before any journal write (review M2).
+        _refuse_claimed(journal.state, journal.steps, journal.status, interruption)
+        held = journal.state.get("approval_claim")
+        was_paused = journal.status == "paused"
+        await journal.record_claim(decisions.claim)
+        try:
+            await self._consume_approval(interruption, envelope)
+        except ApprovalDecisionError:
+            # Not ours to use: the earlier claim stands, and a run that was waiting for a
+            # person waits again. A run that was not paused keeps its status (it stays
+            # recoverable).
+            if was_paused:
+                journal.state["approval_claim"] = held if isinstance(held, dict) else None
+                keys = [
+                    journal.latest(state.turn, c.id)[1]
+                    for c in interruption.pending
+                    if interruption.reason == _UNKNOWN_REASON
+                ]
+                with contextlib.suppress(Exception):
+                    await journal.pause(interruption.pause_reason, keys)
+            else:
+                with contextlib.suppress(Exception):
+                    await journal.restore_claim(held if isinstance(held, dict) else None)
+            raise
+        _trace_approval_decided(state.span, interruption, decisions)  # consumed: decided
 
     async def _remember_interruption(self, interruption: ApprovalEnvelope) -> None:
         self._prune_approval_snapshots()
@@ -3346,6 +3939,9 @@ class Runner:
 
             # The run lease: free, expired, or held by a process on this host that is gone.
             journal = await AgentJournal.open(checkpoints, run_id, self.lease_ttl)
+            # A6 S11: a run started under a budget needs one, refused before the takeover.
+            stored = await journal.peek()
+            self._check_budget_scope(run_id, stored.run.state if stored is not None else None)
             lease_owner = new_lease_owner()
             if not await journal.takeover(lease_owner, agent.definition_digest(), agent.name):
                 raise RunRecoveryError(
@@ -3455,8 +4051,12 @@ class Runner:
         state.cancel = cancel
         if _journal is not None and _journal.lease is not None:
             state.journal = _journal
+            _journal.trace_span = state.span  # nexura.effect.* events go on the run span
             if _journal.stored_digest != agent.definition_digest():
                 _warn_definition_changed(run_id, agent)
+        # A6 S11, before any step runs (the budget was checked before the takeover): the
+        # reservations the stopped owner left open are settled (dispatched) or released.
+        await self._settle_reservations(state, "terminal" if phase == "completed" else "takeover")
         # Older checkpoints keep these counters only in the envelope.
         state.output_attempts = checkpoint_output_attempts(raw) or state.output_attempts
         state.agent_started_at = min(
@@ -3472,6 +4072,27 @@ class Runner:
 
         if state.journal is not None:
             await self._heal_journal(state, phase, interruption)
+        claim = (
+            state.journal.unused_claim(interruption.interruption_id)
+            if phase == "paused" and state.journal is not None and state.journal.held
+            else None
+        )
+        if claim is not None:
+            # A resume claimed this approval and stopped before dispatching under it (K8).
+            async for event in self._recover_approval_claim(
+                agent,
+                interruption,
+                state,
+                claim,
+                deps=deps,
+                timeout=timeout,
+                session_store=session_store,
+                stream_text=stream_text,
+                cancel=cancel,
+                _span=_span,
+            ):
+                yield event
+            return
         if phase == "paused" and not await self._paused_effects_resolved(state, interruption):
             # Still waiting for a human: hand the stored interruption back.
             if (
@@ -3553,10 +4174,18 @@ class Runner:
             if state.journal is not None:
                 await state.journal.ensure_running()
             decisions = _Decisions()
+            self._continue_claim(state, active, remaining_calls, decisions)
             uncertain: list[ToolCall] = []
             for c in remaining_calls:
                 if c.name in active.handoffs_by_name:
                     continue
+                if (
+                    c.id in decisions.rejected
+                    or c.id in decisions.answers
+                    or c.id in decisions.outcomes
+                    or c.id in decisions.deferred
+                ):
+                    continue  # decided by the claim, or asked again (B1)
                 tool = active.tools_by_name.get(c.name)
                 if tool is not None and not await self._settle_in_doubt(state, tool, c, decisions):
                     uncertain.append(c)
@@ -3578,6 +4207,7 @@ class Runner:
                         state, uncertain, copy_messages=True, reason=_UNKNOWN_REASON
                     )
                     await self._save_interruption(state, "paused", paused)
+                    _trace_approval_requested(state, paused, uncertain)
                     yield RunEvent(
                         type=RunEventType.RUN_PAUSED,
                         run_id=run_id,
@@ -3598,6 +4228,152 @@ class Runner:
             state, effective_store, hooks, stream_text=stream_text, resume_batch=resume_batch
         ):
             yield event
+
+    async def _recover_approval_claim(
+        self,
+        agent: Agent,
+        interruption: RunInterruption,
+        state: _RunState,
+        claim: dict[str, Any],
+        **kwargs: Any,
+    ) -> AsyncGenerator[RunEvent, None]:
+        """Continue a claimed, unused approval under the same approval (design §2.7).
+
+        The recorded decisions are applied as the stopped resume would have, after checking
+        the approval again (stored envelope, action digests, expiry). An expired approval
+        is asked for again: the run pauses with a fresh interruption for the same calls.
+        """
+        from nexura_agents.durable import ResolvedOutcome
+
+        journal = state.journal
+        assert journal is not None
+        expires = claim.get("expires_at")
+        if not isinstance(expires, (int, float)) or expires <= time.time():
+            # Before asking again, the old approval is spent (best effort): one call never
+            # has two live approvals (round 3, F3-B1).
+            await self._reconsume_approval(interruption, _approval_payload(interruption))
+            journal.state["approval_claim"] = None
+            fresh = self._make_interruption(
+                state, list(interruption.pending), copy_messages=True, reason=interruption.reason
+            )
+            await self._save_interruption(state, "paused", fresh)
+            yield RunEvent(
+                type=RunEventType.RUN_PAUSED,
+                run_id=state.run_id,
+                data={
+                    "pending": [
+                        {"id": c.id, "name": c.name, "arguments": c.arguments}
+                        for c in fresh.pending
+                    ],
+                    "interruption": fresh,
+                    "last_agent": state.agent,
+                    "agent_path": list(state.path),
+                },
+            )
+            return
+        approve: dict[str, str | ApproveWith] = {}
+        for call_id, item in (claim.get("approve") or {}).items():
+            digest = item.get("digest")
+            arguments = item.get("arguments")
+            approve[call_id] = (
+                ApproveWith(arguments=arguments, digest=digest) if arguments is not None else digest
+            )
+        outcomes = {
+            call_id: ResolvedOutcome(**value)
+            for call_id, value in (claim.get("outcomes") or {}).items()
+        }
+        async for event in self._resume_stream_impl(
+            agent,
+            interruption,
+            approve=approve,
+            reject=claim.get("reject") or None,
+            answers=claim.get("answers") or None,
+            outcomes=outcomes or None,
+            actor=claim.get("actor") or None,
+            _reclaim=(journal, state.checkpoint_owner),
+            **kwargs,
+        ):
+            yield event
+
+    def _continue_claim(
+        self, state: _RunState, agent: Agent, calls: list[ToolCall], decisions: _Decisions
+    ) -> None:
+        """Recovery of a checkpointed batch: the claim's decisions hold (design §2.7, B1)."""
+        self._apply_claim(state, agent, calls, decisions, answer_outcomes=False)
+
+    def _apply_claim(
+        self,
+        state: _RunState,
+        agent: Agent,
+        calls: list[ToolCall],
+        decisions: _Decisions,
+        *,
+        answer_outcomes: bool,
+    ) -> None:
+        """Decide calls nobody decided in this process from the journal and the claim.
+
+        For a call that was never dispatched (no intent): the claim's rejection or answer
+        holds; a call it approved runs under that approval (its intent carries it), or is
+        asked for again once the approval expired; any other call to a tool that requires
+        approval is asked for again. A person never sees a call they rejected, or did not
+        approve, sent after a crash. A dispatched call follows the effect-class rules; a
+        resolution the claim recorded for it applies (and ``answer_outcomes``: its outcome
+        on record answers it). Runs checkpointed before they had a journal keep the old
+        rules for the turns before it.
+        """
+        from nexura_agents.contracts.execution import EffectStatus
+        from nexura_agents.durable import ResolvedOutcome
+
+        journal = state.journal
+        if journal is None:
+            return
+        claim = journal.state.get("approval_claim")
+        if not isinstance(claim, dict) or claim.get("turn", state.turn) != state.turn:
+            claim = None  # a claim of another turn says nothing about these calls (m2)
+        claim = claim or {}
+        approved = set(claim.get("approve") or {})
+        rejected = dict(claim.get("reject") or {})
+        answers = dict(claim.get("answers") or {})
+        outcomes = dict(claim.get("outcomes") or {})
+        expires = claim.get("expires_at")
+        expired = not isinstance(expires, (int, float)) or expires <= time.time()
+        claim_id = claim.get("approval_id")
+        for call in calls:
+            if (
+                call.id in decisions.rejected
+                or call.id in decisions.answers
+                or call.id in decisions.outcomes
+                or call.id in decisions.unknown
+                or call.id in decisions.deferred
+                or call.name in agent.handoffs_by_name
+            ):
+                continue
+            tool = _callable_tool(agent, state, call.name)
+            _, key, step = journal.latest(state.turn, call.id)
+            if step is not None and step.intent is not None:
+                effect = journal.effects.get(str(key))
+                if step.outcome is not None:
+                    if answer_outcomes and tool is not None:
+                        decisions.answers[call.id] = _result_text(tool, step.outcome.output)
+                elif call.id in outcomes and (
+                    effect is None or effect.status != EffectStatus.RESOLVED
+                ):
+                    decisions.outcomes[call.id] = ResolvedOutcome(**outcomes[call.id])
+                continue  # dispatched: the effect-class rules decide
+            if journal.unjournaled_dispatch_possible(state.turn):
+                continue  # may have been sent before the run had a journal (H1)
+            gated = tool is not None and tool.needs_approval(state.ctx, call.arguments)
+            if call.id in rejected:
+                decisions.rejected[call.id] = str(rejected[call.id] or "")
+            elif call.id in answers:
+                decisions.answers[call.id] = str(answers[call.id])
+            elif call.id in approved and isinstance(claim_id, str):
+                if expired and gated:
+                    decisions.deferred.add(call.id)
+                else:
+                    decisions.claimed[call.id] = claim_id
+            elif gated:
+                decisions.deferred.add(call.id)  # no decision on record: ask again
 
     async def _heal_journal(
         self, state: _RunState, phase: str, interruption: RunInterruption

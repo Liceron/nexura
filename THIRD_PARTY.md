@@ -9,6 +9,7 @@ bundle. The packages themselves are Liceron's own code under the MIT License
 | `nexura-runtime` (Python) | `src/nexura_runtime` | MIT, Liceron |
 | `nexura-agents` (Python) | `packages/nexura-agents` | MIT, Liceron |
 | `nexura-connectors` (Python) | `packages/nexura-connectors` | MIT, Liceron |
+| `nexura-guardrails` (Python) | `packages/nexura-guardrails` | MIT, Liceron |
 | `nexura-postgres` (Python) | `packages/nexura-postgres` | MIT, Liceron |
 | `nexura-qdrant` (Python) | `packages/nexura-qdrant` | MIT, Liceron |
 | `nexura-sandbox` (Python) | `packages/nexura-sandbox` | MIT, Liceron |
@@ -78,10 +79,12 @@ those shared dependencies are attributed above. Their additional dependencies ar
 | `nexura-qdrant` | `qdrant-client` | Apache-2.0 | https://github.com/qdrant/qdrant-client | Vector backend client |
 | `nexura-vertex` | `httpx` | BSD-3-Clause | https://github.com/encode/httpx | Provider HTTP transport |
 | `nexura-vertex` | `google-auth[requests]` | Apache-2.0 | https://github.com/googleapis/google-auth-library-python | Vertex AI credentials |
+| `nexura-guardrails[yaml]` | `pyyaml` 6.0.3 (licence read 2026-10-22) | MIT | https://github.com/yaml/pyyaml | YAML policy files (optional) |
 | `nexura-studio` | `fastapi`, `uvicorn`, `pydantic` | MIT, BSD-3-Clause, MIT respectively | https://github.com/fastapi/fastapi, https://github.com/encode/uvicorn and https://github.com/pydantic/pydantic | Studio service and validation |
 | `nexura-sandbox[wasi]` | `wasmtime` 49.0.0 | Apache-2.0 WITH LLVM-exception | https://github.com/bytecodealliance/wasmtime-py | WASI interpreter; native runtime outside the service process |
 
-`nexura-sandbox` core adds no third-party requirements beyond runtime. SQLAlchemy
+`nexura-sandbox` core adds no third-party requirements beyond runtime, and `nexura-guardrails`
+core none beyond `nexura-agents` (its `judge` extra is empty). SQLAlchemy
 (MIT, https://github.com/sqlalchemy/sqlalchemy) belongs to the root development
 group; it is not a dependency of the published Postgres package. `authlib`
 (BSD-3-Clause, https://github.com/authlib/authlib) and `joserfc` (BSD-3-Clause,

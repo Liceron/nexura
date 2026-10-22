@@ -24,6 +24,7 @@ import dataclasses
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
+from nexura_agents import tracing
 from nexura_agents._lazy import LazyModule
 from nexura_agents.contracts.execution import (
     EffectRecord,
@@ -121,6 +122,8 @@ class AgentJournal:
         self._closed = False
         # Called once when the lease is found lost (the runner stops its in-flight work).
         self.on_lost: Callable[[], None] | None = None
+        # The run's tracing span handle: committed effects are recorded on it (opt-in).
+        self.trace_span: Any = None
 
     @classmethod
     async def open(cls, checkpoints: Any, run_id: str, ttl: float) -> AgentJournal:
@@ -152,9 +155,16 @@ class AgentJournal:
         self.effects = {str(e.intent.step_key): e for e in snapshot.effects.values()}
 
     def _initial_state(
-        self, agent_name: str, pre_journal_turn: int | None = None
+        self,
+        agent_name: str,
+        pre_journal_turn: int | None = None,
+        budget_scope: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         state: dict[str, Any] = {"agent": agent_name, "pause_reason": None}
+        if budget_scope is not None:
+            # The RunBudget scope the run started under (A6 S11): continuing the run (resume,
+            # recover) needs a budget again.
+            state["budget_scope"] = dict(budget_scope)
         if pre_journal_turn is not None:
             # The run was checkpointed before it had a journal (a pre-S5 file, or a store
             # that was not journal capable): calls of turns up to this one may have been
@@ -196,13 +206,23 @@ class AgentJournal:
         return True
 
     async def begin(
-        self, owner: str, digest: str, agent_name: str, *, pre_journal_turn: int | None = None
+        self,
+        owner: str,
+        digest: str,
+        agent_name: str,
+        *,
+        pre_journal_turn: int | None = None,
+        budget_scope: dict[str, str] | None = None,
     ) -> None:
         """A new run (lease from its first write) or ``resume`` of a stored one.
 
         ``pre_journal_turn``: the turn of a resumed interruption; recorded when the run has
         no journal row yet (it was checkpointed before it had one).
         """
+        if pre_journal_turn is not None:
+            # resume: an owner that died on this host between its paused checkpoint and
+            # the journal's pause commit still holds the run; give it back on its behalf.
+            await self._release_dead_owner(await self._snapshot())
         if not await self.checkpoints.claim(self.run_id, owner, self.ttl):
             raise RunRecoveryError(f"Run '{self.run_id}' is being executed by another caller.")
         try:
@@ -212,7 +232,7 @@ class AgentJournal:
                     self.eid,
                     owner=owner,
                     definition_digest=digest,
-                    state=self._initial_state(agent_name, pre_journal_turn),
+                    state=self._initial_state(agent_name, pre_journal_turn, budget_scope),
                     ttl=self.ttl,
                     kind="agent",
                 )
@@ -226,22 +246,27 @@ class AgentJournal:
                 await self.checkpoints.release(self.run_id, owner)
             raise
 
+    async def _release_dead_owner(self, snapshot: ExecutionSnapshot | None) -> None:
+        """A lease owner whose process exited on this host: release its leases for it."""
+        from nexura_agents.durable import lease_owner_is_dead
+        from nexura_agents.execution_store import ExecutionLease
+
+        if snapshot is None:
+            return
+        run = snapshot.run
+        dead = run.lease_owner
+        if dead is not None and run.lease_expires_at is not None and lease_owner_is_dead(dead):
+            handle = ExecutionLease(self.eid, dead, run.fencing_token, run.lease_expires_at)
+            with contextlib.suppress(Exception):
+                await self.store.release(handle)
+            with contextlib.suppress(Exception):
+                await self.checkpoints.release(self.run_id, dead)
+
     async def takeover(self, owner: str, digest: str, agent_name: str) -> bool:
         """Recovery: take the run, at once if its owner process is gone; False when busy."""
-        from nexura_agents.durable import lease_owner_is_dead
-        from nexura_agents.execution_store import ExecutionConflictError, ExecutionLease
+        from nexura_agents.execution_store import ExecutionConflictError
 
-        snapshot = await self._snapshot()
-        if snapshot is not None:
-            run = snapshot.run
-            dead = run.lease_owner
-            if dead is not None and run.lease_expires_at is not None and lease_owner_is_dead(dead):
-                # Its process has exited on this host: give its leases back on its behalf.
-                handle = ExecutionLease(self.eid, dead, run.fencing_token, run.lease_expires_at)
-                with contextlib.suppress(Exception):
-                    await self.store.release(handle)
-                with contextlib.suppress(Exception):
-                    await self.checkpoints.release(self.run_id, dead)
+        await self._release_dead_owner(await self._snapshot())
         if not await self.checkpoints.claim(self.run_id, owner, self.ttl):
             return False
         try:
@@ -383,6 +408,7 @@ class AgentJournal:
         self.status = status
         if status in ("paused", *_TERMINAL):
             self.lease = None  # the store released it with this commit
+        tracing.effects_committed(effects, run_id=self.run_id, on=self.trace_span)
 
     async def ensure_running(self) -> None:
         """A resumed or recovered run is ``running`` again before it does anything."""
@@ -437,12 +463,65 @@ class AgentJournal:
                 raise lost
             await self.renew()
             return
+        event: dict[str, Any] = {
+            "type": "tool_dispatched",
+            "step_key": str(intent.step_key),
+            "tool": tool_name,
+        }
+        if intent.approval_id is not None:
+            # Claim for dispatch (§2.7): the approval is consumed by this dispatch, recorded
+            # in the same fenced commit as the intent that carries it.
+            consumed = list(self.state.get("consumed_approvals") or [])
+            consumed.append({"approval_id": intent.approval_id, "step_key": str(intent.step_key)})
+            self.state["consumed_approvals"] = consumed
+            event["approval_id"] = intent.approval_id
+        await self._commit(steps=[intent], effects=[EffectRecord(self.eid, intent)], events=[event])
+
+    def approval_used(self, approval_id: str) -> bool:
+        """True when a dispatch was made under this approval (an intent carries it)."""
+        return any(
+            isinstance(item, dict) and item.get("approval_id") == approval_id
+            for item in self.state.get("consumed_approvals") or []
+        ) or any(
+            step.intent is not None and step.intent.approval_id == approval_id
+            for step in self.steps.values()
+        )
+
+    def unused_claim(self, approval_id: str) -> dict[str, Any] | None:
+        """The recorded claim of this approval when no dispatch was made under it yet."""
+        claim = self.state.get("approval_claim")
+        if (
+            isinstance(claim, dict)
+            and claim.get("approval_id") == approval_id
+            and not self.approval_used(approval_id)
+        ):
+            return claim
+        return None
+
+    async def peek(self) -> ExecutionSnapshot | None:
+        """The run's journal as stored, read without taking or changing anything."""
+        return await self._snapshot()
+
+    async def restore_claim(self, claim: dict[str, Any] | None) -> None:
+        """Put back the claim a refused resume replaced (the run's status is kept)."""
+        self.state["approval_claim"] = dict(claim) if claim is not None else None
         await self._commit(
-            steps=[intent],
-            effects=[EffectRecord(self.eid, intent)],
+            status=self.status,
             events=[
-                {"type": "tool_dispatched", "step_key": str(intent.step_key), "tool": tool_name}
+                {"type": "approval_claim_restored", "approval_id": (claim or {}).get("approval_id")}
             ],
+        )
+
+    async def record_claim(self, claim: dict[str, Any]) -> None:
+        """A resume claims an approval: its decisions, before the approval is consumed.
+
+        The run is ``running`` from this commit; a takeover that finds the claim without a
+        dispatch under it continues with these decisions (or asks again once expired).
+        """
+        self.state["approval_claim"] = dict(claim)
+        self.state["pause_reason"] = None
+        await self._commit(
+            events=[{"type": "approval_claimed", "approval_id": claim.get("approval_id")}]
         )
 
     async def record_outcome(self, key: StepKey, output: str, *, uncertain: bool = False) -> None:
@@ -493,6 +572,12 @@ class AgentJournal:
             effects=effects,
             events=[{"type": "run_paused", "pause_reason": pause_reason}],
         )
+        # A paused run holds no lease (§2.7): the store released the journal lease with the
+        # commit; the checkpoint claim goes too, so a process that dies now does not keep
+        # the run from being resumed elsewhere until its claim expires.
+        if self.owner is not None:
+            with contextlib.suppress(Exception):
+                await self.checkpoints.release(self.run_id, self.owner)
 
     async def finish(self, status: str) -> None:
         """Terminal status; a failed run's dispatched-but-unfinished effects are indeterminate."""

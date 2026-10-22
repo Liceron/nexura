@@ -16,6 +16,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
+from nexura_agents import tracing
 from nexura_agents.types import Message, ModelResponse, Usage
 from nexura_agents.usage.errors import UsageError
 
@@ -172,6 +173,27 @@ async def budget_stream(stream: Any, budget: Any) -> AsyncGenerator[Any, None]:
 async def admit(budget: Any, model_id: str, tokens: int, method: str) -> str | None:
     if budget is None:
         return None
+    try:
+        reservation = await _admit(budget, model_id, tokens, method)
+    except Exception as exc:
+        if not isinstance(budget, _CombinedBudget):  # each scope reports its own refusal
+            tracing.budget_event(
+                "refuse",
+                str(model_id),
+                method=method,
+                estimated_tokens=tokens,
+                limit_type=getattr(exc, "limit_type", None),
+                error_type=type(exc).__name__,
+            )
+        raise
+    if not isinstance(budget, _CombinedBudget):
+        tracing.budget_event(
+            "reserve", model_id, method=method, reservation_id=reservation, estimated_tokens=tokens
+        )
+    return reservation
+
+
+async def _admit(budget: Any, model_id: str, tokens: int, method: str) -> str:
     if not model_id or isinstance(tokens, bool) or not isinstance(tokens, int) or tokens <= 0:
         raise UsageError("Budget admission refused: model or token estimate is unavailable.")
     admit_fn = getattr(budget, "admit_provider_call_async", None)
@@ -207,6 +229,15 @@ async def settle(
         await fn(reservation, **kw)
     else:
         budget.settle_provider_call(reservation, **kw)
+    if not isinstance(budget, _CombinedBudget):
+        tracing.budget_event(
+            "settle",
+            model_id,
+            reservation_id=reservation,
+            outcome="released" if failed or pre_dispatch else "settled",
+            input_tokens=getattr(usage, "prompt_tokens", None),
+            output_tokens=getattr(usage, "completion_tokens", None),
+        )
 
 
 def _admission_model(model: Any) -> Any:

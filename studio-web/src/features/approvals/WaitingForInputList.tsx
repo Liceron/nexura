@@ -93,7 +93,7 @@ export function WaitingForInputList({ reloadKey = 0 }: { reloadKey?: number }) {
               </div>
               <a href={runHref(run.run_id)} data-testid="waiting-input-open">
                 {t('runs.openToAnswer')}
-                <span className="sr-only" style={{ position: 'absolute', left: -9999 }}>
+                <span className="studio-sr-only">
                   {' '}
                   {run.run_id}
                 </span>

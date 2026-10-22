@@ -54,6 +54,7 @@ PROTECTED_STATE = (
     "extensions",
     "local_session",
     "session_token",
+    "delivery_tokens",
 )
 
 #: Prefix of the routes ``SecurityScopingMiddleware`` authenticates.

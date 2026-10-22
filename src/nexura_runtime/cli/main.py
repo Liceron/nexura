@@ -8,6 +8,7 @@ import argparse
 import asyncio
 import contextlib
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -226,7 +227,48 @@ def serve_command(args: argparse.Namespace) -> int:
 
     from nexura_agents.contracts import MissingDependencyError
 
+    from nexura_runtime.service.api.operator_token import (
+        OPERATOR_TOKEN_ENV,
+        OperatorTokenAuthProvider,
+        OperatorTokenError,
+    )
     from nexura_runtime.service.auth import UnauthenticatedNetworkError
+
+    remote = getattr(args, "auth", "none") == "token"
+    token_file = getattr(args, "token_file", None)
+    plain_http = bool(getattr(args, "insecure_plain_http", False))
+    insecure_network = bool(getattr(args, "insecure_allow_unauthenticated_network", False))
+    auth_provider = None
+    if not remote and os.environ.get(OPERATOR_TOKEN_ENV, "").strip():
+        print(
+            f"Warning: {OPERATOR_TOKEN_ENV} is set but --auth token was not given; the service "
+            "runs on this machine only, without the token, and child processes inherit the "
+            "variable. Unset it, or start with --auth token.",
+            file=sys.stderr,
+        )
+    if not remote and (token_file or plain_http):
+        print(
+            "Error: --token-file and --insecure-plain-http only apply with --auth token.",
+            file=sys.stderr,
+        )
+        return 2
+    if remote:
+        if insecure_network:
+            print(
+                "Error: --auth token authenticates every request; do not combine it with "
+                "--insecure-allow-unauthenticated-network.",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            auth_provider = OperatorTokenAuthProvider.from_environment(token_file=token_file)
+        except OperatorTokenError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 2
+        # Only the hash is kept; child processes (MCP servers, handlers) do not inherit it. The
+        # initial environment block (/proc/<pid>/environ) keeps it for the process lifetime,
+        # readable by this user and root: --token-file is preferred.
+        os.environ.pop(OPERATOR_TOKEN_ENV, None)
 
     try:
         app = create_api_app(
@@ -238,13 +280,30 @@ def serve_command(args: argparse.Namespace) -> int:
             trigger_poll_interval=args.poll_interval,
             listen_host=args.host,
             capture_failed_runs=getattr(args, "capture_failed_runs", None),
-            allow_unauthenticated_network=bool(
-                getattr(args, "insecure_allow_unauthenticated_network", False)
-            ),
+            allow_unauthenticated_network=insecure_network,
+            auth_provider=auth_provider,
+            allow_plain_http=plain_http,
         )
     except (UnauthenticatedNetworkError, ValueError, MissingDependencyError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
+    if remote:
+        # The operator token is never printed or logged.
+        print(
+            "Remote single-operator mode: every request except /healthz and /readyz needs "
+            "Authorization: Bearer <operator token>. Studio asks for the token once per browser "
+            "tab. Serve it over HTTPS through a reverse proxy; see "
+            "docs/remote-single-operator.md."
+        )
+        if plain_http:
+            print(
+                f"WARNING: --insecure-plain-http: listening on {args.host} over plain HTTP. The "
+                "operator token crosses the network unencrypted unless TLS is terminated in "
+                "front of this port.",
+                file=sys.stderr,
+            )
+        uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+        return 0
     # The token itself is not printed: Studio reads it from its own origin.
     print(
         "Per-session token: state-changing requests need the X-Nexura-Session header. Studio "
@@ -902,6 +961,35 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "UNSAFE: allow a non-loopback --host without authentication "
             "(the local-owner profile has full authority). Throwaway development only."
+        ),
+    )
+    serve_p.add_argument(
+        "--auth",
+        choices=("none", "token"),
+        default="none",
+        help=(
+            "none (default): this machine only, no login. token: remote single-operator mode; "
+            "every request except /healthz and /readyz needs Authorization: Bearer <token>, "
+            "with the token from NEXURA_OPERATOR_TOKEN or --token-file (never on the command "
+            "line). Allows a non-loopback --host. Multi-user logins are in the enterprise edition."
+        ),
+    )
+    serve_p.add_argument(
+        "--token-file",
+        metavar="PATH",
+        default=None,
+        help=(
+            "With --auth token: read the operator token from this file, which only its owner "
+            "may read (chmod 600). Also NEXURA_OPERATOR_TOKEN_FILE."
+        ),
+    )
+    serve_p.add_argument(
+        "--insecure-plain-http",
+        action="store_true",
+        help=(
+            "With --auth token: allow a non-loopback --host although the service speaks plain "
+            "HTTP (TLS terminated on another host or a VPN). Prefer 127.0.0.1 behind a TLS "
+            "reverse proxy."
         ),
     )
     serve_p.set_defaults(func=serve_command)

@@ -9,7 +9,8 @@ interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   loading?: boolean;
 }
 
-export function Button({
+/** Forwards its ref so callers can restore focus to the button after a disclosure closes. */
+export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(function Button({
   variant = 'secondary',
   size = 'md',
   loading = false,
@@ -18,7 +19,7 @@ export function Button({
   style,
   className,
   ...props
-}: ButtonProps) {
+}, ref) {
   const baseStyle: React.CSSProperties = {
     display: 'inline-flex',
     alignItems: 'center',
@@ -57,6 +58,7 @@ export function Button({
 
   return (
     <button
+      ref={ref}
       disabled={disabled || loading}
       aria-busy={loading || undefined}
       className={['studio-button', `studio-button--${variant}`, className].filter(Boolean).join(' ')}
@@ -67,4 +69,4 @@ export function Button({
       {children}
     </button>
   );
-}
+});

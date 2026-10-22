@@ -5,6 +5,69 @@ has been published.
 
 ## Unreleased (0.4.0)
 
+### Added (P39 G3: the `nexura-guardrails` package)
+- New workspace package `nexura-guardrails` (import `nexura_guardrails`, MIT, Python 3.11 to
+  3.13), depending on `nexura-agents` only. Extras: `judge` (empty marker) and `yaml` (PyYAML).
+- `Verdict` (allow, block, rewrite, review, error), `CheckInput`, the `Check` protocol, and
+  `as_guardrail` / `as_tool_guardrail`, which turn any check into a plain guardrail for the
+  existing `Agent(input_guardrails=..., output_guardrails=...)` and `@tool(...)` parameters.
+- A category taxonomy with classifier label maps (Llama Guard, ShieldGemma, Granite Guardian,
+  Nemotron Safety Guard v3, OpenAI moderation) and opt-in Indian-context categories
+  (`caste_hate`, `communal_hate`, `id_exposure_in`, `financial_fraud_in`, `election_in`;
+  wording pending founder review).
+- Pre-filter checks `pii`, `injection`, `length`, `topics`, `json_only` that call the
+  `nexura_agents` built-ins (one implementation).
+- `JudgeCheck`: an LLM judge with the policy in the system message, the content in a per-call
+  nonce fence, a strictly validated JSON verdict, fail-closed handling of timeouts, provider
+  errors, budget refusals and malformed verdicts, calls through Nexura's model layer (run
+  budgets apply, usage is counted) and a per-run verdict cache keyed by a content hash.
+  The fully built prompt must fit `context_tokens` (default 4096) by a conservative token
+  estimate; otherwise nothing is sent and the verdict is a hard `ContentTooLong` error that
+  no `on_error` setting softens. Tool rejections the agent reads are fixed text with category
+  ids only, never the judge's free-text reason.
+- `tiered`, `parallel` and `cached` composition. New guide: docs/guardrails-package.md.
+
+### Changed (P39 G0: guardrail docs honesty)
+- The stdlib guardrails are documented as fast heuristic pre-filters, with the measured misses
+  (docs/guardrails-hooks-limits.md, section renamed "Built-in pre-filters (heuristic)", and the
+  `guardrails_builtin` docstrings). No behaviour or import change.
+- Removed the unreachable duplicate `return None` lines in `AgentHooks`.
+- New strict-xfail tests record the known pre-filter misses, so an improvement shows up.
+
+### Changed (P38 C2: OpenTelemetry GenAI semantic conventions)
+- Tracing follows the GenAI conventions pinned to `open-telemetry/semantic-conventions-genai`
+  commit `8538971bd11dba723fdd33c804b5a32121827ff7` (Development status; see
+  docs/observability.md). Model-call spans are `CLIENT` and carry `gen_ai.provider.name`,
+  `gen_ai.response.id`, `gen_ai.response.model`, and the cache-read, cache-write and
+  reasoning token attributes; workflow spans are `invoke_workflow <name>` with
+  `gen_ai.workflow.name`; `error.type` is set on failed operations.
+- With `capture_content=True`, `gen_ai.system_instructions`, `gen_ai.input.messages`,
+  `gen_ai.output.messages`, `gen_ai.tool.call.arguments` and `gen_ai.tool.call.result` are
+  recorded in the conventions' structured format (redacted, truncated). Still off by default.
+- New metrics: `gen_ai.client.inference.duration`, `gen_ai.invoke_agent.duration`,
+  `gen_ai.execute_tool.duration`, `gen_ai.invoke_workflow.duration`, the
+  `gen_ai.client.inference.usage.*` token counters and `gen_ai.client.inference.operation.*`
+  token histograms.
+- New `nexura.approval.requested` / `.decided`, `nexura.budget.reserve` / `.settle` /
+  `.refuse` and `nexura.effect.intent` / `.outcome` / `.unknown` / `.resolved` span events.
+- `ModelResponse` gains optional `response_id` and `response_model`, filled by the OpenAI,
+  Anthropic, Gemini, Sarvam and LiteLLM adapters for non-streamed calls.
+- Deprecated (removed in 0.5.0): `gen_ai.system`, `nexura.usage.reasoning_tokens`,
+  `nexura.operation.name`, the `gen_ai.content.prompt` / `gen_ai.content.completion` events,
+  the `gen_ai.client.token.usage` metric, and `gen_ai.client.operation.duration` for model
+  calls (that histogram keeps `gen_ai.operation.name=workflow` for workflows until then), the
+  `gen_ai.tool.call.arguments` / `gen_ai.tool.call.result` span events, and
+  `nexura.response.finish_reasons` (the raw `tool_calls` value; `gen_ai.response.finish_reasons`
+  now reports `tool_call`, and `error` for a failed model call). The workflow span name changed
+  from `workflow <name>` to `invoke_workflow <name>`.
+- Recording content never fails or changes a run (a tool result is parsed as JSON only up to
+  64,000 characters and any parse or conversion error is contained); `gen_ai.input.messages`
+  keeps the newest messages; attachment URLs lose their query string; history capture is
+  linear in the history size. `gen_ai.provider.name` follows an OpenAI-compatible adapter's
+  base URL (unknown hosts get no value) and is `gcp.vertex_ai` for `nexura-vertex`.
+- The V2 trace exporter forwards the cache and reasoning token breakdowns without adding them
+  to `total_tokens` or to usage completeness.
+
 ### Added (P37 B5: project scaffolding)
 - `nexura-runtime init DIR --template agent|workflow|rag` (and `--list`) writes a small runnable
   project with offline FakeModel tests, a README, `.gitignore` and `.env.example`; it refuses
@@ -15,6 +78,72 @@ has been published.
   DEPLOY.md with the loopback and token caveats; it builds and runs nothing.
 - `nexura.commands` entry points `dev` and `project` (`nexura project init|dev|deploy`; `init`
   and `deploy` are the Nexura Cloud client's built-ins). See docs/project-templates.md.
+
+### Changed (P35 A6 S11: budgets and approvals across a takeover)
+
+- Budget reservations record the run step they were made for
+  (`metadata["execution"]`, `metadata["step_key"]`; `nexura_agents.usage.linkage`).
+  `Runner`, `WorkflowEngine` and `DurableExecutionEngine` open a dispatch scope around
+  model calls, tool calls, nodes, branches and items. New
+  `UsageLedger.open_reservations(workspace_id, run_id)`.
+- Before any step runs, a takeover ends the run's open reservations. That covers
+  `Runner.recover`, `WorkflowEngine.recover`/`resume`/`resume_interrupt`,
+  `DurableExecutionEngine.claim_run` and trigger continuation. A dispatched (or possibly
+  dispatched) step is settled as unknown usage at its estimate; a step whose intent the
+  journal does not have is released. A run that reaches a terminal status ends its open
+  reservations the same way. The rule is
+  `nexura_agents.usage.recovery.settle_run_reservations`.
+- A run started under a `RunBudget` records its scope in its journal.
+  `WorkflowEngine` restores the policy with `manager.get_run_budget(scope)`. Continuing
+  such a run without a budget raises `UsageError` (SDK) or `WorkflowError` (workflows).
+  The new `DurableExecutionEngine(..., budget=)` argument links that engine's
+  reservations.
+- SDK approvals: with a journal-capable store, `resume` records its claim (decisions,
+  expiry) in the run's journal before it consumes the approval. Approved calls' intents
+  carry `approval_id`, recorded in `consumed_approvals` in the same commit. `recover`
+  dispatches a claimed, unused approval once under the same approval, or asks again once
+  it has expired. Before this, a crash after consumption left the run paused on a spent
+  approval. A second `resume` of a claimed approval is refused.
+- `resume` releases a dead same-host owner's lease. A paused agent run gives back its
+  checkpoint claim with the pause commit.
+- Review fixes:
+  - Recovery never sends a call a person rejected. The claim's rejections and answers
+    hold, and a call to a tool that requires approval with no decision on record is asked
+    for again. This includes the other calls of an `effect_unknown` batch.
+  - A resume that cannot take the run consumes nothing. A spent or claimed approval is
+    refused before any journal write.
+  - Workflows continue under the recorded budget scope: another scope is replaced with a
+    warning, or refused when its ledger does not know the recorded scope. `resume` and
+    `resume_interrupt` check the budget before claiming.
+  - `DurableExecutionEngine.claim_run` fails closed on a run started under a budget.
+  - Runner reservations outside model and tool calls (history processors, instructions,
+    guardrails) are linked to the run (`step_key="run"`).
+  - Terminal sweeps run before the terminal commit.
+  - Claims record their turn and must be exact JSON.
+- Round-2 review fixes:
+  - Terminal sweeps are fenced. Each reservation records its owner's run-lease token. A
+    sweep first confirms the lease (`renew`), then ends only reservations of its own
+    lease or older, so a stale owner never ends the new owner's in-flight reservation.
+  - Combined budgets are looked through. Workflows enforce the recorded scope's policy
+    alongside, or warn; the Runner warns.
+  - The Runner's no-budget refusal reads the journal before taking the lease.
+  - (Superseded in round 3.) A non-replayable claim marker for decisions that are not
+    exact JSON.
+- Round-3 review fixes:
+  - One approval path: decisions are normalised to JSON (tuples become lists). A
+    journaled resume with decisions that have no exact JSON form raises
+    `ApprovalDecisionError` before taking the run or consuming anything. The claim marker
+    is removed.
+  - An approval whose pending calls already have an intent for that turn is refused.
+  - Recovery consumes an expired claimed approval (best effort) before asking again.
+  - Terminal sweeps also end unlinked reservations of the run's own scope made before the
+    lease was confirmed.
+  - A transient store error while confirming the lease is a warning, not a failed run.
+    The confirmation is retried once. If it still fails, the token-filtered sweep runs
+    after the fenced terminal commit succeeds (round 4, F4-m1); otherwise recovery
+    settles.
+  - Documented: the shared workspace counts a recovered call once per scope under dual
+    enforcement.
 
 ### Changed (P35 A6 S10/S10b: trigger jobs on the execution journal)
 - A reclaimed trigger job continues the run it owns (`WorkflowEngine.recover`) instead of

@@ -5,14 +5,13 @@ import { useCallback, useEffect, useState, type CSSProperties } from 'react';
 import { useApi } from '../../api/context';
 import { Badge } from '../../components/Badge';
 import { Button } from '../../components/Button';
-import { Card } from '../../components/Card';
 import { useI18n } from '../../i18n';
 import type { CaseStatus, StudioDatasetSummary } from './studioEvalsTypes';
 import { caseRows, listWorkflowTestDatasets, runWorkflowTests, useCanEdit, type WorkflowTestOutcome } from './workflowTests';
 import { formatApiError } from '../../api/errors';
 import { runHref } from '../../app/routes';
 
-const cell: CSSProperties = { padding: '6px 8px', textAlign: 'left', verticalAlign: 'top', fontSize: 12 };
+const cell: CSSProperties = { padding: '8px 12px', textAlign: 'left', verticalAlign: 'top', fontSize: 'var(--type-ui)', borderBottom: '1px solid var(--border-subtle)' };
 
 function statusVariant(s: CaseStatus): 'success' | 'danger' | 'warning' {
   return s === 'passed' ? 'success' : s === 'paused' ? 'warning' : 'danger';
@@ -70,15 +69,19 @@ export function WorkflowTestsPanel({ workflowId, revision }: WorkflowTestsPanelP
 
   return (
     <div data-testid="workflow-tests-panel" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-      <Card>
-        <h2 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 4px 0' }}>{t('workflowTests.title')}</h2>
-        <p style={{ fontSize: 13, color: 'var(--text-secondary)', margin: 0 }}>{t('workflowTests.subtitle')}</p>
+      <section>
+        <h2 style={{ margin: '0 0 4px 0' }}>{t('workflowTests.title')}</h2>
+        <p style={{ fontSize: 'var(--type-ui)', color: 'var(--text-secondary)', margin: 0, maxWidth: '65ch' }}>{t('workflowTests.subtitle')}</p>
+        <details className="resource-help-disclosure" style={{ marginTop: 4 }}>
+          <summary>{t('workflowTests.executionTitle')}</summary>
+          <p>{t('workflowTests.executionHelp')}</p>
+        </details>
         {!canRun && (
-          <p data-testid="workflow-tests-viewer-note" style={{ fontSize: 12, color: 'var(--text-muted)', margin: '8px 0 0 0' }}>
+          <p data-testid="workflow-tests-viewer-note" style={{ fontSize: 'var(--type-meta)', color: 'var(--text-muted)', margin: '8px 0 0 0' }}>
             {t('workflowTests.viewerNote')}
           </p>
         )}
-      </Card>
+      </section>
 
       {error && (
         <div data-testid="workflow-tests-error" role="alert" style={{ fontSize: 13, color: 'var(--status-danger)' }}>
@@ -86,7 +89,7 @@ export function WorkflowTestsPanel({ workflowId, revision }: WorkflowTestsPanelP
         </div>
       )}
 
-      <Card>
+      <section className="settings-panel">
         {datasets === null ? (
           <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{t('common.loading')}</div>
         ) : datasets.length === 0 ? (
@@ -117,7 +120,6 @@ export function WorkflowTestsPanel({ workflowId, revision }: WorkflowTestsPanelP
                   <td style={cell}>
                     <Button
                       data-testid={`workflow-tests-run-${d.dataset_id}`}
-                      variant="primary"
                       size="sm"
                       disabled={!canRun || runningId !== null}
                       loading={runningId === d.dataset_id}
@@ -132,10 +134,10 @@ export function WorkflowTestsPanel({ workflowId, revision }: WorkflowTestsPanelP
             </tbody>
           </table>
         )}
-      </Card>
+      </section>
 
       {outcome && summary && (
-        <Card data-testid="workflow-tests-results">
+        <section className="settings-panel" data-testid="workflow-tests-results">
           <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center', marginBottom: 10, fontSize: 13 }}>
             <strong>{outcome.dataset.name || outcome.dataset.dataset_id}</strong>
             <span>
@@ -213,7 +215,7 @@ export function WorkflowTestsPanel({ workflowId, revision }: WorkflowTestsPanelP
               {t('workflowTests.noBaseline')}
             </div>
           )}
-        </Card>
+        </section>
       )}
     </div>
   );

@@ -50,14 +50,7 @@ export function CitationFootnotes({
   const unresolved = useUnresolved(citations);
   if (citations.length === 0) return null;
   return (
-    <div
-      data-testid="citation-footnotes"
-      style={{
-        padding: "8px 16px",
-        borderTop: "1px solid var(--border-subtle)",
-        fontSize: 12,
-      }}
-    >
+    <div data-testid="citation-footnotes" style={{ fontSize: "var(--type-ui)" }}>
       <div
         style={{
           fontWeight: 600,
@@ -84,7 +77,7 @@ export function CitationFootnotes({
             {unresolved.has(keyOf(c)) ? (
               <span
                 data-testid={`citation-footnote-unavailable-${i + 1}`}
-                style={{ color: "var(--text-tertiary)" }}
+                style={{ color: "var(--text-secondary)" }}
               >
                 {t("citations.unavailable", "source unavailable")}
               </span>
@@ -104,7 +97,7 @@ export function CitationFootnotes({
                 {c.title}
               </a>
             )}{" "}
-            <span style={{ color: "var(--text-tertiary)" }}>
+            <span style={{ color: "var(--text-muted)" }}>
               ({t("citations.chunk", "chunk")} {c.chunkIndex})
             </span>
           </li>

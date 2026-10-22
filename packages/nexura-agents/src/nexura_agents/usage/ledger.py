@@ -19,6 +19,7 @@ from nexura_agents.usage.errors import (
     CrossWorkspaceAccessError,
     ReservationNotFoundError,
 )
+from nexura_agents.usage.linkage import frames_of, link_metadata
 from nexura_agents.usage.models import (
     BudgetConfig,
     BudgetStatus,
@@ -521,6 +522,8 @@ class UsageLedger:
                             run_id=scope_id,
                         )
             metadata = {**(metadata or {}), "budget_ancestors": list(ancestor_configs or {})}
+            # A6 S11: the run step this reservation is made for (see usage.linkage).
+            metadata = link_metadata(metadata)
 
             actual_call_id = provider_call_id or f"pcall_{uuid.uuid4().hex[:12]}"
             # Create reservation
@@ -603,6 +606,34 @@ class UsageLedger:
             workspace_config=workspace_config,
             metadata=metadata,
         )
+
+    def open_reservations(
+        self, workspace_id: str, run_id: str, *, include_unlinked: bool = False
+    ) -> list[Reservation]:
+        """Active (or expired) reservations made for a run's steps (A6 S11).
+
+        A reservation belongs to the run when its dispatch path (``metadata["execution"]``,
+        see :mod:`nexura_agents.usage.linkage`) names the execution ``(workspace_id,
+        run_id)``. ``include_unlinked`` adds reservations without a dispatch path whose
+        budget scope is that workspace and run id (made outside any dispatch scope, or
+        before reservations were linked).
+        """
+        with self._atomic():
+            found = []
+            for res in self._reservations.values():
+                if res.status not in ("active", "expired"):
+                    continue
+                frames = frames_of(res.metadata)
+                if frames:
+                    mine = any((f.workspace_id, f.run_id) == (workspace_id, run_id) for f in frames)
+                else:
+                    mine = include_unlinked and (res.workspace_id, res.run_id) == (
+                        workspace_id,
+                        run_id,
+                    )
+                if mine:
+                    found.append(res.model_copy(deep=True))
+            return sorted(found, key=lambda r: (r.created_at, r.reservation_id))
 
     def get_reservation(self, reservation_id: str, workspace_id: str) -> Reservation:
         """Read persisted reservation identity without exposing mutable ledger state."""

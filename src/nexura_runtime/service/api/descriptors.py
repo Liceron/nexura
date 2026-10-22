@@ -394,10 +394,16 @@ async def get_capabilities(request: Request) -> ServiceCapabilitiesResponse:
     host = getattr(request.app.state, "extensions", None)
     extension_capabilities = host.capabilities if host is not None else {}
     # The OSS provider supports one local owner. An installed authenticating provider
-    # supplies the shared profile; its presence, rather than a profile name, is evidence.
+    # supplies the shared profile; its presence, rather than a profile name, is evidence. The
+    # open-source operator token (remote single-operator mode) authenticates the local owner
+    # only, so it does not add the shared profile.
     provider = getattr(request.app.state, "auth_provider", None)
     profiles = ["local-owner"]
-    if provider is not None and provider.is_authenticating:
+    if (
+        provider is not None
+        and provider.is_authenticating
+        and getattr(provider, "single_operator", False) is not True
+    ):
         profiles.append("authenticated-shared-service")
 
     return ServiceCapabilitiesResponse(

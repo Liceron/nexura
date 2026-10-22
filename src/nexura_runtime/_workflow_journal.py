@@ -32,6 +32,7 @@ import dataclasses
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
+from nexura_agents import tracing
 from nexura_agents.contracts.execution import (
     EffectRecord,
     EffectResolution,
@@ -87,6 +88,9 @@ class WorkflowJournal:
         self.effects: dict[str, EffectRecord] = {}  # by step key (one effect per step)
         #: Revision of the workflow checkpoint this run last read or wrote (fences saves).
         self.cp_revision: int | None = None
+        #: A terminal sweep whose lease check failed twice: (lease token, time), run after
+        #: the terminal commit succeeds (A6 S11, F4-m1).
+        self.deferred_sweep: tuple[int | None, float] | None = None
         #: Step keys this instance dispatched (an in-process node retry re-runs them; an
         #: open intent not in here was left by a process that stopped).
         self.local: set[str] = set()
@@ -134,13 +138,26 @@ class WorkflowJournal:
     def _initial_state() -> dict[str, Any]:
         return {"pause_reason": None, "pending_effect": None, "consumed_approvals": []}
 
-    async def create(self, owner: str, origin: dict[str, Any] | None = None) -> None:
-        """Journal a new run with its lease already held (raises if it exists)."""
+    async def create(
+        self,
+        owner: str,
+        origin: dict[str, Any] | None = None,
+        *,
+        budget_scope: dict[str, str] | None = None,
+    ) -> None:
+        """Journal a new run with its lease already held (raises if it exists).
+
+        ``budget_scope``: the ``RunBudget`` scope the run starts under (A6 S11); continuing
+        the run (resume, recover) then needs a budget again.
+        """
+        state = self._initial_state()
+        if budget_scope is not None:
+            state["budget_scope"] = dict(budget_scope)
         run = await self.store.create(
             self.eid,
             owner=owner,
             definition_digest=self.digest,
-            state=self._initial_state(),
+            state=state,
             ttl=self.ttl,
             kind="workflow",
             parent_run_id=self.parent_run_id,
@@ -300,6 +317,8 @@ class WorkflowJournal:
         for effect in effects:
             self.effects[str(effect.intent.step_key)] = effect
         self.status = status
+        # nexura.effect.* on the current (workflow or node) span; opt-in tracing, never raises.
+        tracing.effects_committed(effects, run_id=self.run_id)
         if status in ("paused", *TERMINAL):
             self.lease = None  # the store released it with this commit
             with contextlib.suppress(Exception):

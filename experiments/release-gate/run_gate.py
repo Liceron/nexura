@@ -196,6 +196,7 @@ PACKAGE_SOURCES = tuple(
     for name in (
         "nexura-agents",
         "nexura-connectors",
+        "nexura-guardrails",
         "nexura-postgres",
         "nexura-qdrant",
         "nexura-sandbox",
@@ -925,6 +926,41 @@ print(json.dumps({"file": nexura_vertex.__file__,
             ),
             (
                 "nexura-vertex needs nexura-agents only, not nexura-runtime",
+                lambda a, p: a.get("runtime") is False and p.get("runtime") is False,
+            ),
+        ),
+    ),
+    PackageCheck(
+        package="nexura-guardrails",
+        base="nexura_agents",
+        absent_probe=f"""
+{_ABSENT_SPEC.format(name="nexura_guardrails")}
+import json
+from nexura_agents import block_pii
+print(json.dumps({{"spec": spec, "builtin": callable(block_pii),
+                   "runtime": u.find_spec("nexura_runtime") is not None}}))
+""",
+        present_probe="""
+import asyncio, importlib.util as u, json, nexura_guardrails
+from nexura_agents import FakeModel
+from nexura_guardrails import JudgeCheck, evaluate, injection, tiered
+reply = '{"decision": "block", "categories": ["fraud"], "score": 0.9, "reason": "otp"}'
+judge = JudgeCheck(FakeModel([reply]), "Block OTP requests.", categories=["fraud", "other"])
+verdict = asyncio.run(evaluate(tiered(injection(), judge), "share your OTP"))
+print(json.dumps({"file": nexura_guardrails.__file__, "decision": verdict.decision,
+                  "runtime": u.find_spec("nexura_runtime") is not None}))
+""",
+        invariants=(
+            (
+                "nexura-agents alone keeps its pre-filters and has no nexura_guardrails",
+                lambda a, p: a.get("spec") is False and a.get("builtin") is True,
+            ),
+            (
+                "an installed nexura-guardrails runs a tiered judge check offline",
+                lambda a, p: p.get("decision") == "block",
+            ),
+            (
+                "nexura-guardrails needs nexura-agents only, not nexura-runtime",
                 lambda a, p: a.get("runtime") is False and p.get("runtime") is False,
             ),
         ),

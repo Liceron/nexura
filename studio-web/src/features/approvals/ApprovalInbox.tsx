@@ -61,7 +61,7 @@ export function ApprovalInbox({ onOpenWorkflow }: { onOpenWorkflow?: (workflowId
           <td>{date(item.createdAt)}</td><td>{date(request?.expires_at)}</td>
           <td><div className="inspection-actions">
             <Button variant="secondary" onClick={() => setSelectedItem(item)}>{t('approvalReview.review')}</Button>
-            <a href={runHref(item.runId)} data-testid="approval-open-run">{t('runs.open')}<span className="sr-only"> {item.runId}</span></a>
+            <a href={runHref(item.runId)} data-testid="approval-open-run">{t('runs.open')}<span className="studio-sr-only"> {item.runId}</span></a>
             {onOpenWorkflow && <Button variant="ghost" onClick={() => onOpenWorkflow(item.workflowId)}>{t('approvalReview.workflow')}</Button>}
           </div><code className="inspection-meta">{item.runId}</code></td>
         </tr>;

@@ -46,7 +46,7 @@ from nexura_agents.providers.types import (
     ProviderCapabilities,
     StreamDelta,
 )
-from nexura_agents.types import ModelResponse
+from nexura_agents.types import ModelResponse, response_identity
 
 _ANTHROPIC_KEY_PATTERN = re.compile(r"sk-ant-[a-zA-Z0-9_-]{20,}", re.IGNORECASE)
 
@@ -480,6 +480,7 @@ class AnthropicNativeProvider(BaseProvider):
             message=msg,
             usage=usage,
             finish_reason=finish_reason,
+            **response_identity(data),
         )
 
     async def _stream_internal(

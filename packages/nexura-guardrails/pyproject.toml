@@ -1,0 +1,57 @@
+[project]
+name = "nexura-guardrails"
+version = "0.4.0"
+description = "Guardrails for Nexura agents: verdicts, a category taxonomy, fast pre-filters, an LLM judge and tiered composition."
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Liceron", email = "info@liceron.in" }]
+keywords = ["agents", "ai-agents", "llm", "guardrails", "safety", "prompt-injection", "llm-judge"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+# Depends on the agent SDK only (not on nexura-runtime), with the same Python range, and on no
+# third-party package of its own. Judge calls go through nexura_agents models, so budgets apply.
+dependencies = [
+    "nexura-agents==0.4.0",
+]
+
+[project.optional-dependencies]
+# Empty marker: the LLM judge ships in core and needs no extra dependency
+# (`pip install "nexura-guardrails[judge]"` reads naturally in docs).
+judge = []
+# YAML policy files (JSON works without it); used by the policy loader of a later phase.
+yaml = ["pyyaml>=6"]
+
+[project.urls]
+Homepage = "https://github.com/Liceron/nexura"
+Documentation = "https://github.com/Liceron/nexura/blob/main/docs/guardrails-package.md"
+Source = "https://github.com/Liceron/nexura"
+Issues = "https://github.com/Liceron/nexura/issues"
+Changelog = "https://github.com/Liceron/nexura/blob/main/CHANGELOG.md"
+
+[tool.uv.sources]
+# Development inside the monorepo uses the workspace copy.
+nexura-agents = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nexura_guardrails"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/src", "/README.md", "/LICENSE", "/pyproject.toml"]
+exclude = [
+    "**/__pycache__", "**/*.pyc",
+    "**/*blueprint*/**", "**/internal/**", "**/product/**", "**/.autopilot/**",
+]

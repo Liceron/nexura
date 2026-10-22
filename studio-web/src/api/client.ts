@@ -16,6 +16,27 @@ export interface ConnectionInfo {
   capabilities?: ServiceCapabilities;
   error?: string;
   latencyMs?: number;
+  /** The server refused this address after too many failed sign-ins (HTTP 429). */
+  rateLimited?: boolean;
+  /** The server refused the credential itself (HTTP 401), as opposed to a 403 or 429. */
+  credentialRefused?: boolean;
+  /** HTTP status of an unauthorized answer (401, 403 or 429), for the status chip. */
+  httpStatus?: number;
+  /**
+   * The refusal came from remote single-operator mode (the operator-token provider): a 429 from
+   * its failure limiter, or a 401 whose message asks for the operator token / answers a token we
+   * sent. Only then does Studio offer the operator sign-in (Round 5 review M3).
+   */
+  operatorTokenMode?: boolean;
+}
+
+/** The origin a base URL ('/api' or an absolute URL) resolves to; '' when it cannot be parsed. */
+export function apiOrigin(baseUrl: string): string {
+  try {
+    return new URL(baseUrl, window.location.href).origin;
+  } catch {
+    return '';
+  }
 }
 
 export class NexuraApiManager {
@@ -59,13 +80,28 @@ export class NexuraApiManager {
     return this._abortController.signal;
   }
 
-  public setBaseUrl(url: string): void {
+  /** True while an operator token (remote single-operator mode) is set. */
+  get hasAuthToken(): boolean {
+    return Boolean(this._authToken);
+  }
+
+  /**
+   * Point the client at another server. Returns true when the operator token was dropped: it
+   * is never sent to an origin other than the one it was given for (P38 C4 m4).
+   */
+  public setBaseUrl(url: string): boolean {
+    let dropped = false;
     if (this._baseUrl !== url) {
       this.abortAllRequests('Base URL changed');
+      if (this._authToken && apiOrigin(this._baseUrl) !== apiOrigin(url)) {
+        this._authToken = null;
+        dropped = true;
+      }
       this._baseUrl = url;
       this._scopedCache.clear();
       this._client = this._createClient(false);
     }
+    return dropped;
   }
 
   public setWorkspace(ws: string): void {
@@ -124,6 +160,8 @@ export class NexuraApiManager {
       const latencyMs = Math.round(performance.now() - startTime);
       // Read the per-session token now (same origin) so the first state-changing request carries
       // it instead of being refused and retried. Best effort: the refusal path still applies.
+      // With an operator token the client sends it on this probe too, so a server in remote
+      // single-operator mode answers 404 instead of counting a failed sign-in (P38 C4 m3).
       if (!this._client.sessionToken) {
         await this._client.fetchSessionToken().catch(() => undefined);
       }
@@ -141,8 +179,28 @@ export class NexuraApiManager {
       const latencyMs = Math.round(performance.now() - startTime);
       const errMessage = formatApiError(err);
       const raw = err instanceof Error ? err.message : String(err); // keeps "[401] CODE"
-      const is401 = raw.includes('401') || raw.toLowerCase().includes('unauthorized');
-      const is403 = raw.includes('403') || raw.toLowerCase().includes('forbidden');
+      const statusCode = typeof (err as { statusCode?: unknown })?.statusCode === 'number' ? (err as { statusCode: number }).statusCode : undefined;
+      const is401 = statusCode === 401 || (statusCode === undefined && (raw.includes('401') || raw.toLowerCase().includes('unauthorized')));
+      const is403 = statusCode === 403 || (statusCode === undefined && (raw.includes('403') || raw.toLowerCase().includes('forbidden')));
+      // Remote single-operator mode refuses an address after repeated failed sign-ins.
+      const is429 = statusCode === 429 || raw.includes('TOO_MANY_AUTH_FAILURES') || (statusCode === undefined && raw.includes('429'));
+      // The operator-token provider's 401 asks for the operator token; a 401 to a token we sent
+      // is also its answer. Shared-service and other 401s keep the service's own message.
+      const operatorToken401 = is401 && (Boolean(this._authToken) || /operator token/i.test(raw));
+
+      if (is429) {
+        return {
+          status: 'unauthorized',
+          baseUrl: this._baseUrl,
+          workspace: this._workspace,
+          principal: this._principal || 'default',
+          error: 'Too many failed authentication attempts; try again later.',
+          rateLimited: true,
+          httpStatus: 429,
+          operatorTokenMode: true,
+          latencyMs,
+        };
+      }
 
       if (is401 || is403) {
         return {
@@ -150,9 +208,13 @@ export class NexuraApiManager {
           baseUrl: this._baseUrl,
           workspace: this._workspace,
           principal: this._principal || 'default',
-          error: is401
-            ? 'Unauthorized: Authentication required.'
-            : 'Forbidden: Insufficient workspace permissions.',
+          // A plain lead, then the service's own message (review M3).
+          error: [is401 ? 'Unauthorized: Authentication required.' : 'Forbidden: Insufficient workspace permissions.', errMessage]
+            .filter(Boolean)
+            .join(' '),
+          credentialRefused: is401,
+          httpStatus: is401 ? 401 : 403,
+          operatorTokenMode: operatorToken401,
           latencyMs,
         };
       }

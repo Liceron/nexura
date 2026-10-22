@@ -1,4 +1,4 @@
-# Release: build, check and upload the eight Python packages to PyPI and the TypeScript client
+# Release: build, check and upload the nine Python packages to PyPI and the TypeScript client
 # to npm. Tokenless: PyPI Trusted Publishing and npm trusted publishing both use this job's
 # short-lived GitHub OIDC identity, and npm attaches a provenance statement. No repository
 # credentials are read. Runs only on a v* tag push or when started by hand.
@@ -83,7 +83,7 @@ jobs:
           set -euo pipefail
           v="${{ steps.version.outputs.version }}"
           mkdir -p stage/1 stage/2 stage/3 stage/4
-          mv dist/nexura_agents-"$v"* dist/nexura_vertex-"$v"* stage/1/
+          mv dist/nexura_agents-"$v"* dist/nexura_vertex-"$v"* dist/nexura_guardrails-"$v"* stage/1/
           mv dist/nexura_runtime-"$v"* stage/2/
           mv dist/nexura_postgres-"$v"* dist/nexura_qdrant-"$v"* dist/nexura_sandbox-"$v"* \
              dist/nexura_connectors-"$v"* stage/3/
@@ -118,7 +118,7 @@ jobs:
           name: python-dist
           path: stage
       # pypi-publish v1.14.2 or later accepts the Metadata-Version 2.5 that hatchling writes.
-      - name: Upload nexura-agents and nexura-vertex
+      - name: Upload nexura-agents, nexura-vertex and nexura-guardrails
         uses: pypa/gh-action-pypi-publish@v1.14.2
         with:
           packages-dir: stage/1/

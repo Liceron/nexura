@@ -32,7 +32,7 @@ test.describe('Studio Web Negative Cases & Error Recovery', () => {
 
     // Should display recoverable error card
     await expect(page.getByText('Unable to connect to Nexura Service')).toBeVisible({ timeout: 10000 });
-    await expect(page.getByRole('button', { name: 'Retry Connection' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Retry connection', exact: true })).toBeVisible();
 
     // Reset back to valid backend URL to verify recovery
     await page.getByLabel(/^Service connection status:/).click();

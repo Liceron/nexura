@@ -108,8 +108,8 @@ The resolved prompt is recorded as `ctx.prompt` (inside the instructions and too
 as `RunResult.prompt` (`{"name", "version", "sha256"}`, `None` for plain-string
 instructions; a run resumed after an approval pause does not carry it), and, once
 `nexura_agents.tracing.instrument()` is on, as `gen_ai.prompt.name` and
-`gen_ai.prompt.version` on the `invoke_agent` span. The OpenTelemetry GenAI conventions
-define no prompt-registry attributes, so these follow their `gen_ai.*` naming.
+`gen_ai.prompt.version` on the `invoke_agent` span. These are the GenAI conventions'
+prompt attributes (see [observability](observability.md) for the pinned version).
 
 ## Literal braces
 

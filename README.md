@@ -36,6 +36,7 @@ Install locally built wheels with the commands below, from the checkout. Each Py
 | `nexura-qdrant` | Qdrant vector store | `pip install --no-index --find-links dist nexura-qdrant` |
 | `nexura-sandbox` | WASI, bubblewrap and gVisor backends | `pip install --no-index --find-links dist nexura-sandbox` |
 | `nexura-vertex` | Google Vertex AI provider | `pip install --no-index --find-links dist nexura-vertex` |
+| `nexura-guardrails` | LLM judge, pre-filters, tiered checks | `pip install --no-index --find-links dist nexura-guardrails` |
 | `nexura-studio` | Older built-in Studio and launcher | `pip install --no-index --find-links dist nexura-studio` |
 | `@liceron/nexura-sdk` | TypeScript REST API client | `npm install ./clients/typescript/liceron-nexura-sdk-0.4.0.tgz` |
 
@@ -175,7 +176,7 @@ Nothing has been published. Final package names still need registration and npm 
 
 ## Documentation map
 
-[Documentation index](https://github.com/Liceron/nexura/blob/main/docs/README.md): **40 guides** plus the generated [API reference](https://github.com/Liceron/nexura/blob/main/docs/api-reference.md). Offline Python examples are executed by tests; blocks needing a real model or running service are marked and skipped.
+[Documentation index](https://github.com/Liceron/nexura/blob/main/docs/README.md): **42 guides** plus the generated [API reference](https://github.com/Liceron/nexura/blob/main/docs/api-reference.md). Offline Python examples are executed by tests; blocks needing a real model or running service are marked and skipped.
 
 | Start with | Continue to |
 |---|---|

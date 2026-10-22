@@ -31,6 +31,7 @@ from nexura_agents.contracts.execution import (
 )
 from nexura_agents.errors import ExecutionCancelledError, SessionConflictError, StorageError
 from nexura_agents.execution_store import EffectAlreadyResolvedError, ExecutionStore
+from nexura_agents.usage.linkage import enter_dispatch_scope, leave_dispatch_scope
 
 from nexura_runtime.runtime.execution.errors import (
     DurableDefinitionMismatchError,
@@ -58,10 +59,118 @@ class DurableExecutionEngine:
         self,
         repository: StorageRepository | ExecutionStore,
         handlers: dict[str, Callable[..., Any]] | None = None,
+        *,
+        budget: Any | None = None,
     ) -> None:
         self.repository = repository
         self.handlers: dict[str, Callable[..., Any]] = handlers.copy() if handlers else {}
         self._execution_store: ExecutionStore | None = None
+        # A6 S11: the budget whose ledger holds the reservations handlers make. Reservations
+        # made by a handler are linked to its visit; a claim ends the ones a stopped worker
+        # left open, and so does a terminal status (design §2.7).
+        self.budget = budget
+        # Terminal sweeps whose lease check failed twice, keyed by run: (lease token, time),
+        # run after the terminal commit succeeds (A6 S11, F4-m1).
+        self._deferred_sweeps: dict[tuple[str, str], tuple[int | None, float]] = {}
+
+    async def _settle_reservations(
+        self,
+        workspace_id: str,
+        run_id: str,
+        context: str,
+        *,
+        owner: str | None = None,
+        expected_revision: int | None = None,
+        proven: tuple[int | None, float] | None = None,
+    ) -> int | None:
+        """End the run's open reservations (a takeover: all; a terminal status: ours).
+
+        Returns the run's revision after a terminal sweep's lease renewal (the commit that
+        follows expects it), else ``None``.
+
+        A terminal sweep first confirms this worker still owns the run: the revision it
+        read and the lease owner must match, and the lease is renewed (fenced by its token).
+        Then it ends only reservations made under a lease token no newer than its own, so a
+        stale worker never ends the in-flight reservation of the worker that took over.
+        """
+        if self.budget is None:
+            return None
+        from nexura_agents.usage.recovery import settle_run_reservations_async
+
+        store = await self.get_execution_store()
+        snapshot = await store.get(ExecutionId(workspace_id, run_id))
+        max_token: int | None = None
+        confirmed_at: float | None = None
+        from nexura_agents.usage.recovery import budget_scope
+
+        own_scope = budget_scope(self.budget) == {"workspace_id": workspace_id, "run_id": run_id}
+        if proven is not None:
+            # After a successful fenced terminal commit (round 4, F4-m1).
+            max_token, confirmed_at = proven
+        elif context == "terminal":
+            run = snapshot.run
+            if (
+                run.lease_owner is None
+                or run.lease_owner != owner
+                or (expected_revision is not None and run.revision != expected_revision)
+                or run.lease_expires_at is None
+            ):
+                return None  # not (or no longer) ours: the owner or a takeover settles them
+            confirmed = False
+            for attempt in (1, 2):  # a transient store error is retried once (F4-m1)
+                try:
+                    await store.renew(run.lease, max(1.0, run.lease_expires_at - time.time()))
+                    confirmed = True
+                    break
+                except LeaseLostError:
+                    return None
+                except Exception as exc:
+                    # A transient store error must not fail a finished run (round 3).
+                    import warnings
+
+                    warnings.warn(
+                        f"Run '{run_id}' finished, but its lease could not be confirmed "
+                        f"({exc}); "
+                        + (
+                            "retrying once."
+                            if attempt == 1
+                            else "its open budget reservations are settled after the "
+                            "terminal commit, or left for recovery if that fails."
+                        ),
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+            if not confirmed:
+                self._deferred_sweeps[(workspace_id, run_id)] = (run.fencing_token, time.time())
+                return None
+            max_token = run.fencing_token
+            # A newer owner can reserve only after this lease expires (residual: a worker
+            # frozen here longer than its ttl together with host clock skew beyond it).
+            confirmed_at = time.time()
+            snapshot = await store.get(ExecutionId(workspace_id, run_id))
+        try:
+            await settle_run_reservations_async(
+                [self.budget],
+                workspace_id=workspace_id,
+                run_id=run_id,
+                steps=snapshot.steps,
+                context=context,
+                max_fencing_token=max_token,
+                include_unlinked=own_scope,
+                unlinked_before=confirmed_at,
+            )
+        except Exception as exc:
+            if context != "terminal":
+                raise
+            import warnings
+
+            warnings.warn(
+                f"Run '{run_id}' finished, but its open budget reservations could not be "
+                f"settled: {exc}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        return snapshot.run.revision if max_token is not None else None
 
     async def get_execution_store(self) -> ExecutionStore:
         """Return the authoritative execution journal behind this deprecated adapter."""
@@ -120,6 +229,12 @@ class DurableExecutionEngine:
         )
 
         meta = copy.deepcopy(metadata or {})
+        from nexura_agents.usage.recovery import budget_scope
+
+        scope = budget_scope(self.budget)
+        if scope is not None:
+            # A6 S11: a worker without a budget may not take this run over (claim_run).
+            meta["budget_scope"] = scope
         meta["workflow_id"] = spec.workflow_id
         meta["entry_node"] = spec.entry_node
         meta["workflow_digest"] = canonical_digest(spec.model_dump())
@@ -156,6 +271,15 @@ class DurableExecutionEngine:
         cur_state = await self.get_state(workspace_id, run_id)
         if cur_state.status in {"completed", "failed", "cancelled"}:
             return cur_state
+        record = await (await self._records()).get_run(workspace_id=workspace_id, run_id=run_id)
+        recorded = record.metadata.get("budget_scope") if record is not None else None
+        if isinstance(recorded, dict) and self.budget is None:
+            # Fail closed before the claim: nothing is taken, run or settled (A6 S11).
+            raise DurableExecutionError(
+                f"Run '{run_id}' was started under budget scope '{recorded.get('run_id')}' "
+                f"(workspace '{recorded.get('workspace_id')}'); claim it with "
+                "DurableExecutionEngine(..., budget=manager.get_run_budget(...))."
+            )
         snapshot = await store.get(identity)
         lease = await store.claim(
             identity, worker_id, lease_duration, definition_digest=snapshot.run.definition_digest
@@ -196,6 +320,8 @@ class DurableExecutionEngine:
             raise FencingConflictError(
                 run_id, cur_state.fencing_token, cur_state.fencing_token, worker_id
             ) from exc
+        # Before any step runs: end what a stopped worker left open (no-op on a first claim).
+        await self._settle_reservations(workspace_id, run_id, "takeover")
         return DurableRunState.model_validate(rec.state)
 
     async def execute_step(
@@ -206,7 +332,21 @@ class DurableExecutionEngine:
         spec: DurableWorkflowSpec,
         context: ExecutionContext | None = None,
     ) -> DurableRunState:
-        """Execute a single workflow node with lease verification and crash recovery."""
+        """Execute a single workflow node with lease verification and crash recovery.
+
+        A terminal status ends the run's open budget reservations just before it is
+        committed (see ``_commit_state``).
+        """
+        return await self._execute_step(workspace_id, run_id, worker_id, spec, context)
+
+    async def _execute_step(
+        self,
+        workspace_id: str,
+        run_id: str,
+        worker_id: str,
+        spec: DurableWorkflowSpec,
+        context: ExecutionContext | None = None,
+    ) -> DurableRunState:
         rec = await (await self._records()).get_run(workspace_id=workspace_id, run_id=run_id)
         if rec is None:
             raise StorageError(f"Run '{run_id}' not found in workspace '{workspace_id}'.")
@@ -412,6 +552,20 @@ class DurableExecutionEngine:
             )
 
         start_time = time.time()
+        lease_token = (
+            (
+                await (await self.get_execution_store()).get(ExecutionId(workspace_id, run_id))
+            ).run.fencing_token
+            if self.budget is not None
+            else None
+        )
+        scope = enter_dispatch_scope(
+            workspace_id,
+            run_id,
+            str(visit_key(state.model_dump())),
+            tracked=effect_class != EffectClass.PURE,
+            fencing_token=lease_token,
+        )
         try:
             if recovered:
                 output = recovered_output
@@ -467,6 +621,8 @@ class DurableExecutionEngine:
                 events.append({"type": "indeterminate_effect_detected", "node_id": current_node_id})
             await self._commit_state(workspace_id, run_id, state, rec.revision, events)
             raise
+        finally:
+            leave_dispatch_scope(scope)
         # A BaseException that is not an Exception (task cancellation at worker shutdown,
         # KeyboardInterrupt, SystemExit) propagates without a commit: crash semantics. The
         # dispatched intent stays; after the lease expires the next worker treats it by its
@@ -607,8 +763,21 @@ class DurableExecutionEngine:
     ) -> Any:
         now = time.time()
         state.updated_at = now
+        if state.status in {"completed", "failed", "cancelled"}:
+            # Every step is finished: end open reservations before the terminal commit, so
+            # a crash between the two cannot leak them (A6 S11 review m1). Fenced: a stale
+            # worker ends nothing of the worker that took over (round 2, R2-M1).
+            renewed = await self._settle_reservations(
+                workspace_id,
+                run_id,
+                "terminal",
+                owner=state.worker_id,
+                expected_revision=expected_revision,
+            )
+            if renewed is not None:
+                expected_revision = renewed  # the fenced renewal moved the revision
         try:
-            return await (await self._records()).update_run(
+            record = await (await self._records()).update_run(
                 workspace_id=workspace_id,
                 run_id=run_id,
                 expected_revision=expected_revision,
@@ -619,6 +788,7 @@ class DurableExecutionEngine:
                 has_outcome=has_outcome,
             )
         except LeaseLostError as exc:
+            self._deferred_sweeps.pop((workspace_id, run_id), None)  # left for recovery
             # The journal judged the lease by the store's clock; keep the legacy error type.
             raise LeaseExpiredError(
                 run_id=run_id,
@@ -626,6 +796,15 @@ class DurableExecutionEngine:
                 expires_at=state.lease_expires_at,
                 current_time=time.time(),
             ) from exc
+        except Exception:
+            self._deferred_sweeps.pop((workspace_id, run_id), None)  # left for recovery
+            raise
+        deferred = self._deferred_sweeps.pop((workspace_id, run_id), None)
+        if deferred is not None:
+            # The fenced terminal commit succeeded: it proved this worker's lease, so the
+            # deferred sweep runs now with the same token filter (round 4, F4-m1).
+            await self._settle_reservations(workspace_id, run_id, "terminal", proven=deferred)
+        return record
 
     async def resolve_effect(
         self,

@@ -58,6 +58,7 @@ from nexura_agents.errors import (
     WorkflowValidationError,
 )
 from nexura_agents.events import RunEvent, RunEventType
+from nexura_agents.usage import linkage as _linkage
 
 from nexura_runtime._workflow_journal import TERMINAL as _JOURNAL_TERMINAL
 from nexura_runtime._workflow_journal import WorkflowJournal, journal_capable
@@ -164,6 +165,11 @@ class _NodeApprovalRequested(WorkflowInterrupt):  # noqa: N818 - control flow
         self.details = details
 
 
+# Set by ``resume`` when an approval is granted: the ``nexura.approval.decided`` event for the
+# workflow span that continues the run (opt-in tracing). Consumed once.
+_TRACE_DECISION: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
+    "nexura_workflow_trace_decision", default=None
+)
 # Set by ``resume`` for the node it continues; the first node step consumes it.
 _RESUME_GRANT: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
     "nexura_workflow_resume_grant", default=None
@@ -2317,12 +2323,17 @@ class WorkflowEngine:
             checkpoint.workspace_id = self.workspace_id
         assert self.store is not None
         journal = self._journal_for(checkpoint.workflow_run_id)
+        if checkpoint.status in ("completed", "failed", "rejected"):
+            # Every step is finished: end open reservations before the terminal commit, so
+            # a crash between the two cannot leak them (A6 S11 review m1).
+            await self._settle_reservations(checkpoint.workflow_run_id, journal, "terminal")
         if journal is None:
             await self.store.save(checkpoint)
             return
         # The journal moves first (fenced by the lease token), then the checkpoint (fenced
         # by its revision): a stale owner is refused before it can write either.
         await self._journal_sync(journal, checkpoint)
+        await self._settle_deferred(checkpoint.workflow_run_id, journal)
         checkpoint.revision = journal.cp_revision
         await self.store.save(checkpoint)
         journal.cp_revision = checkpoint.revision
@@ -2360,18 +2371,275 @@ class WorkflowEngine:
             await journal.finish("completed", cursor)
 
     async def _journaled(
-        self, journal: WorkflowJournal | None, run: Callable[[], Awaitable[WorkflowRunResult]]
+        self,
+        journal: WorkflowJournal | None,
+        run: Callable[[], Awaitable[WorkflowRunResult]],
+        *,
+        run_id: str | None = None,
+        takeover: bool = False,
     ) -> WorkflowRunResult:
-        """Run ``run`` with ``journal`` as this run's journal; give its lease back after."""
+        """Run ``run`` with ``journal`` as this run's journal; give its lease back after.
+
+        A6 S11: on a ``takeover`` (resume, recover) the run's budget policy is restored and
+        its open reservations are ended before any step runs; when the run reaches a
+        terminal status its open reservations are ended too (design §2.7).
+        """
         if journal is None:
-            return await run()
+            if self.store is not None:
+                return await run()  # terminal saves end open reservations (_save)
+            try:
+                result = await run()
+            except Exception:
+                await self._settle_reservations(run_id, None, "terminal")
+                raise
+            if result.status in ("completed", "failed", "rejected"):
+                await self._settle_reservations(run_id, None, "terminal")
+            return result
         token = _JOURNAL.set(journal)
         journal.start_heartbeat()
         try:
-            return await run()
+            if takeover and journal.held:
+                self._restore_budget(journal)
+                await self._settle_reservations(journal.run_id, journal, "takeover")
+            try:
+                return await run()
+            except Exception:
+                if journal.status in _JOURNAL_TERMINAL and journal.lost is None:
+                    # A terminal commit made outside a checkpoint save (none today): end them.
+                    await self._settle_reservations(journal.run_id, journal, "terminal")
+                raise
         finally:
             _JOURNAL.reset(token)
             await journal.close()
+
+    def _restore_budget(self, journal: WorkflowJournal) -> None:
+        """Attach the run's persisted budget policy before any step runs (A6 S11)."""
+        self._resolve_budget(journal.run_id, journal.state.get("budget_scope"))
+
+    async def _precheck_budget(self, workflow_run_id: str) -> None:
+        """Resume paths: refuse a missing or unknown budget before the approval is claimed.
+
+        Reads the run's journal without taking it, so a refusal consumes nothing.
+        """
+        if not self._journaled_store():
+            return
+        journal = await self._open_journal(workflow_run_id)
+        snapshot = await journal.snapshot()
+        if snapshot is not None:
+            self._resolve_budget(workflow_run_id, snapshot.run.state.get("budget_scope"))
+
+    def _resolve_budget(self, workflow_run_id: str, recorded: Any) -> None:
+        """The run continues under the budget scope recorded in its journal.
+
+        - No budget attached: refused (``WorkflowError``), fail closed.
+        - A ``RunBudget`` of the recorded scope: replaced by the persisted policy
+          (``manager.get_run_budget(scope)``).
+        - A ``RunBudget`` of another scope: the recorded scope's persisted policy from the
+          same ledger is used instead, with a ``RuntimeWarning``; refused when that ledger
+          has no policy for the recorded scope.
+        - A combined budget containing the recorded scope: kept. One without it: the
+          recorded scope's persisted policy from the ledger of one of its ``RunBudget`` objects
+          is enforced alongside it (``combine_budgets``), with a ``RuntimeWarning``; when
+          no such policy is found, a ``RuntimeWarning`` says the recorded policy is not
+          enforced.
+        - A custom budget object: kept, with that ``RuntimeWarning``.
+        """
+        from nexura_agents.usage.manager import RunBudget
+        from nexura_agents.usage.recovery import restore_run_budget
+
+        if not isinstance(recorded, dict):
+            self.budget = restore_run_budget(self.budget)
+            return
+        scope = f"'{recorded.get('run_id')}' (workspace '{recorded.get('workspace_id')}')"
+        if self.budget is None:
+            raise WorkflowError(
+                f"Workflow run '{workflow_run_id}' was started under budget scope {scope}; "
+                "attach that budget, WorkflowEngine(budget=manager.get_run_budget("
+                f"'{recorded.get('run_id')}')), and continue it again. Nothing was claimed "
+                "or run."
+            )
+        if not isinstance(self.budget, RunBudget):
+            self._combine_recorded_budget(workflow_run_id, recorded, scope)
+            return
+        mine = {"workspace_id": self.budget.workspace_id, "run_id": self.budget.run_id}
+        if mine == recorded:
+            self.budget = restore_run_budget(self.budget)
+            return
+        restored = None
+        with contextlib.suppress(Exception):
+            restored = self.budget.manager.get_run_budget(str(recorded.get("run_id")))
+        if not isinstance(restored, RunBudget) or restored.workspace_id != recorded.get(
+            "workspace_id"
+        ):
+            raise WorkflowError(
+                f"Workflow run '{workflow_run_id}' was started under budget scope {scope}, "
+                f"but the engine's budget is scope '{mine['run_id']}' and its ledger has no "
+                "policy for the recorded scope. Attach the recorded scope's budget. Nothing "
+                "was claimed or run."
+            )
+        import warnings
+
+        warnings.warn(
+            f"Workflow run '{workflow_run_id}' was started under budget scope {scope}; it "
+            f"continues under that scope's persisted policy, not the engine's scope "
+            f"'{mine['run_id']}'.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+        self.budget = restored
+
+    def _combine_recorded_budget(
+        self, workflow_run_id: str, recorded: dict[str, Any], scope: str
+    ) -> None:
+        """A combined or custom budget without the recorded scope (round 2, minor 1)."""
+        import warnings
+
+        from nexura_agents.usage import admission
+        from nexura_agents.usage.manager import RunBudget
+        from nexura_agents.usage.recovery import budget_scope
+
+        inner = admission._budgets(self.budget)
+        if any(budget_scope(b) == recorded for b in inner):
+            return
+        restored = None
+        for candidate in inner:
+            if not isinstance(candidate, RunBudget):
+                continue
+            with contextlib.suppress(Exception):
+                found = candidate.manager.get_run_budget(str(recorded.get("run_id")))
+                if isinstance(found, RunBudget) and found.workspace_id == recorded.get(
+                    "workspace_id"
+                ):
+                    restored = found
+                    break
+        if restored is not None:
+            self.budget = admission.combine_budgets(self.budget, restored)
+            warnings.warn(
+                f"Workflow run '{workflow_run_id}' was started under budget scope {scope}; "
+                "the attached budget does not contain it, so that scope's persisted policy "
+                "is enforced alongside it.",
+                RuntimeWarning,
+                stacklevel=4,
+            )
+            return
+        warnings.warn(
+            f"Workflow run '{workflow_run_id}' was started under budget scope {scope}; the "
+            "attached budget does not contain it and its policy was not found, so it is not "
+            "enforced.",
+            RuntimeWarning,
+            stacklevel=4,
+        )
+
+    async def _settle_deferred(self, run_id: str, journal: WorkflowJournal) -> None:
+        """A deferred terminal sweep, once the fenced terminal commit has succeeded.
+
+        If that commit failed, the journal is not terminal: recovery ends the reservations
+        (round 4, F4-m1).
+        """
+        deferred, journal.deferred_sweep = journal.deferred_sweep, None
+        if deferred is not None and journal.status in _JOURNAL_TERMINAL:
+            await self._settle_reservations(run_id, journal, "terminal", proven=deferred)
+
+    async def _settle_reservations(
+        self,
+        run_id: str | None,
+        journal: WorkflowJournal | None,
+        context: str,
+        *,
+        proven: tuple[int | None, float] | None = None,
+    ) -> None:
+        """End the run's open budget reservations: settle as unknown or release (§2.7).
+
+        Errors propagate on a takeover (nothing runs while the ledger cannot be read); at
+        a terminal status they are reported as a warning.
+
+        A terminal sweep of a journaled run is fenced (round 2, R2-M1): the lease is
+        renewed first (a stale owner stops here), and only reservations made under a
+        lease token no newer than this owner's are ended. A takeover ends them all.
+        """
+        if self.budget is None or run_id is None:
+            return
+        from nexura_agents.usage.recovery import budget_scope, settle_run_reservations_async
+
+        workspace = self.workspace_id or "default"
+        own_scope = budget_scope(self.budget) == {"workspace_id": workspace, "run_id": run_id}
+        max_token: int | None = None
+        confirmed_at: float | None = None
+        if proven is not None:
+            # After a successful fenced terminal commit (round 4, F4-m1): it proved this
+            # owner held the run under this token up to that moment.
+            max_token, confirmed_at = proven
+        elif context == "terminal" and journal is not None:
+            if journal.lease is None:
+                return  # not ours (any more): its owner or a takeover settles them
+            confirmed = False
+            for attempt in (1, 2):  # a transient store error is retried once (F4-m1)
+                try:
+                    await journal.renew()
+                    confirmed = True
+                    break
+                except LeaseLostError:
+                    return
+                except Exception as exc:
+                    # A transient store error must not fail a finished run (round 3).
+                    import warnings
+
+                    warnings.warn(
+                        f"Workflow run '{run_id}' finished, but its run lease could not be "
+                        f"confirmed ({exc}); "
+                        + (
+                            "retrying once."
+                            if attempt == 1
+                            else "its open budget reservations are settled after the "
+                            "terminal commit, or left for recovery if that fails."
+                        ),
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+            if not confirmed:
+                journal.deferred_sweep = (journal.fencing_token, time.time())
+                return
+            max_token = journal.fencing_token
+            # Unlinked reservations older than this are ours: a newer owner can reserve
+            # only after this lease expires (residual: an owner frozen here longer than its
+            # ttl together with host clock skew larger than the ttl).
+            confirmed_at = time.time()
+        try:
+            await settle_run_reservations_async(
+                [self.budget],
+                workspace_id=workspace,
+                run_id=run_id,
+                steps=journal.steps if journal is not None else None,
+                # The service's convention: the run's budget scope is its run id, so an
+                # unlinked reservation of that scope is this run's.
+                include_unlinked=own_scope,
+                context=context,
+                max_fencing_token=max_token,
+                unlinked_before=confirmed_at,
+            )
+        except Exception as exc:
+            if context != "terminal":
+                raise
+            import warnings
+
+            warnings.warn(
+                f"Workflow run '{run_id}' finished, but its open budget reservations could "
+                f"not be settled: {exc}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
+    def _dispatch_scope(self, workflow_run_id: str, key: StepKey) -> Any:
+        """Link budget reservations made by this step to it (``tracked``: intent written)."""
+        journal = self._journal_for(workflow_run_id)
+        step = journal.steps.get(str(key)) if journal is not None else None
+        return _linkage.enter_dispatch_scope(
+            self.workspace_id or "default",
+            workflow_run_id,
+            str(key),
+            tracked=step is not None and step.intent is not None,
+            fencing_token=journal.fencing_token if journal is not None else None,
+        )
 
     async def _take_journal(self, workflow_run_id: str) -> WorkflowJournal | None:
         """Claim a stored run's lease (resume, recover); None for stores without a journal.
@@ -2663,6 +2931,7 @@ class WorkflowEngine:
                 node_already_approved=False,
                 operation="run",
             ),
+            run_id=run_id,
         )
 
     async def _new_journal(
@@ -2673,10 +2942,11 @@ class WorkflowEngine:
             return None
         from nexura_agents.durable import new_lease_owner
         from nexura_agents.execution_store import ExecutionConflictError
+        from nexura_agents.usage.recovery import budget_scope
 
         journal = await self._open_journal(workflow_run_id)
         try:
-            await journal.create(new_lease_owner())
+            await journal.create(new_lease_owner(), budget_scope=budget_scope(self.budget))
         except ExecutionConflictError as exc:
             raise WorkflowError(
                 f"Workflow run '{workflow_run_id}' already has an execution journal; "
@@ -2807,6 +3077,8 @@ class WorkflowEngine:
         # stores). The intent that consumes the approval is written just before the node
         # dispatches; recover() handles a stop anywhere in between.
         assert self.store is not None
+        # A6 S11: the run's budget is resolved before the approval is claimed (fail closed).
+        await self._precheck_budget(workflow_run_id)
         if not await self.store.claim_approval(workflow_run_id, approval_id):
             if deadline is not None and time.time() > deadline:
                 raise ApprovalExpiredError(
@@ -2861,6 +3133,10 @@ class WorkflowEngine:
                     else None
                 )
                 rejected_span = self._start_workflow_span(workflow_run_id, "resume")
+                rejected_span.skip_spec_duration()  # nothing ran: no invoke_workflow.duration
+                tracing.approval_decided(
+                    rejected_span, approval_id, kind="workflow_node", decision="reject"
+                )
                 rejected_span.set("nexura.workflow.status", "rejected")
                 rejected_span.set("nexura.workflow.step_count", step_count)
                 rejected_span.set("nexura.workflow.pause_reason", "approval")
@@ -2906,6 +3182,14 @@ class WorkflowEngine:
             if approval_stands and deadline is not None and time.time() > deadline:
                 await self._fail_expired(checkpoint, approval_id, deadline)
             grant_token = _RESUME_GRANT.set(grant)
+            decision_token = _TRACE_DECISION.set(
+                {
+                    "approval_id": approval_id,
+                    "kind": "workflow_node",
+                    "decision": "approve",
+                    "inputs_edited": not approval_stands,
+                }
+            )
             provenance_token = _REGATE_PROVENANCE.set(
                 {
                     "node_id": cursor,
@@ -2929,9 +3213,10 @@ class WorkflowEngine:
                 )
             finally:
                 _RESUME_GRANT.reset(grant_token)
+                _TRACE_DECISION.reset(decision_token)
                 _REGATE_PROVENANCE.reset(provenance_token)
 
-        return await self._journaled(journal, claimed)
+        return await self._journaled(journal, claimed, run_id=workflow_run_id, takeover=True)
 
     async def resume_interrupt(
         self,
@@ -2960,6 +3245,7 @@ class WorkflowEngine:
             )
         _validate_json_serializable(value, str(pending.get("node_id")))
         assert self.store is not None
+        await self._precheck_budget(workflow_run_id)  # before the answer is claimed (S11)
         if not await self.store.claim_approval(workflow_run_id, interrupt_id):
             raise ApprovalAlreadyClaimedError(
                 f"Interrupt '{interrupt_id}' for workflow run '{workflow_run_id}' "
@@ -3011,7 +3297,7 @@ class WorkflowEngine:
             finally:
                 _RESUME_GRANT.reset(grant_token)
 
-        return await self._journaled(journal, answered)
+        return await self._journaled(journal, answered, run_id=workflow_run_id, takeover=True)
 
     async def history(self, workflow_run_id: str) -> list[WorkflowCheckpoint]:
         """Every checkpoint of a run, oldest first: inspect state step by step."""
@@ -3104,6 +3390,7 @@ class WorkflowEngine:
                 node_already_approved=False,
                 operation="fork",
             ),
+            run_id=run_id,
         )
 
     # ------------------------------------------------------------------ recovery
@@ -3167,7 +3454,10 @@ class WorkflowEngine:
         token = _ON_UNCERTAIN.set(on_uncertain)
         try:
             return await self._journaled(
-                journal, lambda: self._recover_taken(journal, workflow_run_id, on_uncertain)
+                journal,
+                lambda: self._recover_taken(journal, workflow_run_id, on_uncertain),
+                run_id=workflow_run_id,
+                takeover=True,
             )
         finally:
             _ON_UNCERTAIN.reset(token)
@@ -3617,12 +3907,15 @@ class WorkflowEngine:
         self._written.update(update)
         step = cp.step_count + 1
         terminal = self._is_finished_cursor(next_node)
+        if terminal:  # end open reservations before the terminal commit (S11 review m1)
+            await self._settle_reservations(cp.workflow_run_id, journal, "terminal")
         await journal.record_outcome(
             key,
             {"update": update, "branch": branch, "next": next_node},
             cursor=next_node,
             terminal=terminal,
         )
+        await self._settle_deferred(cp.workflow_run_id, journal)
         checkpoint = WorkflowCheckpoint(
             workflow_run_id=cp.workflow_run_id,
             spec_version=self.spec.spec_version,
@@ -4199,7 +4492,11 @@ class WorkflowEngine:
         journal = self._journal_for(workflow_run_id)
         if journal is None:
             _STEP_IDENTITY.set(dataclasses.replace(parent, step_key=family(first)))
-            return await call()
+            scope = self._dispatch_scope(workflow_run_id, family(first))
+            try:
+                return await call()
+            finally:
+                _linkage.leave_dispatch_scope(scope)
         if branch is not None:
             effect, reconcile = self._handler_effect(node, branch, None, part_state)
             label = f"branch '{branch}' of node '{node.id}'"
@@ -4244,7 +4541,11 @@ class WorkflowEngine:
             journal.check()
             journal.local.add(str(key))
         _STEP_IDENTITY.set(dataclasses.replace(parent, step_key=key))
-        update = await call()
+        scope = self._dispatch_scope(workflow_run_id, key)
+        try:
+            update = await call()
+        finally:
+            _linkage.leave_dispatch_scope(scope)
         _validate_json_serializable(update, node.id)
         await journal.record_part(key, update, node.id)
         return update
@@ -4514,6 +4815,9 @@ class WorkflowEngine:
             canonical_payload_json=canonical_json({"state": state, "request": details}),
             **_take_regate_provenance(node.id),
         )
+        tracing.approval_requested(
+            None, pending.approval_id, kind="workflow_node", reason="node_request", node_id=node.id
+        )
         budget_state = (
             self.budget.to_dict()
             if self.budget is not None and hasattr(self.budget, "to_dict")
@@ -4654,15 +4958,19 @@ class WorkflowEngine:
         return checkpoint
 
     def _start_workflow_span(self, workflow_run_id: str, operation: str) -> Any:
-        return tracing.start(
-            f"workflow {self.spec.name}",
+        span = tracing.start_workflow(
+            self.spec.name,
             {
-                tracing.OPERATION_NAME: "workflow",
                 "nexura.workflow.name": self.spec.name,
                 "nexura.workflow.run_id": workflow_run_id,
                 "nexura.workflow.operation": operation,
             },
         )
+        decided = _TRACE_DECISION.get()
+        if decided is not None:
+            _TRACE_DECISION.set(None)
+            tracing.approval_decided(span, **decided)
+        return span
 
     async def _execute_loop(
         self,
@@ -4886,6 +5194,9 @@ class WorkflowEngine:
 
                 gate_span = _node_span(node, step_count + 1)
                 gate_span.set("nexura.workflow.pause_reason", "approval")
+                tracing.approval_requested(
+                    gate_span, pending.approval_id, kind="workflow_node", node_id=node.id
+                )
                 gate_span.end()
                 self._progress(
                     RunEventType.NODE_PAUSED,
@@ -4976,6 +5287,7 @@ class WorkflowEngine:
                 _RESUME_GRANT.set(None)  # consumed by this step only
             grant_token = _NODE_GRANT.set(node_grant)
             identity_token = _STEP_IDENTITY.set(identity)
+            scope_token = self._dispatch_scope(workflow_run_id, identity.step_key)
             try:
                 while True:
                     attempt += 1
@@ -5190,6 +5502,7 @@ class WorkflowEngine:
                 _NODE_APPROVED.reset(approved_token)
                 _NODE_GRANT.reset(grant_token)
                 _STEP_IDENTITY.reset(identity_token)
+                _linkage.leave_dispatch_scope(scope_token)
                 node_span.set("nexura.workflow.node.attempts", attempt)
                 node_span.end()
 
@@ -5231,6 +5544,8 @@ class WorkflowEngine:
             )
             journal = self._journal_for(workflow_run_id)
             if journal is not None:
+                if is_terminal:  # open reservations end before the terminal commit (m1)
+                    await self._settle_reservations(workflow_run_id, journal, "terminal")
                 # Outcome, effect confirmed and the new cursor: one fenced commit, before
                 # the checkpoint moves (recover() applies it if the save below is lost).
                 await journal.record_outcome(
@@ -5240,6 +5555,7 @@ class WorkflowEngine:
                     terminal=is_terminal,
                     approval_id=node_approval_id,
                 )
+                await self._settle_deferred(workflow_run_id, journal)
             if self.store is not None:
                 await self._save(checkpoint)
 

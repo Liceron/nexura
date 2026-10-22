@@ -64,6 +64,13 @@ from nexura_runtime.service.api.middleware import (
     SecurityScopingMiddleware,
     require_shared_principal,
 )
+from nexura_runtime.service.api.operator_token import (
+    DeliveryTokenStore,
+    OperatorTokenAuthProvider,
+    OperatorTokenMiddleware,
+    assert_remote_transport,
+    single_operator_mode,
+)
 from nexura_runtime.service.api.runs import router as runs_router
 from nexura_runtime.service.api.sessions import (
     DEFAULT_CHAT_USAGE_LIMITS,
@@ -125,6 +132,10 @@ def _create_service_health_router(
     cache: dict[str, Any] = {"at": 0.0, "health": None}
 
     def _is_admin(request: Request) -> bool:
+        # Remote single-operator mode never shows probe details on this public route: it would
+        # tell a right token from a wrong one outside the failed-attempt limiter (P38 C4 M1).
+        if single_operator_mode(request.app):
+            return False
         # Fails closed: a provider whose is_operator raises keeps the response minimal.
         return caller_is_operator(request)
 
@@ -169,9 +180,14 @@ def _create_service_health_router(
 
 
 def _local_profile(app: Any) -> bool:
-    """True while the app runs the unauthenticated ``local-owner`` profile."""
+    """True while the app runs the unauthenticated ``local-owner`` profile.
+
+    False in the remote single-operator mode: there the operator token authenticates every
+    request, so the loopback-client rule, the per-session token and the JSON-only rule of
+    ``local_session`` do not apply (a bearer header is never sent by a browser on its own).
+    """
     pm: ProfileManager | None = getattr(getattr(app, "state", None), "profile_manager", None)
-    return pm is None or pm.profile == "local-owner"
+    return (pm is None or pm.profile == "local-owner") and not single_operator_mode(app)
 
 
 def create_api_app(
@@ -204,6 +220,7 @@ def create_api_app(
     execution_store: ExecutionStore | None = None,
     workflow_state_url: str | None = None,
     workflow_lease_ttl: float = 30.0,
+    allow_plain_http: bool = False,
 ) -> FastAPI:
     """Create a configured FastAPI application exposing the Nexura REST API.
 
@@ -247,7 +264,21 @@ def create_api_app(
             multipart bodies on state-changing requests (415), see ``local_session``.
 
     Authentication: the open-source edition has one principal, the local owner (role ``admin``),
-    and no logins, tokens or API keys; ``X-Principal-*`` headers are ignored. The
+    and no logins, user accounts or API keys; ``X-Principal-*`` headers are ignored.
+
+    Remote single-operator mode (P38 C4, ``docs/remote-single-operator.md``): pass
+    ``auth_provider=OperatorTokenAuthProvider(token)`` (``nexura-runtime serve --auth token``).
+    Every request except ``/healthz`` and ``/readyz`` then needs ``Authorization: Bearer
+    <token>`` and the caller is the same local owner; the loopback-client rule and the
+    per-session token are off, a non-loopback ``listen_host`` is allowed by the bind guard, and
+    ``Origin`` may also be the request's own origin. ``allow_plain_http`` (default False) must be
+    True to use a non-loopback ``listen_host`` in this mode, since the service speaks plain HTTP
+    (``PlainHttpNetworkError`` otherwise); put a TLS reverse proxy in front instead. Without it,
+    a request from a non-loopback peer that did not arrive over HTTPS is also refused at request
+    time (403 ``PLAIN_HTTP_REFUSED``), which covers embedding without ``listen_host``.
+    ``/readyz`` shows no probe details in this mode. Webhook deliveries take a per-endpoint
+    delivery token instead of the operator token (``docs/remote-single-operator.md``). Combining
+    the mode with ``allow_unauthenticated_network`` raises ``ValueError``. The
     ``authenticated-shared-service`` profile needs an authenticating ``auth_provider``; the
     closed edition supplies one (its app factory also takes the
     ``token_validator``, ``api_key_manager`` and ``operator_principal_ids`` arguments this
@@ -364,6 +395,23 @@ def create_api_app(
     from nexura_runtime.integrations.sandbox import assert_sandbox_allowed_for_profile
 
     assert_sandbox_allowed_for_profile(effective_profile_mgr.profile, effective_registry)
+
+    # Remote single-operator mode: one operator token, plain HTTP only on loopback by default.
+    remote_operator = isinstance(effective_auth_provider, OperatorTokenAuthProvider)
+    if remote_operator:
+        if allow_unauthenticated_network:
+            raise ValueError(
+                "allow_unauthenticated_network cannot be combined with the operator token: "
+                "remote single-operator mode authenticates every request."
+            )
+        assert_remote_transport(
+            listen_host if listen_host is not None else bound_host,
+            allow_plain_http=allow_plain_http,
+        )
+    elif allow_plain_http:
+        raise ValueError(
+            "allow_plain_http only applies to remote single-operator mode (an operator token)."
+        )
 
     assert_safe_bind(
         # When the caller names only ``bound_host`` it is the best evidence of the real bind.
@@ -482,6 +530,12 @@ def create_api_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        if (
+            isinstance(app.state.auth_provider, OperatorTokenAuthProvider)
+            and app.state.delivery_tokens is None
+        ):
+            # The app is started again after a shutdown closed its delivery-token store.
+            app.state.delivery_tokens = DeliveryTokenStore(effective_store.db_path)
         if execution_store is None and app.state.execution_store_closed:
             # The app is started again after a shutdown closed its own journal store.
             app.state.execution_store = default_execution_store()
@@ -605,6 +659,12 @@ def create_api_app(
         if execution_store is None:
             await app.state.execution_store.close()
             app.state.execution_store_closed = True
+        delivery_tokens = app.state.delivery_tokens
+        if isinstance(delivery_tokens, DeliveryTokenStore):
+            # Reopened at the next start (Windows cannot delete an open file).
+            with suppress(Exception):
+                delivery_tokens.close()
+            app.state.delivery_tokens = None
 
     docs_enabled = (
         expose_api_docs
@@ -662,10 +722,16 @@ def create_api_app(
         token=token,
         configured=token_configured,
         allow_network=allow_unauthenticated_network,
-        require_loopback_client=True,
+        # Off in remote single-operator mode, where every request carries the operator token.
+        require_loopback_client=not remote_operator,
         require_json=True,
     )
     app.state.auth_provider = effective_auth_provider
+    # Per-endpoint webhook delivery tokens (hashes) of remote single-operator mode (P38 C4 M3),
+    # kept on this app, not on the provider, so apps sharing a provider stay apart (R2-3).
+    app.state.delivery_tokens = (
+        DeliveryTokenStore(effective_store.db_path) if remote_operator else None
+    )
     app.state.active_run_tasks = {}
     app.state.trigger_store = app_trigger_store
     app.state.trigger_manager = app_trigger_manager
@@ -678,8 +744,9 @@ def create_api_app(
     )
 
     # Middleware: SecurityScopingMiddleware runs inside RequestIdMiddleware
-    # Order (outermost first): body limit -> security headers -> host/origin -> local session
-    # (loopback client, session token, JSON only) -> request id -> auth
+    # Order (outermost first): body limit -> security headers -> [operator token, remote
+    # single-operator mode only] -> host/origin -> local session (loopback client, session
+    # token, JSON only; off in remote mode) -> request id -> auth
     app.state.workspace_repo.fail_closed_unowned = (
         effective_profile_mgr.profile == "authenticated-shared-service"
     )
@@ -692,6 +759,13 @@ def create_api_app(
         allowed_origins=allowed_origins,
         bound_host=bound_host,
     )
+    if remote_operator:
+        assert isinstance(effective_auth_provider, OperatorTokenAuthProvider)
+        app.add_middleware(
+            OperatorTokenMiddleware,
+            provider=effective_auth_provider,
+            allow_plain_http=allow_plain_http,
+        )
     app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(
         BodySizeLimitMiddleware,

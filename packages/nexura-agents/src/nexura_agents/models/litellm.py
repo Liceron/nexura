@@ -32,7 +32,7 @@ from nexura_agents.providers.errors import (
     http_status_error,
 )
 from nexura_agents.providers.types import GenerationRequest, ProviderCapabilities, StreamDelta
-from nexura_agents.types import Message, ModelResponse, ToolCall, Usage
+from nexura_agents.types import Message, ModelResponse, ToolCall, Usage, response_identity
 
 CompletionFn = Callable[..., Awaitable[Any]]
 
@@ -456,6 +456,7 @@ class LiteLLMModel(ModelProtocol):
             message=Message(role="assistant", content=content, tool_calls=tool_calls),
             usage=usage,
             finish_reason=finish_reason,
+            **response_identity(data),
         )
 
     def __repr__(self) -> str:

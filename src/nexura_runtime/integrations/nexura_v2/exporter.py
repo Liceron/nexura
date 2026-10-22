@@ -43,7 +43,22 @@ _SECRET_KEYS = {
 _TYPES = {"chain", "llm", "tool", "retriever", "embedding", "parser", "agent"}
 _KINDS = {"INTERNAL", "CLIENT", "SERVER", "PRODUCER", "CONSUMER"}
 _USAGE = ("gen_ai.usage.input_tokens", "gen_ai.usage.output_tokens")
-_MODEL_KEYS = {"gen_ai.response.model", "gen_ai.request.model", "gen_ai.system"}
+# Breakdowns of the totals above (cached tokens are part of the input tokens, reasoning tokens
+# part of the output tokens): forwarded and validated, but never counted in usage
+# completeness or total tokens.
+_USAGE_DETAIL = (
+    "gen_ai.usage.cache_read.input_tokens",
+    "gen_ai.usage.cache_write.input_tokens",
+    "gen_ai.usage.reasoning.output_tokens",
+)
+# gen_ai.provider.name is the current GenAI convention; gen_ai.system is its deprecated alias
+# (still read for spans from older instrumentation).
+_MODEL_KEYS = {
+    "gen_ai.response.model",
+    "gen_ai.request.model",
+    "gen_ai.provider.name",
+    "gen_ai.system",
+}
 Redactor = Callable[[dict[str, Any]], dict[str, Any]]
 
 
@@ -121,6 +136,7 @@ def _attributes(span: SpanRecord) -> dict[str, Any]:
             result[key] = value
         elif (
             key in _USAGE
+            or key in _USAGE_DETAIL
             or key.startswith("gen_ai.usage.input_token_details.")
             or key.startswith("gen_ai.usage.output_token_details.")
         ):

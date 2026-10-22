@@ -40,7 +40,7 @@ from nexura_agents.providers.types import (
     ProviderMessage,
     StreamDelta,
 )
-from nexura_agents.types import Message, ModelResponse, ToolCall, Usage
+from nexura_agents.types import Message, ModelResponse, ToolCall, Usage, response_identity
 
 # Message.provider_data key: the raw output items of the response that produced the message
 # (reasoning items with encrypted_content, function calls with their ids).
@@ -335,6 +335,7 @@ class OpenAIResponsesProvider(OpenAIProvider):
             ),
             usage=usage,
             finish_reason=finish,
+            **response_identity(data),
         )
 
     @staticmethod

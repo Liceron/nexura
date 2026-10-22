@@ -18,6 +18,8 @@ import { useStudioExtensions } from './extensions';
 import { Modal } from '../components/Modal';
 import { PageHeader } from '../components/PageHeader';
 import { useCompactLayout } from './useCompactLayout';
+import { AccessRefused, OperatorLogin } from './OperatorLogin';
+import { confirmNavigation } from './navigationGuard';
 
 const WorkflowDetail = lazyWithRetry(() => import('../features/workflows/WorkflowDetail').then(m => ({ default: m.WorkflowDetail })));
 const ApprovalInbox = lazyWithRetry(() => import('../features/approvals/ApprovalInbox').then(m => ({ default: m.ApprovalInbox })));
@@ -69,14 +71,25 @@ export function Shell() {
 
   useEffect(() => {
     parseRoute();
-    window.addEventListener('hashchange', parseRoute);
-    return () => window.removeEventListener('hashchange', parseRoute);
+    const onHashChange = (event: HashChangeEvent) => {
+      // A page holding a one-time secret may ask first; staying restores the previous address
+      // without re-rendering the route, so the secret is still on screen.
+      if (!confirmNavigation(window.location.hash)) {
+        const previous = event.oldURL ? new URL(event.oldURL).hash : '';
+        window.history.replaceState(null, '', previous || '#/');
+        return;
+      }
+      parseRoute();
+    };
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
   }, [parseRoute]);
 
   // A page registered by a Studio extension (for example the closed edition's Organisation page).
   const ExtensionPage = extensions.page(currentTab);
 
   const handleSelectTab = (tab: NavTab) => {
+    if (!confirmNavigation(`#/${tab}`)) return;
     setNavigationOpen(false);
     setCurrentTab(tab);
     setSelectedWorkflowId(null);
@@ -147,22 +160,9 @@ export function Shell() {
             </Card>
           )}
 
-          {connection.status === 'unauthorized' && (
-            <Card elevated style={{ maxWidth: 600, margin: '20px auto', borderColor: 'var(--status-danger)' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
-                <span style={{ fontSize: 24 }}><Icon name="lock" /></span>
-                <PageHeader title={t('connection.unauthorizedTitle')} />
-              </div>
-              <p style={{ color: 'var(--text-secondary)', fontSize: 14, marginBottom: 16, lineHeight: 1.5 }}>
-                {connection.error || t('connection.unauthorizedDescription')}
-              </p>
-              <div style={{ display: 'flex', gap: 12 }}>
-                <Button variant="primary" onClick={refreshConnection}>
-                  {t('connection.retry')}
-                </Button>
-              </div>
-            </Card>
-          )}
+          {/* P38 C4: only the operator-token provider's refusal (401/429) asks for the operator
+              token; a 403 or another service's 401 shows the service's own error (review M3). */}
+          {connection.status === 'unauthorized' && (connection.operatorTokenMode ? <OperatorLogin /> : <AccessRefused />)}
 
           {connection.status === 'connected' && (
             <Suspense

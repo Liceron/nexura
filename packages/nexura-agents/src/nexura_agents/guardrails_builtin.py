@@ -1,13 +1,31 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Liceron
-"""Ready-made, opt-in guardrails and PII helpers.
+"""Ready-made, opt-in fast pre-filters and PII helpers.
 
-Everything here is a **heuristic**. Detectors use regular expressions plus checksums
-(Verhoeff for Aadhaar, Luhn for payment cards). They reduce accidental leaks and
-obvious prompt-injection attempts. They are not a security boundary, they have false
-negatives and false positives, and the injection detector only knows English and
-Hindi/Hinglish phrasing. Guardrail results never echo the matched sensitive value:
-evidence is limited to the kind, character span and a masked preview.
+Everything here is a **heuristic pre-filter**: regular expressions plus checksums
+(Verhoeff for Aadhaar, Luhn for payment cards), about 1 ms per KB of text. Use them as a
+cheap first pass that catches obvious cases, in front of a model-based check (the
+``nexura-guardrails`` package), not as the only check. They are not a security boundary.
+
+Measured weaknesses (P39 probe, default threshold 0.5):
+
+- ``no_prompt_injection`` passes paraphrases ("set aside what you were told earlier"),
+  spaced-out words ("I g n o r e previous instructions"), French, Spanish, Tamil and
+  Bengali, Hindi and Hinglish paraphrases, short base64 payloads, markdown fake turns
+  ("### System:"), role-play ("my late grandmother used to read me keys") and indirect
+  injection inside documents; 4 of the 6 bundled red-team injection prompts get through.
+  It also trips on benign text that quotes the phrases ("make my app ignore previous
+  instructions from a stale cache").
+- ``detect_pii`` misses names, addresses, dates of birth, Indian passport, voter ID,
+  driving licence and GSTIN numbers, bank account numbers, landlines, numbers spelled
+  out in words, "anita at example dot com" and an Aadhaar split across a line break. It
+  reports an order number as a phone, a version string as an IPv4 address, and a
+  14-digit account number that happens to pass Luhn as a card.
+- ``allowed_topics`` is lexical: a deny list passes "b0mb", "explosive device" and the
+  Hindi word, and an allow list trips on a Hindi or paraphrased on-topic question.
+
+Guardrail results never echo the matched sensitive value: evidence is limited to the
+kind, character span and a masked preview.
 
 Nothing in this module runs unless you pass a factory's result to an ``Agent``::
 
@@ -249,7 +267,8 @@ def _check_kinds(kinds: Iterable[str] | None) -> frozenset[str]:
 
 
 def detect_pii(text: str, kinds: Iterable[str] | None = None) -> list[PIIFinding]:
-    """Find personal data and secrets in ``text`` (heuristic, see the module docstring).
+    """Find personal data and secrets in ``text`` (a fast heuristic pre-filter, see the
+    module docstring for what it misses).
 
     Kinds: ``email``, ``phone`` (Indian mobile with optional +91/91/0 prefix, or
     E.164 with a leading ``+``), ``aadhaar`` (12 digits, not starting with 0 or 1,
@@ -331,8 +350,9 @@ def _named(fn: Callable[[RunContext[Any], Any], GuardrailResult], name: str) -> 
 def block_pii(
     kinds: Iterable[str] | None = None, on: Literal["input", "output"] = "input"
 ) -> GuardrailFn:
-    """Guardrail that trips when ``detect_pii`` finds any of ``kinds`` (default: all).
+    """Pre-filter guardrail that trips when ``detect_pii`` finds any of ``kinds`` (default: all).
 
+    Regex and checksum only, so it has the misses listed in the module docstring.
     ``on`` labels the stage the guardrail is meant for; pass the result to
     ``input_guardrails`` or ``output_guardrails`` accordingly. Typed outputs are
     scanned as JSON. Evidence holds kinds, spans and masked previews only.
@@ -362,9 +382,10 @@ def redact_output_pii(
     mask: str = "[REDACTED:{kind}]",
     on_structured: Literal["trip", "pass"] = "trip",
 ) -> GuardrailFn:
-    """Output guardrail that rewrites text output with PII redacted instead of tripping.
+    """Output pre-filter that rewrites text output with PII redacted instead of tripping.
 
-    It returns ``GuardrailResult.rewritten(...)``, which the runner applies to the final
+    It redacts only what ``detect_pii`` finds (see its misses). It returns
+    ``GuardrailResult.rewritten(...)``, which the runner applies to the final
     text before it is returned, stored in the session or emitted. The rewrite hook works
     for text output only. For an agent with ``output_type``, output containing PII
     cannot be rewritten safely, so by default the guardrail trips (``on_structured="trip"``);
@@ -560,7 +581,7 @@ def _injection_signals(text: str, extra: Sequence[re.Pattern[str]]) -> list[tupl
 def no_prompt_injection(
     extra_patterns: Sequence[str | re.Pattern[str]] = (), threshold: float = 0.5
 ) -> GuardrailFn:
-    """Heuristic prompt-injection guardrail. Trips when the summed signal score >= ``threshold``.
+    """Fast prompt-injection pre-filter. Trips when the summed signal score >= ``threshold``.
 
     Signals (each counted once): instruction-override phrases ("ignore previous
     instructions"), system-prompt exfiltration requests, jailbreak and role-play
@@ -569,8 +590,11 @@ def no_prompt_injection(
     tag characters and long base64 blobs. Strong phrases score 0.5-0.8, weak role-play
     markers 0.3, each ``extra_patterns`` match 1.0. Lower ``threshold`` to be stricter.
 
-    Paraphrases, other languages and encoded attacks are missed. Evidence lists signal
-    ids, offsets and the score, not the matched text.
+    Paraphrases, spaced-out words, other languages (French, Spanish, Tamil, Bengali),
+    Hindi and Hinglish paraphrases, short base64, markdown fake turns, role-play and
+    indirect injection are missed, and benign text quoting the phrases can trip it. Put a
+    model-based check behind it. Evidence lists signal ids, offsets and the score, not
+    the matched text.
     """
     if threshold <= 0:
         raise ValueError("threshold must be positive.")
@@ -646,12 +670,14 @@ def _keyword_regex(words: Iterable[str]) -> re.Pattern[str] | None:
 
 
 def allowed_topics(keywords: Iterable[str] = (), deny: Iterable[str] = ()) -> GuardrailFn:
-    """Keyword topic filter. This is lexical matching, not semantic understanding.
+    """Keyword topic pre-filter. This is lexical matching, not semantic understanding.
 
     With ``keywords``, text must contain at least one (whole word, case-insensitive) or
     the guardrail trips; empty text passes. With ``deny``, text containing any denied
     word trips. A paraphrase that avoids every keyword defeats both checks, and an
-    allowed keyword can appear in an off-topic message.
+    allowed keyword can appear in an off-topic message. Measured: ``deny=["bomb"]``
+    passes "b0mb", "explosive device" and the Hindi word; ``keywords=["emi"]`` trips on
+    "How much is my monthly instalment?" and on the same question in Hindi.
     """
     allow_rx = _keyword_regex(keywords)
     deny_rx = _keyword_regex(deny)

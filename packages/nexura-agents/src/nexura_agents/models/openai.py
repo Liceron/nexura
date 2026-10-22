@@ -30,7 +30,7 @@ from nexura_agents.models.base import ModelProtocol
 from nexura_agents.providers.errors import error_body_codes, http_status_error, response_excerpt
 from nexura_agents.providers.multimodal import openai_content_parts
 from nexura_agents.providers.types import GenerationRequest, ProviderCapabilities, StreamDelta
-from nexura_agents.types import Message, ModelResponse, ToolCall, Usage
+from nexura_agents.types import Message, ModelResponse, ToolCall, Usage, response_identity
 
 
 def _usage_from_openai(u_dict: dict[str, Any]) -> Usage:
@@ -378,6 +378,7 @@ class OpenAIChatModel(ModelProtocol):
             ),
             usage=usage,
             finish_reason=finish_reason,
+            **response_identity(data),
         )
 
     async def stream(

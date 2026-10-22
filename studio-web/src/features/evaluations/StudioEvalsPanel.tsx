@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Liceron
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useId, useMemo, useState } from 'react';
 import { InlineConfirm } from '../../components/InlineConfirm';
 import type { CSSProperties } from 'react';
 import { Alert } from '../../components/Alert';
 import { Badge } from '../../components/Badge';
 import { Button } from '../../components/Button';
-import { Card } from '../../components/Card';
+import { WorkflowTabs } from '../../components/WorkflowTabs';
 import { Spinner } from '../../components/Spinner';
 import { useI18n } from '../../i18n';
 import { useStudioEvals } from './useStudioEvals';
@@ -36,16 +36,17 @@ import { savedAgentIdOfTarget } from '../agents/agentForm';
 
 type Section = 'datasets' | 'run' | 'results' | 'compare' | 'redteam';
 
+// Shared form appearance (index.css supplies the strong control boundary and focus ring).
 const field: CSSProperties = {
   padding: '6px 10px',
   borderRadius: 'var(--radius-md)',
-  border: '1px solid var(--border-subtle)',
-  background: 'var(--bg-surface)',
+  border: '1px solid var(--border-strong)',
+  background: 'var(--bg-surface-elevated)',
   color: 'var(--text-primary)',
-  fontSize: 13,
+  fontSize: 'var(--type-ui)',
 };
-const cell: CSSProperties = { padding: '6px 8px', textAlign: 'left', verticalAlign: 'top', fontSize: 12 };
-const labelStyle: CSSProperties = { display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, color: 'var(--text-secondary)' };
+const cell: CSSProperties = { padding: '8px 12px', textAlign: 'left', verticalAlign: 'top', fontSize: 'var(--type-ui)', borderBottom: '1px solid var(--border-subtle)' };
+const labelStyle: CSSProperties = { display: 'flex', flexDirection: 'column', gap: 6, fontSize: 'var(--type-label)', fontWeight: 500, color: 'var(--text-secondary)' };
 
 function statusVariant(s: CaseStatus): 'success' | 'danger' | 'warning' | 'neutral' {
   return s === 'passed' ? 'success' : s === 'failed' ? 'danger' : s === 'error' ? 'danger' : 'warning';
@@ -62,6 +63,7 @@ export function StudioEvalsPanel() {
   const { t } = useI18n();
   const api = useStudioEvals();
   const [section, setSection] = useState<Section>('datasets');
+  const sectionPanelId = `${useId()}-section`;
 
   // ---- dataset editor state
   const [datasetId, setDatasetId] = useState('');
@@ -283,31 +285,17 @@ export function StudioEvalsPanel() {
   const runName = (r: StudioRun) =>
     `${r.label || r.run_id} - ${r.target.id}${r.target.version ? `@${r.target.version}` : ''} - ${pct(r.summary.pass_rate)}`;
 
-  const tabBtn = (id: Section, text: string) => (
-    <button
-      key={id}
-      data-testid={`studio-evals-tab-${id}`}
-      role="tab"
-      aria-selected={section === id}
-      onClick={() => setSection(id)}
-      style={{
-        background: 'none',
-        border: 'none',
-        borderBottom: section === id ? '2px solid var(--accent-primary)' : '2px solid transparent',
-        color: section === id ? 'var(--accent-primary)' : 'var(--text-secondary)',
-        fontWeight: section === id ? 600 : 500,
-        fontSize: 13,
-        padding: '6px 12px',
-        cursor: 'pointer',
-      }}
-    >
-      {text}
-    </button>
-  );
+  const sectionTabs: { id: Section; label: string; testId: string }[] = [
+    { id: 'datasets', label: `${t('evalsStudio.tabDatasets')} (${api.datasets.length})`, testId: 'studio-evals-tab-datasets' },
+    { id: 'run', label: t('evalsStudio.tabRun'), testId: 'studio-evals-tab-run' },
+    { id: 'results', label: t('evalsStudio.tabResults'), testId: 'studio-evals-tab-results' },
+    { id: 'compare', label: t('evalsStudio.tabCompare'), testId: 'studio-evals-tab-compare' },
+    { id: 'redteam', label: t('evalsStudio.tabRedteam'), testId: 'studio-evals-tab-redteam' },
+  ];
 
   return (
     <div data-testid="studio-evals-panel" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-      <p style={{ margin: 0, fontSize: 13, color: 'var(--text-secondary)' }}>{t('evalsStudio.subtitle')}</p>
+      <p style={{ margin: 0, fontSize: 'var(--type-ui)', color: 'var(--text-secondary)', maxWidth: '65ch' }}>{t('evalsStudio.subtitle')}</p>
       {api.error && (
         <Alert variant="danger" title={t('common.error')}>
           <span data-testid="studio-evals-error">{api.error}</span>
@@ -322,19 +310,14 @@ export function StudioEvalsPanel() {
           </ul>
         </Alert>
       )}
-      <div role="tablist" style={{ display: 'flex', gap: 8, borderBottom: '1px solid var(--border-subtle)' }}>
-        {tabBtn('datasets', `${t('evalsStudio.tabDatasets')} (${api.datasets.length})`)}
-        {tabBtn('run', t('evalsStudio.tabRun'))}
-        {tabBtn('results', t('evalsStudio.tabResults'))}
-        {tabBtn('compare', t('evalsStudio.tabCompare'))}
-        {tabBtn('redteam', t('evalsStudio.tabRedteam'))}
-        {api.busy && <Spinner size={14} />}
-      </div>
+      <WorkflowTabs tabs={sectionTabs} active={section} onChange={(id) => setSection(id as Section)} label={t('evalsStudio.tabsLabel')} panelId={sectionPanelId} />
+      {api.busy && <span role="status" style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}><Spinner size={14} /> <span className="resource-help">{t('common.loading')}</span></span>}
+      <div role="tabpanel" id={sectionPanelId} aria-label={sectionTabs.find((x) => x.id === section)?.label} style={{ minWidth: 0, display: 'flex', flexDirection: 'column', gap: 14 }}>
 
       {section === 'datasets' && (
         <div className="studio-grid" style={{ display: 'grid', gridTemplateColumns: '220px 1fr', gap: 16 }}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-            <Button size="sm" variant="primary" data-testid="studio-evals-new-dataset" onClick={startNew}>
+            <Button size="sm" data-testid="studio-evals-new-dataset" onClick={startNew}>
               {t('evalsStudio.newDataset')}
             </Button>
             {api.datasets.length === 0 && <span style={{ fontSize: 12 }}>{t('evalsStudio.noDatasets')}</span>}
@@ -346,13 +329,13 @@ export function StudioEvalsPanel() {
                 style={{ ...field, textAlign: 'left', cursor: 'pointer' }}
               >
                 <strong>{d.name || d.dataset_id}</strong>
-                <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+                <div style={{ fontSize: 'var(--type-meta)', color: 'var(--text-secondary)' }}>
                   {d.dataset_id} - {d.case_count} {t('evalsStudio.cases')} - r{d.revision}
                 </div>
               </button>
             ))}
           </div>
-          <Card>
+          <section className="settings-panel">
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }} data-testid="studio-evals-editor">
               <div className="studio-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
                 <label style={labelStyle}>
@@ -425,7 +408,7 @@ export function StudioEvalsPanel() {
                     </div>
                   )}
                   <div style={{ display: 'flex', gap: 8 }}>
-                    <Button size="sm" variant="primary" data-testid="studio-evals-apply-import" onClick={applyImport}>
+                    <Button size="sm" data-testid="studio-evals-apply-import" onClick={applyImport}>
                       {t('evalsStudio.applyImport')}
                     </Button>
                     <Button size="sm" onClick={() => setImportOpen(false)}>
@@ -500,7 +483,7 @@ export function StudioEvalsPanel() {
                     <input style={field} value={editing.draft.tags} onChange={(e) => setEditing({ ...editing, draft: { ...editing.draft, tags: e.target.value } })} />
                   </label>
                   <div style={{ display: 'flex', gap: 8 }}>
-                    <Button size="sm" variant="primary" data-testid="studio-evals-save-case" onClick={saveCase}>
+                    <Button size="sm" data-testid="studio-evals-save-case" onClick={saveCase}>
                       {t('evalsStudio.saveCase')}
                     </Button>
                     <Button size="sm" onClick={() => setEditing(null)}>
@@ -509,7 +492,7 @@ export function StudioEvalsPanel() {
                   </div>
                 </div>
               )}
-              <table data-testid="studio-evals-cases" style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <div className="inspection-table-scroll" role="region" aria-label={t('evalsStudio.tableRegion')} tabIndex={0}><table data-testid="studio-evals-cases" className="studio-evals-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
                 <thead>
                   <tr>
                     <th style={cell}>{t('evalsStudio.colCase')}</th>
@@ -537,7 +520,7 @@ export function StudioEvalsPanel() {
                     </tr>
                   ))}
                 </tbody>
-              </table>
+              </table></div>
               <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                 <Button variant="primary" data-testid="studio-evals-save-dataset" onClick={() => void saveDataset()}>
                   {t('evalsStudio.saveDataset')}
@@ -551,14 +534,14 @@ export function StudioEvalsPanel() {
                 )}
                 {notice && <span data-testid="studio-evals-notice" style={{ fontSize: 12 }}>{notice}</span>}
               </div>
-              <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{t('evalsStudio.secretsNote')}</span>
+              <span style={{ fontSize: 'var(--type-meta)', color: 'var(--text-secondary)' }}>{t('evalsStudio.secretsNote')}</span>
             </div>
-          </Card>
+          </section>
         </div>
       )}
 
       {section === 'run' && (
-        <Card>
+        <section className="settings-panel">
           <div className="studio-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
             <label style={labelStyle}>
               {t('evalsStudio.tabDatasets')}
@@ -603,7 +586,7 @@ export function StudioEvalsPanel() {
           <Button variant="primary" data-testid="studio-evals-run" disabled={api.busy || !runDatasetId || !targetKey} onClick={() => void startRun()}>
             {api.busy ? t('evalsStudio.running') : t('evalsStudio.runEval')}
           </Button>
-        </Card>
+        </section>
       )}
 
       {section === 'results' && (
@@ -653,7 +636,7 @@ export function StudioEvalsPanel() {
                 </label>
                 <input data-testid="studio-evals-search" aria-label={t('evalsStudio.search')} placeholder={t('evalsStudio.search')} style={field} value={query} onChange={(e) => setQuery(e.target.value)} />
               </div>
-              <table data-testid="studio-evals-results" style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <div className="inspection-table-scroll" role="region" aria-label={t('evalsStudio.tableRegion')} tabIndex={0}><table data-testid="studio-evals-results" className="studio-evals-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
                 <thead>
                   <tr>
                     <th style={cell}>{t('evalsStudio.colCase')}</th>
@@ -690,7 +673,7 @@ export function StudioEvalsPanel() {
                     </tr>
                   ))}
                 </tbody>
-              </table>
+              </table></div>
             </>
           )}
         </div>
@@ -755,7 +738,7 @@ export function StudioEvalsPanel() {
                   {api.comparison.gate.passed ? t('evalsStudio.gatePass') : t('evalsStudio.gateFail')}
                 </Badge>
                 <span style={{ fontSize: 12 }}>{api.comparison.gate.reasons.join('; ') || t('evalsStudio.gateClean')}</span>
-                <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+                <span style={{ fontSize: 'var(--type-meta)', color: 'var(--text-secondary)' }}>
                   {t('evalsStudio.tolerance')} {api.comparison.gate.tolerance}
                 </span>
               </div>
@@ -775,7 +758,7 @@ export function StudioEvalsPanel() {
                 </select>
                 <input aria-label={t('evalsStudio.search')} placeholder={t('evalsStudio.search')} style={field} value={rowQuery} onChange={(e) => setRowQuery(e.target.value)} />
               </div>
-              <table data-testid="studio-evals-compare-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <div className="inspection-table-scroll" role="region" aria-label={t('evalsStudio.tableRegion')} tabIndex={0}><table data-testid="studio-evals-compare-table" className="studio-evals-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
                 <thead>
                   <tr>
                     <th style={cell}>{t('evalsStudio.colCase')}</th>
@@ -819,13 +802,13 @@ export function StudioEvalsPanel() {
                     </tr>
                   ))}
                 </tbody>
-              </table>
+              </table></div>
             </>
           )}
         </div>
       )}
       {section === 'redteam' && (
-        <Card>
+        <section className="settings-panel">
           <div data-testid="studio-evals-redteam" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             <p style={{ margin: 0, fontSize: 12, color: 'var(--text-secondary)' }}>{t('evalsStudio.redteamIntro')}</p>
             {rtChoices.length === 0 ? (
@@ -899,7 +882,7 @@ export function StudioEvalsPanel() {
                   </span>
                   {api.redteam.synthetic_write_tool && <span>{t('evalsStudio.redteamSyntheticTool')}</span>}
                 </div>
-                <table data-testid="studio-evals-redteam-results" style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <div className="inspection-table-scroll" role="region" aria-label={t('evalsStudio.tableRegion')} tabIndex={0}><table data-testid="studio-evals-redteam-results" className="studio-evals-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
                   <thead>
                     <tr>
                       <th style={cell}>{t('evalsStudio.colCase')}</th>
@@ -920,12 +903,13 @@ export function StudioEvalsPanel() {
                       </tr>
                     ))}
                   </tbody>
-                </table>
+                </table></div>
               </>
             )}
           </div>
-        </Card>
+        </section>
       )}
+      </div>
     </div>
   );
 }

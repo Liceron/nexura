@@ -3,11 +3,10 @@
 // B39: one-time signing secret, delivery URL, signing headers/snippets and the workflow picker
 // used by the trigger forms. Text only; the secret is passed in from React state and never
 // written to storage, logs or the URL.
-import { useState } from 'react';
+import { useId, useState } from 'react';
 import { Button } from '../../components/Button';
-import { Card } from '../../components/Card';
 import { useI18n } from '../../i18n';
-import type { RegisteredWebhookSecret, TriggerWorkflowOption } from './useTriggers';
+import type { IssuedDeliveryToken, RegisteredWebhookSecret, TriggerWorkflowOption } from './useTriggers';
 import {
   WEBHOOK_EVENT_ID_HEADER,
   WEBHOOK_SECRET_ENV,
@@ -19,8 +18,8 @@ import {
 } from './webhookSnippet';
 
 const labelStyle = {
-  fontSize: 12,
-  fontWeight: 600,
+  fontSize: 'var(--type-label)',
+  fontWeight: 500,
   color: 'var(--text-secondary)',
   display: 'block',
   marginBottom: 4,
@@ -33,8 +32,8 @@ const codeBlockStyle = {
   border: '1px solid var(--border-subtle)',
   backgroundColor: 'var(--bg-surface-elevated)',
   color: 'var(--text-primary)',
-  fontFamily: 'monospace',
-  fontSize: 11,
+  fontFamily: 'var(--font-mono)',
+  fontSize: 'var(--type-meta)',
   whiteSpace: 'pre-wrap',
   wordBreak: 'break-all',
   overflowX: 'auto',
@@ -64,6 +63,66 @@ function CopyButton({ text, testId }: { text: string; testId: string }) {
   );
 }
 
+/**
+ * P38 C4 token mode: a webhook's delivery token, shown once. Masked until the operator asks to
+ * see it; Copy reads it from memory. It is never written to storage, the URL or the console, and
+ * once this disappears it cannot be shown again (rotate for a new one).
+ */
+export function DeliveryTokenValue({ endpointId, token, header, testIdPrefix }: { endpointId: string; token: string; header: string; testIdPrefix: string }) {
+  const { t } = useI18n();
+  const [revealed, setRevealed] = useState(false);
+  const labelId = useId();
+  return (
+    <div className="resource-field" data-testid={`${testIdPrefix}-delivery-token`}>
+      <span id={labelId} style={labelStyle}>{t('triggers.deliveryTokenLabel').replace('{id}', endpointId)}</span>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+        <code
+          aria-labelledby={labelId}
+          data-testid={`${testIdPrefix}-delivery-token-value`}
+          style={{ ...codeBlockStyle, flex: '1 1 240px' }}
+        >
+          {revealed ? token : '•'.repeat(24)}
+        </code>
+        {!revealed && <span className="studio-sr-only">{t('triggers.deliveryTokenHidden')}</span>}
+        <Button
+          size="sm"
+          aria-pressed={revealed}
+          data-testid={`${testIdPrefix}-delivery-token-reveal`}
+          onClick={() => setRevealed(!revealed)}
+        >
+          {revealed ? t('triggers.hideToken') : t('triggers.showToken')}
+        </Button>
+        <CopyButton text={token} testId={`${testIdPrefix}-delivery-token-copy`} />
+      </div>
+      <span className="resource-help">
+        {t('triggers.deliveryTokenUse')} <code>{header}</code>
+      </span>
+    </div>
+  );
+}
+
+/** A delivery token issued by rotation, shown once until dismissed. */
+export function IssuedDeliveryTokenPanel({ issued, onDismiss }: { issued: IssuedDeliveryToken; onDismiss: () => void }) {
+  const { t } = useI18n();
+  return (
+    <section
+      role="region"
+      aria-label={t('triggers.deliveryTokenRegion')}
+      data-testid="delivery-token-panel"
+      className="webhook-secret-panel"
+    >
+      <h2 style={{ margin: 0 }}>{t('triggers.deliveryTokenRotatedTitle').replace('{id}', issued.endpointId)}</h2>
+      <p style={{ margin: 0, fontSize: 'var(--type-ui)', color: 'var(--text-primary)', maxWidth: '65ch' }}>{t('triggers.deliveryTokenOnce')}</p>
+      <DeliveryTokenValue endpointId={issued.endpointId} token={issued.token} header={issued.header} testIdPrefix="rotated" />
+      <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+        <Button variant="primary" data-testid="delivery-token-dismiss" onClick={onDismiss}>
+          {t('triggers.dismissToken')}
+        </Button>
+      </div>
+    </section>
+  );
+}
+
 /** Delivery URL, required headers and curl/Python snippets. Contains no secret. */
 export function WebhookSigningSnippets({ deliveryUrl, testIdPrefix }: { deliveryUrl: string; testIdPrefix: string }) {
   const { t } = useI18n();
@@ -87,7 +146,7 @@ export function WebhookSigningSnippets({ deliveryUrl, testIdPrefix }: { delivery
       </div>
       <div>
         <span style={labelStyle}>{t('triggers.headersTitle')}</span>
-        <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12, color: 'var(--text-secondary)' }}>
+        <ul style={{ margin: 0, paddingLeft: 18, fontSize: 'var(--type-meta)', color: 'var(--text-secondary)' }}>
           {headers.map(([name, help]) => (
             <li key={name}>
               <code>{name}</code>: {help}
@@ -97,31 +156,21 @@ export function WebhookSigningSnippets({ deliveryUrl, testIdPrefix }: { delivery
       </div>
       <div>
         <span style={labelStyle}>{t('triggers.signingTitle')}</span>
-        <p style={{ margin: '0 0 6px 0', fontSize: 12, color: 'var(--text-secondary)' }}>
+        <p style={{ margin: '0 0 6px 0', fontSize: 'var(--type-meta)', color: 'var(--text-secondary)' }}>
           {t('triggers.signingIntro').replace('{env}', WEBHOOK_SECRET_ENV)}
         </p>
-        <p data-testid={`${testIdPrefix}-auth-note`} style={{ margin: '0 0 6px 0', fontSize: 12, color: 'var(--text-secondary)' }}>
+        <p data-testid={`${testIdPrefix}-auth-note`} style={{ margin: '0 0 6px 0', fontSize: 'var(--type-meta)', color: 'var(--text-secondary)' }}>
           {t('triggers.signingAuth').replace('{env}', WEBHOOK_API_KEY_ENV)}
         </p>
-        <div style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
-          <Button
-            variant={lang === 'curl' ? 'primary' : 'secondary'}
-            size="sm"
-            data-testid={`${testIdPrefix}-snippet-curl`}
-            aria-pressed={lang === 'curl'}
-            onClick={() => setLang('curl')}
-          >
-            {t('triggers.snippetCurl')}
-          </Button>
-          <Button
-            variant={lang === 'python' ? 'primary' : 'secondary'}
-            size="sm"
-            data-testid={`${testIdPrefix}-snippet-python`}
-            aria-pressed={lang === 'python'}
-            onClick={() => setLang('python')}
-          >
-            {t('triggers.snippetPython')}
-          </Button>
+        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+          <div className="segmented" role="group" aria-label={t('triggers.snippetLanguage')}>
+            <button type="button" data-testid={`${testIdPrefix}-snippet-curl`} aria-pressed={lang === 'curl'} onClick={() => setLang('curl')}>
+              {t('triggers.snippetCurl')}
+            </button>
+            <button type="button" data-testid={`${testIdPrefix}-snippet-python`} aria-pressed={lang === 'python'} onClick={() => setLang('python')}>
+              {t('triggers.snippetPython')}
+            </button>
+          </div>
           <CopyButton text={snippet} testId={`${testIdPrefix}-copy-snippet`} />
         </div>
         <pre data-testid={`${testIdPrefix}-snippet`} style={codeBlockStyle}>
@@ -141,38 +190,54 @@ export function WebhookSecretPanel({
   onDismiss: () => void;
 }) {
   const { t } = useI18n();
+  const [secretShown, setSecretShown] = useState(false);
   return (
-    <Card
-      elevated
+    <section
       role="region"
       aria-label={t('triggers.secretLabel')}
       data-testid="webhook-secret-panel"
-      style={{ display: 'flex', flexDirection: 'column', gap: 12, borderColor: 'var(--status-warning)' }}
+      className="webhook-secret-panel"
     >
-      <h2 style={{ margin: 0, fontSize: 16, fontWeight: 600, color: 'var(--text-primary)' }}>
+      <h2 style={{ margin: 0 }}>
         {t('triggers.secretTitle').replace('{id}', registered.endpointId)}
       </h2>
-      <p style={{ margin: 0, fontSize: 13, color: 'var(--text-secondary)' }}>{t('triggers.secretOnce')}</p>
+      <p style={{ margin: 0, fontSize: 'var(--type-ui)', color: 'var(--text-primary)', maxWidth: '65ch' }}>{t('triggers.secretOnce')}</p>
       <div>
         <span style={labelStyle}>{t('triggers.secretLabel')}</span>
         {registered.secret ? (
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <code data-testid="webhook-secret-value" style={{ ...codeBlockStyle, flex: 1 }}>
-              {registered.secret}
+          // Masked until the operator asks to see it (review M2); Copy reads it from memory.
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+            <code data-testid="webhook-secret-value" style={{ ...codeBlockStyle, flex: '1 1 240px' }}>
+              {secretShown ? registered.secret : '•'.repeat(24)}
             </code>
+            {!secretShown && <span className="studio-sr-only">{t('triggers.secretHidden')}</span>}
+            <Button size="sm" aria-pressed={secretShown} data-testid="webhook-secret-reveal" onClick={() => setSecretShown(!secretShown)}>
+              {secretShown ? t('triggers.hideToken') : t('triggers.showToken')}
+            </Button>
             <CopyButton text={registered.secret} testId="webhook-secret-copy" />
           </div>
         ) : (
-          <p style={{ margin: 0, fontSize: 12, color: 'var(--status-danger)' }}>{t('triggers.secretMissing')}</p>
+          <p style={{ margin: 0, fontSize: 'var(--type-meta)', color: 'var(--status-danger)' }}>{t('triggers.secretMissing')}</p>
         )}
       </div>
+      {registered.deliveryToken && (
+        <>
+          <p style={{ margin: 0, fontSize: 'var(--type-ui)', color: 'var(--text-primary)', maxWidth: '65ch' }}>{t('triggers.deliveryTokenOnce')}</p>
+          <DeliveryTokenValue
+            endpointId={registered.endpointId}
+            token={registered.deliveryToken}
+            header="Authorization: Bearer <delivery_token>"
+            testIdPrefix="webhook-secret"
+          />
+        </>
+      )}
       <WebhookSigningSnippets deliveryUrl={registered.deliveryUrl} testIdPrefix="webhook-secret" />
       <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
         <Button variant="primary" data-testid="webhook-secret-dismiss" onClick={onDismiss}>
-          {t('triggers.dismissSecret')}
+          {registered.deliveryToken ? t('triggers.dismissSecretAndToken') : t('triggers.dismissSecret')}
         </Button>
       </div>
-    </Card>
+    </section>
   );
 }
 
@@ -194,8 +259,8 @@ export function WorkflowPicker({
 }) {
   const { t } = useI18n();
   return (
-    <div>
-      <label htmlFor={testId} style={labelStyle}>
+    <div className="resource-field">
+      <label htmlFor={testId}>
         {t('triggers.workflowLabel')}
       </label>
       <select
@@ -204,15 +269,8 @@ export function WorkflowPicker({
         value={value}
         disabled={loading || options.length === 0}
         onChange={(e) => onChange(e.target.value)}
-        style={{
-          width: '100%',
-          padding: '8px 12px',
-          borderRadius: 'var(--radius-md)',
-          border: '1px solid var(--border-subtle)',
-          backgroundColor: 'var(--bg-surface)',
-          color: 'var(--text-primary)',
-          fontSize: 13,
-        }}
+        style={{ width: '100%' }}
+        aria-describedby={error ? `${testId}-error` : !loading && options.length === 0 ? `${testId}-empty` : undefined}
       >
         {loading && <option value="">{t('triggers.workflowLoading')}</option>}
         {!loading && options.length === 0 && <option value="">{t('triggers.workflowNone')}</option>}
@@ -223,12 +281,12 @@ export function WorkflowPicker({
         ))}
       </select>
       {error && (
-        <span role="alert" style={{ fontSize: 11, color: 'var(--status-danger)' }}>
+        <span role="alert" id={`${testId}-error`} className="resource-error">
           {t('triggers.workflowLoadError').replace('{error}', error)}
         </span>
       )}
       {!loading && !error && options.length === 0 && (
-        <span data-testid={`${testId}-empty`} style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+        <span id={`${testId}-empty`} data-testid={`${testId}-empty`} className="resource-help">
           {t('triggers.workflowNoneHelp')}
         </span>
       )}

@@ -16,8 +16,8 @@ interpreted again.
 Resolution happens on every run, so moving a label such as ``production`` takes effect on
 the next run of an existing agent. The resolved prompt is recorded on ``RunContext.prompt``,
 on ``RunResult.prompt`` and, when tracing is instrumented, on the run span as
-``gen_ai.prompt.name`` and ``gen_ai.prompt.version`` (OpenTelemetry GenAI conventions
-define no prompt-registry attributes yet, so these follow the ``gen_ai.*`` naming).
+``gen_ai.prompt.name`` and ``gen_ai.prompt.version`` (the OpenTelemetry GenAI
+conventions' prompt attributes).
 """
 
 from __future__ import annotations

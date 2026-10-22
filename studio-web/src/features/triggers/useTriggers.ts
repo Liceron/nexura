@@ -33,6 +33,15 @@ export interface RegisteredWebhookSecret {
   workflowId: string;
   secret: string;
   deliveryUrl: string;
+  /** Remote single-operator (token) mode only: the endpoint's delivery token, returned once. */
+  deliveryToken?: string;
+}
+
+/** A delivery token just issued by rotation (token mode). Held in React state only. */
+export interface IssuedDeliveryToken {
+  endpointId: string;
+  token: string;
+  header: string;
 }
 
 const WORKFLOW_PAGE_SIZE = 100; // server maximum for GET /workflows
@@ -68,6 +77,12 @@ export function useTriggers(initialWorkflowId: string | null = null) {
   const [newWebhookWfId, setNewWebhookWfId] = useState<string>(initialWorkflowId ?? '');
   const [newReplayWindow, setNewReplayWindow] = useState<number>(300);
   const [registeredWebhook, setRegisteredWebhook] = useState<RegisteredWebhookSecret | null>(null);
+  // Token mode (P38 C4): delivery tokens are shown once, never stored or shown again.
+  const [issuedDeliveryToken, setIssuedDeliveryToken] = useState<IssuedDeliveryToken | null>(null);
+  const [deliveryTokensSeen, setDeliveryTokensSeen] = useState(false);
+  const [rotatingEndpointId, setRotatingEndpointId] = useState<string | null>(null);
+  // A refused rotation is reported on its webhook's row, not in the page banner (review minor 3).
+  const [rotateError, setRotateError] = useState<{ endpointId: string; message: string } | null>(null);
 
   // Workflow picker (B39): the workspace's workflows instead of a free-text id.
   const [workflowOptions, setWorkflowOptions] = useState<TriggerWorkflowOption[]>([]);
@@ -180,6 +195,7 @@ export function useTriggers(initialWorkflowId: string | null = null) {
   useEffect(() => {
     // A secret shown for one workspace must not linger after switching to another.
     setRegisteredWebhook(null);
+    setIssuedDeliveryToken(null);
     refreshAll();
   }, [connection.workspace]);
 
@@ -320,7 +336,9 @@ export function useTriggers(initialWorkflowId: string | null = null) {
         workflowId: registered.workflow_id || newWebhookWfId.trim(),
         secret: registered.secret ?? '',
         deliveryUrl: webhookDeliveryUrl(deriveEndpoint(manager.baseUrl, window.location.origin), endpointId),
+        deliveryToken: typeof registered.delivery_token === 'string' && registered.delivery_token ? registered.delivery_token : undefined,
       });
+      if (registered.delivery_token) setDeliveryTokensSeen(true);
       await fetchWebhooks();
       setTestEndpointId(endpointId);
       setNewEndpointId('');
@@ -338,6 +356,10 @@ export function useTriggers(initialWorkflowId: string | null = null) {
     setError(null);
     try {
       await client.triggers.deleteWebhook(endpointId);
+      // Deleting a webhook deletes its signing secret and delivery token on the service; drop any
+      // one-time panel for it too (secret, token and snippets) (review M1).
+      setIssuedDeliveryToken((current) => (current?.endpointId === endpointId ? null : current));
+      setRegisteredWebhook((current) => (current?.endpointId === endpointId ? null : current));
       await fetchWebhooks();
     } catch (err: unknown) {
       setError(formatApiError(err, t));
@@ -422,6 +444,30 @@ export function useTriggers(initialWorkflowId: string | null = null) {
 
   const dismissRegisteredWebhook = useCallback(() => setRegisteredWebhook(null), []);
 
+  /** Token mode: issue a new delivery token. The previous one stops working immediately. */
+  const handleRotateDeliveryToken = async (endpointId: string) => {
+    setRotatingEndpointId(endpointId);
+    setRotateError(null);
+    setIssuedDeliveryToken(null);
+    try {
+      const issued = await client.triggers.rotateDeliveryToken(endpointId);
+      setIssuedDeliveryToken({
+        endpointId: issued.endpoint_id || endpointId,
+        token: issued.delivery_token,
+        header: issued.delivery_token_header || 'Authorization: Bearer <delivery_token>',
+      });
+      setDeliveryTokensSeen(true);
+    } catch (err: unknown) {
+      setRotateError({ endpointId, message: formatApiError(err, t) });
+    } finally {
+      setRotatingEndpointId(null);
+    }
+  };
+  const dismissIssuedDeliveryToken = useCallback(() => setIssuedDeliveryToken(null), []);
+  // A service in token mode: Studio is sending an operator token to this service, or the service
+  // returned a delivery token. Local mode never shows the rotate action.
+  const deliveryTokenMode = deliveryTokensSeen || manager.hasAuthToken;
+
   /** Delivery URL of any registered endpoint (no secret involved). */
   const deliveryUrlFor = useCallback(
     (endpointId: string) => webhookDeliveryUrl(deriveEndpoint(manager.baseUrl, window.location.origin), endpointId),
@@ -477,6 +523,12 @@ export function useTriggers(initialWorkflowId: string | null = null) {
     handleTestWebhook,
     registeredWebhook,
     dismissRegisteredWebhook,
+    issuedDeliveryToken,
+    dismissIssuedDeliveryToken,
+    handleRotateDeliveryToken,
+    rotatingEndpointId,
+    rotateError,
+    deliveryTokenMode,
     deliveryUrlFor,
     // Role
     role,

@@ -39,7 +39,7 @@ from nexura_agents.providers.types import (
     ProviderMessage,
     StreamDelta,
 )
-from nexura_agents.types import Message, ModelResponse, ToolCall, Usage
+from nexura_agents.types import Message, ModelResponse, ToolCall, Usage, response_identity
 
 
 def _reasoning_tokens(usage: dict[str, Any]) -> int | None:
@@ -396,6 +396,7 @@ class OpenAIProvider(BaseProvider):
             ),
             usage=usage,
             finish_reason=finish_reason,
+            **response_identity(data),
         )
 
     def _stream_internal(

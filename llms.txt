@@ -21,6 +21,7 @@ Every Python example in the docs runs offline with `FakeModel`, a scripted model
 - [Human approval](https://github.com/Liceron/nexura/blob/main/docs/approvals.md): pause before a tool runs, save the pause as JSON, approve, reject or edit, bind approval to the exact arguments.
 - [Teams](https://github.com/Liceron/nexura/blob/main/docs/teams.md): sequential, parallel and loop agents, group chat, approvals that pass through.
 - [Guardrails, hooks and limits](https://github.com/Liceron/nexura/blob/main/docs/guardrails-hooks-limits.md): input, output and tool guardrails, lifecycle hooks, `UsageLimits`.
+- [Guardrails package](https://github.com/Liceron/nexura/blob/main/docs/guardrails-package.md): `nexura-guardrails`, an LLM judge that fails closed, fast pre-filters, tiered and parallel checks, a category taxonomy.
 - [Budgets and usage](https://github.com/Liceron/nexura/blob/main/docs/budgets-and-usage.md): token and cost accounting, budgets that reserve before each model call.
 - [Durable runs](https://github.com/Liceron/nexura/blob/main/docs/durable-runs.md): checkpoint agent runs and recover them after a crash, tool effect classes.
 - [Models and providers](https://github.com/Liceron/nexura/blob/main/docs/providers.md): OpenAI, Anthropic, Gemini, Vertex AI, Sarvam, Ollama, LiteLLM, retries, fallbacks, rate limits.
@@ -43,6 +44,7 @@ Every Python example in the docs runs offline with `FakeModel`, a scripted model
 - [Knowledge](https://github.com/Liceron/nexura/blob/main/docs/knowledge.md): ingest files, hybrid keyword and vector search, citations.
 - [Starter templates](https://github.com/Liceron/nexura/blob/main/docs/templates.md): tested, offline-runnable workflows.
 - [Service and Studio](https://github.com/Liceron/nexura/blob/main/docs/studio-and-service.md): the local REST API, TypeScript client and browser Studio.
+- [Run Nexura on a server (single operator)](https://github.com/Liceron/nexura/blob/main/docs/remote-single-operator.md): remote single-operator mode with one operator token behind a TLS reverse proxy.
 - [Agents in Studio](https://github.com/Liceron/nexura/blob/main/docs/agents-in-studio.md): saved workspace agents, chat, evals and red-team.
 - [Credentials and local secrets](https://github.com/Liceron/nexura/blob/main/docs/local-secrets.md): credential references and the local encrypted secrets file.
 - [Extending the service and Studio](https://github.com/Liceron/nexura/blob/main/docs/extensions.md): auth providers, service extensions, entry points.

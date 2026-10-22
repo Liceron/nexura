@@ -31,10 +31,9 @@ test.describe('Chat citations from real knowledge_search output (P15)', () => {
 
     await page.getByRole('button', { name: 'Knowledge', exact: true }).click();
     await expect(page.locator('[data-testid="knowledge-view"]')).toBeVisible();
-    await page.locator('[data-testid="upload-filename-input"]').fill('wombat_facts.txt');
-    await page
-      .locator('[data-testid="upload-content-textarea"]')
-      .fill('Wombats sleep sixteen hours a day inside their burrows.');
+    await page.getByRole('button', { name: 'Add document', exact: true }).click();
+    await page.getByLabel('File name', { exact: true }).fill('wombat_facts.txt');
+    await page.getByLabel('Text', { exact: true }).fill('Wombats sleep sixteen hours a day inside their burrows.');
     await page.locator('[data-testid="upload-document-button"]').click();
     await expect(
       page.locator('[data-testid^="document-item-"]').filter({ hasText: 'wombat_facts.txt' }),

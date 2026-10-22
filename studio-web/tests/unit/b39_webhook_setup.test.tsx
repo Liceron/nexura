@@ -159,6 +159,10 @@ describe('B39: the signing secret is shown once', () => {
     await registerWebhook(user);
 
     const panel = await screen.findByTestId('webhook-secret-panel');
+    // Masked by default (Round 5 review M2): not in the DOM until Show is pressed.
+    expect(document.body.innerHTML).not.toContain(SECRET);
+    await user.click(within(panel).getByTestId('webhook-secret-reveal'));
+    expect(within(panel).getByTestId('webhook-secret-reveal')).toHaveAttribute('aria-pressed', 'true');
     expect(within(panel).getByTestId('webhook-secret-value')).toHaveTextContent(SECRET);
     expect(within(panel).getByTestId('webhook-secret-delivery-url')).toHaveTextContent(
       'http://127.0.0.1:8765/api/v1/triggers/webhooks/orders/deliver',
@@ -201,6 +205,7 @@ describe('B39: the signing secret is shown once', () => {
     const user = userEvent.setup();
     const view = wrap(<TriggersView />);
     await registerWebhook(user);
+    await user.click(await screen.findByTestId('webhook-secret-reveal'));
     expect(await screen.findByTestId('webhook-secret-value')).toHaveTextContent(SECRET);
     view.unmount();
     wrap(<TriggersView />);

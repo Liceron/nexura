@@ -362,6 +362,12 @@ class HostOriginMiddleware(BaseHTTPMiddleware):
     * ``authenticated-shared-service`` profile: ``Host`` is only validated when ``allowed_hosts``
       is configured; a browser ``Origin`` must be in ``allowed_origins`` (non-browser clients
       send no ``Origin`` and are unaffected).
+    * Remote single-operator mode (``local-owner`` profile behind the operator token, see
+      ``operator_token``): like the shared profile, and an ``Origin`` equal to the request's own
+      origin (its ``host[:port]`` matches the ``Host`` header) is also accepted, so Studio served
+      from the same origin as the API (a reverse proxy) works. Every request carries the
+      operator token, which a browser never sends on its own, so DNS rebinding and CSRF gain
+      nothing.
     """
 
     def __init__(
@@ -404,11 +410,21 @@ class HostOriginMiddleware(BaseHTTPMiddleware):
         host = parsed.hostname.lower()
         return _is_loopback(host) or host in self.configured_hosts
 
+    @staticmethod
+    def _same_origin(origin: str, host_header: str) -> bool:
+        parsed = urlparse(origin)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc or not host_header:
+            return False
+        return parsed.netloc.lower() == host_header.strip().lower()
+
     async def dispatch(
         self, request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
+        from nexura_runtime.service.api.operator_token import single_operator_mode
+
         pm: ProfileManager | None = getattr(request.app.state, "profile_manager", None)
-        local_mode = pm is None or pm.profile == "local-owner"
+        remote_operator = single_operator_mode(request.app)
+        local_mode = (pm is None or pm.profile == "local-owner") and not remote_operator
 
         host_header = request.headers.get("host", "")
         if local_mode or self.configured_hosts:
@@ -422,7 +438,11 @@ class HostOriginMiddleware(BaseHTTPMiddleware):
                 return _error(400, "INVALID_HOST", "Host is not authorized for this service.")
 
         origin = request.headers.get("origin")
-        if origin is not None and not self._origin_allowed(origin, local_mode=local_mode):
+        if (
+            origin is not None
+            and not self._origin_allowed(origin, local_mode=local_mode)
+            and not (remote_operator and self._same_origin(origin, host_header))
+        ):
             return _error(403, "CROSS_ORIGIN_FORBIDDEN", "Cross-origin request is forbidden.")
         return await call_next(request)
 

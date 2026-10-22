@@ -1,19 +1,16 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Liceron
 import { InlineConfirm } from '../../components/InlineConfirm';
-import { Icon } from '../../components/Icon';
-import { useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { useTriggers } from './useTriggers';
-import { Badge } from '../../components/Badge';
 import { Button } from '../../components/Button';
-import { Input } from '../../components/Input';
-import { Alert } from '../../components/Alert';
-import { Spinner } from '../../components/Spinner';
-import { Card } from '../../components/Card';
 import { Modal } from '../../components/Modal';
+import { PageHeader, PageLayout } from '../../components/PageHeader';
+import { WorkflowTabs } from '../../components/WorkflowTabs';
 import { useI18n } from '../../i18n';
-import { runHref } from '../../app/routes';
-import { WebhookSecretPanel, WebhookSigningSnippets, WorkflowPicker } from './WebhookSecretPanel';
+import { parseHash, runHref } from '../../app/routes';
+import { setNavigationGuard } from '../../app/navigationGuard';
+import { IssuedDeliveryTokenPanel, WebhookSecretPanel, WebhookSigningSnippets, WorkflowPicker } from './WebhookSecretPanel';
 
 interface TriggersViewProps {
   /** B39: workflow preselected by `#/triggers/{workflowId}` (the workflow page's Triggers entry). */
@@ -69,6 +66,12 @@ export function TriggersView({ initialWorkflowId = null }: TriggersViewProps = {
     handleTestWebhook,
     registeredWebhook,
     dismissRegisteredWebhook,
+    issuedDeliveryToken,
+    dismissIssuedDeliveryToken,
+    handleRotateDeliveryToken,
+    rotatingEndpointId,
+    rotateError,
+    deliveryTokenMode,
     deliveryUrlFor,
     role,
     canEdit,
@@ -102,731 +105,588 @@ export function TriggersView({ initialWorkflowId = null }: TriggersViewProps = {
   const noWorkflowToPick = workflowsLoading || workflowOptions.length === 0;
   const viewerTitle = canEdit ? undefined : t('triggers.viewerNote');
 
-  return (
-    <div
-      data-testid="triggers-view"
-      style={{
-        padding: 24,
-        maxWidth: 1200,
-        margin: '0 auto',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 20,
-      }}
-    >
-      {/* Top Header */}
-      <div
-        style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'flex-start',
-          borderBottom: '1px solid var(--border-subtle)',
-          paddingBottom: 16,
+  const ids = useId();
+  const panelId = `${ids}-panel`;
+  // A one-time signing secret or delivery token on screen cannot be shown again: ask before the
+  // operator leaves Triggers (reload/close, or another Studio page) (review minor 10).
+  const holdsOneTimeValue = Boolean(registeredWebhook || issuedDeliveryToken);
+  useEffect(() => {
+    if (!holdsOneTimeValue) return;
+    const message = t('triggers.leaveWarning');
+    const onBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = message;
+      return message;
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    setNavigationGuard((nextHash) => parseHash(nextHash).tab === 'triggers' || window.confirm(message));
+    return () => {
+      window.removeEventListener('beforeunload', onBeforeUnload);
+      setNavigationGuard(null);
+    };
+  }, [holdsOneTimeValue, t]);
+  const tabs = [
+    { id: 'schedules', label: `${t('ui.schedules')}${visibleSchedules.length})` },
+    { id: 'webhooks', label: `${t('ui.signedWebhooks')}${visibleWebhooks.length})` },
+    { id: 'outbox', label: `${t('ui.dryRunOutbox')}${outbox.length})` },
+  ];
+  // The one-time secret panel owns the page's primary action until it is dismissed.
+  const headerVariant = registeredWebhook || issuedDeliveryToken ? 'secondary' : 'primary';
+  const headerAction =
+    activeTab === 'schedules' ? (
+      <Button
+        variant={headerVariant}
+        data-testid="btn-open-create-schedule"
+        disabled={!canEdit}
+        title={viewerTitle}
+        onClick={() => {
+          setFormError(null);
+          setScheduleModalOpen(true);
         }}
       >
-        <div>
-          <h1 style={{ margin: 0, fontSize: 22, fontWeight: 700, color: 'var(--text-primary)' }}>
-            {t('triggers.title') || t('ui.triggersSchedulesDryRunOutbox')}
-          </h1>
-          <p style={{ margin: '4px 0 0 0', fontSize: 13, color: 'var(--text-secondary)' }}>
-            {t('triggers.subtitle') ||
-              t('ui.manageCronAndIntervalSchedulesAcrossIanaTimezonesTestSignedWebhookIngressAndO')}
+        {t('ui.createSchedule')}
+      </Button>
+    ) : activeTab === 'webhooks' ? (
+      <Button
+        variant={headerVariant}
+        data-testid="btn-open-register-webhook"
+        disabled={!canEdit}
+        title={viewerTitle}
+        onClick={() => {
+          setFormError(null);
+          setWebhookModalOpen(true);
+        }}
+      >
+        {t('ui.registerEndpoint')}
+      </Button>
+    ) : null;
+  const status = (variant: 'success' | 'warning' | 'danger' | 'neutral', text: string, testId?: string) => (
+    <span className={`run-status run-status--${variant}`} data-testid={testId}>
+      <span aria-hidden="true">●</span> {text}
+    </span>
+  );
+
+  return (
+    <PageLayout data-testid="triggers-view">
+      <PageHeader
+        title={t('triggers.title')}
+        description={t('triggers.subtitle')}
+        actions={
+          <>
+            <Button variant="ghost" onClick={refreshAll} loading={loading} disabled={actionLoading}>
+              {t('ui.refresh')}
+            </Button>
+            {headerAction}
+          </>
+        }
+      />
+
+      <div className="resource-notices">
+        {error && (
+          <div role="alert" className="inline-notice inline-notice--danger">
+            <span>{error}</span>
+          </div>
+        )}
+        {initialWorkflowId && (
+          <p data-testid="triggers-workflow-filter" className="inline-notice">
+            {t('triggers.workflowFilter').replace('{id}', initialWorkflowId)}{' '}
+            <a href="#/triggers" data-testid="triggers-show-all">
+              {t('triggers.showAll')}
+            </a>
           </p>
-        </div>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <Button variant="secondary" size="sm" onClick={refreshAll} disabled={loading || actionLoading}>
-            {loading ? <Spinner size={14} /> : <><Icon name="refresh" /> {t('ui.refresh')}</>}
-          </Button>
-        </div>
+        )}
+        {role !== null && !canEdit && (
+          <p data-testid="triggers-viewer-note" className="inline-notice">
+            {t('triggers.viewerNote')}
+          </p>
+        )}
+        {registeredWebhook && <WebhookSecretPanel registered={registeredWebhook} onDismiss={dismissRegisteredWebhook} />}
+        {issuedDeliveryToken && <IssuedDeliveryTokenPanel issued={issuedDeliveryToken} onDismiss={dismissIssuedDeliveryToken} />}
       </div>
 
-      {error && (
-        <Alert variant="danger" title={t('ui.triggerSystemError')}>
-          {error}
-        </Alert>
-      )}
+      <WorkflowTabs tabs={tabs} active={activeTab} onChange={(id) => setActiveTab(id as typeof activeTab)} label={t('triggers.tabsLabel')} panelId={panelId} />
 
-      {initialWorkflowId && (
-        <div
-          data-testid="triggers-workflow-filter"
-          style={{ display: 'flex', gap: 10, alignItems: 'center', fontSize: 13, color: 'var(--text-secondary)' }}
-        >
-          <span>{t('triggers.workflowFilter').replace('{id}', initialWorkflowId)}</span>
-          <a href="#/triggers" data-testid="triggers-show-all">
-            {t('triggers.showAll')}
-          </a>
-        </div>
-      )}
-
-      {role !== null && !canEdit && (
-        <p data-testid="triggers-viewer-note" style={{ margin: 0, fontSize: 13, color: 'var(--text-secondary)' }}>
-          {t('triggers.viewerNote')}
-        </p>
-      )}
-
-      {registeredWebhook && (
-        <WebhookSecretPanel registered={registeredWebhook} onDismiss={dismissRegisteredWebhook} />
-      )}
-
-      {/* Tabs */}
-      <div role="tablist" style={{ display: 'flex', gap: 12, borderBottom: '1px solid var(--border-subtle)', paddingBottom: 4 }}>
-        <button
-          data-testid="tab-schedules"
-          role="tab"
-          aria-selected={activeTab === 'schedules'}
-          onClick={() => setActiveTab('schedules')}
-          style={{
-            background: 'none',
-            border: 'none',
-            borderBottom: activeTab === 'schedules' ? '2px solid var(--accent-primary)' : '2px solid transparent',
-            color: activeTab === 'schedules' ? 'var(--accent-primary)' : 'var(--text-secondary)',
-            fontWeight: activeTab === 'schedules' ? 600 : 500,
-            fontSize: 14,
-            padding: '8px 16px',
-            cursor: 'pointer',
-          }}
-        >
-          <Icon name="triggers" /> {t('ui.schedules')}{visibleSchedules.length})
-        </button>
-        <button
-          data-testid="tab-webhooks"
-          role="tab"
-          aria-selected={activeTab === 'webhooks'}
-          onClick={() => setActiveTab('webhooks')}
-          style={{
-            background: 'none',
-            border: 'none',
-            borderBottom: activeTab === 'webhooks' ? '2px solid var(--accent-primary)' : '2px solid transparent',
-            color: activeTab === 'webhooks' ? 'var(--accent-primary)' : 'var(--text-secondary)',
-            fontWeight: activeTab === 'webhooks' ? 600 : 500,
-            fontSize: 14,
-            padding: '8px 16px',
-            cursor: 'pointer',
-          }}
-        >
-          <Icon name="hook" /> {t('ui.signedWebhooks')}{visibleWebhooks.length})
-        </button>
-        <button
-          data-testid="tab-outbox"
-          role="tab"
-          aria-selected={activeTab === 'outbox'}
-          onClick={() => setActiveTab('outbox')}
-          style={{
-            background: 'none',
-            border: 'none',
-            borderBottom: activeTab === 'outbox' ? '2px solid var(--accent-primary)' : '2px solid transparent',
-            color: activeTab === 'outbox' ? 'var(--accent-primary)' : 'var(--text-secondary)',
-            fontWeight: activeTab === 'outbox' ? 600 : 500,
-            fontSize: 14,
-            padding: '8px 16px',
-            cursor: 'pointer',
-          }}
-        >
-          <Icon name="send" /> {t('ui.dryRunOutbox')}{outbox.length})
-        </button>
-      </div>
-
-      {/* TAB 1: Schedules */}
-      {activeTab === 'schedules' && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <h2 style={{ fontSize: 16, fontWeight: 600, margin: 0, color: 'var(--text-primary)' }}>
-              {t('ui.activeSchedulesCronTimers')}
-            </h2>
-            <Button
-              variant="primary"
-              size="sm"
-              data-testid="btn-open-create-schedule"
-              disabled={!canEdit}
-              title={viewerTitle}
-              onClick={() => {
-                setFormError(null);
-                setScheduleModalOpen(true);
-              }}
-            >
-              {t('ui.createSchedule')}
-            </Button>
-          </div>
-
-          {visibleSchedules.length === 0 ? (
-            <Card style={{ padding: 32, textAlign: 'center', color: 'var(--text-secondary)' }}>
-              {t('ui.noSchedulesRegisteredYetClickQuotCreateScheduleQuotToSetUpAnIntervalOrCron')}
-            </Card>
-          ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              {visibleSchedules.map((s) => {
-                const isPaused = Boolean(s.paused ?? ((s as any).is_active === false));
-                return (
-                  <Card
-                    key={s.schedule_id}
-                    data-testid={`schedule-item-${s.schedule_id}`}
-                    style={{
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
-                      padding: 16,
-                    }}
-                  >
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                        <span style={{ fontWeight: 700, fontSize: 15, color: 'var(--text-primary)' }}>
-                          {s.schedule_id}
-                        </span>
-                        <Badge variant={isPaused ? 'warning' : 'success'}>
-                          {isPaused ? t('ui.paused') : t('ui.active2')}
-                        </Badge>
-                        <Badge variant="neutral">{t('ui.timezonePrefix')} {s.timezone}</Badge>
-                      </div>
-                      <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
-                        {t('ui.workflow') + " "}<code style={{ color: 'var(--accent-primary)' }}>{s.workflow_id}</code> {t('ui.pattern')}{' '}
-                        <strong>{s.cron ? t('triggers.cronPattern').replace('{value}', String(s.cron)) : t('triggers.intervalPattern').replace('{value}', String(s.interval_seconds))}</strong> {t('ui.policy2')}{' '}
-                        <code>{s.missed_run_policy}</code>
-                      </div>
-                      {s.next_run_at && (
-                        <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                          {t('ui.nextFire') + " "}{new Date(s.next_run_at * 1000).toLocaleString(locale)}
-                        </div>
-                      )}
-                    </div>
-
-                    <div style={{ display: 'flex', gap: 8 }}>
-                      {isPaused ? (
-                        <Button
-                          variant="secondary"
-                          size="sm"
-                          data-testid={`btn-resume-schedule-${s.schedule_id}`}
-                          onClick={() => handleResumeSchedule(s.schedule_id)}
-                          disabled={actionLoading || !canEdit}
-                        >
-                          <Icon name="play" /> {t('ui.resume')}
-                        </Button>
-                      ) : (
-                        <Button
-                          variant="secondary"
-                          size="sm"
-                          data-testid={`btn-pause-schedule-${s.schedule_id}`}
-                          onClick={() => handlePauseSchedule(s.schedule_id)}
-                          disabled={actionLoading || !canEdit}
-                        >
-                          <Icon name="pause" /> {t('ui.pause')}
-                        </Button>
-                      )}
-                    <InlineConfirm key={s.schedule_id} consequence={t('confirmation.deleteSchedule')} >
-                      <Button
-                        variant="danger"
-                        size="sm"
-                        data-testid={`btn-delete-schedule-${s.schedule_id}`}
-                        onClick={() => handleDeleteSchedule(s.schedule_id)}
-                        disabled={actionLoading || !canEdit}
-                      >
-                        {t('ui.delete')}
-                      </Button>
-                    </InlineConfirm>
-                    </div>
-                  </Card>
-              );
-            })}
-            </div>
-          )}
-
-          {/* Pending Durable Trigger Jobs list */}
-          {jobs.length > 0 && (
-            <Card style={{ marginTop: 12 }}>
-              <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 10, color: 'var(--text-primary)' }}>
-                {t('ui.durableTriggerJobs')}{jobs.length})
-              </h3>
-              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
-                <thead>
-                  <tr style={{ borderBottom: '1px solid var(--border-subtle)', textAlign: 'left', color: 'var(--text-secondary)' }}>
-                    <th style={{ padding: '8px 12px' }}>{t('ui.jobId')}</th>
-                    <th style={{ padding: '8px 12px' }}>{t('ui.sourceType')}</th>
-                    <th style={{ padding: '8px 12px' }}>{t('ui.sourceId')}</th>
-                    <th style={{ padding: '8px 12px' }}>{t('ui.workflow2')}</th>
-                    <th style={{ padding: '8px 12px' }}>{t('ui.status')}</th>
-                    <th style={{ padding: '8px 12px' }}>{t('runs.colRun')}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {jobs.map((j) => (
-                    <tr key={j.job_id} style={{ borderBottom: '1px solid var(--border-subtle)' }}>
-                      <td style={{ padding: '8px 12px', fontWeight: 600 }}>{j.job_id}</td>
-                      <td style={{ padding: '8px 12px' }}>{j.trigger_type}</td>
-                      <td style={{ padding: '8px 12px' }}>{j.trigger_source_id}</td>
-                      <td style={{ padding: '8px 12px' }}>{j.workflow_id}</td>
-                      <td style={{ padding: '8px 12px' }}>
-                        <Badge variant={j.status === 'pending' ? 'info' : 'success'}>{t(`statusLabels.${j.status}`, j.status)}</Badge>
-                      </td>
-                      <td style={{ padding: '8px 12px' }} data-testid={`trigger-job-run-${j.job_id}`}>
-                        {j.run_id ? (
-                          <>
-                            <code>{j.run_id}</code>{' '}
-                            <a href={runHref(j.run_id)} data-testid="trigger-job-open-run">
-                              {t('runs.open')}
-                            </a>
-                          </>
-                        ) : (
-                          <span style={{ color: 'var(--text-muted)' }}>
-                            {/* A failed or finished job without a run will never start one. */}
-                            {j.status === 'failed' || j.status === 'completed' ? t('runs.noRun') : t('runs.noRunYet')}
-                          </span>
-                        )}
-                      </td>
+      <div role="tabpanel" id={panelId} aria-label={tabs.find((tab) => tab.id === activeTab)?.label} tabIndex={0} style={{ minWidth: 0 }}>
+        {activeTab === 'schedules' && (
+          <>
+            {visibleSchedules.length === 0 ? (
+              <p className="inspection-empty">{t('ui.noSchedulesRegisteredYetClickQuotCreateScheduleQuotToSetUpAnIntervalOrCron')}</p>
+            ) : (
+              <div className="inspection-table-scroll" role="region" aria-label={t('ui.activeSchedulesCronTimers')} tabIndex={0}>
+                <table className="inspection-table settings-table settings-table--stack" role="table">
+                  <caption className="studio-sr-only">{t('ui.activeSchedulesCronTimers')}</caption>
+                  <thead>
+                    <tr role="row">
+                      <th role="columnheader" scope="col">{t('triggers.colSchedule')}</th>
+                      <th role="columnheader" scope="col">{t('ui.workflow2')}</th>
+                      <th role="columnheader" scope="col">{t('triggers.colPattern')}</th>
+                      <th role="columnheader" scope="col">{t('triggers.colTimezone')}</th>
+                      <th role="columnheader" scope="col">{t('ui.missedRunPolicy')}</th>
+                      <th role="columnheader" scope="col">{t('ui.status')}</th>
+                      <th role="columnheader" scope="col"><span className="studio-sr-only">{t('ui.actions')}</span></th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </Card>
-          )}
-        </div>
-      )}
-
-      {/* TAB 2: Signed Webhooks */}
-      {activeTab === 'webhooks' && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <h2 style={{ fontSize: 16, fontWeight: 600, margin: 0, color: 'var(--text-primary)' }}>
-              {t('ui.registeredWebhookEndpoints')}
-            </h2>
-            <Button
-              variant="primary"
-              size="sm"
-              data-testid="btn-open-register-webhook"
-              disabled={!canEdit}
-              title={viewerTitle}
-              onClick={() => {
-                setFormError(null);
-                setWebhookModalOpen(true);
-              }}
-            >
-              {t('ui.registerEndpoint')}
-            </Button>
-          </div>
-
-          <div className="studio-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-            {/* Endpoints List */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              {visibleWebhooks.length === 0 ? (
-                <Card style={{ padding: 24, textAlign: 'center', color: 'var(--text-secondary)' }}>
-                  {t('ui.noWebhookEndpointsRegistered')}
-                </Card>
-              ) : (
-                visibleWebhooks.map((w) => (
-                  <Card
-                    key={w.endpoint_id}
-                    data-testid={`webhook-item-${w.endpoint_id}`}
-                    style={{
-                      border: testEndpointId === w.endpoint_id ? '1px solid var(--accent-primary)' : '1px solid var(--border-subtle)',
-                      cursor: 'pointer',
-                    }}
-                    onClick={() => setTestEndpointId(w.endpoint_id)}
-                  >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 6 }}>
-                      <div>
-                        <span style={{ fontWeight: 700, fontSize: 14, color: 'var(--text-primary)' }}>
-                          {w.endpoint_id}
-                        </span>
-                        <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 2 }}>
-                          {t('ui.workflow') + " "}<code>{w.workflow_id}</code>
-                        </div>
-                      </div>
-                      <InlineConfirm key={w.endpoint_id} consequence={t('confirmation.deleteWebhook')} >
-                        <Button
-                          variant="danger"
-                          size="sm"
-                          disabled={actionLoading || !canEdit}
-                          title={viewerTitle}
-                          data-testid={`btn-delete-webhook-${w.endpoint_id}`}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleDeleteWebhook(w.endpoint_id);
-                          }}
-                        >
-                          {t('ui.delete')}
-                        </Button>
-                      </InlineConfirm>
-                    </div>
-                    <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                      {t('ui.replayWindow') + " "}{w.replay_window_seconds}{t('ui.sSecret') + " "}<code>●●●●●●●●</code>
-                    </div>
-                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4, wordBreak: 'break-all' }}>
-                      {t('triggers.deliveryUrl')}:{' '}
-                      <code data-testid={`webhook-delivery-url-${w.endpoint_id}`}>{deliveryUrlFor(w.endpoint_id)}</code>
-                    </div>
-                  </Card>
-                ))
-              )}
-
-              {testEndpointId && visibleWebhooks.some((w) => w.endpoint_id === testEndpointId) && (
-                <Card data-testid="webhook-signing-help">
-                  <details>
-                    <summary style={{ cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>
-                      {t('triggers.signingHelp').replace('{id}', testEndpointId)}
-                    </summary>
-                    <div style={{ marginTop: 10 }}>
-                      <WebhookSigningSnippets deliveryUrl={deliveryUrlFor(testEndpointId)} testIdPrefix="webhook-help" />
-                    </div>
-                  </details>
-                </Card>
-              )}
-            </div>
-
-            {/* Interactive Webhook Simulator */}
-            <Card style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-              <h3 style={{ margin: 0, fontSize: 15, fontWeight: 600 }}>{t('ui.testWebhookDeliverySimulator')}</h3>
-              <p style={{ margin: 0, fontSize: 12, color: 'var(--text-secondary)' }}>
-                {t('ui.simulateHmacSha256SignatureVerificationReplayProtectionAndDeduplication')}
-              </p>
-
-              <div>
-                <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>
-                  {t('ui.targetEndpoint')}
-                </label>
-                <select
-                  data-testid="select-test-webhook"
-                  value={testEndpointId}
-                  onChange={(e) => setTestEndpointId(e.target.value)}
-                  style={{
-                    width: '100%',
-                    padding: '8px 12px',
-                    borderRadius: 'var(--radius-md)',
-                    border: '1px solid var(--border-subtle)',
-                    backgroundColor: 'var(--bg-surface)',
-                    color: 'var(--text-primary)',
-                    fontSize: 13,
-                  }}
-                >
-                  <option value="">{t('ui.selectEndpoint')}</option>
-                  {visibleWebhooks.map((w) => (
-                    <option key={w.endpoint_id} value={w.endpoint_id}>
-                      {w.endpoint_id} ({w.workflow_id})
-                    </option>
-                  ))}
-                </select>
+                  </thead>
+                  <tbody>
+                    {visibleSchedules.map((s) => {
+                      const isPaused = Boolean(s.paused ?? ((s as any).is_active === false));
+                      return (
+                        <tr role="row" key={s.schedule_id} data-testid={`schedule-item-${s.schedule_id}`}>
+                          <td role="cell" data-label={t('triggers.colSchedule')}><code>{s.schedule_id}</code></td>
+                          <td role="cell" data-label={t('ui.workflow2')}><code>{s.workflow_id}</code></td>
+                          <td role="cell" data-label={t('triggers.colPattern')}>
+                            {s.cron
+                              ? t('triggers.cronPattern').replace('{value}', String(s.cron))
+                              : t('triggers.intervalPattern').replace('{value}', String(s.interval_seconds))}
+                            {s.next_run_at && (
+                              <div className="resource-help">
+                                {t('ui.nextFire') + ' '}
+                                {new Date(s.next_run_at * 1000).toLocaleString(locale)}
+                              </div>
+                            )}
+                          </td>
+                          <td role="cell" data-label={t('triggers.colTimezone')} data-testid={`schedule-timezone-${s.schedule_id}`}>{s.timezone}</td>
+                          <td role="cell" data-label={t('ui.missedRunPolicy')}><code>{s.missed_run_policy}</code></td>
+                          <td role="cell" data-label={t('ui.status')}>{status(isPaused ? 'warning' : 'success', isPaused ? t('ui.paused') : t('ui.active2'), `schedule-status-${s.schedule_id}`)}</td>
+                          <td role="cell" data-label={t('ui.actions')}>
+                            <div className="settings-row-actions">
+                              {isPaused ? (
+                                <Button
+                                  size="sm"
+                                  data-testid={`btn-resume-schedule-${s.schedule_id}`}
+                                  aria-label={`${t('ui.resume')} ${s.schedule_id}`}
+                                  onClick={() => handleResumeSchedule(s.schedule_id)}
+                                  disabled={actionLoading || !canEdit}
+                                >
+                                  {t('ui.resume')}
+                                </Button>
+                              ) : (
+                                <Button
+                                  size="sm"
+                                  data-testid={`btn-pause-schedule-${s.schedule_id}`}
+                                  aria-label={`${t('ui.pause')} ${s.schedule_id}`}
+                                  onClick={() => handlePauseSchedule(s.schedule_id)}
+                                  disabled={actionLoading || !canEdit}
+                                >
+                                  {t('ui.pause')}
+                                </Button>
+                              )}
+                              <InlineConfirm key={s.schedule_id} consequence={t('confirmation.deleteSchedule')}>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="workflow-danger-action"
+                                  data-testid={`btn-delete-schedule-${s.schedule_id}`}
+                                  aria-label={`${t('ui.delete')} ${s.schedule_id}`}
+                                  onClick={() => handleDeleteSchedule(s.schedule_id)}
+                                  disabled={actionLoading || !canEdit}
+                                >
+                                  {t('ui.delete')}
+                                </Button>
+                              </InlineConfirm>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
               </div>
+            )}
 
-              <div>
-                <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>
-                  {t('ui.eventIdDedupKey')}
-                </label>
-                <Input
-                  data-testid="input-webhook-event-id"
-                  value={testEventId}
-                  onChange={(e) => setTestEventId(e.target.value)}
-                  placeholder={t('ui.leaveEmptyForAutoGeneratedUuid')}
-                />
-              </div>
-
-              <div>
-                <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>
-                  {t('ui.jsonPayload')}
-                </label>
-                <textarea
-                  data-testid="textarea-webhook-payload"
-                  value={testPayloadJson}
-                  onChange={(e) => setTestPayloadJson(e.target.value)}
-                  rows={4}
-                  style={{
-                    width: '100%',
-                    padding: '8px 12px',
-                    borderRadius: 'var(--radius-md)',
-                    border: '1px solid var(--border-subtle)',
-                    backgroundColor: 'var(--bg-surface-elevated)',
-                    color: 'var(--text-primary)',
-                    fontFamily: 'monospace',
-                    fontSize: 12,
-                  }}
-                />
-              </div>
-
-              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                <Button
-                  variant="primary"
-                  size="sm"
-                  data-testid="btn-test-webhook-valid"
-                  onClick={() => handleTestWebhook()}
-                  disabled={actionLoading || !testEndpointId}
-                >
-                  {actionLoading ? <Spinner size={12} /> : <><Icon name="check" /> {t('ui.deliverValidEvent')}</>}
-                </Button>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  data-testid="btn-test-webhook-replay"
-                  onClick={() => handleTestWebhook({ useExistingEventId: true })}
-                  disabled={actionLoading || !testEndpointId || !testEventId}
-                >
-                  <Icon name="refresh" /> {t('ui.replayExactEvent')}
-                </Button>
-                <Button
-                  variant="danger"
-                  size="sm"
-                  data-testid="btn-test-webhook-bad-sig"
-                  onClick={() => handleTestWebhook({ invalid_signature: true })}
-                  disabled={actionLoading || !testEndpointId}
-                >
-                  <Icon name="close" /> {t('ui.testBadSignature')}
-                </Button>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  data-testid="btn-test-webhook-expired"
-                  onClick={() => handleTestWebhook({ expired_timestamp: true })}
-                  disabled={actionLoading || !testEndpointId}
-                >
-                  <Icon name="triggers" /> {t('ui.testExpiredWindow')}
-                </Button>
-              </div>
-
-              {webhookTestResult && (
-                <div
-                  data-testid="webhook-test-result"
-                  style={{
-                    padding: 12,
-                    borderRadius: 'var(--radius-md)',
-                    backgroundColor: 'var(--bg-surface-elevated)',
-                    border: '1px solid var(--border-subtle)',
-                    fontSize: 12,
-                  }}
-                >
-                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
-                    <span style={{ fontWeight: 600 }}>{t('ui.deliveryStatus')}</span>
-                    <Badge variant={webhookTestResult.is_duplicate ? 'warning' : 'success'}>
-                      {webhookTestResult.is_duplicate ? t('ui.duplicateIngestedOnce') : t('ui.delivered')}
-                    </Badge>
-                  </div>
-                  <div>{t('ui.jobId2') + " "}<code>{webhookTestResult.job_id}</code></div>
-                  <div>{t('ui.duplicateFlag') + " "}<code>{String(webhookTestResult.is_duplicate)}</code></div>
+            {jobs.length > 0 && (
+              <section aria-labelledby={`${ids}-jobs`}>
+                <h2 id={`${ids}-jobs`} style={{ margin: '8px 0' }}>
+                  {t('ui.durableTriggerJobs')}{jobs.length})
+                </h2>
+                <div className="inspection-table-scroll" role="region" aria-labelledby={`${ids}-jobs`} tabIndex={0}>
+                  <table className="inspection-table settings-table settings-table--stack" role="table">
+                    <thead>
+                      <tr role="row">
+                        <th role="columnheader" scope="col">{t('ui.jobId')}</th>
+                        <th role="columnheader" scope="col">{t('ui.sourceType')}</th>
+                        <th role="columnheader" scope="col">{t('ui.sourceId')}</th>
+                        <th role="columnheader" scope="col">{t('ui.workflow2')}</th>
+                        <th role="columnheader" scope="col">{t('ui.status')}</th>
+                        <th role="columnheader" scope="col">{t('runs.colRun')}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {jobs.map((j) => (
+                        <tr role="row" key={j.job_id}>
+                          <td role="cell" data-label={t('ui.jobId')}><code>{j.job_id}</code></td>
+                          <td role="cell" data-label={t('ui.sourceType')}>{j.trigger_type}</td>
+                          <td role="cell" data-label={t('ui.sourceId')}><code>{j.trigger_source_id}</code></td>
+                          <td role="cell" data-label={t('ui.workflow2')}><code>{j.workflow_id}</code></td>
+                          <td role="cell" data-label={t('ui.status')}>{t(`statusLabels.${j.status}`, j.status)}</td>
+                          <td role="cell" data-label={t('runs.colRun')} data-testid={`trigger-job-run-${j.job_id}`}>
+                            {j.run_id ? (
+                              <>
+                                <code>{j.run_id}</code>{' '}
+                                <a href={runHref(j.run_id)} data-testid="trigger-job-open-run">
+                                  {t('runs.open')}
+                                </a>
+                              </>
+                            ) : (
+                              <span className="resource-help">
+                                {/* A failed or finished job without a run will never start one. */}
+                                {j.status === 'failed' || j.status === 'completed' ? t('runs.noRun') : t('runs.noRunYet')}
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
-              )}
-            </Card>
-          </div>
-        </div>
-      )}
+              </section>
+            )}
+          </>
+        )}
 
-      {/* TAB 3: Observable Dry-Run Outbox */}
-      {activeTab === 'outbox' && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-          {/* Strict Dry Run Guarantee Banner */}
-          <Alert variant="info" title={t('ui.zeroExternalDispatchGuarantee')}>
-            {(language === 'en' && outboxGuarantee) ||
-              t('ui.dryRunOnlyAllOutboundMessagesAreCapturedInOutboxAndNeverTransmittedToRealCa')}
-          </Alert>
-
-          <div className="studio-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: 16 }}>
-            {/* Dispatch Simulator Form */}
-            <Card style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              <h3 style={{ margin: 0, fontSize: 15, fontWeight: 600 }}>{t('ui.dispatchSimulatedAction')}</h3>
-              <p style={{ margin: 0, fontSize: 12, color: 'var(--text-secondary)' }}>
-                {t('ui.testEmailOrWhatsappChannelTemplatesWithDeduplicationGuarantees')}
-              </p>
-
-              <div>
-                <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>
-                  {t('ui.channel')}
-                </label>
-                <div style={{ display: 'flex', gap: 12 }}>
-                  <label style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <input
-                      type="radio"
-                      name="outbox_ch"
-                      value="email"
-                      checked={outboxChannel === 'email'}
-                      onChange={() => {
-                        setOutboxChannel('email');
-                        setOutboxRecipient('customer@example.com');
-                      }}
-                    />
-                    {t('ui.email')}
-                  </label>
-                  <label style={{ fontSize: 12, display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <input
-                      type="radio"
-                      name="outbox_ch"
-                      value="whatsapp"
-                      checked={outboxChannel === 'whatsapp'}
-                      onChange={() => {
-                        setOutboxChannel('whatsapp');
-                        setOutboxRecipient('+919876543210');
-                      }}
-                    />
-                    {t('ui.whatsapp')}
-                  </label>
-                </div>
-              </div>
-
-              <div>
-                <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>
-                  {t('ui.recipient')}
-                </label>
-                <Input
-                  data-testid="input-outbox-recipient"
-                  value={outboxRecipient}
-                  onChange={(e) => setOutboxRecipient(e.target.value)}
-                  placeholder={t('ui.eGUserExampleComOr91')}
-                />
-              </div>
-
-              <div>
-                <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>
-                  {t('ui.subjectTemplateName')}
-                </label>
-                <Input
-                  data-testid="input-outbox-subject"
-                  value={outboxSubject}
-                  onChange={(e) => setOutboxSubject(e.target.value)}
-                  placeholder={t('ui.orderNotification')}
-                />
-              </div>
-
-              <div>
-                <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>
-                  {t('ui.bodyText')}
-                </label>
-                <textarea
-                  data-testid="textarea-outbox-body"
-                  value={outboxBody}
-                  onChange={(e) => setOutboxBody(e.target.value)}
-                  rows={3}
-                  style={{
-                    width: '100%',
-                    padding: '8px 12px',
-                    borderRadius: 'var(--radius-md)',
-                    border: '1px solid var(--border-subtle)',
-                    backgroundColor: 'var(--bg-surface-elevated)',
-                    color: 'var(--text-primary)',
-                    fontSize: 12,
-                  }}
-                />
-              </div>
-
-              <div>
-                <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>
-                  {t('ui.deduplicationKey')}
-                </label>
-                <Input
-                  data-testid="input-outbox-dedup"
-                  value={outboxDedupKey}
-                  onChange={(e) => setOutboxDedupKey(e.target.value)}
-                  placeholder="dedup_order_123"
-                />
-              </div>
-
-              <Button
-                variant="primary"
-                data-testid="btn-dispatch-outbox"
-                onClick={handleTestDispatchOutbox}
-                disabled={actionLoading}
-              >
-                {actionLoading ? <Spinner size={12} /> : <><Icon name="onboarding" /> {t('ui.dispatchToDryRunOutbox')}</>}
-              </Button>
-
-              {lastDispatchResult && (
-                <div
-                  data-testid="dispatch-result-box"
-                  style={{
-                    padding: 10,
-                    borderRadius: 'var(--radius-md)',
-                    backgroundColor: 'var(--bg-surface-elevated)',
-                    border: '1px solid var(--border-subtle)',
-                    fontSize: 11,
-                  }}
-                >
-                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
-                    <span>{t('ui.receipt') + " "}<code>{lastDispatchResult.receipt.receipt_id}</code></span>
-                    <Badge variant={lastDispatchResult.is_duplicate ? 'warning' : 'success'}>
-                      {t(`statusLabels.${lastDispatchResult.receipt.status}`, lastDispatchResult.receipt.status)}
-                    </Badge>
-                  </div>
-                  <div>{t('ui.duplicateFlag') + " "}<code>{String(lastDispatchResult.is_duplicate)}</code></div>
-                </div>
-              )}
-            </Card>
-
-            {/* Outbox Receipts List */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <h3 style={{ margin: 0, fontSize: 15, fontWeight: 600 }}>
-                  {t('ui.capturedMessages')}{outbox.length})
-                </h3>
-                <div style={{ display: 'flex', gap: 6 }}>
-                  {(['all', 'email', 'whatsapp'] as const).map((f) => (
-                    <Button
-                      key={f}
-                      variant={outboxFilter === f ? 'primary' : 'secondary'}
-                      size="sm"
-                      onClick={() => setOutboxFilter(f)}
-                    >
-                      {t(`channelUpper.${f}`)}
-                    </Button>
-                  ))}
-                </div>
-              </div>
-
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 10, maxHeight: 520, overflowY: 'auto' }}>
-                {outbox.length === 0 ? (
-                  <Card style={{ padding: 24, textAlign: 'center', color: 'var(--text-secondary)' }}>
-                    {t('ui.noMessagesCapturedInOutboxYet')}
-                  </Card>
-                ) : (
-                  outbox.map((msg) => (
-                    <Card key={msg.receipt_id} data-testid={`outbox-item-${msg.receipt_id}`} style={{ padding: 12 }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 6 }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                          <Badge variant="neutral">{t(`channelUpper.${msg.channel}`, msg.channel.toUpperCase())}</Badge>
-                          <span style={{ fontWeight: 600, fontSize: 13, color: 'var(--text-primary)' }}>
-                            {msg.recipient}
-                          </span>
-                        </div>
-                        <Badge variant={msg.status === 'deduplicated' ? 'warning' : 'success'}>
-                          {t(`statusLabels.${msg.status}`, msg.status)}
-                        </Badge>
-                      </div>
-                      <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 6 }}>
-                        {msg.rendered_content.subject_or_template && (
-                          <div style={{ fontWeight: 600, color: 'var(--text-primary)' }}>
-                            {msg.rendered_content.subject_or_template}
+        {activeTab === 'webhooks' && (
+          <>
+            {visibleWebhooks.length === 0 ? (
+              <p className="inspection-empty">{t('ui.noWebhookEndpointsRegistered')}</p>
+            ) : (
+              <div className="inspection-table-scroll" role="region" aria-label={t('ui.registeredWebhookEndpoints')} tabIndex={0}>
+                <table className="inspection-table settings-table settings-table--stack" role="table">
+                  <caption className="studio-sr-only">{t('ui.registeredWebhookEndpoints')}</caption>
+                  <thead>
+                    <tr role="row">
+                      <th role="columnheader" scope="col">{t('triggers.colEndpoint')}</th>
+                      <th role="columnheader" scope="col">{t('ui.workflow2')}</th>
+                      <th role="columnheader" scope="col">{t('triggers.deliveryUrl')}</th>
+                      <th role="columnheader" scope="col" style={{ textAlign: 'right' }}>{t('ui.replayWindowSeconds')}</th>
+                      <th role="columnheader" scope="col"><span className="studio-sr-only">{t('ui.actions')}</span></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {visibleWebhooks.map((w) => (
+                      <tr role="row" key={w.endpoint_id} data-testid={`webhook-item-${w.endpoint_id}`}>
+                        <td role="cell" data-label={t('triggers.colEndpoint')}>
+                          <button
+                            type="button"
+                            className="settings-row-select"
+                            aria-pressed={testEndpointId === w.endpoint_id}
+                            onClick={() => setTestEndpointId(w.endpoint_id)}
+                          >
+                            <code>{w.endpoint_id}</code>
+                          </button>
+                        </td>
+                        <td role="cell" data-label={t('ui.workflow2')}><code>{w.workflow_id}</code></td>
+                        <td role="cell" data-label={t('triggers.deliveryUrl')}>
+                          <code data-testid={`webhook-delivery-url-${w.endpoint_id}`} className="settings-cell-code">{deliveryUrlFor(w.endpoint_id)}</code>
+                          <div className="resource-help">{t('triggers.secretStored')}</div>
+                        </td>
+                        <td role="cell" data-label={t('ui.replayWindowSeconds')} style={{ textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{w.replay_window_seconds}</td>
+                        <td role="cell" data-label={t('ui.actions')}>
+                          <div className="settings-row-actions">
+                          {deliveryTokenMode && (
+                            <InlineConfirm key={`rotate-${w.endpoint_id}`} consequence={t('triggers.rotateConsequence')}>
+                              <Button
+                                size="sm"
+                                loading={rotatingEndpointId === w.endpoint_id}
+                                disabled={!canEdit}
+                                title={viewerTitle}
+                                aria-label={`${t('triggers.rotateToken')} ${w.endpoint_id}`}
+                                data-testid={`btn-rotate-delivery-token-${w.endpoint_id}`}
+                                onClick={() => handleRotateDeliveryToken(w.endpoint_id)}
+                              >
+                                {t('triggers.rotateToken')}
+                              </Button>
+                            </InlineConfirm>
+                          )}
+                          {rotateError?.endpointId === w.endpoint_id && (
+                            <span role="alert" className="resource-error" data-testid={`rotate-error-${w.endpoint_id}`} style={{ flexBasis: '100%' }}>
+                              {rotateError.message}
+                            </span>
+                          )}
+                          <InlineConfirm key={w.endpoint_id} consequence={t('confirmation.deleteWebhook')}>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="workflow-danger-action"
+                              disabled={actionLoading || !canEdit}
+                              title={viewerTitle}
+                              aria-label={`${t('ui.delete')} ${w.endpoint_id}`}
+                              data-testid={`btn-delete-webhook-${w.endpoint_id}`}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleDeleteWebhook(w.endpoint_id);
+                              }}
+                            >
+                              {t('ui.delete')}
+                            </Button>
+                          </InlineConfirm>
                           </div>
-                        )}
-                        <div>{msg.rendered_content.body}</div>
-                      </div>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: 'var(--text-muted)' }}>
-                        <span>ID: {msg.receipt_id}</span>
-                        <span>{new Date(msg.created_at * 1000).toLocaleTimeString(locale)}</span>
-                      </div>
-                    </Card>
-                  ))
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {testEndpointId && visibleWebhooks.some((w) => w.endpoint_id === testEndpointId) && (
+              <details data-testid="webhook-signing-help" className="resource-help-disclosure" style={{ marginBottom: 16 }}>
+                <summary>{t('triggers.signingHelp').replace('{id}', testEndpointId)}</summary>
+                <div style={{ marginTop: 10, maxWidth: 800 }}>
+                  <WebhookSigningSnippets deliveryUrl={deliveryUrlFor(testEndpointId)} testIdPrefix="webhook-help" />
+                </div>
+              </details>
+            )}
+
+            <section className="settings-panel" aria-labelledby={`${ids}-test`}>
+              <h2 id={`${ids}-test`}>{t('ui.testWebhookDeliverySimulator')}</h2>
+              <p className="knowledge-panel-help">{t('ui.simulateHmacSha256SignatureVerificationReplayProtectionAndDeduplication')}</p>
+              <div className="resource-form" style={{ gap: 16 }}>
+                <div className="resource-field">
+                  <label htmlFor={`${ids}-test-endpoint`}>{t('ui.targetEndpoint')}</label>
+                  <select id={`${ids}-test-endpoint`} data-testid="select-test-webhook" value={testEndpointId} onChange={(e) => setTestEndpointId(e.target.value)}>
+                    <option value="">{t('ui.selectEndpoint')}</option>
+                    {visibleWebhooks.map((w) => (
+                      <option key={w.endpoint_id} value={w.endpoint_id}>
+                        {w.endpoint_id} ({w.workflow_id})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="resource-field">
+                  <label htmlFor={`${ids}-test-event`}>{t('ui.eventIdDedupKey')}</label>
+                  <input
+                    id={`${ids}-test-event`}
+                    data-testid="input-webhook-event-id"
+                    value={testEventId}
+                    onChange={(e) => setTestEventId(e.target.value)}
+                    placeholder={t('ui.leaveEmptyForAutoGeneratedUuid')}
+                  />
+                </div>
+                <div className="resource-field">
+                  <label htmlFor={`${ids}-test-payload`}>{t('ui.jsonPayload')}</label>
+                  <textarea
+                    id={`${ids}-test-payload`}
+                    data-testid="textarea-webhook-payload"
+                    value={testPayloadJson}
+                    onChange={(e) => setTestPayloadJson(e.target.value)}
+                    rows={4}
+                    spellCheck={false}
+                  />
+                </div>
+                <div className="resource-actions" style={{ justifyContent: 'flex-start' }}>
+                  <Button
+                    data-testid="btn-test-webhook-valid"
+                    onClick={() => handleTestWebhook()}
+                    loading={actionLoading}
+                    disabled={!testEndpointId}
+                  >
+                    {t('ui.deliverValidEvent')}
+                  </Button>
+                </div>
+                <details className="resource-help-disclosure" data-testid="webhook-more-tests">
+                  <summary>{t('triggers.moreTests')}</summary>
+                  <div className="resource-actions" style={{ justifyContent: 'flex-start', marginTop: 8 }}>
+                    <Button
+                      size="sm"
+                      data-testid="btn-test-webhook-replay"
+                      onClick={() => handleTestWebhook({ useExistingEventId: true })}
+                      disabled={actionLoading || !testEndpointId || !testEventId}
+                    >
+                      {t('ui.replayExactEvent')}
+                    </Button>
+                    <Button
+                      size="sm"
+                      data-testid="btn-test-webhook-bad-sig"
+                      onClick={() => handleTestWebhook({ invalid_signature: true })}
+                      disabled={actionLoading || !testEndpointId}
+                    >
+                      {t('ui.testBadSignature')}
+                    </Button>
+                    <Button
+                      size="sm"
+                      data-testid="btn-test-webhook-expired"
+                      onClick={() => handleTestWebhook({ expired_timestamp: true })}
+                      disabled={actionLoading || !testEndpointId}
+                    >
+                      {t('ui.testExpiredWindow')}
+                    </Button>
+                  </div>
+                </details>
+                {webhookTestResult && (
+                  <div data-testid="webhook-test-result" className="inline-notice" role="status">
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 4 }}>
+                      <strong>{t('ui.deliveryStatus')}</strong>
+                      {status(
+                        webhookTestResult.is_duplicate ? 'warning' : 'success',
+                        webhookTestResult.is_duplicate ? t('ui.duplicateIngestedOnce') : t('ui.delivered'),
+                      )}
+                    </div>
+                    <div>{t('ui.jobId2') + ' '}<code>{webhookTestResult.job_id}</code></div>
+                    <div>{t('ui.duplicateFlag') + ' '}<code>{String(webhookTestResult.is_duplicate)}</code></div>
+                  </div>
                 )}
               </div>
-            </div>
-          </div>
-        </div>
-      )}
+            </section>
+          </>
+        )}
 
-      {/* Modal: Create Schedule */}
+        {activeTab === 'outbox' && (
+          <>
+            <div className="inline-notice" role="note" style={{ marginBottom: 16 }} data-testid="outbox-mode">
+              <strong>{t('ui.zeroExternalDispatchGuarantee')}</strong>{' '}
+              {(language === 'en' && outboxGuarantee) || t('ui.dryRunOnlyAllOutboundMessagesAreCapturedInOutboxAndNeverTransmittedToRealCa')}
+            </div>
+            <div className="settings-split">
+              <form
+                className="resource-form settings-panel"
+                style={{ gap: 16 }}
+                aria-labelledby={`${ids}-dispatch`}
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void handleTestDispatchOutbox();
+                }}
+              >
+                <h2 id={`${ids}-dispatch`}>{t('ui.dispatchSimulatedAction')}</h2>
+                <p className="resource-help" style={{ marginTop: -8 }}>{t('ui.testEmailOrWhatsappChannelTemplatesWithDeduplicationGuarantees')}</p>
+                <fieldset className="resource-section" style={{ gap: 8 }}>
+                  <legend className="resource-label" style={{ fontSize: 'var(--type-label)', fontWeight: 500, marginBottom: 6 }}>{t('ui.channel')}</legend>
+                  <div style={{ display: 'flex', gap: 16 }}>
+                    <label className="resource-check">
+                      <input
+                        type="radio"
+                        name={`${ids}-channel`}
+                        value="email"
+                        checked={outboxChannel === 'email'}
+                        onChange={() => {
+                          setOutboxChannel('email');
+                          setOutboxRecipient('customer@example.com');
+                        }}
+                      />
+                      {t('ui.email')}
+                    </label>
+                    <label className="resource-check">
+                      <input
+                        type="radio"
+                        name={`${ids}-channel`}
+                        value="whatsapp"
+                        checked={outboxChannel === 'whatsapp'}
+                        onChange={() => {
+                          setOutboxChannel('whatsapp');
+                          setOutboxRecipient('+919876543210');
+                        }}
+                      />
+                      {t('ui.whatsapp')}
+                    </label>
+                  </div>
+                </fieldset>
+                <div className="resource-field">
+                  <label htmlFor={`${ids}-recipient`}>{t('ui.recipient')}</label>
+                  <input id={`${ids}-recipient`} data-testid="input-outbox-recipient" value={outboxRecipient} onChange={(e) => setOutboxRecipient(e.target.value)} placeholder={t('ui.eGUserExampleComOr91')} />
+                </div>
+                <div className="resource-field">
+                  <label htmlFor={`${ids}-subject`}>{t('ui.subjectTemplateName')}</label>
+                  <input id={`${ids}-subject`} data-testid="input-outbox-subject" value={outboxSubject} onChange={(e) => setOutboxSubject(e.target.value)} placeholder={t('ui.orderNotification')} />
+                </div>
+                <div className="resource-field">
+                  <label htmlFor={`${ids}-body`}>{t('ui.bodyText')}</label>
+                  <textarea id={`${ids}-body`} data-testid="textarea-outbox-body" value={outboxBody} onChange={(e) => setOutboxBody(e.target.value)} rows={3} style={{ fontFamily: 'inherit', fontSize: 'var(--type-body)' }} />
+                </div>
+                <div className="resource-field">
+                  <label htmlFor={`${ids}-dedup`}>{t('ui.deduplicationKey')}</label>
+                  <input id={`${ids}-dedup`} data-testid="input-outbox-dedup" value={outboxDedupKey} onChange={(e) => setOutboxDedupKey(e.target.value)} placeholder="dedup_order_123" />
+                </div>
+                <div className="resource-actions" style={{ justifyContent: 'flex-start' }}>
+                  <Button type="submit" variant="primary" data-testid="btn-dispatch-outbox" loading={actionLoading}>
+                    {t('ui.dispatchToDryRunOutbox')}
+                  </Button>
+                </div>
+                {lastDispatchResult && (
+                  <div data-testid="dispatch-result-box" className="inline-notice" role="status">
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 4 }}>
+                      <span>{t('ui.receipt') + ' '}<code>{lastDispatchResult.receipt.receipt_id}</code></span>
+                      {status(lastDispatchResult.is_duplicate ? 'warning' : 'success', t(`statusLabels.${lastDispatchResult.receipt.status}`, lastDispatchResult.receipt.status))}
+                    </div>
+                    <div>{t('ui.duplicateFlag') + ' '}<code>{String(lastDispatchResult.is_duplicate)}</code></div>
+                  </div>
+                )}
+              </form>
+
+              <section aria-labelledby={`${ids}-captured`} style={{ minWidth: 0 }}>
+                <div className="resource-detail-header">
+                  <h2 id={`${ids}-captured`}>
+                    {t('ui.capturedMessages')}{outbox.length})
+                  </h2>
+                  <div className="segmented" role="group" aria-label={t('triggers.channelFilter')}>
+                    {(['all', 'email', 'whatsapp'] as const).map((f) => (
+                      <button key={f} type="button" aria-pressed={outboxFilter === f} onClick={() => setOutboxFilter(f)}>
+                        {t(`channelUpper.${f}`)}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                {outbox.length === 0 ? (
+                  <p className="inspection-empty">{t('ui.noMessagesCapturedInOutboxYet')}</p>
+                ) : (
+                  <ul className="resource-list">
+                    {outbox.map((msg) => (
+                      <li key={msg.receipt_id} data-testid={`outbox-item-${msg.receipt_id}`} className="settings-message">
+                        <div className="resource-row-meta" style={{ marginTop: 0 }}>
+                          <span>{t(`channelUpper.${msg.channel}`, msg.channel)}</span>
+                          <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>{msg.recipient}</span>
+                          {status(msg.status === 'deduplicated' ? 'warning' : 'success', t(`statusLabels.${msg.status}`, msg.status))}
+                        </div>
+                        {msg.rendered_content.subject_or_template && <strong>{msg.rendered_content.subject_or_template}</strong>}
+                        <div style={{ color: 'var(--text-secondary)', overflowWrap: 'anywhere' }}>{msg.rendered_content.body}</div>
+                        <div className="resource-row-meta">
+                          <span>
+                            {t('ui.receipt') + ' '}<code>{msg.receipt_id}</code>
+                          </span>
+                          <span>{new Date(msg.created_at * 1000).toLocaleTimeString(locale)}</span>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </section>
+            </div>
+          </>
+        )}
+      </div>
+
       <Modal
         open={scheduleModalOpen}
         onClose={() => setScheduleModalOpen(false)}
         title={t('ui.createScheduleTrigger')}
+        maxWidth={640}
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setScheduleModalOpen(false)}>
+              {t('ui.cancel')}
+            </Button>
+            <Button
+              variant="primary"
+              data-testid="btn-submit-create-schedule"
+              loading={actionLoading}
+              disabled={noWorkflowToPick || !canEdit}
+              onClick={async () => {
+                const ok = await handleCreateSchedule();
+                if (ok) setScheduleModalOpen(false);
+              }}
+            >
+              {t('ui.saveSchedule')}
+            </Button>
+          </>
+        }
       >
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <div className="resource-form" style={{ gap: 16 }}>
           {formError && (
-            <Alert variant="danger" title={t('ui.validationError')}>
-              {formError}
-            </Alert>
+            <div role="alert" className="inline-notice inline-notice--danger">
+              <span>{formError}</span>
+            </div>
           )}
-
-          <div>
-            <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>
-              {t('ui.scheduleId')}
-            </label>
-            <Input
-              data-testid="input-new-schedule-id"
-              value={newScheduleId}
-              onChange={(e) => setNewScheduleId(e.target.value)}
-              placeholder={t('ui.eGSchedOrderDaily')}
-            />
+          <div className="resource-field">
+            <label htmlFor={`${ids}-sched-id`}>{t('ui.scheduleId')}</label>
+            <input id={`${ids}-sched-id`} data-testid="input-new-schedule-id" value={newScheduleId} onChange={(e) => setNewScheduleId(e.target.value)} placeholder={t('ui.eGSchedOrderDaily')} />
           </div>
-
           <WorkflowPicker
             testId="select-new-schedule-wfid"
             value={newScheduleWfId}
@@ -835,36 +695,19 @@ export function TriggersView({ initialWorkflowId = null }: TriggersViewProps = {
             loading={workflowsLoading}
             error={workflowsError}
           />
-
-          <div className="studio-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: 12 }}>
-            <div>
-              <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>
-                {t('ui.scheduleType')}
-              </label>
-              <select
-                value={newScheduleType}
-                onChange={(e) => setNewScheduleType(e.target.value as any)}
-                style={{
-                  width: '100%',
-                  padding: '8px 12px',
-                  borderRadius: 'var(--radius-md)',
-                  border: '1px solid var(--border-subtle)',
-                  backgroundColor: 'var(--bg-surface)',
-                  color: 'var(--text-primary)',
-                  fontSize: 13,
-                }}
-              >
+          <div className="resource-limits" style={{ gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 2fr)' }}>
+            <div className="resource-field">
+              <label htmlFor={`${ids}-sched-type`}>{t('ui.scheduleType')}</label>
+              <select id={`${ids}-sched-type`} value={newScheduleType} onChange={(e) => setNewScheduleType(e.target.value as any)}>
                 <option value="interval">{t('ui.intervalSeconds')}</option>
                 <option value="cron">{t('ui.cronExpression')}</option>
               </select>
             </div>
-
-            <div>
-              <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>
-                {newScheduleType === 'interval' ? t('ui.intervalSeconds') : t('ui.cronExpression')}
-              </label>
+            <div className="resource-field">
+              <label htmlFor={`${ids}-sched-value`}>{newScheduleType === 'interval' ? t('ui.intervalSeconds') : t('ui.cronExpression')}</label>
               {newScheduleType === 'interval' ? (
-                <Input
+                <input
+                  id={`${ids}-sched-value`}
                   type="number"
                   data-testid="input-schedule-interval"
                   value={String(newIntervalSeconds)}
@@ -872,100 +715,80 @@ export function TriggersView({ initialWorkflowId = null }: TriggersViewProps = {
                   placeholder="60"
                 />
               ) : (
-                <Input
+                <input
+                  id={`${ids}-sched-value`}
                   data-testid="input-schedule-cron"
                   value={newCronExpr}
                   onChange={(e) => setNewCronExpr(e.target.value)}
                   placeholder="0 * * * *"
+                  aria-describedby={`${ids}-cron-help`}
                 />
               )}
+              {newScheduleType === 'cron' && <span id={`${ids}-cron-help`} className="resource-help">{t('triggers.cronHelp')}</span>}
             </div>
           </div>
-
-          <div className="studio-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-            <div>
-              <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>
-                {t('ui.ianaTimezone')}
-              </label>
-              <Input
+          <div className="resource-limits" style={{ gridTemplateColumns: 'repeat(2, minmax(0, 1fr))' }}>
+            <div className="resource-field">
+              <label htmlFor={`${ids}-sched-tz`}>{t('ui.ianaTimezone')}</label>
+              <input
+                id={`${ids}-sched-tz`}
                 data-testid="input-schedule-timezone"
                 value={newTimezone}
                 onChange={(e) => setNewTimezone(e.target.value)}
                 placeholder="Asia/Kolkata"
+                aria-describedby={`${ids}-tz-help`}
               />
-              <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+              <span id={`${ids}-tz-help`} className="resource-help">
                 {t('ui.examplePrefix')} <code>Asia/Kolkata, America/New_York, UTC</code>
               </span>
             </div>
-
-            <div>
-              <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>
-                {t('ui.missedRunPolicy')}
-              </label>
-              <select
-                value={newMissedPolicy}
-                onChange={(e) => setNewMissedPolicy(e.target.value as any)}
-                style={{
-                  width: '100%',
-                  padding: '8px 12px',
-                  borderRadius: 'var(--radius-md)',
-                  border: '1px solid var(--border-subtle)',
-                  backgroundColor: 'var(--bg-surface)',
-                  color: 'var(--text-primary)',
-                  fontSize: 13,
-                }}
-              >
+            <div className="resource-field">
+              <label htmlFor={`${ids}-sched-missed`}>{t('ui.missedRunPolicy')}</label>
+              <select id={`${ids}-sched-missed`} value={newMissedPolicy} onChange={(e) => setNewMissedPolicy(e.target.value as any)}>
                 <option value="fire_once">{t('ui.fireOnceEnqueue1Job')}</option>
                 <option value="skip">{t('ui.skipDiscardMissed')}</option>
                 <option value="burst">{t('ui.burstEnqueueAll')}</option>
               </select>
             </div>
           </div>
-
-          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 10 }}>
-            <Button variant="secondary" onClick={() => setScheduleModalOpen(false)}>
-              {t('ui.cancel')}
-            </Button>
-            <Button
-              variant="primary"
-              data-testid="btn-submit-create-schedule"
-              disabled={actionLoading || noWorkflowToPick || !canEdit}
-              onClick={async () => {
-                const ok = await handleCreateSchedule();
-                if (ok) setScheduleModalOpen(false);
-              }}
-            >
-              {actionLoading ? <Spinner size={14} /> : t('ui.saveSchedule')}
-            </Button>
-          </div>
         </div>
       </Modal>
 
-      {/* Modal: Register Webhook */}
       <Modal
         open={webhookModalOpen}
         onClose={() => setWebhookModalOpen(false)}
         title={t('ui.registerWebhookEndpoint')}
+        maxWidth={640}
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setWebhookModalOpen(false)}>
+              {t('ui.cancel')}
+            </Button>
+            <Button
+              variant="primary"
+              data-testid="btn-submit-register-webhook"
+              loading={actionLoading}
+              disabled={noWorkflowToPick || !canEdit}
+              onClick={async () => {
+                const ok = await handleRegisterWebhook();
+                if (ok) setWebhookModalOpen(false);
+              }}
+            >
+              {t('ui.registerWebhook')}
+            </Button>
+          </>
+        }
       >
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <div className="resource-form" style={{ gap: 16 }}>
           {formError && (
-            <Alert variant="danger" title={t('ui.validationError')}>
-              {formError}
-            </Alert>
+            <div role="alert" className="inline-notice inline-notice--danger">
+              <span>{formError}</span>
+            </div>
           )}
-
-          <div>
-            <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>
-              {t('ui.endpointId')}
-            </label>
-            <Input
-              data-testid="input-new-webhook-id"
-              value={newEndpointId}
-              onChange={(e) => setNewEndpointId(e.target.value)}
-              placeholder={t('ui.eGOrdersIngress')}
-            />
+          <div className="resource-field">
+            <label htmlFor={`${ids}-wh-id`}>{t('ui.endpointId')}</label>
+            <input id={`${ids}-wh-id`} data-testid="input-new-webhook-id" value={newEndpointId} onChange={(e) => setNewEndpointId(e.target.value)} placeholder={t('ui.eGOrdersIngress')} />
           </div>
-
           <WorkflowPicker
             testId="select-new-webhook-wfid"
             value={newWebhookWfId}
@@ -974,37 +797,13 @@ export function TriggersView({ initialWorkflowId = null }: TriggersViewProps = {
             loading={workflowsLoading}
             error={workflowsError}
           />
-
-          <div>
-            <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', display: 'block', marginBottom: 4 }}>
-              {t('ui.replayWindowSeconds')}
-            </label>
-            <Input
-              type="number"
-              value={String(newReplayWindow)}
-              onChange={(e) => setNewReplayWindow(Number(e.target.value))}
-              placeholder="300"
-            />
+          <div className="resource-field">
+            <label htmlFor={`${ids}-wh-window`}>{t('ui.replayWindowSeconds')}</label>
+            <input id={`${ids}-wh-window`} type="number" value={String(newReplayWindow)} onChange={(e) => setNewReplayWindow(Number(e.target.value))} placeholder="300" />
           </div>
-
-          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 10 }}>
-            <Button variant="secondary" onClick={() => setWebhookModalOpen(false)}>
-              {t('ui.cancel')}
-            </Button>
-            <Button
-              variant="primary"
-              data-testid="btn-submit-register-webhook"
-              disabled={actionLoading || noWorkflowToPick || !canEdit}
-              onClick={async () => {
-                const ok = await handleRegisterWebhook();
-                if (ok) setWebhookModalOpen(false);
-              }}
-            >
-              {actionLoading ? <Spinner size={14} /> : t('ui.registerWebhook')}
-            </Button>
-          </div>
+          <p className="resource-help">{t('triggers.secretShownOnce')}</p>
         </div>
       </Modal>
-    </div>
+    </PageLayout>
   );
 }

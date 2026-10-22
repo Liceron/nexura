@@ -44,13 +44,11 @@ class AgentHooks:
         Return a ``ModelResponse`` to use it instead of calling the model.
         """
         return None
-        return None
 
     async def after_model(
         self, ctx: RunContext[Any], response: ModelResponse
     ) -> ModelResponse | None:
         """Called after each model response. Return a ``ModelResponse`` to replace it."""
-        return None
         return None
 
     async def before_tool(self, ctx: RunContext[Any], call: ToolCall) -> str | None:
@@ -59,11 +57,9 @@ class AgentHooks:
         Return a string to skip the tool and use the string as its result.
         """
         return None
-        return None
 
     async def after_tool(self, ctx: RunContext[Any], call: ToolCall, result: str) -> str | None:
         """Called after a tool returns its result. Return a string to replace the result."""
-        return None
         return None
 
     async def on_run_end(self, ctx: RunContext[Any], output: Any) -> None:

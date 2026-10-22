@@ -14,7 +14,7 @@
       },
       {
         "name": "nexura:lock-sha256",
-        "value": "d9b7ac1a588cf65d94916bd33ece2abcdda462b282e7d2ae5ec23295fdef085e"
+        "value": "1b605f1d5b88b0f5db5d57a9ec9f2dc56d25222ca54e8c131bfa791e228c7f57"
       },
       {
         "name": "nexura:generator",
@@ -330,6 +330,13 @@
       "name": "nexura-connectors",
       "version": "0.4.0",
       "purl": "pkg:pypi/nexura-connectors@0.4.0"
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:pypi/nexura-guardrails@0.4.0",
+      "name": "nexura-guardrails",
+      "version": "0.4.0",
+      "purl": "pkg:pypi/nexura-guardrails@0.4.0"
     },
     {
       "type": "library",
@@ -936,6 +943,13 @@
         "pkg:pypi/nexura-agents@0.4.0",
         "pkg:pypi/nexura-runtime@0.4.0",
         "pkg:pypi/pydantic@2.14.1"
+      ]
+    },
+    {
+      "ref": "pkg:pypi/nexura-guardrails@0.4.0",
+      "dependsOn": [
+        "pkg:pypi/nexura-agents@0.4.0",
+        "pkg:pypi/pyyaml@6.0.3"
       ]
     },
     {

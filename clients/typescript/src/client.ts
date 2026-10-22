@@ -65,6 +65,7 @@ import type {
   ScheduleConfig,
   CreateScheduleOptions,
   WebhookConfig,
+  DeliveryTokenResult,
   RegisterWebhookOptions,
   TestWebhookOptions,
   TestWebhookResult,
@@ -223,9 +224,11 @@ export class NexuraClient {
 
   /** Read the local server's per-session token (`GET /api/v1/local-session`) and keep it. */
   public async fetchSessionToken(): Promise<string> {
-    const response = await fetch(this.buildUrl("/local-session").toString(), {
-      headers: { Accept: "application/json", "X-Workspace-ID": this.workspaceId },
-    });
+    const headers: Record<string, string> = { Accept: "application/json", "X-Workspace-ID": this.workspaceId };
+    // A server in remote single-operator mode answers 404 to an authenticated probe instead of
+    // counting an unauthenticated one as a failed sign-in.
+    if (this.apiKey) headers.Authorization = `Bearer ${this.apiKey}`;
+    const response = await fetch(this.buildUrl("/local-session").toString(), { headers });
     let token: unknown;
     try {
       token = response.ok ? (await response.json())?.token : undefined;
@@ -1038,7 +1041,12 @@ export class TriggersClient {
     return this.client.request<{ deleted: boolean; endpoint_id: string }>("DELETE", `/triggers/webhooks/${encodeURIComponent(endpointId)}`);
   }
 
-  public async testWebhook(endpointId: string, options: TestWebhookOptions = {}): Promise<TestWebhookResult> {
+  /** Issue a new delivery token for a webhook (remote single-operator mode only). */
+  public async rotateDeliveryToken(endpointId: string): Promise<DeliveryTokenResult> {
+    return this.client.request<DeliveryTokenResult>("POST", `/triggers/webhooks/${encodeURIComponent(endpointId)}/delivery-credential`);
+  }
+
+    public async testWebhook(endpointId: string, options: TestWebhookOptions = {}): Promise<TestWebhookResult> {
     return this.client.request<TestWebhookResult>("POST", `/triggers/webhooks/${encodeURIComponent(endpointId)}/test`, {
       body: options,
     });
