@@ -39,6 +39,8 @@ from nexura_agents.evals import (
 )
 from nexura_agents.types import Message, RunResult, ToolCall
 
+from nexura_runtime.evaluation.graders import ToolArgumentAccuracyGrader, TrajectoryGrader
+from nexura_runtime.evaluation.models import DatasetExample, TrajectoryStep
 from nexura_runtime.observability.run_diagnostics import redact_run_content
 from nexura_runtime.workflow import ModuleRegistry, WorkflowEngine, WorkflowNode, WorkflowSpec
 
@@ -55,6 +57,7 @@ SCORER_TYPES = (
     "contains",
     "regex",
     "tool_trajectory",
+    "tool_argument_accuracy",
     "agent_path",
     "tool_called",
     "max_latency",
@@ -295,6 +298,23 @@ def build_scorers(specs: Sequence[dict[str, Any]], judge_model: Any | None) -> l
                     raise ValueError(f"unsafe pattern: {unsafe}")
                 re.compile(pattern)
                 out.append(regex_match(pattern))
+            elif kind in ("tool_trajectory", "tool_argument_accuracy") and (
+                kind == "tool_argument_accuracy"
+                or "argument_rules" in spec
+                or spec.get("mode") in ("exact", "in_order", "any_order")
+            ):
+                grader = (
+                    ToolArgumentAccuracyGrader(
+                        mode=spec.get("mode", "exact"), argument_rules=spec.get("argument_rules")
+                    )
+                    if kind == "tool_argument_accuracy"
+                    else TrajectoryGrader(
+                        mode=spec.get("mode", "exact"),
+                        check_arguments=spec.get("check_arguments", False),
+                        argument_rules=spec.get("argument_rules"),
+                    )
+                )
+                out.append(_trajectory_scorer(grader))
             elif kind == "tool_trajectory":
                 out.append(
                     _for_field(
@@ -341,6 +361,37 @@ def build_scorers(specs: Sequence[dict[str, Any]], judge_model: Any | None) -> l
     return out
 
 
+def _trajectory_scorer(grader: TrajectoryGrader) -> Scorer:
+    def score(case: Case, result: EvalOutput) -> Score:
+        trajectory = case.metadata.get("expected_trajectory")
+        example = DatasetExample(
+            input_data={},
+            expected_trajectory=[
+                TrajectoryStep(name=name, args=args or {}) for name, args in trajectory
+            ]
+            if trajectory is not None
+            else None,
+        )
+        graded = grader.score_trace(
+            example,
+            {
+                "runs": [
+                    {
+                        "messages": [],
+                        "events": [
+                            {"type": "tool_started", "data": {"tool_name": name, "arguments": args}}
+                            for name, args in result.tool_call_details
+                        ],
+                    }
+                ]
+            },
+        )
+        return Score(grader.name, graded.score, graded.passed, graded.reason)
+
+    score.name = grader.name  # type: ignore[attr-defined]
+    return score
+
+
 def default_scorer_specs(cases: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
     specs: list[dict[str, Any]] = []
     if any(c.get("expected_output") is not None for c in cases):
@@ -373,6 +424,9 @@ def _to_sdk_cases(cases: Sequence[dict[str, Any]]) -> list[Case]:
             "tags": list(c.get("tags") or []),
             "input": c["input"],
         }
+        for field in ("source_run_id", "source_workflow_id", "source_spec_hash", "output_field"):
+            if field in c.get("metadata", {}):
+                meta[field] = c["metadata"][field]
         out.append(Case(name=c["name"], input=text, expected=None, metadata=meta))
     return out
 

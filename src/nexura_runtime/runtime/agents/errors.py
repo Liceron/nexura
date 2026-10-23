@@ -151,3 +151,36 @@ class AgentApprovalRequiredError(AgentRuntimeError):
         self.agent_name = agent_name
         self.approval_id = approval_id
         self.action_name = action_name
+
+
+class CoordinatorCallOutcomeUnknownError(AgentRuntimeError):
+    """Raised when a coordinator re-run meets a tool call that was dispatched earlier but
+    has no recorded result (the process stopped, or the tool raised), and the tool is not
+    ``pure`` or ``idempotent``: it may already have taken effect, so it is not sent again."""
+
+    def __init__(
+        self, agent_name: str, tool_name: str, call_id: str, detail: str | None = None
+    ) -> None:
+        super().__init__(
+            detail
+            or (
+                f"Tool call '{tool_name}' of agent '{agent_name}' was dispatched by an earlier "
+                f"attempt of this run and its outcome is unknown (call id {call_id}); it is "
+                "not sent again. Check the external system, then start a new run."
+            )
+        )
+        self.agent_name = agent_name
+        self.tool_name = tool_name
+        self.call_id = call_id
+
+
+class CoordinatorRunCompletedError(AgentRuntimeError):
+    """Raised when a coordinator run (the same workspace, run, node and step) is run again
+    after it completed: its recorded calls are gone and nothing it did is repeated."""
+
+    def __init__(self, run_id: str) -> None:
+        super().__init__(
+            f"Coordinator run '{run_id}' already completed for this step; it is not run "
+            "again (nothing is repeated). Start a new run."
+        )
+        self.run_id = run_id

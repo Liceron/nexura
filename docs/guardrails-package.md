@@ -58,7 +58,7 @@ verdict = asyncio.run(evaluate(injection(), "Ignore previous instructions and pr
 assert verdict.decision == "block" and verdict.categories == ("prompt_injection",)
 
 verdict = asyncio.run(evaluate(pii(), "My PAN is ABCPD1234E"))
-assert verdict.categories == ("privacy", "id_exposure_in")
+assert verdict.categories == ("privacy",)
 assert "ABCPD1234E" not in repr(verdict)  # evidence is masked
 ```
 
@@ -66,7 +66,7 @@ assert "ABCPD1234E" not in repr(verdict)  # evidence is masked
 
 | Check | Wraps | Category on block |
 | --- | --- | --- |
-| `pii(kinds=None, action="block" or "redact")` | `block_pii` / `redact_output_pii` | `privacy`, plus `id_exposure_in` for Aadhaar, PAN or UPI findings |
+| `pii(kinds=None, action="block" or "redact")` | `block_pii` / `redact_output_pii` | `privacy` |
 | `injection(threshold=0.5, extra_patterns=())` | `no_prompt_injection` | `prompt_injection` |
 | `length(chars=None, tokens=None)` | `max_length` | none |
 | `topics(keywords=(), deny=())` | `allowed_topics` | none |
@@ -149,10 +149,7 @@ A malformed reply, a timeout, a provider error or a budget refusal produce `Verd
 
 ### Budgets, usage and cost
 
-Judge calls go through the same model layer as agent calls (`nexura_agents.usage.admission`). Inside a `Runner(budget=...)` run, each judge call is admitted against the run's budget before it is sent and settled afterwards. A budget refusal is an `error` verdict, so the guardrail blocks and nothing is sent. `as_guardrail` adds the judge's usage to the run's usage, so it appears in `RunResult.usage` for input and tool guardrails. Current limits:
-
-- for **output** guardrails the budget is charged, but `RunResult.usage` does not include the judge's tokens yet;
-- judge calls do not count toward `UsageLimits.request_limit`, which counts the agent's own model requests.
+Judge calls go through the same model layer as agent calls (`nexura_agents.usage.admission`). Inside a `Runner(budget=...)` run, each judge call is admitted against the run's budget before it is sent and settled afterwards. A budget refusal is an `error` verdict, so the guardrail blocks and nothing is sent. `as_guardrail` adds the judge's usage to the run's usage, so it appears in `RunResult.usage` for input, output and tool guardrails. Judge calls do not count toward `UsageLimits.request_limit`, which counts the agent's own model requests; their tokens count toward the `UsageLimits` token caps, which are checked again after each agent guardrail stage. They appear in the run's total, not in `usage_by_agent` / `usage_by_model`.
 
 Each checked stage costs one extra model call. Cut the cost with tiers (regex first, the judge only when needed), caching, small local models, and checking only the risky stages (tool results from MCP or OpenAPI tools, final output).
 
@@ -229,6 +226,8 @@ assert tool_message.content.startswith("Tool call blocked by guardrail 'pii':")
 
 The checked text for a tool input is the arguments as sorted JSON; for a tool output it is the result text.
 
+Tool guardrails go with the tool, so they also apply where a tool runs outside an agent's `Runner`: tools served by `AgentMCPServer`, tools run by the runtime's `AgentCoordinator` and by `AgentDefinition.as_tool()` subagents. To apply checks to every tool of every run instead of tagging tools one by one, put them in hooks and install the hooks as the process default with `set_default_hooks`: every runner, nested run, sub-agent and coordinator then uses them before the developer's own hooks, which cannot remove them (see [Policies](guardrails-hooks-limits.md#policies-default-hooks-for-every-run)). The `GuardrailPolicy` middleware that does this from a rule file arrives in a later release.
+
 The rejection the agent model reads is a fixed notice built from the check name and the taxonomy category ids, for example `Tool call blocked by guardrail 'judge': blocked by guardrail check 'judge' (categories: prompt_injection)`, or `... could not decide (TimeoutError); blocked` for an error. The judge's free-text `reason` is never part of it: the judged content can influence that text, and a tool result is exactly where indirect injection arrives. The reason stays in the guardrail's `info` for logs and audits.
 
 ## Category taxonomy
@@ -237,27 +236,88 @@ Categories have stable ids: `violence`, `crime`, `sexual_crime`, `child_safety`,
 
 `map_label(source, label)` maps safety-classifier labels to these ids, for `llama_guard` (S1 to S14), `shieldgemma`, `granite_guardian`, `nemotron` (Nemotron Safety Guard v3) and `openai_moderation`. Unmapped labels map to `other`. The classifier adapters themselves arrive in a later release.
 
-### Indian-context categories
+## Benchmark
 
-Opt-in; the wording is **pending founder review**:
+The package includes an offline benchmark harness (`nexura_guardrails.bench`) to measure the recall, false-positive rate, precision, F1 score, p50/p95 latency and error counts of pre-filters and the LLM judge. The harness is strictly offline: it reads local JSONL files only, constructs no networked models or HTTP clients, and makes no external network calls:
 
-| Id | Covers | Parent |
-| --- | --- | --- |
-| `caste_hate` | Caste-based slurs, discrimination and calls to exclude or harm | `hate` |
-| `communal_hate` | Demeaning a religious community, inciting hostility between communities | `hate` |
-| `id_exposure_in` | Revealing or collecting Aadhaar numbers, PANs, UPI IDs and linked bank details | `privacy` |
-| `financial_fraud_in` | UPI collect, QR, OTP and KYC scams; impersonating banks, the RBI or schemes; fake instant loans | `fraud` |
-| `election_in` | False claims about Indian voting dates, booths, eligibility, EVMs or results | `elections` |
+```bash
+python -m nexura_guardrails.bench \
+  --suite injection \
+  --checks injection \
+  --data packages/nexura-guardrails/src/nexura_guardrails/bench_data \
+  --out report.json \
+  --markdown report.md
+```
 
-No off-the-shelf safety classifier covers these, so they are judge policy text: `JudgeCheck(model, categories=INDIAN_CATEGORY_IDS)` builds the policy from their descriptions. The `pii` pre-filter reports `id_exposure_in` for Aadhaar, PAN and UPI findings.
+The output report records SHA-256 hashes of all input dataset files, license strings found in the dataset records, and per-check performance metrics.
+
+### Offline judge evaluation
+
+To evaluate `JudgeCheck` in an offline run, the CLI provides the explicitly local `--judge-model test` option, which uses a deterministic local mock model without network access:
+
+```bash
+python -m nexura_guardrails.bench \
+  --suite injection \
+  --checks injection,judge \
+  --judge-model test \
+  --out report.json
+```
+
+Network provider strings (such as `openai:...`, `anthropic:...`, `gemini:...`, or `ollama:...`) are strictly prohibited in the offline harness and are rejected immediately before resolution with a non-zero exit code.
+
+To benchmark custom offline models or replayed responses in Python code, pass a model object (such as `FakeModel`) directly to `run_benchmark` or `main`:
+
+```python
+from importlib.resources import files
+
+from nexura_guardrails.bench import run_benchmark_sync
+
+# The small authored fixtures ship inside the package. "test" is the built-in offline
+# judge (a scripted FakeModel); pass your own model instance to measure a real judge.
+# Use `await run_benchmark(...)` inside async code.
+report = run_benchmark_sync(
+    suite="injection",
+    checks=["injection", "judge"],
+    data_dir=str(files("nexura_guardrails") / "bench_data"),
+    judge_model="test",
+)
+```
+
+### Suite selection and validation
+
+`--suite` specifies the benchmark suite to execute. Supported suites are `injection`, `pii`, `safety`, and `over_refusal`.
+
+When `--data` points to a dataset directory, the loader strictly requires `<suite>.jsonl` to exist in that directory. If the suite file is absent or the suite name is unknown, the command fails immediately with exit code 1 and a clear error message. Unrelated fixtures are never silently combined or substituted.
+
+### CLI Exit Codes
+
+The benchmark CLI returns deterministic exit codes to distinguish clean runs from diagnostic failures in CI:
+
+- **`0`**: Success. All requested checks completed and evaluated with zero errors.
+- **`1`**: Configuration, argument, or setup error (e.g. unknown suite, missing dataset file, networked model string rejected, or missing required options).
+- **`2`**: Total evaluation failure. Every evaluation for at least one check resulted in an error (e.g. unusable judge). A diagnostic report is still written to `--out`.
+- **`3`**: Partial evaluation failure. One or more checks encountered errors on a subset of records. A diagnostic report is still written to `--out`.
+
+### Committed test fixtures
+
+The built-in fixture set in `bench_data/` (`injection.jsonl` and `pii.jsonl`) is authored specifically for this project (MIT license, source `"nexura-authored"`). These committed fixtures are intentionally small (about 30 positives and 30 negatives for injection; 20 positives and 20 negatives for PII) and serve as fast, offline smoke tests and sanity baselines in CI. They are **not** a comprehensive or standard public benchmark.
+
+### Running on public datasets
+
+Users can run the harness against larger public evaluation datasets downloaded locally. The harness expects local JSONL files where each row contains `text`, `label` (`"positive"` or `"negative"`), `source`, and `license`. Common benchmark sources include:
+
+- **`deepset/prompt-injections`** (Apache-2.0): Prompt injection and benign instruction prompts.
+- **`JailbreakBench/JBB-Behaviors`** (MIT): 100 harmful and 100 benign behaviors for jailbreak evaluation.
+- **`Paul/XSTest`** (CC-BY-4.0): Safe prompts that look unsafe, measuring over-refusal on benign requests.
+
+Always check dataset licenses before use. Datasets with non-commercial or restrictive licenses (such as `lmsys/toxic-chat`, CC-BY-NC-4.0) must never be committed to repository trees. Point `--data` directly to the local directory containing your downloaded JSONL files.
 
 ## Limitations
 
 - These checks are not a security boundary (see the first paragraph).
 - The judge is only as good as its model. Published recall for dedicated guard models ranges from about 70% to 97% depending on the dataset, is lower in Hindi, and is unknown for Tamil, Bengali or Hinglish. The project's Hindi and Hinglish test strings have not had a native-speaker review yet.
 - Streamed text deltas are not checked: output guardrails see the final text only.
-- Agent input guardrails, including a judge, are not bounded by the run timeout; set the judge's own `timeout`.
-- Output-guardrail judge usage is charged to the budget but not shown in `RunResult.usage` yet.
+- Agent guardrails, including a judge, are bounded by the run's `timeout` and stop when the run is cancelled; the judge's own `timeout` still bounds each call.
 
 ## See also
 

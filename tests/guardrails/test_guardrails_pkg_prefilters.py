@@ -52,12 +52,12 @@ async def test_injection_blocks_with_category_and_capped_score() -> None:
     assert benign.decision == "allow" and benign.score == 0.0
 
 
-async def test_pii_block_maps_indian_ids_to_the_indian_category() -> None:
+async def test_pii_block_maps_pan_to_privacy() -> None:
     card = await evaluate(pii(), "card 4111 1111 1111 1111")
     assert card.decision == "block" and card.categories == ("privacy",)
     assert "4111 1111 1111 1111" not in repr(card)
     pan = await evaluate(pii(), "my PAN is ABCPD1234E")
-    assert pan.categories == ("privacy", "id_exposure_in")
+    assert pan.categories == ("privacy",)
     assert (await evaluate(pii(kinds=["email"]), "PAN ABCPD1234E")).decision == "allow"
     with pytest.raises(ValueError):
         pii(action="mask")

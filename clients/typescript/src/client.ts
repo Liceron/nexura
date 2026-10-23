@@ -8,6 +8,12 @@ import type {
   ExecutionEffect,
   ResolveEffectOptions,
   RecoverRunOptions,
+  MigrateRunOptions,
+  GraderCapabilities,
+  StoredTrace,
+  TraceEvaluationOptions,
+  SimulationEvaluationOptions,
+  TraceEvaluationSummary,
   AgentListResponse,
   AgentOptions,
   AgentRecord,
@@ -579,6 +585,25 @@ export class RunsClient {
     return this.client.request<RunRecord>("POST", `/runs/${encodeURIComponent(runId)}/fork`, { body });
   }
 
+  /**
+   * Migrate the run to its saved workflow's current definition with the server's trusted
+   * hooks, then optionally recover it. The target is always the run's saved workflow (ad-hoc
+   * runs are refused); the caller needs `run` and `edit`. `expectedDefinitionDigest` refuses
+   * the call (409) if the saved definition changed since it was read. Pending approvals and
+   * input stay pending. Defaults: resume, pause on unknown effects. Refusals raise
+   * NexuraApiError with code WORKFLOW_MIGRATION_REFUSED.
+   */
+  public async migrate(runId: string, options: MigrateRunOptions = {}): Promise<RunRecord> {
+    const body: Record<string, unknown> = {
+      resume: options.resume ?? true,
+      on_uncertain: options.onUncertain ?? "pause",
+    };
+    if (options.expectedDefinitionDigest !== undefined) {
+      body.expected_definition_digest = options.expectedDefinitionDigest;
+    }
+    return this.client.request<RunRecord>("POST", `/runs/${encodeURIComponent(runId)}/migrate`, { body });
+  }
+
   public async subruns(runId: string, options: { limit?: number; offset?: number } = {}): Promise<PaginatedResponse<RunCheckpoint>> {
     return this.client.request<PaginatedResponse<RunCheckpoint>>(
       "GET", `/runs/${encodeURIComponent(runId)}/subruns`, { params: options }
@@ -957,6 +982,28 @@ export class EvaluationsClient {
   constructor(client: NexuraClient) {
     this.client = client;
     this.studio = new StudioEvaluationsClient(client);
+  }
+
+  /** Supported grader types, trajectory modes and evaluation JSON schemas. */
+  public async graders(): Promise<GraderCapabilities> {
+    return this.client.request<GraderCapabilities>("GET", "/evaluations/graders");
+  }
+
+  /** Import a recorded snapshot for post-hoc grading; requires edit permission. */
+  public async importTrace(trace: StoredTrace): Promise<{ run_id: string; source: "imported_trace" }> {
+    return this.client.request<{ run_id: string; source: "imported_trace" }>(
+      "POST", "/evaluations/traces", { body: trace }
+    );
+  }
+
+  /** Grade stored traces without executing a target; omitted options use server defaults. */
+  public async evaluateOnline(options: TraceEvaluationOptions): Promise<TraceEvaluationSummary> {
+    return this.client.request<TraceEvaluationSummary>("POST", "/evaluations/online", { body: options });
+  }
+
+  /** Evaluate simulated conversations with a host-registered agent; requires run permission. */
+  public async simulate(options: SimulationEvaluationOptions): Promise<TraceEvaluationSummary> {
+    return this.client.request<TraceEvaluationSummary>("POST", "/evaluations/simulate", { body: options });
   }
 
   public async listDatasets(): Promise<{ datasets: DatasetSummary[]; total: number }> {

@@ -7,6 +7,8 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from decimal import Decimal, InvalidOperation
+from fractions import Fraction
 from typing import Any, Protocol, runtime_checkable
 
 from nexura_agents.contracts.errors import SchemaValidationError
@@ -16,11 +18,294 @@ from nexura_agents.evals import check_regex_safety
 
 from nexura_runtime.evaluation.errors import GraderExecutionError, JudgeUnauthorizedEffectError
 from nexura_runtime.evaluation.models import (
+    ArgumentMatch,
     DatasetExample,
     GraderKind,
     GraderResult,
     QualityEvidence,
+    TrajectoryMode,
+    TrajectoryStep,
 )
+
+
+def recorded_tool_calls(trace: Any) -> list[TrajectoryStep]:
+    """Read SDK RunResult/RunEvents or their stored JSON, deduplicating per run/call id.
+
+    Messages include requested calls; tool_started events also cover calls missing from
+    message capture. Streaming deltas and completion events never count as extra calls.
+    """
+
+    def get(value: Any, key: str, default: Any = None) -> Any:
+        return value.get(key, default) if isinstance(value, dict) else getattr(value, key, default)
+
+    calls: list[TrajectoryStep] = []
+    nodes: dict[tuple[str, str], TrajectoryStep] = {}
+    edges: dict[tuple[str, str], set[tuple[str, str]]] = {}
+
+    def add(call: Any, run_id: str) -> tuple[str, str]:
+        call_id = get(call, "id", get(call, "tool_call_id"))
+        key = (run_id, str(call_id) if call_id else f"anonymous:{len(nodes)}")
+        if key in nodes:
+            return key
+        function = get(call, "function", call)
+        name = get(function, "name", get(function, "tool_name"))
+        args = get(function, "arguments", get(function, "args", {}))
+        if isinstance(args, str):
+            args = json.loads(args)
+        if not isinstance(name, str) or not name or not isinstance(args, dict):
+            raise ValueError("Recorded tool call requires name and object arguments")
+        nodes[key] = TrajectoryStep(name=name, args=args)
+        edges[key] = set()
+        return key
+
+    def read(run: Any) -> None:
+        prior = set(nodes)
+        run_id = str(get(run, "run_id", ""))
+        sequences: list[list[tuple[str, str]]] = [[], []]
+        for message in get(run, "messages", []) or []:
+            for call in get(message, "tool_calls", []) or []:
+                sequences[0].append(add(call, run_id))
+        for event in get(run, "events", []) or []:
+            if get(event, "type") == "tool_started":
+                sequences[1].append(
+                    add(get(event, "data", {}), str(get(event, "run_id", run_id)))
+                )
+        for sequence in sequences:
+            unique = list(dict.fromkeys(sequence))
+            for before, after in zip(unique, unique[1:], strict=False):
+                edges[before].add(after)
+        # Conversation runs themselves are recorded in turn order.
+        for key in prior:
+            edges[key].update(set(nodes) - prior)
+
+    if isinstance(trace, (list, tuple)):
+        read({"events": trace})
+    else:
+        runs = get(trace, "runs")
+        for run in runs if runs is not None else [trace]:
+            read(run)
+    # Both captures provide ordering constraints. Shared call IDs anchor partial
+    # captures; no arbitrary message-first ordering is invented for disjoint data.
+    while nodes:
+        successors = {key for targets in edges.values() for key in targets}
+        ready = [key for key in nodes if key not in successors]
+        if len(ready) != 1:
+            raise ValueError("Recorded tool call ordering is ambiguous or contradictory")
+        key = ready[0]
+        calls.append(nodes.pop(key))
+        edges.pop(key)
+    return calls
+
+
+def _argument_equal(actual: Any, expected: Any, rule: ArgumentMatch) -> bool:
+    def normalise(value: Any) -> Any:
+        for operation in rule.normalisers:
+            if operation == "numeric":
+                if isinstance(value, bool):
+                    raise ValueError("Boolean is not numeric")
+                value = Decimal(str(value))
+            elif isinstance(value, str):
+                if operation == "strip":
+                    value = value.strip()
+                elif operation == "casefold":
+                    value = value.casefold()
+                elif operation == "whitespace":
+                    value = " ".join(value.split())
+        return value
+
+    try:
+        actual, expected = normalise(actual), normalise(expected)
+    except (ValueError, TypeError, OverflowError, InvalidOperation):
+        return False
+    if isinstance(actual, (int, float, Decimal)) and not isinstance(actual, bool):
+        if not isinstance(expected, (int, float, Decimal)) or isinstance(expected, bool):
+            return False
+        try:
+            left, right = Fraction(actual), Fraction(expected)
+        except (ValueError, OverflowError):
+            return False
+        return abs(left - right) <= max(
+            Fraction(str(rule.absolute_tolerance)),
+            Fraction(str(rule.relative_tolerance)) * max(abs(left), abs(right)),
+        )
+    # JSON booleans must not accidentally equal 0/1 (including nested objects).
+    return type(actual) is type(expected) and json.dumps(actual, sort_keys=True) == json.dumps(
+        expected, sort_keys=True
+    )
+
+
+def _maximum_assignment(weights: list[list[float]]) -> list[tuple[int, int]]:
+    """Maximum-weight bipartite assignment, padding with unmatched zero-weight calls."""
+    rows = len(weights)
+    columns = max(rows, len(weights[0]) if rows else 0)
+    u, v = [0.0] * (rows + 1), [0.0] * (columns + 1)
+    p, way = [0] * (columns + 1), [0] * (columns + 1)
+    for i in range(1, rows + 1):
+        p[0], j0 = i, 0
+        minimum, used = [float("inf")] * (columns + 1), [False] * (columns + 1)
+        while True:
+            used[j0] = True
+            i0, delta, j1 = p[j0], float("inf"), 0
+            for j in range(1, columns + 1):
+                if not used[j]:
+                    weight = weights[i0 - 1][j - 1] if j <= len(weights[i0 - 1]) else 0
+                    cost = -weight - u[i0] - v[j]
+                    if cost < minimum[j]:
+                        minimum[j], way[j] = cost, j0
+                    if minimum[j] < delta:
+                        delta, j1 = minimum[j], j
+            for j in range(columns + 1):
+                if used[j]:
+                    u[p[j]] += delta
+                    v[j] -= delta
+                else:
+                    minimum[j] -= delta
+            j0 = j1
+            if not p[j0]:
+                break
+        while j0:
+            p[j0], j0 = p[way[j0]], way[j0]
+    return [
+        (p[j] - 1, j - 1) for j in range(1, columns + 1) if p[j] and j <= len(weights[p[j] - 1])
+    ]
+
+
+class TrajectoryGrader:
+    """Score tool sequence accuracy; optionally compare expected argument leaves.
+
+    Exact/any_order require equal call counts. Subset/in_order permits extra actual
+    calls. Scores average expected step accuracy, penalising extras outside subset.
+    Argument rules use dotted paths, optionally prefixed with the tool name.
+    """
+
+    def __init__(
+        self,
+        name: str = "tool_trajectory",
+        *,
+        mode: TrajectoryMode = "exact",
+        check_arguments: bool = False,
+        argument_rules: dict[str, ArgumentMatch | dict[str, Any]] | None = None,
+    ) -> None:
+        if mode not in ("exact", "strict", "subset", "in_order", "any_order"):
+            raise ValueError(f"Unsupported trajectory mode: {mode}")
+        self.name = name
+        self.kind: GraderKind = "deterministic"
+        self.mode = "exact" if mode == "strict" else "subset" if mode == "in_order" else mode
+        self.check_arguments = check_arguments
+        self.argument_rules = {
+            key: ArgumentMatch.model_validate(value)
+            for key, value in (argument_rules or {}).items()
+        }
+
+    def _step(
+        self, expected: TrajectoryStep, actual: TrajectoryStep
+    ) -> tuple[float, dict[str, bool]]:
+        if expected.name != actual.name:
+            return 0.0, {}
+        checks: dict[str, bool] = {}
+        if self.check_arguments:
+
+            def compare(want: dict[str, Any], got: Any, prefix: str = "") -> None:
+                for key, value in want.items():
+                    path = f"{prefix}.{key}" if prefix else key
+                    present = isinstance(got, dict) and key in got
+                    observed = got[key] if present else None
+                    rule = self.argument_rules.get(
+                        f"{expected.name}.{path}", self.argument_rules.get(path, ArgumentMatch())
+                    )
+                    if isinstance(value, dict) and not rule.normalisers:
+                        if value:
+                            compare(value, observed, path)
+                        else:
+                            checks[path] = present and isinstance(observed, dict)
+                    else:
+                        checks[path] = present and _argument_equal(observed, value, rule)
+
+            compare(expected.args, actual.args)
+        return (sum(checks.values()) / len(checks) if checks else 1.0), checks
+
+    def score_trace(self, example: DatasetExample, trace: Any) -> GraderResult:
+        """Synchronous grading shared by the runtime and SDK Studio scorer adapter."""
+        try:
+            if example.expected_trajectory is None:
+                raise ValueError("Example has no expected_trajectory")
+            expected = [
+                TrajectoryStep(name=s) if isinstance(s, str) else s
+                for s in example.expected_trajectory
+            ]
+            actual = recorded_tool_calls(trace)
+            pairs = [[self._step(e, a) for a in actual] for e in expected]
+            weights = [[value for value, _ in row] for row in pairs]
+            if self.mode == "exact":
+                matching = [(i, i) for i in range(min(len(expected), len(actual)))]
+            elif self.mode == "any_order":
+                matching = _maximum_assignment(weights)
+            else:
+                # Weighted longest in-order subsequence, including repeated tool names.
+                dp = [[0.0] * (len(actual) + 1) for _ in range(len(expected) + 1)]
+                for i in range(1, len(expected) + 1):
+                    for j in range(1, len(actual) + 1):
+                        dp[i][j] = max(
+                            dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1] + weights[i - 1][j - 1]
+                        )
+                i, j, matching = len(expected), len(actual), []
+                while i and j:
+                    if dp[i][j] == dp[i - 1][j - 1] + weights[i - 1][j - 1]:
+                        matching.append((i - 1, j - 1))
+                        i, j = i - 1, j - 1
+                    elif dp[i - 1][j] >= dp[i][j - 1]:
+                        i -= 1
+                    else:
+                        j -= 1
+                matching.reverse()
+            denominator = (
+                len(expected) if self.mode == "subset" else max(len(expected), len(actual))
+            )
+            score = sum(weights[i][j] for i, j in matching) / denominator if denominator else 1.0
+            passed = score == 1.0
+            return GraderResult(
+                grader_name=self.name,
+                grader_kind=self.kind,
+                score=score,
+                passed=passed,
+                reason="Trajectory matched" if passed else "Trajectory or argument mismatch",
+                details={
+                    "mode": self.mode,
+                    "expected_calls": len(expected),
+                    "actual_calls": len(actual),
+                    "matches": [
+                        {
+                            "expected_index": i,
+                            "actual_index": j,
+                            "score": pairs[i][j][0],
+                            "arguments": pairs[i][j][1],
+                        }
+                        for i, j in matching
+                    ],
+                },
+            )
+        except (ValueError, TypeError) as exc:
+            return GraderResult(
+                grader_name=self.name, grader_kind=self.kind, score=0, passed=False, reason=str(exc)
+            )
+
+    async def grade(
+        self, example: DatasetExample, actual_output: Any, context: dict[str, Any] | None = None
+    ) -> GraderResult:
+        return self.score_trace(example, (context or {}).get("trace", actual_output))
+
+
+class ToolArgumentAccuracyGrader(TrajectoryGrader):
+    """Trajectory accuracy with per-argument normalisation and numeric tolerances."""
+
+    def __init__(
+        self,
+        name: str = "tool_argument_accuracy",
+        *,
+        mode: TrajectoryMode = "exact",
+        argument_rules: dict[str, ArgumentMatch | dict[str, Any]] | None = None,
+    ) -> None:
+        super().__init__(name, mode=mode, check_arguments=True, argument_rules=argument_rules)
 
 
 @runtime_checkable

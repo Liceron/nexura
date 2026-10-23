@@ -209,7 +209,29 @@ def _agent_tools(config: dict[str, Any]) -> list[Any]:
         settle(reservation)
         return f"paid {order_id}"
 
-    return [charge, reserve, pay]
+    @tool
+    def hookpay(ctx: RunContext[Any], order_id: str) -> str:
+        """Pay an order (not idempotent). Only a hook gates it (P39 G2, ``hook_gate``)."""
+        h.effect("hookpay")
+        h.point("in_tool", run_id=ctx.run_id)
+        return f"paid {order_id}"
+
+    return [charge, reserve, pay, hookpay]
+
+
+def _agent_hooks(config: dict[str, Any]) -> Any:
+    """``hook_gate``: tool names an approval hook gates in this process (P39 G2)."""
+    from nexura_agents import AgentHooks
+
+    names = set(config.get("hook_gate") or ())
+    if not names:
+        return None
+
+    class GateNames(AgentHooks):
+        def tool_needs_approval(self, ctx: Any, tool: Any, arguments: Any) -> bool | None:
+            return True if tool.name in names else None
+
+    return GateNames()
 
 
 def _describe_agent(result: Any) -> dict[str, Any]:
@@ -236,7 +258,10 @@ async def scenario_agent(config: dict[str, Any]) -> dict[str, Any]:
     # The run lease must be shorter than the takeover wait of the stale-owner row (K6,
     # claim_wait=10): a frozen owner stops renewing and its lease expires after this.
     runner = Runner(
-        checkpoint_store=store, lease_ttl=float(config.get("lease_ttl", 2.0)), budget=budget
+        checkpoint_store=store,
+        lease_ttl=float(config.get("lease_ttl", 2.0)),
+        budget=budget,
+        hooks=_agent_hooks(config),
     )
     if config["mode"] == "run":
         model = FakeModel(

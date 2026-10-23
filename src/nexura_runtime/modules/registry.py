@@ -205,7 +205,8 @@ class LegacyModuleAdapter(BaseModule):
             kind="legacy_handler",
             title=f"Legacy Handler: {name}",
             description="Compatibility adapter for legacy workflow callable handlers.",
-            effect_policy="idempotent_write",
+            # A legacy callable declares nothing about its effects: non_idempotent (A6).
+            effect_policy="non_idempotent_write",
             capabilities={"network": False, "streaming": False},
         )
 

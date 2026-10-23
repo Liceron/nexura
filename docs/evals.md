@@ -1,5 +1,223 @@
 # Evaluating agents and teams
 
+## Runtime trajectory and argument accuracy
+
+The runtime evaluation API also grades recorded SDK `RunResult` objects, JSON messages,
+or `RunEvent` lists. `TrajectoryGrader` compares tool names; `ToolArgumentAccuracyGrader`
+also checks expected argument leaves. Captures deduplicate messages and `tool_started`
+events by run/call ID; streaming fragments and completion events do not add calls.
+Message capture includes requested calls, so this measures the recorded trajectory,
+not proof that a tool effect happened. Missing expectations or malformed calls fail.
+
+Modes are `exact` (same ordered calls), `subset`/`in_order` (expected calls appear in
+order, allowing extras), and `any_order` (same call counts and multiplicity in any
+order). `strict` aliases `exact`. Any-order uses maximum-weight matching, including
+repeated tool names. Expected argument objects are a required subset: extra actual
+arguments are permitted. Nested objects use dotted paths; arrays compare as a whole.
+Missing arguments differ from explicit null. Rules accept `strip`, `casefold`,
+`whitespace` (collapse whitespace), and `numeric` normalisers in order, with absolute
+and relative numeric tolerances. A `tool.path` rule overrides a `path` rule.
+
+Each step scores its fraction of matching expected argument leaves (or name accuracy
+alone). Case scores average step scores; exact/any-order additionally penalise extra
+calls through the denominator `max(expected_count, actual_count)`. Subset divides by
+expected count. A complete match is required to pass. An explicitly empty trajectory
+passes only when there are no calls, except in subset mode. `EvaluationSummary` contains
+case results, `mean_score`, and `grader_scores` (mean score per grader).
+
+```python
+import asyncio
+from nexura_agents import Agent, FakeModel, ToolCall, tool
+from nexura_runtime.evaluation import (
+    DatasetExample, EvaluationDataset, EvaluationRunner,
+    ToolArgumentAccuracyGrader, TrajectoryStep,
+)
+
+@tool
+async def search(q: str, limit: int) -> str:
+    """Offline fixture; does not contact a search service."""
+    return "found"
+
+async def main():
+    agent = Agent(name="fixture", instructions="Offline test", tools=[search], model=FakeModel([
+        [ToolCall(id="s1", name="search", arguments={"q": "  HELLO ", "limit": 11})], "found"
+    ]))
+    dataset = EvaluationDataset(dataset_id="trajectory", version="1", examples=[DatasetExample(
+        input_data={"query": "Find hello"}, expected_trajectory=[TrajectoryStep(
+            name="search", args={"q": "hello", "limit": 10}
+        )]
+    )])
+    grader = ToolArgumentAccuracyGrader(mode="exact", argument_rules={
+        "search.q": {"normalisers": ["strip", "casefold"]},
+        "limit": {"absolute_tolerance": 1},
+    })
+    summary = await EvaluationRunner([grader]).run(agent, dataset)
+    assert summary.pass_rate == 1
+    assert summary.grader_scores["tool_argument_accuracy"] == 1
+
+asyncio.run(main())
+```
+
+## Simulated users for multi-turn evaluation
+
+`UserSimulation` chooses either scripted `turns` or a `persona`. A persona uses an
+explicitly injected existing model (`EvaluationRunner(user_model=...)` or
+`simulate_user(..., model=...)`); no provider is selected implicitly. The user model
+receives the dialogue with roles reversed and no tools. A new conversation history is
+created for each case. Usage aggregates agent and user model tokens; unknown counts
+remain unknown. Scripted plans do not call a user model.
+
+Stops include `script_exhausted`, `max_turns` (1–100), `user_stop` and `agent_stop`
+(case-sensitive substring markers), `empty_user`, an optional SDK `stop` callback,
+and non-completed agent statuses. User stop markers are checked before dispatching
+that turn. Paused, failed, and cancelled conversations fail their evaluation case.
+Metadata exposes `transcript`, `turns`, `stop_reason`, and per-turn traces. Reports
+redact captured content by default; `simulate_user` itself returns raw local evidence.
+Configure normal agent limits/timeouts/budgets for the agent's own tool/model loop;
+max_turns bounds conversation exchanges, not elapsed time or provider spending.
+
+```python
+import asyncio
+from nexura_agents import Agent, FakeModel
+from nexura_runtime.evaluation import (
+    DatasetExample, EvaluationDataset, EvaluationRunner, ExactMatchGrader, UserSimulation,
+)
+
+async def main():
+    agent = Agent(name="fixture", instructions="Offline support", model=FakeModel([
+        "What is your order number?", "Resolved"
+    ]))
+    user = FakeModel(["Help me", "Order 42", "[DONE]"])
+    case = DatasetExample(input_data={}, expected_output="Resolved", simulation=UserSimulation(
+        persona="A customer asking for help", max_turns=5,
+    ))
+    report = await EvaluationRunner([ExactMatchGrader()], user_model=user).run(
+        agent, EvaluationDataset(dataset_id="dialogue", version="1", examples=[case])
+    )
+    assert report.pass_rate == 1
+    assert report.results[0].metadata["stop_reason"] == "user_stop"
+    assert report.results[0].metadata["turns"] == 2
+
+asyncio.run(main())
+```
+
+For scripts, replace the persona with `UserSimulation(turns=["Help me", "Order 42"])`
+and omit `user_model`. FakeModel makes the dialogue deterministic; report IDs, timings,
+and timestamps are still ordinary run metadata. Simulated dialogue is not evidence
+of real-user or live-model quality.
+
+## Online evaluation of stored traces
+
+Online evaluation here means post-hoc grading: `evaluate_traces` never re-executes
+the agent or its tools. Supply stored `StoredTrace` snapshots and an expectation
+case. `expectation_for(trace)` can select different expectations per trace in Python.
+`OnlineEvalConfig` filters by workflow, agent, and inclusive UTC epoch-second times.
+After filtering, seed/run-ID SHA256 sampling selects a stable subset, independent
+of iteration order. Rate 0 selects none and rate 1 selects all. Repeated IDs count
+once. No matching runs yields zero cases and a zero pass rate.
+
+```python
+import asyncio
+import tempfile
+from pathlib import Path
+from nexura_agents import Agent, FakeModel
+from nexura_runtime.evaluation import (
+    DatasetExample, EvaluationRunner, ExactMatchGrader, OnlineEvalConfig, StoredTrace,
+)
+from nexura_runtime.evaluation.store import SqliteEvaluationStore
+
+async def main():
+    agent = Agent(name="fixture", instructions="Offline test", model=FakeModel(["ok"]))
+    recorded = await agent.run_async("hello")
+    with tempfile.TemporaryDirectory() as directory:
+        path = str(Path(directory) / "evals.sqlite")
+        store = SqliteEvaluationStore(path)
+        store.save_trace(StoredTrace(run_id=recorded.run_id, agent_id="fixture",
+                                    workflow_id="support", timestamp=10, output=recorded.final_output))
+        report = await EvaluationRunner([ExactMatchGrader()]).evaluate_traces(
+            store.list_traces(), DatasetExample(input_data={}, expected_output="ok"),
+            config=OnlineEvalConfig(agent_id="fixture", start_time=0, end_time=20, sampling_rate=1),
+        )
+        store.save_run(report)
+        store.close()
+        reopened = SqliteEvaluationStore(path)
+        assert reopened.get_run(report.run_id).pass_rate == 1
+        assert report.metadata["source_run_ids"] == [recorded.run_id]
+        reopened.close()
+
+asyncio.run(main())
+```
+
+Trace snapshots and evaluation results are workspace-scoped in the existing SQLite
+evaluation store. Grading uses original local evidence and then redacts persisted
+results. The API redacts imported snapshots on ingestion, so expectations must match
+the available redacted evidence. Generic workflow node events are not agent tool
+calls: only captured tool messages or `tool_started` events support tool accuracy.
+
+## Service and Studio data contracts
+
+Existing `/api/v1/evaluations` dataset/run/compare routes remain available. New routes:
+
+| Route | Purpose |
+| --- | --- |
+| `GET /evaluations/graders` | Grader names, modes, argument rules and online config schemas |
+| `POST /evaluations/traces` | Import a recorded `StoredTrace` (edit permission) |
+| `POST /evaluations/online` | Grade stored traces with `example`, `graders`, `config` (run permission) |
+| `POST /evaluations/simulate` | Run a dataset's conversation plans with `agent_id` (run permission) |
+
+All paths above have the `/api/v1` prefix. Online evaluation also reads completed,
+failed, or cancelled Studio runs owned by the active workspace, using their captured
+events and current output state. Unowned legacy runs belong only to the default local
+workspace. Imported snapshots can carry `agent_id` for filtering when the underlying
+workflow run does not record one. No event is invented for missing tool capture.
+
+Datasets preserve `expected_trajectory` and `simulation` through upload, retrieval and
+SQLite persistence. `/simulate` resolves agents through the existing host `eval_agents`
+factory table (or the offline `local-fake` echo agent); a persona requires the host's
+`app.state.eval_user_model`. Factories must return fresh agents. Reports from these new
+routes use the existing `EvaluationSummary` shape and are listed/retrieved via
+`GET /evaluations/runs` and `GET /evaluations/runs/{id}`. Case `graders[].details.matches`
+contains index alignment and per-argument booleans; `grader_scores` contains aggregates.
+Conversation data is in case `metadata`; online provenance is in summary `metadata`.
+
+The existing `/evaluations/studio` API also accepts the `tool_argument_accuracy` scorer,
+argument rules, and new trajectory mode names. Its established SDK report shape remains
+unchanged. No Studio web changes are required to consume these JSON contracts.
+
+```python
+import asyncio
+import tempfile
+from pathlib import Path
+from httpx import ASGITransport, AsyncClient
+from nexura_agents import Agent, FakeModel
+from nexura_runtime.service.api.app import create_api_app
+
+async def main():
+    with tempfile.TemporaryDirectory() as directory:
+        app = create_api_app(db_path=str(Path(directory) / "local.sqlite"), profile="local-owner")
+        app.state.eval_agents = {"fixture": lambda version: Agent(
+            name="fixture", instructions="Offline", model=FakeModel(["one", "done"])
+        )}
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1",
+                               headers={"X-Nexura-Session": app.state.session_token}) as client:
+            prefix = "/api/v1/evaluations"
+            response = await client.post(prefix + "/datasets", json={
+                "dataset_id": "conversation", "examples": [{"input_data": {"q": "help"},
+                    "expected_output": "done", "simulation": {"turns": ["hello", "more"]}}]
+            })
+            assert response.status_code == 200
+            response = await client.post(prefix + "/simulate", json={
+                "dataset_id": "conversation", "agent_id": "fixture"
+            })
+            assert response.status_code == 200 and response.json()["pass_rate"] == 1
+            run_id = response.json()["run_id"]
+            assert (await client.get(prefix + "/runs/" + run_id)).json()["total_examples"] == 1
+        app.state.eval_store.close()
+        await app.state.store.close()
+
+asyncio.run(main())
+```
+
 Run an agent or team over a list of cases, score every answer, and keep the result as a
 report you can diff in CI. Everything runs offline here with `FakeModel`; swap in a real
 model when you want real numbers.

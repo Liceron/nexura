@@ -9,7 +9,9 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from nexura_runtime.evaluation._service_access import registered_agents
 from nexura_runtime.evaluation.errors import (
     DatasetNotFoundError,
 )
@@ -19,12 +21,19 @@ from nexura_runtime.evaluation.graders import (
     ExactMatchGrader,
     Grader,
     RegexGrader,
+    ToolArgumentAccuracyGrader,
+    TrajectoryGrader,
 )
 from nexura_runtime.evaluation.models import (
+    ArgumentMatch,
     DatasetExample,
     EvaluationDataset,
+    EvaluationSummary,
+    OnlineEvalConfig,
+    StoredTrace,
+    TrajectoryMode,
 )
-from nexura_runtime.evaluation.runner import EvaluationRunner
+from nexura_runtime.evaluation.runner import EvaluationRunner, redact_trace, simulate_user
 from nexura_runtime.evaluation.store import EvaluationStore, SqliteEvaluationStore
 from nexura_runtime.service.api.models import (
     CompareEvaluationsRequest,
@@ -36,23 +45,68 @@ from nexura_runtime.service.auth.models import ActionPermission, Principal, Work
 from nexura_runtime.service.auth.permissions import check_permission
 from nexura_runtime.service.workspaces.repository import WorkspaceRepository
 
-router = APIRouter(prefix="/evaluations", tags=["evaluations"])
-
 _SAFE_ID_REGEX = re.compile(r"^[a-zA-Z0-9_\-\.]+$")
 
 
 def _get_caller_context(request: Request) -> tuple[str, Principal, WorkspaceRole]:
-    caller_ws: str = getattr(request.state, "workspace_id", "default")
-    principal: Principal = getattr(
-        request.state,
-        "principal",
-        Principal(principal_id="local-owner", profile="local-owner"),
-    )
-    raw_role = getattr(request.state, "role", "admin")
+    caller_ws = getattr(request.state, "workspace_id", None)
+    principal = getattr(request.state, "principal", None)
+    if not isinstance(caller_ws, str) or not caller_ws or not isinstance(principal, Principal):
+        raise HTTPException(403, detail={"code": "PERMISSION_DENIED"})
+    raw_role = getattr(request.state, "role", "viewer")
     role: WorkspaceRole = (
         "admin" if raw_role == "admin" else ("editor" if raw_role == "editor" else "viewer")
     )
     return caller_ws, principal, role
+
+
+def _evaluation_access(request: Request) -> None:
+    """Reports/imports cannot yet enforce per-workflow/starter resource scopes."""
+    _, principal, _ = _get_caller_context(request)
+    if principal.resources is not None:
+        raise HTTPException(403, detail={"code": "RESOURCE_SCOPE_DENIED"})
+
+
+router = APIRouter(
+    prefix="/evaluations", tags=["evaluations"], dependencies=[Depends(_evaluation_access)]
+)
+
+
+async def _assert_trace_access(request: Request, trace: dict[str, Any]) -> None:
+    """Check known run/workflow references, including nested conversation captures.
+
+    New standalone imports need no Studio row. Existing unowned rows are legacy
+    resources accessible only to the default local owner. Never adopt foreign IDs.
+    """
+    workspace_id, principal, _ = _get_caller_context(request)
+    repo: WorkspaceRepository = request.app.state.workspace_repo
+    app_store = request.app.state.store
+    legacy = principal.profile == "local-owner" and workspace_id == "default"
+    for kind in ("run", "workflow"):
+        resource_id = trace.get(f"{kind}_id")
+        if not resource_id:
+            continue
+        ownership = repo.get_resource_ownership(kind, str(resource_id))
+        owner = ownership[0] if ownership else None
+        if owner is not None:
+            allowed = owner == workspace_id
+        else:
+            getter = app_store.get_run if kind == "run" else app_store.get_workflow
+            allowed = legacy or await getter(str(resource_id)) is None
+        if not allowed:
+            raise HTTPException(403, detail={"code": "CROSS_WORKSPACE_ACCESS_DENIED"})
+    for child in [*(trace.get("runs") or []), *(trace.get("events") or [])]:
+        if isinstance(child, dict):
+            await _assert_trace_access(request, child)
+
+
+async def _assert_summary_access(request: Request, summary: EvaluationSummary) -> None:
+    for result in summary.results:
+        trace = result.metadata.get("trace")
+        if isinstance(trace, dict):
+            await _assert_trace_access(request, trace)
+    for run_id in summary.metadata.get("source_run_ids", []):
+        await _assert_trace_access(request, {"run_id": run_id})
 
 
 def _require(permission: ActionPermission) -> Any:
@@ -80,6 +134,205 @@ def _get_eval_store(request: Request) -> EvaluationStore:
         eval_store = SqliteEvaluationStore(db_file)
         request.app.state.eval_store = eval_store
     return eval_store
+
+
+class TraceGraderSpec(BaseModel):
+    """JSON configuration shared by replay and simulation endpoints."""
+
+    model_config = ConfigDict(extra="forbid")
+    type: str = "tool_trajectory"
+    mode: TrajectoryMode = "exact"
+    check_arguments: bool = False
+    argument_rules: dict[str, ArgumentMatch] = Field(default_factory=dict)
+
+
+class TraceEvaluationRequest(BaseModel):
+    """Grade existing traces using shared expectations, without dispatching an agent."""
+
+    model_config = ConfigDict(extra="forbid")
+    example: DatasetExample
+    graders: list[TraceGraderSpec] = Field(default_factory=lambda: [TraceGraderSpec()])
+    config: OnlineEvalConfig = Field(default_factory=OnlineEvalConfig)
+
+
+class SimulationEvaluationRequest(BaseModel):
+    """Evaluate a versioned dataset using a host-registered agent and user model."""
+
+    model_config = ConfigDict(extra="forbid")
+    dataset_id: str
+    dataset_version: str | None = None
+    agent_id: str = "local-fake"
+    graders: list[TraceGraderSpec] = Field(
+        default_factory=lambda: [TraceGraderSpec(type="exact_match")]
+    )
+
+
+def _summary_payload(summary: EvaluationSummary) -> dict[str, Any]:
+    data = summary.model_dump(mode="json")
+    data["mean_latency_ms"] = round(summary.total_latency_ms / max(summary.total_examples, 1), 2)
+    return data
+
+
+def _trace_graders(specs: list[TraceGraderSpec]) -> list[Grader]:
+    if not specs:
+        raise HTTPException(422, detail={"code": "INVALID_GRADER", "message": "Provide graders"})
+    graders: list[Grader] = []
+    for spec in specs:
+        if spec.type == "tool_argument_accuracy":
+            graders.append(
+                ToolArgumentAccuracyGrader(mode=spec.mode, argument_rules=dict(spec.argument_rules))
+            )
+        elif spec.type == "tool_trajectory":
+            graders.append(
+                TrajectoryGrader(
+                    mode=spec.mode,
+                    check_arguments=spec.check_arguments,
+                    argument_rules=dict(spec.argument_rules),
+                )
+            )
+        elif spec.type == "exact_match":
+            graders.append(ExactMatchGrader())
+        elif spec.type in ("contains", "substring"):
+            graders.append(ContainsGrader())
+        else:
+            raise HTTPException(422, detail={"code": "INVALID_GRADER", "message": spec.type})
+    if len({g.name for g in graders}) != len(graders):
+        raise HTTPException(422, detail={"code": "INVALID_GRADER", "message": "Duplicate graders"})
+    return graders
+
+
+@router.get("/graders", summary="Evaluation grader capabilities")
+async def grader_capabilities() -> dict[str, Any]:
+    return {
+        "types": [
+            "exact_match",
+            "contains",
+            "regex",
+            "citation_coverage",
+            "tool_trajectory",
+            "tool_argument_accuracy",
+        ],
+        "trajectory_modes": ["exact", "subset", "in_order", "any_order"],
+        "argument_rule_schema": ArgumentMatch.model_json_schema(),
+        "result_schema": EvaluationSummary.model_json_schema(),
+        "simulation_schema": SimulationEvaluationRequest.model_json_schema(),
+        "online_config_schema": OnlineEvalConfig.model_json_schema(),
+    }
+
+
+@router.post("/traces", dependencies=[_require("edit")], summary="Import recorded trace")
+async def import_trace(request: Request, payload: StoredTrace) -> dict[str, Any]:
+    workspace_id, _, _ = _get_caller_context(request)
+    await _assert_trace_access(request, payload.model_dump())
+    # Only captured content is redacted; typed identity/time fields stay intact.
+    try:
+        cleaned = StoredTrace.model_validate(redact_trace(payload.model_dump()))
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(422, detail={"code": "INVALID_TRACE"}) from exc
+    _get_eval_store(request).save_trace(cleaned, workspace_id)
+    return {"run_id": payload.run_id, "source": "imported_trace"}
+
+
+@router.post("/online", dependencies=[_require("run")], summary="Grade stored traces offline")
+async def evaluate_online(request: Request, payload: TraceEvaluationRequest) -> dict[str, Any]:
+    workspace_id, principal, _ = _get_caller_context(request)
+    eval_store = _get_eval_store(request)
+    graders = _trace_graders(payload.graders)
+    traces = {t.run_id: t for t in eval_store.list_traces(workspace_id)}
+    app_store = getattr(request.app.state, "store", None)
+    repo: WorkspaceRepository = request.app.state.workspace_repo
+    if app_store is not None:
+        # Match existing run ownership semantics without writing/adopting run records.
+        owned = repo.list_workspace_resource_ids("run", workspace_id)
+        legacy = principal.profile == "local-owner" and workspace_id == "default"
+        for row in await app_store.list_runs(limit=None, run_ids=None if legacy else owned):
+            run_id = row["run_id"]
+            owner = repo.get_resource_workspace("run", run_id)
+            if owner != workspace_id and not (legacy and owner is None):
+                continue
+            # Do not evaluate in-flight snapshots.
+            if row.get("status") not in ("completed", "failed", "cancelled"):
+                continue
+            run = await app_store.get_run(run_id)
+            if run:
+                # Imports are explicit snapshots: preserve their capture, identity
+                # and timestamp as one coherent record, evaluated only once.
+                if run_id in traces:
+                    continue
+                traces[run_id] = StoredTrace(
+                    run_id=run_id,
+                    workflow_id=run.get("workflow_id"),
+                    agent_id=run.get("agent_id"),
+                    timestamp=run["created_at"],
+                    output=run.get("output", run.get("current_state")),
+                    events=run.get("events", []),
+                    messages=run.get("messages", []),
+                )
+    for trace in traces.values():
+        await _assert_trace_access(request, trace.model_dump())
+    summary = await EvaluationRunner(graders).evaluate_traces(
+        traces.values(), payload.example, config=payload.config
+    )
+    eval_store.save_run(summary, workspace_id)
+    return _summary_payload(summary)
+
+
+@router.post(
+    "/simulate", dependencies=[_require("run")], summary="Evaluate simulated conversations"
+)
+async def evaluate_simulation(
+    request: Request, payload: SimulationEvaluationRequest
+) -> dict[str, Any]:
+    from nexura_runtime.evaluation.studio_engine import local_fake_agent
+
+    workspace_id, principal, _ = _get_caller_context(request)
+    store = _get_eval_store(request)
+    try:
+        dataset = store.get_dataset(payload.dataset_id, payload.dataset_version, workspace_id)
+    except DatasetNotFoundError as exc:
+        raise HTTPException(404, detail={"code": "DATASET_NOT_FOUND", "message": str(exc)}) from exc
+    if any(e.simulation is None for e in dataset.examples):
+        raise HTTPException(422, detail={"code": "SIMULATION_REQUIRED"})
+    legacy = principal.profile == "local-owner" and workspace_id == "default"
+    user_model = getattr(request.app.state, "eval_user_models", {}).get(workspace_id)
+    if user_model is None and legacy:
+        user_model = getattr(request.app.state, "eval_user_model", None)
+    if (
+        any(e.simulation and e.simulation.persona is not None for e in dataset.examples)
+        and user_model is None
+    ):
+        raise HTTPException(422, detail={"code": "USER_MODEL_UNAVAILABLE"})
+    registered = registered_agents(
+        request.app.state, workspace_id, local_owner=principal.profile == "local-owner"
+    )
+    factory = registered.get(payload.agent_id)
+    if payload.agent_id == "local-fake":
+        factory = local_fake_agent
+    if factory is None:
+        raise HTTPException(404, detail={"code": "AGENT_NOT_FOUND"})
+    runner = EvaluationRunner(_trace_graders(payload.graders), user_model=user_model)
+
+    originals = {e.example_id: e for e in dataset.examples}
+
+    async def dispatch(example: DatasetExample) -> dict[str, Any]:
+        from nexura_agents.types import Usage
+
+        plan = originals[example.example_id].simulation
+        assert plan is not None
+        result = await simulate_user(factory(None), plan, model=user_model)
+        result["usage"] = Usage(**result["usage"])
+        return result
+
+    # The callable owns simulation dispatch; the outer runner only grades its result.
+    outer = dataset.model_copy(
+        update={"examples": [e.model_copy(update={"simulation": None}) for e in dataset.examples]}
+    )
+    summary = await runner.run(dispatch, outer, run_id=f"eval_sim_{uuid.uuid4().hex}")
+    summary.dataset_digest = summary.dataset_hash = dataset.content_hash
+    summary.metadata.update({"source": "user_simulation", "agent_id": payload.agent_id})
+    summary.is_synthetic_evidence = True
+    store.save_run(summary, workspace_id)
+    return _summary_payload(summary)
 
 
 @router.get("/datasets", summary="List evaluation datasets")
@@ -149,16 +402,20 @@ async def create_dataset(request: Request, payload: CreateDatasetRequest) -> dic
             )
             continue
 
-        parsed_examples.append(
-            DatasetExample(
+        try:
+            parsed = DatasetExample(
                 example_id=ex_dict.get("example_id") or f"ex_{idx + 1}",
                 input_data=input_data,
                 expected_output=ex_dict.get("expected_output"),
                 expected_citations=ex_dict.get("expected_citations"),
+                expected_trajectory=ex_dict.get("expected_trajectory"),
+                simulation=ex_dict.get("simulation"),
                 tags=ex_dict.get("tags") or [],
                 metadata=ex_dict.get("metadata") or {},
             )
-        )
+            parsed_examples.append(parsed)
+        except ValidationError as exc:
+            field_errors.append({"field": f"examples[{idx}]", "error": str(exc)})
 
     if field_errors:
         raise HTTPException(
@@ -262,6 +519,10 @@ async def run_evaluation(request: Request, payload: RunEvaluationRequest) -> dic
             graders_list.append(CitationCoverageGrader(min_coverage=0.5))
         elif g_name == "regex":
             graders_list.append(RegexGrader())
+        elif g_name == "tool_trajectory":
+            graders_list.append(TrajectoryGrader())
+        elif g_name == "tool_argument_accuracy":
+            graders_list.append(ToolArgumentAccuracyGrader())
 
     if not graders_list:
         graders_list.append(ExactMatchGrader(case_sensitive=False))
@@ -351,6 +612,10 @@ async def list_runs(
     workspace_id, _, _ = _get_caller_context(request)
     store = _get_eval_store(request)
     runs = store.list_runs(workspace_id=workspace_id, limit=limit, offset=offset)
+    for row in runs:
+        summary = store.get_run(row["run_id"], workspace_id=workspace_id)
+        if summary is not None:
+            await _assert_summary_access(request, summary)
     return {"runs": runs, "total": len(runs)}
 
 
@@ -365,6 +630,7 @@ async def get_run_details(request: Request, eval_id: str) -> dict[str, Any]:
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"code": "RUN_NOT_FOUND", "message": f"Evaluation run '{eval_id}' not found."},
         )
+    await _assert_summary_access(request, run)
     res_data = run.model_dump(mode="json")
     res_data["mean_latency_ms"] = round(run.total_latency_ms / max(run.total_examples, 1), 2)
     return res_data
@@ -396,6 +662,9 @@ async def compare_runs(request: Request, payload: CompareEvaluationsRequest) -> 
                 "message": f"Candidate run '{payload.run_id_b}' not found.",
             },
         )
+
+    await _assert_summary_access(request, run_a)
+    await _assert_summary_access(request, run_b)
 
     # Compare metrics
     delta_pass_rate = round(run_b.pass_rate - run_a.pass_rate, 4)

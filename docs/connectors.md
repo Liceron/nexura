@@ -65,7 +65,9 @@ Who sets the context flag:
   `ExecutionContext(..., approval_granted=True)`. The module manifest lists
   `write_operations`, and `GET /api/v1/modules` reports `requires_approval` and
   `write_operations` for every connector with writes (Studio's Approval Gate badge). Reads retry (429, 5xx, timeouts) up to
-`max_retries` (default 2, maximum 3) with `Retry-After` capped at 5 seconds.
+`max_retries` (default 2, maximum 3). GitHub, Slack, Drive and Sheets honour the full
+`Retry-After`/reset delay in sleep intervals of at most five seconds; other connectors
+retain their five-second delay cap. See the provider sections below.
 
 | Connector (`nexura.connectors.`) | Operations | Credential type (by reference) | Limits |
 | --- | --- | --- | --- |
@@ -103,6 +105,191 @@ Every operation that returns `next_cursor` accepts an input named `cursor` to re
 older names (`offset`, `page_token`, `start_cursor`, `continuation_token`, Jira `start_at`) remain
 as aliases; passing both with different values is an error. GitHub cursors are absolute URLs and
 are only followed when they stay on the API origin and this repository's list endpoint.
+
+## Refreshable authentication
+
+GitHub, Slack, Google Drive and Google Sheets still accept a plain PAT, bot token or
+access token in the existing secret store. To enable refresh, store a **JSON secret**
+under the same credential type and pass only its `credential_ref` in flow config:
+
+```json
+{
+  "auth_type": "oauth2",
+  "access_token": "example-access-token-not-real",
+  "expires_at": 1800000000,
+  "refresh_token": "example-refresh-token-not-real",
+  "client_id": "example-client-id",
+  "client_secret": "example-client-secret-not-real"
+}
+```
+
+`expires_at` is a Unix timestamp in seconds. Missing expiry or access token triggers
+refresh; a 30-second safety margin avoids sending a nearly expired token. Each page
+and each read retry after backoff re-resolves the credential and checks expiry.
+Refresh uses a form-encoded POST to the
+provider endpoint, tracks `expires_in`, preserves an omitted refresh token, and stores
+rotated refresh tokens before sending an API operation. Providers that return
+`refresh_token_expires_in` also update `refresh_expires_at`; an expired refresh token
+requires re-authorization. A GET/HEAD rejected with HTTP 401 forces one refresh and
+one replay, even when the access token has not expired. This recovery happens at most
+once per invocation; static tokens and writes are never refreshed/replayed on a 401.
+
+Use `WorkspaceCredentialResolver(ScopedCredentialStore(...), workspace_id)` with the
+existing secret backend (including the encrypted backend for persistent storage).
+The default `ScopedCredentialStore()` is memory-only. Credential type, provider and
+description remain intact. Refreshable records must not use environment fallbacks.
+A custom resolver can implement synchronous `update_secret(ref, secret)` to atomically
+replace its stored JSON. Without a writable store/hook, refresh fails before consuming
+the refresh token. Plain tokens and unexpired records still work with read-only resolvers.
+
+Concurrent callers sharing a store, workspace and credential serialise refreshes with
+a process-wide thread lock, including callers on different threads/event loops and
+Drive and Sheets sharing a Google credential. Within one event loop callers join one
+refresh task. Cancellation
+of one waiter does not cancel the shared exchange. This is **not a distributed lock**:
+use a single refresh owner for a rotating credential across worker processes. Token
+exchange POSTs are never retried automatically. Token-endpoint timeouts, transport
+failures and 5xx return retryable `UPSTREAM_UNAVAILABLE`; retry later, and re-authorize
+if an uncertain exchange rotated the credential. Rejected exchanges and persistence
+failures return `AUTH_FAILED`. Store checks prevent refresh from restoring a credential
+changed during the exchange, but are not an atomic cross-process compare-and-swap:
+independent store instances and external credential writers need an exclusive owner.
+Token-endpoint throttling returns `RATE_LIMITED` without retrying the exchange.
+An in-flight refresh does not overwrite a revoked/deleted or replaced stored credential.
+
+Refresh endpoints are fixed by default. A secret record's optional `token_url` can
+point at an enterprise OAuth endpoint only on an operator-allowed host; HTTPS, DNS
+pinning, response caps and no-redirect rules still apply. Token endpoints cannot have
+userinfo, query strings or fragments. Client secrets and tokens stay in the credential
+record and request body/Authorization header; they are never emitted to connector logs.
+Known original and refreshed values are scrubbed from outputs and errors. Provider
+error bodies are omitted in favour of status-specific, actionable error messages.
+The credential fields that are scrubbed as known values are the secret ones (access and
+refresh tokens, client secrets, JWTs and private keys); auth type, client ID, token type
+and scope words are not treated as secrets. As for every connector, outputs also pass
+through the generic pattern redaction (bearer tokens, API keys, `password=` pairs, card
+numbers and similar), so text matching those patterns is masked.
+
+## GitHub: auth, pagination and rate limits
+
+- Auth: plain `github_token` credentials support PATs and existing installation tokens.
+  OAuth records refresh at `https://github.com/login/oauth/access_token`; only GitHub
+  token types that actually issue refresh tokens can use this mode.
+- GitHub App mode stores `{"auth_type":"github_app","installation_id":123}` as the
+  secret. Supply `GitHubConnector(app_jwt_provider=...)` with a trusted synchronous
+  callable returning a freshly signed App JWT (run via `asyncio.to_thread`), or store
+  a short-lived `app_jwt` for one initial exchange in the
+  record. The connector exchanges it at `/app/installations/{id}/access_tokens`,
+  persists the installation token and Unix expiry, and renews it when needed. Expiry
+  responses with an offset are honoured; a naive `expires_at` is interpreted as UTC.
+  The consumed JWT is removed from the persisted record. JWT signing/key management
+  stays with the application; automatic renewal needs a provider returning fresh JWTs.
+  Enterprise API bases use the existing operator allow-list.
+- Pagination: `list_issues` and `list_pulls` follow Link `rel="next"`, with
+  `per_page` 1–100 and optional `max_items` 1–10000. Every followed URL must match
+  the API origin and either `/repos/{owner}/{repo}/{kind}` or GitHub's documented
+  `/repositories/{numeric_id}/{kind}` form, including enterprise path prefixes.
+  Relative upstream links are resolved on the current page. Caller cursors must be
+  absolute URLs or returned opaque cursors. Other paths and origins are refused;
+  if a later page/link fails, the failure result retains fetched items in
+  `outputs.data` with `truncated:true`. Partial cursors bind the repository, kind and
+  `state`; changing them requires a new listing.
+- Rate limits: reads retry 429, primary limits (`X-RateLimit-Remaining: 0` with
+  `X-RateLimit-Reset`), and 403 secondary/abuse limits. Numeric or HTTP-date
+  `Retry-After` is honoured within the total call budget; secondary limits without
+  timing return `RATE_LIMITED` immediately with advice to wait at least 60 seconds.
+  The later of Retry-After and primary reset wins; an already elapsed reset uses a
+  small jittered wait (0.1–0.55 seconds). Other 403s return `AUTH_FAILED`
+  with scope/resource/installation guidance. Issue/comment writes explicitly declare
+  `non_idempotent`, require approval and are sent once; GitHub has no supported
+  idempotency key for these endpoints.
+
+## Slack: auth, pagination and rate limits
+
+- Auth: plain `slack_bot_token` credentials keep working. OAuth records with token
+  rotation refresh at `https://slack.com/api/oauth.v2.access`; rotated refresh tokens
+  are persisted before another Slack request.
+- Pagination: `list_channels` and `read_history` follow `response_metadata.next_cursor`
+  through empty as well as full pages. `limit` is the page size (1–200), and
+  `max_items` optionally limits total returned items (1–10000). Slack can impose
+  smaller page sizes and stricter quotas on some app types. A `has_more` response
+  without a usable cursor is explicitly truncated; it cannot be resumed by cursor.
+- Rate limits: read retries honour Slack 429/Retry-After and HTTP-200
+  `ok:false,error:ratelimited`. Invalid/expired/revoked auth maps to `AUTH_FAILED`;
+  membership, channel and scope errors give actionable messages. `post_message`
+  accepts a UUID `client_msg_id`; when omitted, an available workflow step idempotency
+  key becomes a stable UUID. No new random ID is invented on recovery. This field
+  is forwarded as a correlation ID and provides no de-duplication guarantee: the operation
+  explicitly stays `non_idempotent`, requires approval and never auto-retries.
+
+## Google Drive: auth, pagination and rate limits
+
+- Auth: plain `google_oauth_token` or OAuth records; refresh endpoint
+  `https://oauth2.googleapis.com/token`. Drive and Sheets may share one stored Google
+  credential with appropriate scopes and one in-process refresh flight.
+- Pagination: `list_files` follows `nextPageToken`, including empty pages, with
+  `page_size` 1–100 and optional `max_items` 1–10000. `page_token` remains a cursor
+  alias. Drive's `incompleteSearch` yields `truncated:true,incomplete_search:true`;
+  narrow the search/corpus rather than treating that result as complete.
+- Rate limits: reads retry 429 and 403 `rateLimitExceeded`/`userRateLimitExceeded`,
+  honouring Retry-After or using jittered exponential backoff. Permission failures
+  remain `AUTH_FAILED`. `upload_text` accepts `file_id` **reserved by Drive's
+  `files.generateIds` API** and sends it in create metadata. Arbitrary UUIDs are not
+  valid pre-generated Drive IDs. Reserve and persist the ID in application code before
+  submitting an approved create; a repeated create may return 409, which requires
+  reconciliation. The operation also supports creates without such an ID, so it
+  explicitly remains `non_idempotent`, requires approval and never auto-retries.
+  Multipart uploads reject content or metadata containing the multipart boundary
+  before sending HTTP. Binary downloads are not JSON-parsed to inspect rate limits.
+
+## Google Sheets: auth, pagination and rate limits
+
+- Auth: the same Google OAuth record/refresh contract as Drive; use Sheets scopes.
+- Pagination: `values.get` (`read_range`) has **no pageToken API**. Read the requested
+  A1 range in one bounded response. Optional `max_items` (1–10000) limits returned
+  rows and sets `truncated:true` when rows were omitted. There is no synthetic Sheets
+  next cursor; request a narrower/subsequent A1 range explicitly. Responses beyond
+  `max_response_bytes` fail with `RESPONSE_TOO_LARGE` rather than returning partial JSON.
+- Rate limits: reads retry 429 and Google 403 rate-limit reasons with Retry-After or
+  jittered exponential backoff. `append_rows` and `update_range` have explicit
+  `non_idempotent` effect classes and approval gates. Neither has a supported
+  idempotency key. USER_ENTERED values can include formulas, so even range updates
+  retain the conservative class and never auto-retry.
+
+### Item caps and retry boundaries
+
+GitHub, Slack and Drive keep the existing `max_pages` default 3/hard cap 10. Either
+page or item cap produces `truncated:true` when more items remain. `next_cursor`
+can be a native provider cursor or an opaque `nexura-page-v1:` cursor retaining a
+partial page and its offset/page size. Pass it unchanged with the **same operation,
+resource and filters**. Resuming a partial page re-fetches that page; listings are
+not snapshots, so concurrent upstream insertions/deletions can affect results.
+Malformed responses and invalid cursors fail explicitly. Check `truncated` even
+when no `next_cursor` exists (Sheets row caps or Drive incomplete searches).
+Repeated page links/cursors stop before fetching the repeated page and return
+`truncated:true,pagination_loop:true`. Restart or investigate the listing when this
+flag is present; a retained Slack cursor is diagnostic, not a safe continuation.
+
+Only idempotent GET/HEAD reads retry automatically. The four connectors use jittered
+exponential fallback delays and bounded retry counts. Each invocation shares a total
+budget across pages, HTTP requests, refresh waits and backoff: the smaller of configured
+`timeout_seconds` and the manifest's 30 seconds. Server delays include nonnegative
+jitter (up to 10%, capped at 3 extra seconds). A wait that cannot fit the remaining
+budget returns retryable `RATE_LIMITED` immediately with `metadata.retry_after_seconds`,
+so the caller can schedule the read later without an early retry. Shorter waits use
+cancellable intervals of at most 5 seconds.
+Writes, including writes carrying provider-specific keys, are never retried on
+429, 403 throttling, 5xx or transport failures. A lost write response, HTTP 408 or
+HTTP 5xx is `INDETERMINATE_EFFECT`; inspect the remote effect before authorizing
+another attempt. The module-level manifest stays `non_idempotent_write`; every
+operation explicitly declares `pure` for reads or `non_idempotent` for writes in
+`OPS` and manifest display examples. These per-operation declarations are informational;
+the framework's module effect policy remains conservative for the whole connector.
+The existing workflow `Idempotency-Key`
+header remains for compatibility; sending this header does not assert provider support
+or change the effect class. Slack and Drive use the native fields described above.
+
+All of this is verified with local MockTransport fixtures, not live provider accounts.
 
 ## Safety rules
 

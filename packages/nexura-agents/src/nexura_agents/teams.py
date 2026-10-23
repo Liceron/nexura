@@ -931,6 +931,7 @@ class Team(abc.ABC):
             name or self.name.lower().replace(" ", "_"),
             call_team,
             description=description or self.description or f"Ask the {self.name} team.",
+            origin=f"team:{self.name}",
         )
         wrapped.nexura_agent = self  # type: ignore[attr-defined]  # for to_mermaid()
         return wrapped

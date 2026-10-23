@@ -27,8 +27,8 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from nexura_agents import policy
 from nexura_agents.agent import Agent
-from nexura_agents.guardrails import check_tool_input, check_tool_output
 from nexura_agents.mcp.headers import (
     METHOD_HEADER,
     NAME_HEADER,
@@ -52,6 +52,7 @@ from nexura_agents.mcp.types import (
 from nexura_agents.run_context import RunContext
 from nexura_agents.teams import Team
 from nexura_agents.tools import Tool
+from nexura_agents.types import ToolCall
 
 Scope = MutableMapping[str, Any]
 Receive = Callable[[], Awaitable[MutableMapping[str, Any]]]
@@ -98,7 +99,10 @@ class AgentMCPServer:
         tools: Plain tools, exposed with their own schemas.
         deps: Passed to every run and tool call as ``RunContext.deps``.
         runner: Runner used for agent calls (for usage limits, hooks or budgets), and for
-            teams that were not given their own runner.
+            teams that were not given their own runner. Plain tools use the hooks a run of
+            this runner would use (``Runner.effective_hooks()``: the process default from
+            ``set_default_hooks`` plus the runner's own): ``before_tool``, ``after_tool``
+            and ``tool_needs_approval`` apply to them as in a run.
         list_ttl_ms: ``ttlMs`` cache hint on 2026-07-28 discover and list results. The
             tool list is fixed when the server is built, so clients may reuse it for this
             long (default 60 s).
@@ -191,38 +195,51 @@ class AgentMCPServer:
             handler,
         )
 
+    def _hooks(self) -> Any:
+        """The hooks for plain tool calls: those a run of ``self.runner`` would use."""
+        effective = getattr(self.runner, "effective_hooks", None)
+        return effective() if callable(effective) else policy.effective_hooks()
+
     def _register_tool(self, tool: Tool) -> None:
         if tool.enabled is False:
             return  # never offered, as in the runner
         schema = tool.to_schema()["function"]
 
         async def handler(args: dict[str, Any]) -> str:
+            call_id = f"mcp-{uuid.uuid4().hex[:12]}"
             ctx: RunContext[Any] = RunContext(
                 deps=self.deps,
-                run_id=f"mcp-{uuid.uuid4().hex[:12]}",
+                run_id=call_id,
                 agent_name=self.name,
+                tool_call_id=call_id,
                 tool_name=tool.name,
+                tool=tool.info(),
             )
             if not await tool.is_enabled(ctx):
                 # An ``enabled`` rule that says no for this call: refuse, as the runner does.
                 raise ToolNotAvailable(f"Tool '{tool.name}' is not available.")
-            if tool.needs_approval(ctx, args):
+            hooks = self._hooks()
+            # The tool's own gate, or a hook's (P39 G2): approval cannot be given over MCP.
+            if policy.tool_call_needs_approval(tool, ctx, args, hooks):
                 raise ApprovalRequiredOverMCP(
                     f"'{tool.name}' needs human approval for these arguments, which cannot "
                     "be given over MCP. Nothing was executed."
                 )
-            # The tool's own guardrails apply here too: a rejection is an error result.
-            blocked = await check_tool_input(tool, ctx, args)
-            if blocked is not None:
-                raise ToolGuardrailRejected(blocked)
-            try:
-                raw = await asyncio.wait_for(tool.execute(args, ctx), timeout=tool.timeout)
-            except TimeoutError as expired:
-                # Either way the client gets an error result; nothing is half-returned.
-                raise ToolTimedOut(
-                    f"Tool call timed out: '{tool.name}' did not finish within {tool.timeout:g}s."
-                ) from expired
-            result, rejected = await check_tool_output(tool, ctx, raw)
+
+            async def execute() -> str:
+                try:
+                    return await asyncio.wait_for(tool.execute(args, ctx), timeout=tool.timeout)
+                except TimeoutError as expired:
+                    # Either way the client gets an error result; nothing is half-returned.
+                    raise ToolTimedOut(
+                        f"Tool call timed out: '{tool.name}' did not finish within "
+                        f"{tool.timeout:g}s."
+                    ) from expired
+
+            # The tool's guardrails and the hooks' before_tool / after_tool apply as in a
+            # run; a guardrail rejection is an error result.
+            call = ToolCall(id=call_id, name=tool.name, arguments=dict(args))
+            result, rejected = await policy.run_tool_call(tool, ctx, call, hooks, execute)
             if rejected:
                 raise ToolGuardrailRejected(result)
             return str(result)

@@ -61,6 +61,7 @@ export interface WorkflowNode {
 
 export interface WorkflowSpec {
   name: string;
+  version?: string | number | null;
   entry_node: string;
   nodes: Record<string, WorkflowNode | any>;
   spec_version?: number;
@@ -161,6 +162,10 @@ export interface RunRecord {
   run_id: string;
   workflow_id?: string | null;
   spec_hash: string;
+  workflow_version?: string | number | null;
+  definition_digest?: string;
+  started_workflow_version?: string | number | null;
+  origin_definition_digest?: string;
   /**
    * `interrupted`: the process executing the run stopped (its run lease expired); continue it
    * with `runs.recover()`. `paused`: a step's outcome is unknown after a crash
@@ -194,6 +199,17 @@ export interface RecoverRunOptions {
    * (`pause_reason` `effect_unknown`, the default) or `fail` it.
    */
   onUncertain?: "pause" | "fail";
+}
+
+/**
+ * Options of `runs.migrate()` (`POST /runs/{id}/migrate`). The target definition is the run's
+ * saved workflow on the server; pending approvals and input remain pending.
+ */
+export interface MigrateRunOptions extends RecoverRunOptions {
+  /** Refuse (409) unless the saved workflow's definition digest still equals this value. */
+  expectedDefinitionDigest?: string;
+  /** Recover the run after migrating (default `true`); `false` only migrates. */
+  resume?: boolean;
 }
 
 /** Per-run limits accepted by the service's BudgetConfig. Decimal fields accept JSON strings. */
@@ -752,11 +768,136 @@ export interface WorkflowImportOptions {
 // ---------------------------------------------------------------------------
 
 export interface DatasetExample {
-  example_id: string;
+  example_id?: string;
   input_data: Record<string, any>;
   expected_output?: any;
+  expected_citations?: string[] | null;
+  expected_trajectory?: (TrajectoryStep | string)[] | null;
+  simulation?: UserSimulation | null;
   tags?: string[];
   metadata?: Record<string, any>;
+}
+
+export type TrajectoryMode = "exact" | "strict" | "subset" | "in_order" | "any_order";
+
+export interface TrajectoryStep {
+  name: string;
+  args?: Record<string, unknown>;
+}
+
+export interface ArgumentMatch {
+  normalisers?: ("strip" | "casefold" | "whitespace" | "numeric")[];
+  absolute_tolerance?: number;
+  relative_tolerance?: number;
+}
+
+/** Exactly one of scripted turns or a persona backed by a host-injected model. */
+export type UserSimulation = {
+  max_turns?: number;
+  stop_on_agent?: string[];
+  stop_on_user?: string[];
+} & ({ turns: string[]; persona?: never } | { persona: string; turns?: never });
+
+export interface StoredTrace {
+  run_id: string;
+  timestamp: number;
+  workflow_id?: string | null;
+  agent_id?: string | null;
+  output?: unknown;
+  events?: Record<string, unknown>[];
+  messages?: Record<string, unknown>[];
+}
+
+/** Graders accepted by the online and simulation routes. */
+export interface TraceGraderSpec {
+  type?: "tool_trajectory" | "tool_argument_accuracy" | "exact_match" | "contains" | "substring";
+  mode?: TrajectoryMode;
+  check_arguments?: boolean;
+  argument_rules?: Record<string, ArgumentMatch>;
+}
+
+/** Stable sampling and inclusive UTC epoch-second filters over stored traces. */
+export interface OnlineEvalConfig {
+  sampling_rate?: number;
+  seed?: number;
+  workflow_id?: string | null;
+  agent_id?: string | null;
+  start_time?: number | null;
+  end_time?: number | null;
+}
+
+export interface TraceEvaluationOptions {
+  example: DatasetExample;
+  graders?: TraceGraderSpec[];
+  config?: OnlineEvalConfig;
+}
+
+export interface SimulationEvaluationOptions {
+  dataset_id: string;
+  dataset_version?: string | null;
+  agent_id?: string;
+  graders?: TraceGraderSpec[];
+}
+
+export interface GraderCapabilities {
+  types: string[];
+  trajectory_modes: TrajectoryMode[];
+  argument_rule_schema: Record<string, unknown>;
+  result_schema: Record<string, unknown>;
+  simulation_schema: Record<string, unknown>;
+  online_config_schema: Record<string, unknown>;
+}
+
+export interface TraceEvaluationResult {
+  example_id: string;
+  passed: boolean;
+  actual_output: unknown;
+  graders: {
+    grader_name: string;
+    grader_kind: "deterministic" | "model_judge";
+    passed: boolean;
+    score: number;
+    reason: string;
+    details: Record<string, unknown>;
+    is_synthetic_judge: boolean;
+    quality_evidence: "verified_human" | "model_judge" | "mock_simulated";
+  }[];
+  overall_score: number;
+  latency_ms: number;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  total_tokens: number | null;
+  cost_usd: string;
+  error: string | null;
+  metadata: Record<string, unknown>;
+}
+
+/** Stored evaluation report returned by online and simulation grading. */
+export interface TraceEvaluationSummary {
+  run_id: string;
+  dataset_id: string;
+  dataset_version: string;
+  dataset_digest: string;
+  dataset_hash: string;
+  workflow_version: string | null;
+  spec_hash: string | null;
+  workflow_spec_hash: string | null;
+  seed: number | null;
+  timestamp: number;
+  total_examples: number;
+  passed_examples: number;
+  failed_examples: number;
+  pass_rate: number;
+  mean_score: number;
+  grader_scores: Record<string, number>;
+  mean_latency_ms: number;
+  total_latency_ms: number;
+  total_cost_usd: string;
+  total_tokens: number;
+  results: TraceEvaluationResult[];
+  is_synthetic_evidence: boolean;
+  budget_halted: boolean;
+  metadata: Record<string, unknown>;
 }
 
 export interface EvaluationDataset {

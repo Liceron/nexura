@@ -478,7 +478,10 @@ class TestAgentsSubagentsHandoffsAcceptance:
 
         assert mod.manifest.kind == "agent"
         assert mod.manifest.module_id == "nexura.agents.test_coord"
-        assert mod.manifest.effect_policy == "idempotent_write"
+        # Updated deliberately in P39 G1 (was "idempotent_write"): the coordinator's agents
+        # may call any tool, and an undeclared effect is non_idempotent (A6 decision 1).
+        # The old default let module_tool and durable workflows repeat it after a crash.
+        assert mod.manifest.effect_policy == "non_idempotent_write"
 
         ctx = ExecutionContext(workspace_id="ws_mod", run_id="run_mod_1", node_id="agent_step")
         res = await mod.execute(ctx, {"prompt": "Inquire support"}, config={})

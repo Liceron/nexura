@@ -25,7 +25,7 @@ gVisor sandbox (it needs a privileged runtime) and the local release gate.
 
 | Profile | Command (from repo root unless noted) |
 |---|---|
-| Python tests | `uv run pytest --deselect tests/backend/b22` |
+| Python tests | `uv run pytest -n auto --dist loadfile --deselect tests/backend/b22` (parallel, one file per worker; about 8 minutes on 4 cores instead of 17; drop `-n auto --dist loadfile` to run serially) |
 | Python lint / format | `uv run ruff check src tests examples` and `uv run ruff format --check <changed files>` |
 | Python types | `uv run mypy src packages/*/src` |
 | Licence headers (new source files need the MIT SPDX header) | `uv run python scripts/add_spdx_headers.py --check`; run it without `--check` to add missing headers |

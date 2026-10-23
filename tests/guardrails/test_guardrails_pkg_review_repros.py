@@ -2,9 +2,9 @@
 # Copyright (c) 2026 Liceron
 """P39 G0/G3 adversarial review repros (offline; scripted local models only).
 
-Moved from ``.autopilot/p39/g0g3_repros``. Each test failed on the reviewed tree and passes
-after the fixes; the review (``.autopilot/p39/g0g3_review.md``) gives the finding id. The
-assertions are unchanged.
+Repros from the adversarial review. Each test failed on the reviewed tree and passes
+after the fixes; finding ids match the review report. The assertions are
+unchanged.
 """
 
 from __future__ import annotations

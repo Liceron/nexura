@@ -4,12 +4,15 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 
 class ConnectorError(Exception):
     """Base class for connector failures, carrying a stable machine-readable code."""
 
     code = "CONNECTOR_ERROR"
     retryable = False
+    partial_outputs: dict[str, Any] | None = None
 
     def __init__(self, message: str) -> None:
         super().__init__(message)
@@ -56,6 +59,7 @@ class AuthFailedError(ConnectorError):
     """Upstream rejected the credential (401/403)."""
 
     code = "AUTH_FAILED"
+    status: int | None = None
 
 
 class RateLimitedError(ConnectorError):
@@ -63,6 +67,7 @@ class RateLimitedError(ConnectorError):
 
     code = "RATE_LIMITED"
     retryable = True
+    retry_after_seconds: float | None = None
 
 
 class UpstreamError(ConnectorError):

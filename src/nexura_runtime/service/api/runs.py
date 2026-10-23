@@ -13,7 +13,7 @@ import uuid
 from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
 from typing import Any, Literal, TypeVar
 
-from fastapi import APIRouter, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi import status as http_status
 from fastapi.responses import JSONResponse, StreamingResponse
 from nexura_agents.contracts.execution import (
@@ -28,6 +28,7 @@ from nexura_agents.errors import (
     WorkflowError,
     WorkflowSpecMismatchError,
     WorkflowTerminalError,
+    WorkflowValidationError,
 )
 from nexura_agents.network.redaction import redact_secret_values
 from nexura_agents.usage.models import BudgetConfig
@@ -39,6 +40,7 @@ from nexura_runtime.service.api.models import (
     CancelRunRequest,
     DecisionRequest,
     ForkRunRequest,
+    MigrateRunRequest,
     PaginatedResponse,
     ProvideInputRequest,
     RecoverRunRequest,
@@ -71,6 +73,13 @@ from nexura_runtime.service.run_liveness import (
     workflow_lease_ttl,
 )
 from nexura_runtime.service.run_liveness import journal_decides as _journal_decides
+
+# P38 C3: transport-only hook; native generator and authorization stay below.
+from nexura_runtime.service.stream_adapters import (
+    StreamFormat,
+    select_stream_format,
+    stream_response,
+)
 from nexura_runtime.service.workspaces.repository import UNOWNED_WORKSPACE, WorkspaceRepository
 from nexura_runtime.service.workspaces.scoping import ResourceScopeEnforcer
 from nexura_runtime.studio.store import StudioStore
@@ -83,6 +92,7 @@ from nexura_runtime.workflow import (
     WorkflowSpec,
     _LeaseBusyError,
     checkpoint_to_dict,
+    workflow_run_identities,
 )
 
 router = APIRouter(prefix="/runs", tags=["runs"])
@@ -309,6 +319,28 @@ def _redact_events(run: dict[str, Any], app_state: Any) -> dict[str, Any]:
         from nexura_runtime.service.api.export import WorkflowExporter
 
         safe["spec"] = WorkflowExporter().sanitize_spec_dict(run["spec"])
+    return safe
+
+
+async def _run_snapshot(
+    run: dict[str, Any], app_state: Any, identity: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
+    """Redacted response with current checkpoint identity and immutable run origin."""
+    safe = _redact_events(run, app_state)
+    if identity is None:
+        cp = await app_state.store.checkpoint_store.get(run["run_id"])
+        identity = (
+            {"workflow_version": cp.workflow_version, "definition_digest": cp.spec_hash}
+            if cp
+            else {}
+        )
+    started_version = identity.get(
+        "started_workflow_version", run.get("spec", {}).get("workflow_version")
+    )
+    safe["workflow_version"] = identity.get("workflow_version", started_version)
+    safe["definition_digest"] = identity.get("definition_digest", run["spec_hash"])
+    safe["started_workflow_version"] = started_version
+    safe["origin_definition_digest"] = run["spec_hash"]
     return safe
 
 
@@ -613,15 +645,19 @@ async def list_runs(
     # neither hide nor delay this workspace's runs.
     owned_ids = ws_repo.list_workspace_resource_ids("run", caller_ws)
     total = await store.count_runs(workflow_id=workflow_id, run_ids=owned_ids, status=status)
+    rows = await store.list_runs(
+        workflow_id=workflow_id,
+        limit=limit,
+        offset=offset,
+        run_ids=owned_ids,
+        status=status,
+    )
+    identities = await workflow_run_identities(store.checkpoint_store, [r["run_id"] for r in rows])
     page_items = [
-        _redact_events(show_live(r, live_again), request.app.state)
-        for r in await store.list_runs(
-            workflow_id=workflow_id,
-            limit=limit,
-            offset=offset,
-            run_ids=owned_ids,
-            status=status,
+        await _run_snapshot(
+            show_live(r, live_again), request.app.state, identities.get(r["run_id"], {})
         )
+        for r in rows
     ]
     has_more = (offset + limit) < total
 
@@ -918,7 +954,7 @@ async def start_workflow_run(
         if run_budget is not None:
             snapshot = dict(snapshot)
             snapshot["budget_status"] = run_budget.to_dict()["status"]
-        return _redact_events(snapshot, app_state)
+        return await _run_snapshot(snapshot, app_state)
 
     # Synchronous execution, as a task a cancel or revocation can stop (B40)
     await run_in_request(app_state, run_id, _execute_job)
@@ -927,7 +963,7 @@ async def start_workflow_run(
     if run_budget is not None:
         snapshot = dict(snapshot)
         snapshot["budget_status"] = run_budget.to_dict()["status"]
-    return _redact_events(snapshot, app_state)
+    return await _run_snapshot(snapshot, app_state)
 
 
 @router.get("/{run_id}", response_model=RunResponse)
@@ -947,9 +983,11 @@ async def get_run(request: Request, run_id: str) -> dict[str, Any]:
         # database last: a run another live process executes is never shown interrupted.
         live_again = await reconcile_quietly(request.app.state, run_ids=[run_id])
         run = show_live(await store.get_run(run_id) or run, live_again)
-    run = _redact_events(run, request.app.state)
+    run = await _run_snapshot(run, request.app.state)
     run = dict(run)
-    run["has_subworkflows"] = _spec_has_subworkflows(run.get("spec"))
+    run["has_subworkflows"] = _spec_has_subworkflows(
+        (await _bound_definition(request.app.state, run)).to_dict()
+    )
     run.pop("spec", None)
     budget_mgr = _budget_manager(request.app.state)
     if budget_mgr is not None:
@@ -1017,7 +1055,7 @@ async def cancel_run(
         # The run finished while its background task was being stopped.
         latest = await store.get_run(run_id)
         raise _already_terminal(run_id, latest["status"] if latest else current_status)
-    return _redact_events(updated, request.app.state)
+    return await _run_snapshot(updated, request.app.state)
 
 
 #: Statuses a run cannot be cancelled from.
@@ -1297,7 +1335,7 @@ async def decide_run(request: Request, run_id: str, payload: DecisionRequest) ->
     if payload.decision == "approve":
         _scan_references(request, caller_ws, payload.state_update)
 
-    bound_spec = WorkflowSpec.from_dict(run["spec"])
+    bound_spec = await _bound_definition(request.app.state, run)
     enforce_approval_policy(request, bound_spec)
     engine, event_sink = _build_engine(request, bound_spec, run_id, caller_ws)
 
@@ -1329,8 +1367,14 @@ async def decide_run(request: Request, run_id: str, payload: DecisionRequest) ->
                     state_update=payload.state_update if payload.decision == "approve" else None,
                     engine=engine,
                 )
-            except (ApprovalAlreadyClaimedError, WorkflowTerminalError):
-                # Another request decided first: this recording no longer describes the run.
+            except (
+                ApprovalAlreadyClaimedError,
+                WorkflowTerminalError,
+                WorkflowSpecMismatchError,
+                DefinitionMismatchError,
+            ):
+                # Another request decided (or migrated) first: this recording no longer
+                # describes the run.
                 request.app.state.repro_capture.discard(run_id)
                 raise
         else:
@@ -1358,7 +1402,16 @@ async def decide_run(request: Request, run_id: str, payload: DecisionRequest) ->
             status_code=http_status.HTTP_409_CONFLICT,
             detail={"code": "RUN_ALREADY_TERMINAL", "message": str(exc)},
         ) from exc
-
+    except (WorkflowSpecMismatchError, DefinitionMismatchError) as exc:
+        # A /migrate committed between reading the run's definition and claiming (P38 C6).
+        await event_sink.flush()
+        raise await _definition_changed(
+            request.app.state,
+            run,
+            caller_ws,
+            exc,
+            {"approval_id": payload.approval_id, "decision": payload.decision},
+        ) from exc
     except Exception as exc:
         await event_sink.flush()
         await _record_execution_failure(store, run_id, exc)
@@ -1370,11 +1423,11 @@ async def decide_run(request: Request, run_id: str, payload: DecisionRequest) ->
         # A revoke can cancel the tracked task while the engine is awaiting its claim.
         # Surface that refusal too, rather than reporting a successful decision.
         _refuse_if_revoked(updated)
-    return _redact_events(updated, request.app.state)
+    return await _run_snapshot(updated, request.app.state)
 
 
 def _require_permission(
-    request: Request, permission: Literal["run", "approve"]
+    request: Request, permission: Literal["run", "approve", "edit"]
 ) -> tuple[str, Principal | None]:
     caller_ws, principal, role = _get_caller_context(request)
     if principal:
@@ -1423,6 +1476,8 @@ def _engine_for(
 ) -> tuple[WorkflowEngine, RunStoreEventSink]:
     """The engine (and its event sink) that continues an existing service run."""
     store: StudioStore = app_state.store
+    # Python callables installed by the service owner; HTTP never supplies executable code.
+    spec.migrations.update(getattr(app_state, "workflow_migrations", {}).get(spec.name, {}))
     approval_handlers: frozenset[str] = getattr(
         app_state, "approval_required_handlers", frozenset()
     )
@@ -1445,6 +1500,22 @@ def _engine_for(
         lease_ttl=workflow_lease_ttl(app_state),
     )
     return engine, event_sink
+
+
+async def _bound_definition(app_state: Any, run: Mapping[str, Any]) -> WorkflowSpec:
+    """Use the journal's active definition after migration; Studio's row pins the origin."""
+    journal = await run_journal(app_state)
+    if journal is not None:
+        try:
+            workspace = run.get("journal_workspace") or "default"
+            snapshot = await journal.get(ExecutionId(workspace, run["run_id"]))
+        except KeyError:
+            pass
+        else:
+            definition = snapshot.run.state.get("definition")
+            if definition:
+                return WorkflowSpec.from_dict(definition)
+    return WorkflowSpec.from_dict(run["spec"])
 
 
 def _cross_workspace_error(exc: Exception) -> HTTPException:
@@ -1495,7 +1566,7 @@ async def provide_run_input(
         )
 
     _scan_references(request, caller_ws, payload.value)
-    bound_spec = WorkflowSpec.from_dict(run["spec"])
+    bound_spec = await _bound_definition(request.app.state, run)
     enforce_approval_policy(request, bound_spec)
     engine, event_sink = _build_engine(request, bound_spec, run_id, caller_ws)
 
@@ -1537,10 +1608,11 @@ async def provide_run_input(
             status_code=http_status.HTTP_409_CONFLICT,
             detail={"code": "RUN_ALREADY_TERMINAL", "message": str(exc)},
         ) from exc
-    except WorkflowSpecMismatchError as exc:
-        raise HTTPException(
-            status_code=http_status.HTTP_409_CONFLICT,
-            detail={"code": "SPEC_MISMATCH", "message": str(exc)},
+    except (WorkflowSpecMismatchError, DefinitionMismatchError) as exc:
+        # A /migrate committed between reading the run's definition and claiming (P38 C6).
+        await event_sink.flush()
+        raise await _definition_changed(
+            request.app.state, run, caller_ws, exc, {"interrupt_id": payload.interrupt_id}
         ) from exc
     except ApprovalError as exc:
         raise HTTPException(
@@ -1553,7 +1625,7 @@ async def provide_run_input(
 
     updated = await store.get_run(run_id)
     assert updated is not None
-    return _redact_events(updated, request.app.state)
+    return await _run_snapshot(updated, request.app.state)
 
 
 #: Studio statuses ``POST /runs/{id}/recover`` continues from (``paused``: an effect_unknown pause).
@@ -1566,12 +1638,111 @@ def _conflict(code: str, message: str) -> HTTPException:
     )
 
 
+async def _definition_changed(
+    app_state: Any,
+    run: Mapping[str, Any],
+    workspace_id: str,
+    exc: Exception,
+    request_data: Mapping[str, Any],
+) -> HTTPException:
+    """409 for a decision or answer refused because a migration committed first (P38 C6).
+
+    The refusal happened before anything ran, so the run is never marked failed. Its row is
+    brought back in line with the checkpoint under the now-active definition:
+
+    - the approval or question is still pending (the refusal came before the claim): the
+      row keeps its status, and the same decision can be sent again (a decision on the old
+      definition then asks for a fresh approval of the migrated input);
+    - the stale request had already claimed it: the run is recovered under the active
+      definition, which asks the person again (a fresh approval, or the question again);
+      if that cannot happen now (another worker holds the lease), the row shows
+      ``interrupted`` and ``POST /runs/{id}/recover`` continues it;
+    - the run finished meanwhile: the row records that result.
+    """
+    store: StudioStore = app_state.store
+    run_id = str(run["run_id"])
+    previous = str(run["status"])
+    await _record_event(
+        store,
+        run_id,
+        "RUN_DEFINITION_CHANGED",
+        node_id=run.get("current_node_id"),
+        data={**dict(request_data), "error": str(redact_run_content(str(exc)))},
+    )
+    current = await store.get_run(run_id)
+    checkpoint = await store.checkpoint_store.get(run_id)
+    if current is not None and current["status"] not in _CANCEL_TERMINAL_STATUSES and checkpoint:
+        bound = await _bound_definition(app_state, current)
+        engine, event_sink = _engine_for(app_state, bound, run_id, workspace_id)
+        if checkpoint.status in ("running", "interrupted"):
+            await _record_event(
+                store,
+                run_id,
+                "RUN_RECOVERY_STARTED",
+                node_id=checkpoint.current_node_id,
+                data={
+                    "previous_status": previous,
+                    "on_uncertain": "pause",
+                    "source": "definition_changed",
+                },
+            )
+            # Nothing executes the run now: shown as interrupted until it is continued.
+            await store.update_run(
+                run_id=run_id,
+                status="interrupted",
+                current_node_id=checkpoint.current_node_id,
+                current_state=checkpoint.state,
+                step_count=checkpoint.step_count,
+                unless_status=_CANCEL_TERMINAL_STATUSES,
+            )
+
+            async def ask_again() -> None:
+                await _recover_execution(app_state, run_id, engine, event_sink, "pause")
+
+            try:
+                await run_in_request(app_state, run_id, ask_again)
+            except (
+                _LeaseBusyError,
+                WorkflowSpecMismatchError,
+                DefinitionMismatchError,
+                HTTPException,
+            ):
+                pass  # the row keeps the checkpoint's status; POST /recover continues it
+            except Exception as failure:
+                # The recovery itself ran and failed, exactly as POST /recover would record.
+                await event_sink.flush()
+                await _record_execution_failure(store, run_id, failure)
+        elif checkpoint.status != "paused" or current["status"] != previous:
+            await _persist_result(store, run_id, engine._result_from_checkpoint(checkpoint))
+    now = await store.get_run(run_id)
+    status = now["status"] if now else "missing"
+    if status == "pending_approval":
+        pending = (now or {}).get("pending_approval") or {}
+        hint = (
+            "The approval is still pending; send the decision again."
+            if pending.get("approval_id") == request_data.get("approval_id")
+            else f"A fresh approval '{pending.get('approval_id')}' was requested; decide it."
+        )
+    elif status == "waiting_for_input":
+        hint = "The run is waiting for input again; answer the current question."
+    elif status in ("running", "interrupted"):
+        hint = "Nothing ran; continue it with POST /runs/{id}/recover."
+    else:
+        hint = f"The run is now '{status}'."
+    return _conflict(
+        "WORKFLOW_DEFINITION_CHANGED",
+        f"Run '{run_id}' was migrated to a new workflow definition while this request was "
+        f"being applied; it was not applied and nothing ran. {hint}",
+    )
+
+
 async def _recover_execution(
     app_state: Any,
     run_id: str,
     engine: WorkflowEngine,
     event_sink: RunStoreEventSink,
     on_uncertain: Literal["pause", "fail"],
+    continue_on_old_definition: bool = False,
 ) -> None:
     """Continue ``run_id`` through ``engine.recover`` and record the result on its row.
 
@@ -1580,6 +1751,10 @@ async def _recover_execution(
     """
     store: StudioStore = app_state.store
     current = await _settled_run(app_state, run_id)
+    if current is not None and current["status"] in ("completed", "failed", "rejected"):
+        # The prior owner can finish while this request reads the active definition.
+        # Its committed terminal result already satisfies recovery; never revive it.
+        return
     if current is None or current["status"] not in _RECOVERABLE_STATUSES:
         if current is not None:
             _refuse_if_revoked(current)
@@ -1598,7 +1773,11 @@ async def _recover_execution(
         unless_status=_CANCEL_TERMINAL_STATUSES,
     )
     try:
-        res = await engine.recover(run_id, on_uncertain=on_uncertain)
+        res = await engine.recover(
+            run_id,
+            on_uncertain=on_uncertain,
+            continue_on_old_definition=continue_on_old_definition,
+        )
     except (_LeaseBusyError, WorkflowSpecMismatchError, DefinitionMismatchError):
         # Refused before anything ran: the run keeps the status it had.
         await store.update_run(
@@ -1644,7 +1823,10 @@ async def recover_workflow_run(
     run = await store.get_run(run_id)
     if run is None:
         raise WorkflowError(f"Run '{run_id}' not found.")
-    bound_spec = WorkflowSpec.from_dict(run["spec"])
+    _refuse_if_revoked(run)
+    if run["status"] not in _RECOVERABLE_STATUSES:
+        return await _run_snapshot(run, app_state)
+    bound_spec = await _bound_definition(app_state, run)
     engine, event_sink = _engine_for(app_state, bound_spec, run_id, workspace_id)
     await _record_event(
         store,
@@ -1670,7 +1852,7 @@ async def recover_workflow_run(
         await _record_execution_failure(store, run_id, exc)
     updated = await store.get_run(run_id)
     assert updated is not None
-    return _redact_events(updated, app_state)
+    return await _run_snapshot(updated, app_state)
 
 
 @router.post("/{run_id}/recover")
@@ -1732,7 +1914,7 @@ async def recover_run(
             )
 
     on_uncertain = payload.on_uncertain if payload is not None else "pause"
-    bound_spec = WorkflowSpec.from_dict(run["spec"])
+    bound_spec = await _bound_definition(app_state, run)
     enforce_approval_policy(request, bound_spec)
     engine, event_sink = _build_engine(request, bound_spec, run_id, caller_ws)
     await _record_event(
@@ -1744,7 +1926,13 @@ async def recover_run(
     )
 
     async def recover() -> None:
-        await _recover_execution(app_state, run_id, engine, event_sink, on_uncertain)
+        await _recover_execution(
+            app_state,
+            run_id,
+            engine,
+            event_sink,
+            on_uncertain,
+        )
 
     try:
         await run_in_request(app_state, run_id, recover)
@@ -1762,7 +1950,151 @@ async def recover_run(
 
     updated = await store.get_run(run_id)
     assert updated is not None
-    return _redact_events(updated, app_state)
+    return await _run_snapshot(updated, app_state)
+
+
+@router.post("/{run_id}/migrate")
+async def migrate_run(request: Request, run_id: str, payload: MigrateRunRequest) -> dict[str, Any]:
+    """Migrate to the run's current saved workflow using trusted server hooks, then recover.
+
+    Install ``app.state.workflow_migrations[workflow_name][(from_version, to_version)]``
+    with pure Python callables. A waiting approval or interrupt stays pending; use the
+    existing decide/input endpoint afterwards. Old approvals retain their original digest
+    and a decision requests a fresh approval for the migrated definition.
+    """
+    caller_ws, principal = _require_permission(request, "run")
+    _require_permission(request, "edit")
+    app_state = request.app.state
+    store: StudioStore = app_state.store
+    run = await _get_owned_run(request, run_id)
+    _assert_run_resource(request, run)
+    _refuse_if_revoked(run)
+    if run["status"] in _CANCEL_TERMINAL_STATUSES:
+        raise _already_terminal(run_id, run["status"])
+    workflow_id = run.get("workflow_id")
+    if not workflow_id:
+        if principal and principal.resources is not None:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "RESOURCE_SCOPE_DENIED",
+                    "message": "Resource-scoped keys cannot migrate ad-hoc runs.",
+                },
+            )
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "VALIDATION_ERROR",
+                "message": "Service migration requires a run of a saved workflow.",
+            },
+        )
+    workflow_owner = app_state.workspace_repo.get_resource_workspace("workflow", workflow_id)
+    if workflow_owner is not None and workflow_owner != caller_ws:
+        raise HTTPException(status_code=404, detail={"code": "WORKFLOW_NOT_FOUND"})
+    workflow = await store.get_workflow(workflow_id)
+    if workflow is None:
+        raise HTTPException(status_code=404, detail={"code": "WORKFLOW_NOT_FOUND"})
+    try:
+        spec = WorkflowSpec.from_dict(workflow["spec"])
+        if spec.name != WorkflowSpec.from_dict(run["spec"]).name:
+            raise WorkflowValidationError("Saved workflow name differs from the run's workflow.")
+        spec.validate(app_state.registry)
+        _scan_references(request, caller_ws, spec.to_dict())
+        enforce_approval_policy(request, spec)
+        engine, event_sink = _build_engine(request, spec, run_id, caller_ws)
+    except (WorkflowValidationError, KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=422, detail={"code": "VALIDATION_ERROR", "message": str(exc)}
+        ) from exc
+    if (
+        payload.expected_definition_digest is not None
+        and payload.expected_definition_digest != spec.canonical_hash()
+    ):
+        raise _conflict("SPEC_MISMATCH", "Saved workflow differs from expected_definition_digest.")
+    journal = await run_journal(app_state)
+    try:
+        snapshot = (
+            await journal.get(ExecutionId(run.get("journal_workspace") or caller_ws, run_id))
+            if journal
+            else None
+        )
+    except KeyError:
+        snapshot = None
+    if snapshot is None:
+        raise _conflict(
+            "RUN_NOT_JOURNALED", f"Run '{run_id}' has no execution journal; fork it instead."
+        )
+    rows = await store.list_journaled_runs(
+        ("running", "paused", "interrupted"), run_ids=[run_id]
+    ) or [{"run_id": run_id, "journal_workspace": caller_ws, "owner_process": None}]
+    if (
+        snapshot.run.status in ("running", "interrupted") or snapshot.run.lease_owner is not None
+    ) and (await run_liveness(journal, rows)).get(run_id) == LIVE:
+        raise _conflict("RUN_LEASE_HELD", f"Run '{run_id}' is being executed by a live process.")
+
+    async def migrate_and_resume() -> None:
+        _refuse_if_revoked(await _get_owned_run(request, run_id))
+        before = await engine.get_result(run_id)
+        try:
+            cp = await engine.migrate(run_id)
+        except WorkflowTerminalError:
+            # As in POST /recover: the checkpoint finished before its process stopped and
+            # only the run row lagged. The committed result stands; nothing is migrated.
+            finished = await store.checkpoint_store.get(run_id)
+            if finished is None or finished.status not in ("completed", "failed", "rejected"):
+                raise
+            await event_sink.flush()
+            await _persist_result(store, run_id, engine._result_from_checkpoint(finished))
+            return
+        await _persist_result(store, run_id, await engine.get_result(run_id))
+        if before.definition_digest != cp.spec_hash:
+            await _record_event(
+                store,
+                run_id,
+                "RUN_DEFINITION_MIGRATED",
+                data={
+                    "actor": principal.principal_id if principal else "local-owner",
+                    "workflow_id": workflow_id,
+                    "from_version": before.workflow_version,
+                    "to_version": cp.workflow_version,
+                    "from_digest": before.definition_digest,
+                    "to_digest": cp.spec_hash,
+                },
+            )
+        if payload.resume and (cp.status != "paused" or cp.pending_effect is not None):
+            await _record_event(
+                store,
+                run_id,
+                "RUN_RECOVERY_STARTED",
+                data={
+                    "previous_status": run["status"],
+                    "on_uncertain": payload.on_uncertain,
+                    "source": "migration",
+                },
+            )
+            await _recover_execution(app_state, run_id, engine, event_sink, payload.on_uncertain)
+        else:
+            await event_sink.flush()
+
+    try:
+        await run_in_request(app_state, run_id, migrate_and_resume)
+    except _LeaseBusyError as exc:
+        raise _conflict("RUN_LEASE_HELD", str(exc)) from exc
+    except WorkflowConflictError as exc:
+        raise _conflict("RUN_STATUS_CHANGED", str(exc)) from exc
+    except (WorkflowSpecMismatchError, DefinitionMismatchError) as exc:
+        raise _conflict("WORKFLOW_MIGRATION_REFUSED", str(exc)) from exc
+    except WorkflowValidationError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "VALIDATION_ERROR", "message": str(exc)},
+        ) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        await event_sink.flush()
+        await _record_execution_failure(store, run_id, exc)
+    return await get_run(request, run_id)
 
 
 @router.get("/{run_id}/repro")
@@ -1806,7 +2138,7 @@ async def run_history(request: Request, run_id: str) -> dict[str, Any]:
     caller_ws, _, _ = _get_caller_context(request)
     run = await _get_owned_run(request, run_id)
     engine = WorkflowEngine(
-        spec=WorkflowSpec.from_dict(run["spec"]),
+        spec=await _bound_definition(request.app.state, run),
         registry=request.app.state.registry,
         store=request.app.state.store.checkpoint_store,
         workspace_id=caller_ws,
@@ -1919,7 +2251,7 @@ async def fork_run(request: Request, run_id: str, payload: ForkRunRequest) -> di
     source = await _get_owned_run(request, run_id)
 
     _scan_references(request, caller_ws, payload.state_update)
-    spec = WorkflowSpec.from_dict(source["spec"])
+    spec = await _bound_definition(request.app.state, source)
     enforce_approval_policy(request, spec)
     new_id = f"run-{uuid.uuid4().hex[:12]}"
     engine, event_sink = _build_engine(request, spec, new_id, caller_ws)
@@ -2023,7 +2355,7 @@ async def fork_run(request: Request, run_id: str, payload: ForkRunRequest) -> di
 
     snapshot = await store.get_run(new_id)
     assert snapshot is not None
-    return _redact_events(snapshot, request.app.state)
+    return await _run_snapshot(snapshot, request.app.state)
 
 
 @router.get("/{run_id}/events")
@@ -2033,6 +2365,7 @@ async def stream_run_events(
     cursor: int = Query(default=0, ge=0, description="Resume sequence cursor"),
     live: bool = Query(default=False, description="Stream live events until terminal state"),
     last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+    stream_format: StreamFormat = Depends(select_stream_format),
 ) -> StreamingResponse:
     """Stream lifecycle events via SSE with replay cursor, enforcing tenant ownership."""
     store: StudioStore = request.app.state.store
@@ -2098,4 +2431,5 @@ async def stream_run_events(
                 yield f"event: RUN_STREAM_CLOSED\ndata: {close_data}\n\n"
                 break
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    # P38 C3: adapt only the already-redacted public SSE frames.
+    return stream_response(event_generator(), stream_format, thread_id=run_id, run_id=run_id)

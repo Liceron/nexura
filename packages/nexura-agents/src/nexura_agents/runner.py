@@ -46,7 +46,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError
 
-from nexura_agents import tracing
+from nexura_agents import policy, tracing
 from nexura_agents._lazy import LazyModule
 from nexura_agents.agent import Agent
 from nexura_agents.approvals import ApprovalEnvelope, ApprovalStore
@@ -75,9 +75,15 @@ from nexura_agents.errors import (
     UnknownToolError,
 )
 from nexura_agents.events import RunEvent, RunEventType
-from nexura_agents.guardrails import check_tool_input, check_tool_output, run_guardrail
+from nexura_agents.guardrails import (
+    GuardrailResult,
+    check_tool_input,
+    check_tool_output,
+    decision_record,
+    run_guardrail,
+)
 from nexura_agents.handoffs import Handoff
-from nexura_agents.hooks import AgentHooks
+from nexura_agents.hooks import AgentHooks, ComposedHooks, approval_vote, is_hooks_object
 from nexura_agents.json_schema import validate_instance
 from nexura_agents.limits import ModelSettings, UsageLimits
 from nexura_agents.models.resilience import _accepts_model_settings, _accepts_run_context
@@ -557,6 +563,118 @@ def _hook_override(hook: str, value: Any, expected: type) -> Any:
     raise SDKValidationError(
         f"AgentHooks.{hook} must return None or a {expected.__name__}, not {type(value).__name__}."
     )
+
+
+def _gate_key(turn: int, call_id: str) -> str:
+    """The recorded form of a hook approval gate: the call's first step key."""
+    from nexura_agents._agent_journal import call_step_key
+
+    return str(call_step_key(turn, call_id))
+
+
+def _recorded_gates(state: _RunState) -> set[str]:
+    """Hook gates of this run: this process's, and those in the run's journal."""
+    gates = set(state.hook_gates)
+    journal = state.journal
+    if journal is not None:
+        stored = journal.state.get("hook_gates")
+        if isinstance(stored, list):
+            gates.update(item for item in stored if isinstance(item, str))
+    return gates
+
+
+def _record_gate(state: _RunState, key: str) -> None:
+    """Remember that a hook gated this call. With a journal the gate goes in its state, so
+    the commit that pauses the run (or any earlier one) persists it before the call can be
+    sent; gates of earlier turns are dropped (only the current batch can be recovered)."""
+    prefix = key.split("/", 1)[0] + "/"
+    state.hook_gates = {g for g in state.hook_gates if g.startswith(prefix)} | {key}
+    journal = state.journal
+    if journal is not None:
+        stored = journal.state.get("hook_gates")
+        kept = [
+            g
+            for g in (stored if isinstance(stored, list) else [])
+            if isinstance(g, str) and g.startswith(prefix)
+        ]
+        journal.state["hook_gates"] = sorted({*kept, *state.hook_gates})
+
+
+def _compose_hooks(hooks: Any) -> AgentHooks | None:
+    """``Runner(hooks=...)``: one hooks object as is, a list as ``ComposedHooks``."""
+    if hooks is None:
+        return None
+    if isinstance(hooks, Sequence) and not isinstance(hooks, (str, bytes)):
+        return ComposedHooks(*hooks) if len(hooks) else None
+    if not is_hooks_object(hooks):
+        # A set, dict, generator, class or other non-hooks value fails at construction,
+        # not on the run's first hook call.
+        raise SDKValidationError(
+            "hooks must be a hooks object (an AgentHooks instance or an object with its "
+            f"methods) or a list of them, got {type(hooks).__name__}."
+        )
+    return hooks  # type: ignore[no-any-return]
+
+
+def _decision_event(
+    state: _RunState,
+    stage: str,
+    name: str,
+    action: str,
+    started: float,
+    *,
+    info: Any = None,
+    error_type: str | None = None,
+) -> RunEvent:
+    """A ``GUARDRAIL_DECISION`` event for an agent input/output guardrail, also recorded as
+    ``nexura.guardrail.decision`` on the run span (redacted: see ``decision_record``)."""
+    record = decision_record(
+        stage,
+        name,
+        action,
+        info=info,
+        latency_ms=(time.monotonic() - started) * 1000,
+        agent=state.agent.name,
+        error_type=error_type,
+    )
+    tracing.guardrail_decision(state.span, record)
+    return RunEvent(type=RunEventType.GUARDRAIL_DECISION, run_id=state.run_id, data=record)
+
+
+async def _agent_guardrail(state: _RunState, check: Any, value: Any) -> GuardrailResult:
+    """Run one agent input/output guardrail within the run's timeout, stopping early with
+    ``_RunCancelled`` when the run's CancelToken fires (as tool guardrails do)."""
+
+    async def bounded() -> GuardrailResult:
+        # The guardrail's coroutine is created only once it can run: never left unawaited
+        # when the run is already cancelled or past its deadline.
+        remaining = state.remaining()  # ModelTimeoutError once the deadline has passed
+        work = run_guardrail(check, state.ctx, value)
+        return await (asyncio.wait_for(work, timeout=remaining) if remaining else work)
+
+    try:
+        result: GuardrailResult = await _until_cancelled(bounded(), state.cancel)
+    except TimeoutError as exc:
+        elapsed = time.monotonic() - state.start_time
+        limit = state.effective_timeout
+        if limit is None or elapsed + 0.05 < limit:
+            raise  # the guardrail's own TimeoutError, before the run's deadline: as before
+        raise ModelTimeoutError(limit, elapsed) from exc  # the run's deadline passed
+    return result
+
+
+def _drain_nested_usage(state: _RunState) -> bool:
+    """Count usage recorded with ``ctx.add_usage`` (judge calls in guardrails, validators).
+
+    Only the run's total: ``usage_by_agent`` / ``usage_by_model`` cover the agents' own
+    model calls, as for nested usage from tools. True when anything was added.
+    """
+    nested_usage = state.ctx.take_nested_usage()
+    for nested in nested_usage:
+        state.usage = state.usage.add(nested)
+    state.ctx.usage = state.usage
+    state.span.set_usage(state.usage)
+    return bool(nested_usage)
 
 
 def _custom_event(run_id: str, payload: dict[str, Any]) -> RunEvent:
@@ -1048,6 +1166,17 @@ class _RunState:
     dispatch_keys: dict[str, StepKey] = field(default_factory=dict)
     # tool_call_id -> step key of a call whose outcome is unknown after a crash.
     in_doubt: dict[str, StepKey] = field(default_factory=dict)
+    # tool_call_id -> GUARDRAIL_DECISION events of that call's tool guardrails, yielded
+    # with its result.
+    guard_events: dict[str, list[RunEvent]] = field(default_factory=dict)
+    # Index in messages of a final answer that has not passed its output validators and
+    # guardrails yet; a cancelled run drops it from the messages it returns.
+    unchecked_answer: int | None = None
+    # The run's hooks: inherited, process default and the runner's own (P39 G2).
+    hooks: AgentHooks | None = None
+    # Hook approval gates of this turn ("turn:<n>/call:<id>"); with a journal they are
+    # also in its state ("hook_gates") and survive a crash (P39 G2, MIN7).
+    hook_gates: set[str] = field(default_factory=set)
 
     def remaining(self) -> float | None:
         if self.effective_timeout is None:
@@ -1069,7 +1198,7 @@ class Runner:
         self,
         session_store: SessionStore | None = None,
         *,
-        hooks: AgentHooks | None = None,
+        hooks: AgentHooks | Sequence[AgentHooks] | None = None,
         usage_limits: UsageLimits | None = None,
         model_settings: ModelSettings | None = None,
         budget: Any | None = None,
@@ -1079,7 +1208,14 @@ class Runner:
         approval_signing_secret: str | bytes | None = None,
         approval_store: ApprovalStore | None = None,
         lease_ttl: float = 30.0,
+        default_hooks: bool = True,
     ) -> None:
+        if not isinstance(default_hooks, bool):
+            raise SDKValidationError("default_hooks must be True or False.")
+        # False leaves out the process default hooks (set_default_hooks). For tests only:
+        # hooks inherited from an enclosing run still apply, and a locked default refuses it.
+        policy.check_opt_out(default_hooks)
+        self.use_default_hooks = default_hooks
         if (
             isinstance(lease_ttl, bool)
             or not isinstance(lease_ttl, (int, float))
@@ -1131,11 +1267,61 @@ class Runner:
                 DeprecationWarning,
                 stacklevel=2,
             )
+        # One hooks object, or a list composed in order (see ComposedHooks).
         self.hooks = hooks
         self.usage_limits = usage_limits
         self.model_settings = model_settings
         # A usage RunBudget; provider models admit and settle every call against it.
         self._configured_budget = budget
+
+    @property
+    def hooks(self) -> AgentHooks | None:
+        """This runner's own hooks: the object given, a ``ComposedHooks`` for a list, or
+        ``None``. A run uses them after the inherited and default hooks
+        (see :meth:`effective_hooks`)."""
+        return self._hooks
+
+    @hooks.setter
+    def hooks(self, value: AgentHooks | Sequence[AgentHooks] | None) -> None:
+        self._hooks = _compose_hooks(value)
+
+    def effective_hooks(self) -> AgentHooks | None:
+        """The hooks a run started now would use: the hooks inherited from an enclosing
+        run, the process default (``set_default_hooks``; left out with
+        ``Runner(default_hooks=False)``), then this runner's own ``hooks``, each object
+        once. ``hooks=`` adds to the default; it never replaces it."""
+        return policy.effective_hooks(self._hooks, use_default=self.use_default_hooks)
+
+    def _scoped(self, stream: AsyncGenerator[RunEvent, None]) -> AsyncGenerator[RunEvent, None]:
+        """The run's event stream with its hooks active (inherited by nested runs) and
+        inside its budget."""
+        return admission.budget_stream(
+            policy.hooks_stream(stream, self.effective_hooks()), self.budget
+        )
+
+    def _needs_approval(self, state: _RunState, tool: Tool, call: ToolCall) -> bool:
+        """Whether a call waits for human approval: the tool's ``requires_approval`` flag or
+        rule, or a hook gate recorded for it in the run's journal, or else any hook's
+        ``tool_needs_approval``. Hooks add gates; they cannot remove the tool's own (it is
+        checked first and wins), and a gate a hook added stays after a crash (P39 G2,
+        MIN7): it is recorded with the run, so a recovery or resume without that hook
+        still waits for a person."""
+        if tool.needs_approval(state.ctx, call.arguments):
+            return True
+        key = _gate_key(state.turn, call.id)
+        if key in _recorded_gates(state):
+            return True
+        hooks = state.hooks
+        if hooks is None:
+            return False
+        ctx = state.ctx.for_tool(
+            call.id, call.name, state.tool_retries.get(call.name, 0), tool=tool.info()
+        )
+        # Copies: a hook cannot change the call or the tool (for example lift its gate).
+        if not approval_vote(hooks, ctx, copy.copy(tool), copy.deepcopy(call.arguments)):
+            return False
+        _record_gate(state, key)
+        return True
 
     @property
     def budget(self) -> Any:
@@ -1341,7 +1527,7 @@ class Runner:
             stream = self._traced(
                 tracing.start_run, agent.name, False, self._stream_impl, agent, prompt, **kwargs
             )
-        return admission.budget_stream(stream, self.budget)
+        return self._scoped(stream)
 
     async def _stream_impl(
         self,
@@ -1450,6 +1636,7 @@ class Runner:
             expected_revision=expected_revision,
             span=_span,
             cancel=cancel,
+            hooks=policy.active_hooks.get(),  # this run's hooks (set by _scoped)
         )
 
         _set_run_attributes(_span, ctx, session_id)
@@ -1467,7 +1654,7 @@ class Runner:
             },
         )
 
-        hooks = self.hooks or _NO_HOOKS
+        hooks = state.hooks or _NO_HOOKS
         await hooks.on_run_start(ctx)
         await _hook(hooks, "on_agent_start", ctx, agent)
         yield RunEvent(
@@ -1476,23 +1663,49 @@ class Runner:
             data={"agent": agent.name, "path": [agent.name]},
         )
 
-        # Input guardrails see the user's latest message before any model call.
+        # Input guardrails see the user's latest message before any model call. Each one is
+        # bounded by the run's timeout and stops when the run is cancelled.
         user_text = next((m.content or "" for m in reversed(messages) if m.role == "user"), "")
         for check in agent.input_guardrails:
-            outcome = await run_guardrail(check, ctx, user_text)
-            if outcome.replacement is not None:
-                bad = TypeError(
-                    f"Input guardrail '{getattr(check, '__name__', 'guardrail')}' returned "
-                    "rewritten(); only output guardrails can rewrite."
+            name = getattr(check, "__name__", "guardrail")
+            started = time.monotonic()
+            try:
+                outcome = await _agent_guardrail(state, check, user_text)
+            except _RunCancelled:
+                _drain_nested_usage(state)  # judges that finished before the cancel count
+                yield _cancelled(state)
+                return
+            except Exception as exc:
+                _drain_nested_usage(state)
+                yield _decision_event(
+                    state, "input", name, "fail", started, error_type=type(exc).__name__
                 )
+                if isinstance(exc, ModelTimeoutError):
+                    yield _failed(run_id, exc)
+                raise  # any other error propagates as before
+            if outcome.replacement is not None:
+                _drain_nested_usage(state)
+                bad = TypeError(
+                    f"Input guardrail '{name}' returned rewritten(); only output guardrails "
+                    "can rewrite."
+                )
+                yield _decision_event(state, "input", name, "fail", started, error_type="TypeError")
                 yield _failed(run_id, bad)
                 raise bad
             if outcome.tripwire:
-                tripped = GuardrailTripwireTriggered(
-                    getattr(check, "__name__", "guardrail"), "input", outcome.info
-                )
+                _drain_nested_usage(state)  # the judge that tripped cost money too
+                tripped = GuardrailTripwireTriggered(name, "input", outcome.info)
+                yield _decision_event(state, "input", name, "fail", started, info=outcome.info)
                 yield _failed(run_id, tripped)
                 raise tripped
+        # Model calls made inside the guardrails (a judge, ctx.add_usage) count now, and
+        # against UsageLimits before any model call.
+        if _drain_nested_usage(state) and self.usage_limits is not None:
+            try:
+                self.usage_limits.check(state.requests, state.usage)
+            except NexuraError as limit_err:
+                yield _failed(run_id, limit_err)
+                raise
 
         # Long-term memory: recall once per run (not on resume), attachments-only skips it.
         memory = agent.memory
@@ -1547,10 +1760,8 @@ class Runner:
             "stream_text": stream_text,
         }
         if tracing._STATE is None:
-            return admission.budget_stream(
-                self._resume_stream_impl(agent, interruption, **kwargs), self.budget
-            )
-        return admission.budget_stream(
+            return self._scoped(self._resume_stream_impl(agent, interruption, **kwargs))
+        return self._scoped(
             self._traced(
                 tracing.start_run,
                 agent.name,
@@ -1559,8 +1770,7 @@ class Runner:
                 agent,
                 interruption,
                 **kwargs,
-            ),
-            self.budget,
+            )
         )
 
     async def _resume_stream_impl(
@@ -1695,7 +1905,7 @@ class Runner:
         if root.handoffs:
             _span.set(tracing.AGENT_PATH, list(state.path))
             _span.set(tracing.LAST_AGENT, agent.name)
-        hooks = self.hooks or _NO_HOOKS
+        hooks = state.hooks or _NO_HOOKS
         last = messages[-1] if messages else None
         if interruption.reason is None:
             if last is None or last.role != "assistant" or not last.tool_calls:
@@ -2142,6 +2352,7 @@ class Runner:
 
             while True:
                 agent = state.agent
+                state.unchecked_answer = None  # an earlier answer was finished or retried
                 if state.cancel is not None and state.cancel.cancelled:
                     _raise_if_lease_lost(state)
                     yield _cancelled(state)  # between steps: nothing is half-done
@@ -2266,6 +2477,9 @@ class Runner:
 
                 # 4. Final answer (no tool calls)
                 if not response.message.tool_calls:
+                    # Not returned by a cancelled run until its validators and output
+                    # guardrails have passed (see the _RunCancelled handler below).
+                    state.unchecked_answer = len(messages) - 1
                     final_text = response.message.content or ""
                     output: Any = final_text
                     if agent.output_type is not None:
@@ -2361,7 +2575,7 @@ class Runner:
                     tc
                     for tc in calls
                     if (tool := _callable_tool(agent, state, tc.name)) is not None
-                    and tool.needs_approval(ctx, tc.arguments)
+                    and self._needs_approval(state, tool, tc)
                 ]
                 if pending:
                     for waiting in pending:
@@ -2412,6 +2626,18 @@ class Runner:
             # The token interrupted a model call or tool. Nothing from that step is
             # recorded; the checkpoint is kept (it is deleted only on completion/failure).
             _raise_if_lease_lost(state)
+            unchecked = state.unchecked_answer
+            if (
+                unchecked is not None
+                and unchecked == len(state.messages) - 1
+                and state.messages[unchecked].role == "assistant"
+                and not state.messages[unchecked].tool_calls
+            ):
+                # A final answer interrupted in its output validators or guardrails never
+                # passed them: the cancelled result does not return it.
+                state.messages.pop()
+            state.unchecked_answer = None
+            _drain_nested_usage(state)  # guardrail judges that finished before the cancel
             yield _cancelled(state)
             return
         except asyncio.CancelledError:
@@ -2693,11 +2919,24 @@ class Runner:
         ctx = state.ctx
         messages = state.messages
         for check in agent.output_guardrails:
-            outcome = await run_guardrail(check, ctx, output)
-            if outcome.tripwire:
-                tripped = GuardrailTripwireTriggered(
-                    getattr(check, "__name__", "guardrail"), "output", outcome.info
+            name = getattr(check, "__name__", "guardrail")
+            started = time.monotonic()
+            try:
+                outcome = await _agent_guardrail(state, check, output)
+            except _RunCancelled:
+                raise  # the loop drops the unchecked answer and counts finished judges
+            except Exception as exc:
+                _drain_nested_usage(state)
+                yield _decision_event(
+                    state, "output", name, "fail", started, error_type=type(exc).__name__
                 )
+                if isinstance(exc, ModelTimeoutError):
+                    yield _failed(run_id, exc)
+                raise  # any other error propagates as before
+            if outcome.tripwire:
+                _drain_nested_usage(state)  # the judge that tripped cost money too
+                tripped = GuardrailTripwireTriggered(name, "output", outcome.info)
+                yield _decision_event(state, "output", name, "fail", started, info=outcome.info)
                 yield _failed(run_id, tripped)
                 raise tripped
             if outcome.replacement is not None:
@@ -2706,12 +2945,27 @@ class Runner:
                         "An output guardrail returned a rewritten text for an "
                         "agent with output_type; rewriting supports text only."
                     )
+                    _drain_nested_usage(state)
+                    yield _decision_event(
+                        state, "output", name, "fail", started, error_type="TypeError"
+                    )
                     yield _failed(run_id, bad)
                     raise bad
+                yield _decision_event(state, "output", name, "scrub", started, info=outcome.info)
                 final_text = output = outcome.replacement
                 if not from_tool:
                     # Keep the stored history in step with what the caller gets.
                     messages[-1] = dataclasses.replace(messages[-1], content=final_text)
+        state.unchecked_answer = None  # passed its validators and output guardrails
+        # Usage recorded since the last model turn (judge calls in output guardrails,
+        # output validators) is part of the run's usage, and is checked against
+        # UsageLimits like a model response: past a hard cap the run fails.
+        if _drain_nested_usage(state) and self.usage_limits is not None:
+            try:
+                self.usage_limits.check(state.requests, state.usage)
+            except NexuraError as limit_err:
+                yield _failed(run_id, limit_err)
+                raise
 
         yield RunEvent(
             type=RunEventType.FINAL_OUTPUT,
@@ -2860,7 +3114,7 @@ class Runner:
                 failed.append((call, outcome))
             elif call.id in decisions.resend:
                 pass  # approved in this resume: that is its fresh approval
-            elif tool is not None and tool.needs_approval(state.ctx, call.arguments):
+            elif tool is not None and self._needs_approval(state, tool, call):
                 decisions.deferred.add(call.id)  # not applied: send again after approval
         if failed:
             call, outcome = failed[0]
@@ -3073,7 +3327,7 @@ class Runner:
         state.span.set(tracing.LAST_AGENT, target.name)
         mark = tracing.start_handoff(state.span, source.name, target.name, reason, state.path)
         mark.end()
-        hooks = self.hooks or _NO_HOOKS
+        hooks = state.hooks or _NO_HOOKS
         try:
             await _hook(hooks, "on_agent_end", ctx, source, None)
             await _hook(hooks, "on_handoff", ctx, source, target)
@@ -3156,6 +3410,8 @@ class Runner:
         # sibling that already ran (maybe a write) is in the events and the checkpoint.
         failure: tuple[ToolCall, BaseException] | None = None
         for (tc, _tool), outcome in zip(batch, outcomes, strict=True):
+            for decision in state.guard_events.pop(tc.id, ()):
+                yield decision  # its tool guardrails' decisions, before its result
             if isinstance(outcome, BaseException):
                 if failure is None:
                     failure = (tc, outcome)
@@ -3257,11 +3513,23 @@ class Runner:
             retries,
             idempotency_key=self._idempotency_key(state, step_key),
             fencing_token=state.journal.fencing_token if state.journal is not None else None,
+            tool=tool.info(),
         )
         limit = tool.max_retries if tool.max_retries is not None else 1
+
+        def on_decision(record: dict[str, Any]) -> None:
+            tracing.guardrail_decision(None, record)  # on the current execute_tool span
+            state.guard_events.setdefault(tc.id, []).append(
+                RunEvent(type=RunEventType.GUARDRAIL_DECISION, run_id=state.run_id, data=record)
+            )
+
         if tool.input_guardrails:
             blocked = await _until_cancelled(
-                _bounded(state, check_tool_input(tool, tool_ctx, tc.arguments)), state.cancel
+                _bounded(
+                    state,
+                    check_tool_input(tool, tool_ctx, tc.arguments, on_decision=on_decision),
+                ),
+                state.cancel,
             )
             if blocked is not None:
                 return blocked, "guardrail_rejected"
@@ -3272,7 +3540,10 @@ class Runner:
             try:
                 answered = _hook_override(
                     "before_tool",
-                    await _until_cancelled(hooks.before_tool(tool_ctx, tc), state.cancel),
+                    # A copy: a hook cannot change the approved, checked arguments.
+                    await _until_cancelled(
+                        hooks.before_tool(tool_ctx, policy.hook_copy(tc)), state.cancel
+                    ),
                     str,
                 )
                 if answered is not None:
@@ -3302,7 +3573,9 @@ class Runner:
                 return f"Invalid arguments for '{tc.name}': {invalid.message}", "invalid_arguments"
             rewritten = _hook_override(
                 "after_tool",
-                await _until_cancelled(hooks.after_tool(tool_ctx, tc, result), state.cancel),
+                await _until_cancelled(
+                    hooks.after_tool(tool_ctx, policy.hook_copy(tc), result), state.cancel
+                ),
                 str,
             )
             files = list(tool_ctx.tool_attachments)
@@ -3312,7 +3585,8 @@ class Runner:
                 state.tool_cache[cache_key] = (result, files)
         if tool.output_guardrails:
             checked, rejected = await _until_cancelled(
-                _bounded(state, check_tool_output(tool, tool_ctx, result)), state.cancel
+                _bounded(state, check_tool_output(tool, tool_ctx, result, on_decision=on_decision)),
+                state.cancel,
             )
             if rejected:
                 return checked, "guardrail_rejected"  # its files are withheld too
@@ -3506,6 +3780,7 @@ class Runner:
             memory_block=interruption.memory_block,
             checkpoint_interruption_id=interruption.interruption_id,
             checkpoint_expires_at=interruption.expires_at,
+            hooks=policy.active_hooks.get(),  # this run's hooks (set by _scoped)
         )
 
     @staticmethod
@@ -3726,6 +4001,14 @@ class Runner:
         _refuse_claimed(journal.state, journal.steps, journal.status, interruption)
         held = journal.state.get("approval_claim")
         was_paused = journal.status == "paused"
+        if interruption.reason != _UNKNOWN_REASON:
+            # Every call an approval pause asks about was gated (by its tool, a hook or a
+            # re-approval). Recorded with the claim, before any dispatch, so a recovery
+            # without the hook still asks again once the claim expires, even when the
+            # pause commit itself was lost (P39 G2 review M1).
+            for waiting in interruption.pending:
+                if waiting.id not in interruption.question_ids:
+                    _record_gate(state, _gate_key(state.turn, waiting.id))
         await journal.record_claim(decisions.claim)
         try:
             await self._consume_approval(interruption, envelope)
@@ -3897,18 +4180,15 @@ class Runner:
             "stream_text": stream_text,
         }
         if tracing._STATE is None:
-            return admission.budget_stream(
-                self._recover_stream_impl(agent, run_id, **kwargs), self.budget
-            )
+            return self._scoped(self._recover_stream_impl(agent, run_id, **kwargs))
 
         def start(name: str, *, resumed: bool) -> Any:
             return tracing.start_recover(name)
 
-        return admission.budget_stream(
+        return self._scoped(
             self._traced(
                 start, agent.name, True, self._recover_stream_impl, agent, run_id, **kwargs
-            ),
-            self.budget,
+            )
         )
 
     async def _recover_stream_impl(
@@ -4102,6 +4382,13 @@ class Runner:
             ):
                 # The pause reached the checkpoint but not the journal (a crash between
                 # the two): write it now, so the journal says paused / indeterminate.
+                if interruption.reason != _UNKNOWN_REASON:
+                    # Every call this pause asks a person about stays gated after a later
+                    # crash, whichever hooks recover the run (the hook gates recorded at
+                    # the pause were in the lost journal commit; MIN7).
+                    for waiting in interruption.pending:
+                        if waiting.id not in interruption.question_ids:
+                            _record_gate(state, _gate_key(state.turn, waiting.id))
                 keys = [
                     state.journal.latest(state.turn, c.id)[1]
                     for c in interruption.pending
@@ -4123,7 +4410,7 @@ class Runner:
             )
             return
 
-        hooks = self.hooks or _NO_HOOKS
+        hooks = state.hooks or _NO_HOOKS
         if phase == "completed":
             # The run finished and its session is saved; only the cleanup was lost. Do not
             # call the model or save again: replay the final answer.
@@ -4362,7 +4649,7 @@ class Runner:
                 continue  # dispatched: the effect-class rules decide
             if journal.unjournaled_dispatch_possible(state.turn):
                 continue  # may have been sent before the run had a journal (H1)
-            gated = tool is not None and tool.needs_approval(state.ctx, call.arguments)
+            gated = tool is not None and self._needs_approval(state, tool, call)
             if call.id in rejected:
                 decisions.rejected[call.id] = str(rejected[call.id] or "")
             elif call.id in answers:
@@ -4498,7 +4785,7 @@ class Runner:
                     state.dispatch_keys[call.id] = key
                 return True
             if isinstance(probe, NotApplied):
-                if tool.needs_approval(state.ctx, call.arguments):
+                if self._needs_approval(state, tool, call):
                     decisions.deferred.add(call.id)  # its approval was used by the first try
                 return True
         state.in_doubt[call.id] = key
@@ -4516,6 +4803,7 @@ class Runner:
             0,
             idempotency_key=intent.idempotency_key,
             fencing_token=state.journal.fencing_token if state.journal is not None else None,
+            tool=tool.info(),
         )
         assert tool.reconcile is not None
         try:

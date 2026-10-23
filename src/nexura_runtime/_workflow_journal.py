@@ -144,6 +144,7 @@ class WorkflowJournal:
         origin: dict[str, Any] | None = None,
         *,
         budget_scope: dict[str, str] | None = None,
+        definition: dict[str, Any] | None = None,
     ) -> None:
         """Journal a new run with its lease already held (raises if it exists).
 
@@ -151,6 +152,11 @@ class WorkflowJournal:
         the run (resume, recover) then needs a budget again.
         """
         state = self._initial_state()
+        if definition is not None:
+            state["definition"] = definition
+            state["workflow_version"] = definition.get("workflow_version")
+            state["started_workflow_version"] = definition.get("workflow_version")
+            state["definition_digest"] = self.digest
         if budget_scope is not None:
             state["budget_scope"] = dict(budget_scope)
         run = await self.store.create(

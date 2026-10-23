@@ -13,7 +13,8 @@ from __future__ import annotations
 import inspect
 import json
 import math
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, get_origin, get_type_hints, overload
 
 from pydantic import BaseModel, create_model
@@ -47,6 +48,58 @@ EnabledRule = bool | Callable[["RunContext[Any]"], bool | Awaitable[bool]]
 
 
 OnTimeout = Literal["tell_model", "fail"]
+
+
+@dataclass(frozen=True)
+class ToolInfo:
+    """What a hook, guardrail or policy rule may know about a tool: ``ctx.tool``.
+
+    ``origin`` says where the tool comes from: ``python:<module>.<qualname>`` for a
+    ``@tool`` function, ``mcp:<server>:<tool>`` and ``openapi:<METHOD>:<path>`` for MCP and
+    OpenAPI tools, ``module:<module_id>`` for other module tools, ``agent:<name>`` for
+    ``Agent.as_tool``, ``builtin:<name>`` for the SDK's own tools, or ``None`` when unknown.
+    ``effect`` is the tool's effect class (``pure``, ``idempotent``, ``non_idempotent`` or
+    ``reconcilable``). ``requires_approval`` is ``True`` when the tool declares an approval
+    flag or rule (a rule may still say no for a given call). ``tags`` are labels such as
+    ``toolset:<name>`` (MCP server or OpenAPI toolset) or your own ``@tool(tags=...)``.
+    """
+
+    name: str
+    origin: str | None = None
+    effect: str = "non_idempotent"
+    requires_approval: bool = False
+    tags: frozenset[str] = frozenset()
+
+    @property
+    def toolsets(self) -> frozenset[str]:
+        """The names in this tool's ``toolset:<name>`` tags."""
+        return frozenset(t[len("toolset:") :] for t in self.tags if t.startswith("toolset:"))
+
+
+def _check_origin(name: str, origin: Any) -> str | None:
+    if origin is not None and (not isinstance(origin, str) or not origin):
+        raise SDKValidationError(f"Tool '{name}': origin must be a non-empty string or None.")
+    return origin
+
+
+def _check_tags(name: str, tags: Any) -> frozenset[str]:
+    if isinstance(tags, (str, bytes)):
+        raise SDKValidationError(f"Tool '{name}': tags must be a list of strings, not a string.")
+    items = frozenset(tags)
+    if not all(isinstance(t, str) and t for t in items):
+        raise SDKValidationError(f"Tool '{name}': every tag must be a non-empty string.")
+    return items
+
+
+def python_origin(fn: Any) -> str | None:
+    """``python:<module>.<qualname>`` for a function, or ``None`` when it has no name."""
+    module = getattr(fn, "__module__", None)
+    qualname = getattr(fn, "__qualname__", None)
+    if not isinstance(qualname, str) or not qualname:
+        return None
+    if isinstance(module, str) and module:
+        return f"python:{module}.{qualname}"
+    return f"python:{qualname}"
 
 
 class ToolRetry:
@@ -297,6 +350,10 @@ class Tool:
     retry: ToolRetry | None = None
     cache: bool = False
     asks_user: bool = False  # only the built-in Agent(ask_user=True) tool sets this
+    # Where the tool comes from and labels for policies (see ToolInfo). Metadata only:
+    # neither changes how the tool runs.
+    origin: str | None = None
+    tags: frozenset[str] = frozenset()
 
     def __init__(
         self,
@@ -317,9 +374,13 @@ class Tool:
         cache: bool = False,
         effect: EffectName | None = None,
         reconcile: ReconcileFn | None = None,
+        origin: str | None = None,
+        tags: Iterable[str] = (),
     ) -> None:
         self.name = name
         self.fn = fn
+        self.origin = _check_origin(name, origin) if origin is not None else python_origin(fn)
+        self.tags = _check_tags(name, tags)
         self.effect, self.reconcile = _check_effect(name, effect, idempotent, reconcile)
         idempotent = self.effect.value in ("pure", "idempotent")
         self.timeout, self.on_timeout = _check_timeout(name, timeout, on_timeout)
@@ -350,6 +411,17 @@ class Tool:
 
         effect = self.__dict__.get("effect")
         return EffectClass(effect) if effect is not None else EffectClass.NON_IDEMPOTENT
+
+    def info(self) -> ToolInfo:
+        """This tool's metadata for hooks, guardrails and policies (``ctx.tool``)."""
+        rule = self.requires_approval
+        return ToolInfo(
+            name=self.name,
+            origin=self.origin,
+            effect=self.effect_class().value,
+            requires_approval=callable(rule) or bool(rule),
+            tags=frozenset(self.tags),
+        )
 
     def needs_approval(self, ctx: RunContext[Any], arguments: dict[str, Any]) -> bool:
         """Whether this call needs human approval, from the ``requires_approval`` flag or rule."""
@@ -561,9 +633,14 @@ class SchemaTool(Tool):
         idempotent: bool = False,
         effect: EffectName | None = None,
         reconcile: ReconcileFn | None = None,
+        origin: str | None = None,
+        tags: Iterable[str] = (),
     ) -> None:
         self.name = name
         self.fn = handler
+        # MCP and OpenAPI tools get theirs from module_tool; otherwise unknown.
+        self.origin = _check_origin(name, origin)
+        self.tags = _check_tags(name, tags)
         self.effect, self.reconcile = _check_effect(name, effect, idempotent, reconcile)
         idempotent = self.effect.value in ("pure", "idempotent")
         self.idempotent = idempotent
@@ -676,6 +753,7 @@ def tool(
     cache: bool = False,
     effect: EffectName | None = None,
     reconcile: ReconcileFn | None = None,
+    tags: Iterable[str] = (),
 ) -> Callable[[Callable[..., Any]], Tool]: ...
 
 
@@ -697,6 +775,7 @@ def tool(
     cache: bool = False,
     effect: EffectName | None = None,
     reconcile: ReconcileFn | None = None,
+    tags: Iterable[str] = (),
 ) -> Tool | Callable[[Callable[..., Any]], Tool]:
     """Decorator to define a typed Agent tool from a function.
 
@@ -705,6 +784,9 @@ def tool(
     ``"non_idempotent"`` (the default, also for undeclared tools) pauses the run, and
     ``"reconcilable"`` runs ``reconcile(ctx, intent)`` to find out. ``idempotent=True``
     is an alias of ``effect="idempotent"``.
+
+    ``tags`` are labels that hooks, guardrails and policy rules can match
+    (``ctx.tool.tags``); the tool's ``origin`` is ``python:<module>.<qualname>``.
     """
     if fn is not None:
         return Tool(
@@ -724,6 +806,7 @@ def tool(
             cache=cache,
             effect=effect,
             reconcile=reconcile,
+            tags=tags,
         )
 
     def decorator(func: Callable[..., Any]) -> Tool:
@@ -744,6 +827,7 @@ def tool(
             cache=cache,
             effect=effect,
             reconcile=reconcile,
+            tags=tags,
         )
 
     return decorator

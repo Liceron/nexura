@@ -14,6 +14,8 @@ from nexura_agents._lazy import LazyModule
 
 if TYPE_CHECKING:
     import asyncio
+
+    from nexura_agents.tools import ToolInfo
 else:
     asyncio = LazyModule("asyncio")  # the core import must not load asyncio
 
@@ -114,6 +116,10 @@ class RunContext(Generic[DepsT]):  # noqa: UP046 - keeps Python 3.11 support
     # Systems that can compare it (a header or a compare-and-swap field) can refuse a stale
     # caller. None without a durable store.
     fencing_token: int | None = None
+    # Inside a tool call: the tool's metadata (name, origin, effect class, approval flag,
+    # tags) for hooks, guardrails and policy rules. Read-only (a frozen ToolInfo); None
+    # outside a tool call.
+    tool: ToolInfo | None = None
     # Shared by every per-tool copy so nested usage reaches the run's totals.
     _nested_usage: list[Usage] = field(default_factory=list, repr=False)
     # Where ctx.emit sends events; shared by every per-tool copy.
@@ -164,8 +170,9 @@ class RunContext(Generic[DepsT]):  # noqa: UP046 - keeps Python 3.11 support
         *,
         idempotency_key: str | None = None,
         fencing_token: int | None = None,
+        tool: ToolInfo | None = None,
     ) -> RunContext[DepsT]:
-        """Copy scoped to one tool call."""
+        """Copy scoped to one tool call (``tool``: its metadata, see ``ToolInfo``)."""
         return RunContext(
             deps=self.deps,
             run_id=self.run_id,
@@ -182,6 +189,7 @@ class RunContext(Generic[DepsT]):  # noqa: UP046 - keeps Python 3.11 support
             prompt=self.prompt,
             idempotency_key=idempotency_key,
             fencing_token=fencing_token,
+            tool=tool,
             _nested_usage=self._nested_usage,
             _events=self._events,
         )

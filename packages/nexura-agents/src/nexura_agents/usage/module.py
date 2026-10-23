@@ -26,7 +26,9 @@ class UsageBudgetModule(BaseModule):
         *,
         module_id: str = "nexura.usage.budget",
         version: str = "1.0.0",
-        effect_policy: EffectPolicy = "idempotent_write",
+        # reserve and record_usage add a reservation or count usage again when repeated:
+        # not idempotent, so a durable run pauses instead of repeating them after a crash.
+        effect_policy: EffectPolicy = "non_idempotent_write",
     ) -> None:
         self.manager = manager or BudgetManager()
 

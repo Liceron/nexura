@@ -75,10 +75,12 @@ async def test_output_judge_is_admitted_by_the_budget() -> None:
     )
     result = await Runner(budget=budget).run_async(agent, "hello")
     assert budget.get_status().total_tokens == 20
-    # Known gap until P39 G1: the runner does not drain nested usage after the output
-    # guardrail stage, so RunResult.usage misses the judge's 10 tokens (the budget has
-    # them). G1 changes this to 20; update the assertion then.
-    assert result.usage.total_tokens == 10
+    # Updated deliberately in P39 G1 (was 10 in G3): the runner now drains nested usage
+    # (ctx.add_usage, which as_guardrail calls with the judge's usage) after the output
+    # guardrail stage, before FINAL_OUTPUT. So RunResult.usage counts the agent's 10
+    # tokens plus the judge's 10, matching what the budget was charged. Before G1 the
+    # judge's tokens reached the budget but were dropped from RunResult.usage.
+    assert result.usage.total_tokens == 20
 
 
 async def test_budget_refusal_fails_closed_before_the_judge_is_called() -> None:

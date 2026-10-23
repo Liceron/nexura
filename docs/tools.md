@@ -213,6 +213,63 @@ result = runner.resume(agent, result.interruption, approve=True)
 assert result.status == "completed" and sent == ["A1"]
 ```
 
+A hook can add approval gates without changing the tools, for example for every tool of
+one MCP server or every call over an amount: see
+[Adding approval gates](guardrails-hooks-limits.md#adding-approval-gates). It can never
+remove a tool's own `requires_approval`.
+
+## Tool metadata for hooks, guardrails and policies
+
+Every tool carries metadata that hooks, guardrails and policy rules can match on without
+knowing each tool by name. `tool.info()` returns it as a frozen `ToolInfo`, and inside a
+tool call the same value is `ctx.tool` (in the tool, its guardrails, `before_tool`,
+`after_tool` and `tool_needs_approval`; `None` outside a tool call).
+
+| Field | Value |
+| --- | --- |
+| `name` | The tool name the model sees. |
+| `origin` | Where the tool comes from: `python:<module>.<qualname>` for `@tool`, `mcp:<server>:<tool>` for an MCP tool, `openapi:<METHOD>:<path>` for an OpenAPI operation, `module:<module_id>` for another `module_tool`, `agent:<name>` / `team:<name>` for `as_tool()` (and the runtime's `AgentDefinition.as_tool()`), `a2a:<host>` for a remote agent, `handoff` for a handoff's transfer tool (tagged `handoff:<target>`), `knowledge:<collection>` for the runtime's knowledge-search tools (tagged `knowledge:<collection>`; Studio's `knowledge_search` over several collections lists them comma-separated), `builtin:ask_user`, `builtin:web` and `builtin:memory` for the SDK's own tools. `None` when unknown (a `SchemaTool` you build yourself, unless you pass `origin=`). |
+| `effect` | The effect class: `pure`, `idempotent`, `non_idempotent` or `reconcilable` (see `effect=` below). |
+| `requires_approval` | `True` when the tool declares an approval flag or rule (a rule may still say no for a given call). |
+| `tags` | Labels: your own (`@tool(tags=[...])`, `Tool(..., tags=...)`, `SchemaTool(..., tags=...)`), `toolset:<name>` for MCP and OpenAPI tools, `module:<module_id>` for module tools, `mcp.hint:<hint>=<true/false>` for an MCP server's declared hints, and `openapi.method:<METHOD>` plus `openapi.hint:idempotent=true` (when the spec's method or `x-idempotent` claims it) for OpenAPI operations. `info.toolsets` lists the toolset names. |
+
+Metadata never changes how a tool runs. What a third-party server or spec says about its
+own tools is untrusted: an MCP `mcp.hint:readOnlyHint=true` tag or an OpenAPI
+`openapi.method:GET` / `openapi.hint:idempotent=true` tag is recorded for policies and
+operators to see, but the tool stays `non_idempotent` unless you declare it yourself
+(`MCPServer(read_only=...)`, `openapi_tools(read_only=..., idempotent=...)`), and an MCP
+tool is still gated by `requires_approval="writes"` unless you list it in `read_only`.
+
+```python
+from typing import Any
+
+from nexura_agents import Agent, AgentHooks, FakeModel, RunContext, Runner, ToolCall, tool
+
+
+@tool(tags=["billing"], effect="idempotent")
+def charge(ctx: RunContext[Any], amount: int) -> str:
+    """Charge the card on file."""
+    assert ctx.tool is not None and ctx.tool.name == "charge"
+    return "charged"
+
+
+seen = []
+
+
+class Audit(AgentHooks):
+    async def before_tool(self, ctx, call):
+        info = ctx.tool
+        seen.append((info.name, info.origin, info.effect, sorted(info.tags)))
+
+
+model = FakeModel(responses=[[ToolCall(id="1", name="charge", arguments={"amount": 5})], "Ok."])
+agent = Agent(name="Billing", instructions="Bill.", model=model, tools=[charge])
+Runner(hooks=Audit()).run(agent, "Charge 5")
+
+assert seen == [("charge", f"python:{__name__}.charge", "idempotent", ["billing"])]
+assert charge.info().origin == f"python:{__name__}.charge"
+```
+
 ## Choosing which tools the model sees
 
 A tool can be offered only when it makes sense: to admins, after a login step, or only
@@ -449,6 +506,24 @@ A `SchemaTool` can only run through a `Runner`; its `run()` method raises.
 ## module_tool: any Nexura module as a tool
 
 `module_tool(module)` wraps a `BaseModule` (an HTTP call, a SQL query, an MCP tool, an OpenAPI operation, or your own) as a `SchemaTool`. The model sees the module's input schema. A module failure is returned to the model as `{"error": ..., "message": ...}` instead of ending the run, and results longer than `max_result_chars` (default 20,000) are truncated with a note. `requires_approval` accepts `True`, `"writes"`, a collection of tool names, or a predicate `(tool_name, arguments) -> bool`.
+
+The tool keeps the module's identity. Its `origin` is `mcp:<server>:<tool>`,
+`openapi:<METHOD>:<path>` or `module:<module_id>`, its tags include `module:<module_id>`
+(plus any `tags=` you pass), and its effect class comes from the manifest's `effect_policy`:
+`pure` and `read` give `pure`, `idempotent_write` gives `idempotent`, and
+`non_idempotent_write` gives `non_idempotent`. A manifest that does not set `effect_policy`,
+or declares a read policy together with write operations, stays `non_idempotent`. So a
+read-only module tool is repeated after a crash instead of pausing the durable run (see
+[Durable execution](durable-execution.md)). Two kinds of module carry a third party's claim
+rather than yours, so they stay `non_idempotent` until you declare otherwise: MCP tools (an
+MCP module is `read` only when you list it in `MCPServer(read_only=...)`) and OpenAPI
+operations (their policy comes from the spec's HTTP method; declare with
+`openapi_tools(read_only=..., idempotent=...)`). A module that wraps a tool
+(`tool_to_module` in `nexura_runtime`) runs under the stricter of its manifest class and the
+wrapped tool's own class, so a wrapper can never make an undeclared tool repeatable. Pass
+`effect=` to override the class. Approval combines the same way: a call pauses when any gate
+says so, whether `module_tool(requires_approval=...)`, the manifest's write gate, or the
+wrapped tool's own `requires_approval`, so wrapping a tool never removes its gate.
 
 You rarely call `module_tool` directly; [MCP and OpenAPI tools](mcp-and-openapi.md) use it for you.
 

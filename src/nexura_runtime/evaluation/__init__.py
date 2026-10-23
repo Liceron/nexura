@@ -25,19 +25,27 @@ from nexura_runtime.evaluation.graders import (
     JsonSchemaGrader,
     ModelJudgeGrader,
     RegexGrader,
+    ToolArgumentAccuracyGrader,
+    TrajectoryGrader,
     ZeroSideEffectsGrader,
+    recorded_tool_calls,
 )
 from nexura_runtime.evaluation.models import (
+    ArgumentMatch,
     DatasetExample,
     EvaluationDataset,
     EvaluationSummary,
     ExampleEvaluationResult,
     GraderKind,
     GraderResult,
+    OnlineEvalConfig,
     QualityEvidence,
+    StoredTrace,
+    TrajectoryStep,
+    UserSimulation,
 )
 from nexura_runtime.evaluation.module import EvaluationModule
-from nexura_runtime.evaluation.runner import EvaluationRunner, redact_pii
+from nexura_runtime.evaluation.runner import EvaluationRunner, redact_pii, simulate_user
 
 __all__ = [
     # Errors
@@ -65,6 +73,15 @@ __all__ = [
     "CitationCoverageGrader",
     "ZeroSideEffectsGrader",
     "ModelJudgeGrader",
+    "TrajectoryGrader",
+    "ToolArgumentAccuracyGrader",
+    "recorded_tool_calls",
+    "ArgumentMatch",
+    "TrajectoryStep",
+    "UserSimulation",
+    "StoredTrace",
+    "OnlineEvalConfig",
+    "simulate_user",
     # Dataset & Runner
     "DatasetRegistry",
     "create_synthetic_support_dataset",

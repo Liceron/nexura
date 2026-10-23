@@ -35,7 +35,6 @@ __all__ = ["Prefilter", "injection", "json_only", "length", "pii", "topics"]
 
 _ALL_STAGES = frozenset(STAGES)
 _OUTPUT_STAGES = frozenset({"output", "tool_output", "model_output", "stream", "node"})
-_INDIAN_ID_KINDS = frozenset({"aadhaar", "pan", "upi"})
 
 Categorise = Callable[[dict[str, Any]], tuple[str, ...]]
 
@@ -125,12 +124,6 @@ class Prefilter:
         return Verdict(decision="allow", **common)
 
 
-def _pii_categories(info: dict[str, Any]) -> tuple[str, ...]:
-    kinds = set(info.get("kinds") or ())
-    kinds |= {f.get("kind") for f in info.get("redacted") or () if isinstance(f, dict)}
-    return ("privacy", "id_exposure_in") if kinds & _INDIAN_ID_KINDS else ("privacy",)
-
-
 def pii(
     kinds: Iterable[str] | None = None,
     *,
@@ -140,7 +133,7 @@ def pii(
 ) -> Prefilter:
     """PII and secrets pre-filter (``detect_pii``): ``action="block"`` or ``"redact"``.
 
-    Category ``privacy``; findings of Aadhaar, PAN or UPI also add ``id_exposure_in``.
+    Category ``privacy``.
     ``"redact"`` returns a ``rewrite`` verdict with the masked text (output stages rewrite
     it; on input stages the guardrail trips because input cannot be rewritten).
     """
@@ -156,7 +149,7 @@ def pii(
         "action": action,
         "mask": mask if action == "redact" else None,
     }
-    return Prefilter(name, fn, categories=_pii_categories, config=config)
+    return Prefilter(name, fn, categories=("privacy",), config=config)
 
 
 def injection(

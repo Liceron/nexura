@@ -10,10 +10,7 @@ a malformed verdict). ``error`` is never "safe": the guardrail boundary blocks i
 
 Categories are stable ids from one taxonomy. Classifier labels (Llama Guard ``S1`` to
 ``S14``, ShieldGemma, Granite Guardian, Nemotron Safety Guard v3, OpenAI moderation) map to
-those ids through :func:`map_label`; unmapped labels become ``other``. The Indian-context
-categories (``caste_hate``, ``communal_hate``, ``id_exposure_in``, ``financial_fraud_in``,
-``election_in``) are opt-in policy text for the judge. Their wording is **pending founder
-review**.
+those ids through :func:`map_label`; unmapped labels become ``other``.
 """
 
 from __future__ import annotations
@@ -30,7 +27,6 @@ __all__ = [
     "CATEGORIES",
     "DECISIONS",
     "DEFAULT_JUDGE_CATEGORIES",
-    "INDIAN_CATEGORY_IDS",
     "LABEL_MAPS",
     "STAGES",
     "Category",
@@ -205,61 +201,8 @@ _GENERAL: tuple[Category, ...] = (
     Category("other", "Other", "Anything else the policy forbids."),
 )
 
-_PENDING = "pending founder review"
-
-_INDIAN: tuple[Category, ...] = (
-    Category(
-        "caste_hate",
-        "Caste hate",
-        "Caste-based slurs, discrimination, demeaning stereotypes or calls to exclude or "
-        "harm people because of their caste.",
-        parent="hate",
-        region="in",
-        review_status=_PENDING,
-    ),
-    Category(
-        "communal_hate",
-        "Communal and religious hate",
-        "Content that demeans a religious community, or incites hostility or violence "
-        "between religious communities.",
-        parent="hate",
-        region="in",
-        review_status=_PENDING,
-    ),
-    Category(
-        "id_exposure_in",
-        "Aadhaar, PAN and UPI data exposure",
-        "Revealing, requesting or collecting someone's Aadhaar number, PAN, UPI ID or "
-        "linked bank details outside a legitimate, consented purpose.",
-        parent="privacy",
-        region="in",
-        review_status=_PENDING,
-    ),
-    Category(
-        "financial_fraud_in",
-        "UPI and loan fraud",
-        "UPI collect-request, QR-code, OTP or KYC-update scams; impersonation of banks, the "
-        "RBI or government schemes; fake instant-loan offers and loan-app harassment.",
-        parent="fraud",
-        region="in",
-        review_status=_PENDING,
-    ),
-    Category(
-        "election_in",
-        "Election misinformation (India)",
-        "False claims about Indian voting dates, booths, eligibility, EVMs or results, and "
-        "impersonation of the Election Commission or candidates.",
-        parent="elections",
-        region="in",
-        review_status=_PENDING,
-    ),
-)
-
-CATEGORIES: Mapping[str, Category] = MappingProxyType({c.id: c for c in (*_GENERAL, *_INDIAN)})
-"""Every category id, general and Indian-context."""
-
-INDIAN_CATEGORY_IDS: tuple[str, ...] = tuple(c.id for c in _INDIAN)
-"""Opt-in Indian-context categories (policy wording pending founder review)."""
+CATEGORIES: Mapping[str, Category] = MappingProxyType({c.id: c for c in _GENERAL})
+"""Every category id."""
 
 DEFAULT_JUDGE_CATEGORIES: tuple[str, ...] = (
     "prompt_injection",

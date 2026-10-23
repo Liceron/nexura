@@ -4,15 +4,22 @@
 
 from __future__ import annotations
 
+import dataclasses
+import hashlib
 import inspect
 import json
 import re
 import time
+import uuid
+from collections.abc import Callable, Iterable
 from decimal import Decimal
 from typing import Any
 
+from nexura_agents.agent import Agent
 from nexura_agents.contracts.base import BaseModule
 from nexura_agents.contracts.context import ExecutionContext
+from nexura_agents.models.base import ModelProtocol
+from nexura_agents.types import Message, Usage
 from nexura_agents.usage.manager import BudgetManager, RunBudget
 from nexura_agents.usage.models import BudgetConfig, TokenUsage
 from nexura_agents.usage.pricing import PricingTable
@@ -25,8 +32,11 @@ from nexura_runtime.evaluation.models import (
     EvaluationSummary,
     ExampleEvaluationResult,
     GraderResult,
+    OnlineEvalConfig,
+    StoredTrace,
+    UserSimulation,
 )
-from nexura_runtime.observability.run_diagnostics import _TEXT_RULES
+from nexura_runtime.observability.run_diagnostics import _TEXT_RULES, is_secret_key
 
 # PII Redaction Patterns
 _CARD_REGEX = re.compile(r"\b(?:\d[ -]*?){13,16}\b")
@@ -52,6 +62,166 @@ def redact_pii(text: str) -> str:
     return cleaned
 
 
+def redact_value(value: Any) -> Any:
+    """Redact content scalars without rewriting JSON syntax or object keys."""
+    if isinstance(value, dict):
+        return {
+            key: "[REDACTED]" if is_secret_key(str(key)) else redact_value(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [redact_value(item) for item in value]
+    if isinstance(value, str):
+        if value.lstrip().startswith(("{", "[")):
+            try:
+                return json.dumps(redact_value(json.loads(value)))
+            except (ValueError, TypeError):
+                pass
+        return redact_pii(value)
+    if isinstance(value, (int, float, Decimal)) and not isinstance(value, bool):
+        text = str(value)
+        cleaned = redact_pii(text)
+        return cleaned if cleaned != text else value
+    return value
+
+
+def redact_trace(trace: dict[str, Any]) -> dict[str, Any]:
+    """Keep recorded identities/timestamps intact while redacting captured content."""
+    cleaned: dict[str, Any] = redact_value(trace)
+    for field in ("run_id", "workflow_id", "agent_id", "timestamp"):
+        if field in trace:
+            cleaned[field] = trace[field]
+    if isinstance(trace.get("runs"), list):
+        cleaned["runs"] = [
+            redact_trace(run) if isinstance(run, dict) else redact_value(run)
+            for run in trace["runs"]
+        ]
+    if isinstance(trace.get("events"), list):
+        events = []
+        for event in trace["events"]:
+            if not isinstance(event, dict):
+                events.append(redact_value(event))
+                continue
+            item = redact_trace(event)
+            data = event.get("data")
+            if isinstance(data, dict):
+                for field in ("tool_call_id", "tool_name"):
+                    if field in data:
+                        item["data"][field] = data[field]
+            events.append(item)
+        cleaned["events"] = events
+    if isinstance(trace.get("messages"), list):
+        messages = []
+        for message in trace["messages"]:
+            if not isinstance(message, dict):
+                messages.append(redact_value(message))
+                continue
+            item = redact_value(message)
+            if isinstance(message.get("tool_calls"), list):
+                for call, redacted in zip(message["tool_calls"], item["tool_calls"], strict=True):
+                    if not isinstance(call, dict):
+                        continue
+                    for field in ("id", "name"):
+                        if field in call:
+                            redacted[field] = call[field]
+                    if isinstance(call.get("function"), dict) and "name" in call["function"]:
+                        redacted["function"]["name"] = call["function"]["name"]
+            messages.append(item)
+        cleaned["messages"] = messages
+    return cleaned
+
+
+def _trace_json(run: Any) -> dict[str, Any]:
+    if isinstance(run, dict):
+        return run
+    return {
+        "run_id": getattr(run, "run_id", ""),
+        "messages": [m.to_dict() for m in getattr(run, "messages", [])],
+        "events": [
+            {"type": str(e.type), "run_id": e.run_id, "timestamp": e.timestamp, "data": e.data}
+            for e in getattr(run, "events", [])
+            if str(e.type) not in ("run_completed", "run_started")
+        ],
+    }
+
+
+async def simulate_user(
+    agent: Any,
+    plan: UserSimulation,
+    *,
+    model: ModelProtocol | None = None,
+    stop: Callable[[list[Message]], bool] | None = None,
+) -> dict[str, Any]:
+    """Run isolated chat turns with history, bounded by plan and optional stop callback.
+
+    Script exhaustion, markers, empty model output, callback, non-completed agent
+    status and max_turns all stop the conversation. A persona model receives the
+    conversation with roles reversed and no tools. Usage includes both participants.
+    """
+    if plan.persona is not None and model is None:
+        raise ValueError("Persona simulation requires an injected user model")
+    transcript: list[Message] = []
+    history: list[Message] = []
+    runs: list[dict[str, Any]] = []
+    usage = Usage()
+    output, reason = "", "max_turns"
+    for turn in range(plan.max_turns):
+        if plan.turns is not None:
+            if turn >= len(plan.turns):
+                reason = "script_exhausted"
+                break
+            text = plan.turns[turn]
+        else:
+            assert model is not None
+            messages = [Message(role="system", content=plan.persona)] + [
+                Message(role="assistant" if m.role == "user" else "user", content=m.content)
+                for m in transcript
+            ]
+            if len(messages) == 1:
+                messages.append(Message(role="user", content="Begin the conversation."))
+            response = await model.generate(messages, tools=None)
+            usage = usage.add(response.usage)
+            if response.message.tool_calls:
+                raise ValueError("Simulated user must return text, not tool calls")
+            text = response.message.content or ""
+        if not text.strip():
+            reason = "empty_user"
+            break
+        if any(marker in text for marker in plan.stop_on_user):
+            reason = "user_stop"
+            break
+        transcript.append(Message(role="user", content=text))
+        result = await agent.run_async(text, history=history)
+        history = list(result.messages)
+        output = result.final_output
+        usage = usage.add(result.usage)
+        # Keep only this turn's messages: SDK history contains all preceding turns.
+        trace = _trace_json(result)
+        trace["messages"] = trace["messages"][len(runs[-1]["history"]) if runs else 0 :]
+        runs.append({"trace": trace, "history": history})
+        transcript.append(Message(role="assistant", content=output))
+        if result.status != "completed":
+            reason = f"agent_{result.status}"
+            break
+        if any(marker in output for marker in plan.stop_on_agent):
+            reason = "agent_stop"
+            break
+        if stop is not None and stop(list(transcript)):
+            reason = "callback"
+            break
+        if plan.turns is not None and turn + 1 == len(plan.turns):
+            reason = "script_exhausted"
+            break
+    return {
+        "output": output,
+        "trace": {"runs": [r["trace"] for r in runs]},
+        "transcript": [m.to_dict() for m in transcript],
+        "turns": len(runs),
+        "stop_reason": reason,
+        "usage": dataclasses.asdict(usage),
+    }
+
+
 class EvaluationRunner:
     """Orchestrates test dataset execution against agents, workflows, or modules.
 
@@ -74,6 +244,7 @@ class EvaluationRunner:
         seed: int | None = 42,
         redact_data: bool = True,
         strict_budget: bool = False,
+        user_model: ModelProtocol | None = None,
     ) -> None:
         self.graders = graders or []
         self.dataset = dataset
@@ -88,6 +259,7 @@ class EvaluationRunner:
         self.seed = seed
         self.redact_data = redact_data
         self.strict_budget = strict_budget
+        self.user_model = user_model
 
     async def run(
         self,
@@ -210,11 +382,17 @@ class EvaluationRunner:
             failed_examples=failed_count,
             pass_rate=pass_rate,
             mean_score=round(mean_score, 4),
+            grader_scores={
+                name: sum(g.score for r in results for g in r.graders if g.grader_name == name)
+                / sum(g.grader_name == name for r in results for g in r.graders)
+                for name in {g.grader_name for r in results for g in r.graders}
+            },
             total_latency_ms=round(total_latency, 2),
             total_cost_usd=total_cost,
             total_tokens=total_tokens,
             results=results,
-            is_synthetic_evidence=is_synthetic_judge_used,
+            is_synthetic_evidence=is_synthetic_judge_used
+            or any(e.simulation for e in dataset.examples),
             budget_halted=budget_halted,
             metadata={
                 "redact_data": self.redact_data,
@@ -243,6 +421,12 @@ class EvaluationRunner:
             # 1. Dispatch target
             actual_output, usage, meta = await self._invoke_target(target, example)
             call_context.update(meta)
+            if str(call_context.get("stop_reason", "")) in (
+                "agent_paused",
+                "agent_failed",
+                "agent_cancelled",
+            ):
+                error_msg = f"Simulation stopped: {call_context['stop_reason']}"
 
             # 2. Account budget
             if exec_budget is not None and usage is not None:
@@ -270,10 +454,8 @@ class EvaluationRunner:
 
         # Redact output if configured
         clean_output = actual_output
-        if self.redact_data and isinstance(actual_output, str):
-            clean_output = redact_pii(actual_output)
-        elif self.redact_data and isinstance(actual_output, dict):
-            clean_output = json.loads(redact_pii(json.dumps(actual_output)))
+        if self.redact_data:
+            clean_output = redact_value(actual_output)
 
         # 3. Grade output
         grader_results: list[GraderResult] = []
@@ -294,7 +476,7 @@ class EvaluationRunner:
             overall_score = 0.0
         else:
             for grader in self.graders:
-                g_res = await grader.grade(example, clean_output, context=call_context)
+                g_res = await grader.grade(example, actual_output, context=call_context)
                 grader_results.append(g_res)
 
             # Failed grader cannot report pass: must satisfy ALL configured graders
@@ -314,6 +496,20 @@ class EvaluationRunner:
             else getattr(usage, "output_tokens", None)
         )
 
+        # Grade original evidence, then redact every persisted output/detail/trace.
+        if self.redact_data:
+            error_msg = redact_pii(error_msg) if error_msg else error_msg
+            original_trace = call_context.get("trace")
+            call_context = redact_value(call_context)
+            if isinstance(original_trace, dict):
+                call_context["trace"] = redact_trace(original_trace)
+            grader_results = [
+                g.model_copy(update={
+                    "reason": redact_value(g.reason),
+                    "details": redact_value(g.details),
+                })
+                for g in grader_results
+            ]
         return ExampleEvaluationResult(
             example_id=example.example_id,
             passed=passed,
@@ -339,6 +535,10 @@ class EvaluationRunner:
         usage: Any = None
         input_data = example.input_data
 
+        if example.simulation is not None:
+            result = await simulate_user(target, example.simulation, model=self.user_model)
+            return result["output"], Usage(**result.pop("usage")), result
+
         if isinstance(target, BaseModule):
             ctx = ExecutionContext(run_id="eval_run", node_id="eval_node")
             mod_res = await target.invoke(ctx, input_data, {})
@@ -349,9 +549,15 @@ class EvaluationRunner:
 
         if hasattr(target, "run_async"):
             # SDK Runner or Agent
-            res = await target.run_async(input_data)
+            prompt = (
+                input_data.get("prompt", input_data.get("query", json.dumps(input_data)))
+                if isinstance(target, Agent)
+                else input_data
+            )
+            res = await target.run_async(prompt)
             output = getattr(res, "final_output", res)
             usage = getattr(res, "usage", None)
+            meta["trace"] = _trace_json(res)
             return output, usage, meta
 
         if callable(target):
@@ -377,10 +583,69 @@ class EvaluationRunner:
                     meta["model_id"] = out["model_id"]
                 if "mutating_tool_calls_count" in out:
                     meta["mutating_tool_calls_count"] = out["mutating_tool_calls_count"]
+                for field in ("transcript", "turns", "stop_reason"):
+                    if field in out:
+                        meta[field] = out[field]
+                if "trace" in out:
+                    meta["trace"] = _trace_json(out["trace"])
+                elif "events" in out or "messages" in out:
+                    meta["trace"] = _trace_json(out)
                 return output, usage, meta
+            if hasattr(out, "final_output"):
+                return out.final_output, getattr(out, "usage", None), {"trace": _trace_json(out)}
             return out, None, meta
 
         return str(target), None, meta
+
+    async def evaluate_traces(
+        self,
+        traces: Iterable[StoredTrace],
+        example: DatasetExample,
+        *,
+        config: OnlineEvalConfig | None = None,
+        expectation_for: Callable[[StoredTrace], DatasetExample] | None = None,
+    ) -> EvaluationSummary:
+        """Grade recorded runs without executing an agent; persist via EvaluationStore.save_run.
+
+        ``expectation_for`` supplies case-specific expectations; otherwise ``example``
+        is a shared policy. Sampling uses seed/run-id SHA256, independent of input order.
+        """
+        config = config or OnlineEvalConfig()
+        selected: dict[str, StoredTrace] = {}
+        for trace in traces:
+            if config.workflow_id is not None and trace.workflow_id != config.workflow_id:
+                continue
+            if config.agent_id is not None and trace.agent_id != config.agent_id:
+                continue
+            if config.start_time is not None and trace.timestamp < config.start_time:
+                continue
+            if config.end_time is not None and trace.timestamp > config.end_time:
+                continue
+            digest = hashlib.sha256(f"{config.seed}:{trace.run_id}".encode()).digest()
+            sample = int.from_bytes(digest, "big") / (1 << 256)
+            if sample < config.sampling_rate:
+                selected[trace.run_id] = trace
+        cases = []
+        for run_id, trace in sorted(selected.items()):
+            expectation = expectation_for(trace) if expectation_for else example
+            # Online grading must never dispatch simulation or re-execute a target.
+            cases.append(expectation.model_copy(update={"example_id": run_id, "simulation": None}))
+        dataset = EvaluationDataset(dataset_id="online_traces", version="1", examples=cases)
+
+        def recorded(case: DatasetExample) -> dict[str, Any]:
+            trace = selected[case.example_id]
+            return {"output": trace.output, "trace": trace.model_dump(mode="json")}
+
+        summary = await self.run(recorded, dataset, run_id=f"eval_online_{uuid.uuid4().hex}")
+        summary.metadata.update(
+            {
+                "source": "stored_traces",
+                "online": config.model_dump(),
+                "source_run_ids": sorted(selected),
+            }
+        )
+        summary.seed = config.seed
+        return summary
 
     @staticmethod
     def compare_runs(

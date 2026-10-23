@@ -157,7 +157,7 @@ Both constructors pass these keyword arguments on to `MCPServer`:
 - `prefix`: prepended to every tool name as `prefix_name`. Use it when two servers expose a tool with the same name. Names are sanitised to letters, digits, `_` and `-`, and cut to 64 characters.
 - `include` and `exclude`: keep only the named tools, or drop some. Names refer to the server's own tool names, before the prefix.
 - `requires_approval`: the approval policy (next section).
-- `read_only`: names of tools you vouch have no side effects.
+- `read_only`: names of tools you vouch have no side effects. They are not paused by `requires_approval="writes"` and get the `pure` effect class, so a durable run repeats them after a crash instead of pausing. Every other MCP tool stays `non_idempotent`.
 - `max_result_chars`: results longer than this (default `20_000`) are truncated, with a note saying how much was cut. `None` turns truncation off.
 - `request_timeout`: seconds to wait for each server reply. The default comes from the transport (60 seconds for stdio, the `timeout` value for HTTP).
 - `name`: a label used in module ids and logs.
@@ -227,7 +227,9 @@ assert tools[0].timeout == 10.0
 | a set or list of names | Pause for those tools. The names are the final tool names, including any `prefix`. |
 | a function `(tool_name, arguments) -> bool` | Decide per call. The name is the final tool name. |
 
-MCP servers describe tools with hints such as `readOnlyHint`, but a server can say anything, so those hints are ignored. A tool is only treated as read-only if you list it in `read_only`.
+MCP servers describe tools with hints such as `readOnlyHint`, but a server can say anything, so those hints are ignored. A tool is only treated as read-only if you list it in `read_only`. The hints are kept as metadata only: each of the four boolean hints of the MCP specification (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) becomes a tag such as `mcp.hint:readOnlyHint=true` on the tool (other annotation keys are ignored), which a hook or policy can read but which never changes approval or the effect class.
+
+Each tool also says where it comes from, so a hook or guardrail can treat a whole server or API alike (see [Tool metadata](tools.md#tool-metadata-for-hooks-guardrails-and-policies)): an MCP tool has the origin `mcp:<server name>:<tool>` and the tag `toolset:<server name>`; an OpenAPI tool has the origin `openapi:<METHOD>:<path>` and the tag `toolset:<toolset>`, where `openapi_tools(..., toolset=...)` defaults to `prefix`, else `openapi`.
 
 ```python
 import asyncio
@@ -302,6 +304,32 @@ A name set and a predicate work the same way: `requires_approval={"delete_note"}
 ## REST APIs from an OpenAPI spec
 
 `openapi_tools(spec)` returns one tool per operation, named after its `operationId`. `spec` is a dict or a JSON string (YAML is not parsed). If you do not pass `base_url`, the first entry of the spec's `servers` is used.
+
+For durable runs every OpenAPI tool is `non_idempotent`: a crash during the call pauses the run for a person instead of sending the request again. The spec's HTTP method and `x-idempotent` are the API's own claims (real DELETE and PUT endpoints often refund, notify or bill), so they are recorded only as tags (`openapi.method:<METHOD>`, and `openapi.hint:idempotent=true` for GET, HEAD, PUT, DELETE and `x-idempotent` operations). Declare what you vouch for yourself, by `operationId`: `read_only=[...]` makes an operation `pure` (repeated after a crash) and `idempotent=[...]` makes it `idempotent` (repeated with the same `ctx.idempotency_key`). An unknown `operationId`, or one in both lists, raises `SDKValidationError`. These declarations change crash recovery only, never approval: `requires_approval="writes"` still pauses before every non-GET/HEAD call.
+
+```python
+import httpx
+
+from nexura_agents import openapi_tools
+
+spec = {
+    "openapi": "3.0.3",
+    "info": {"title": "Shop", "version": "1"},
+    "servers": [{"url": "https://shop.example.com/v1"}],
+    "paths": {
+        "/orders/{order_id}": {
+            "get": {"operationId": "getOrder", "responses": {"200": {"description": "ok"}}},
+            "delete": {"operationId": "cancelOrder", "responses": {"200": {"description": "ok"}}},
+        }
+    },
+}
+transport = httpx.MockTransport(lambda request: httpx.Response(200, json={}))
+tools = {t.name: t for t in openapi_tools(spec, transport=transport, read_only=["getOrder"])}
+
+assert tools["getOrder"].info().effect == "pure"  # declared by you
+assert tools["cancelOrder"].info().effect == "non_idempotent"  # DELETE claims idempotence
+assert "openapi.method:DELETE" in tools["cancelOrder"].tags  # ...recorded as a tag only
+```
 
 Credentials go in `headers`. They are added to every request and never shown to the model. With `requires_approval="writes"`, GET and HEAD calls run freely and every other method pauses first. Even without that option, a workflow that runs an OpenAPI operation module (or an agent that calls one as a tool) pauses for approval before any non-GET/HEAD call; the module refuses to send it unless a human approved.
 

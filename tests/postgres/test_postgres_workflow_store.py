@@ -141,6 +141,37 @@ async def test_a_scoped_store_sees_and_writes_only_its_workspace(schema: Schema)
             await store.close()
 
 
+async def test_run_identities_read_a_page_within_the_workspace(schema: Schema) -> None:
+    """P38 C6: active and starting identities in one query, scoped like every other read."""
+    shared = PostgresWorkflowStore(schema.dsn)
+    alpha = PostgresWorkflowStore(schema.dsn, workspace_id="alpha")
+    beta = PostgresWorkflowStore(schema.dsn, workspace_id="beta")
+    try:
+        assert await alpha.run_identities([]) == {}
+        assert await alpha.create(cp("m", workspace_id=None, spec_hash="h1", workflow_version=1))
+        moved = cp("m", workspace_id=None, spec_hash="h2", workflow_version=2)
+        await alpha.save(moved)
+        assert await alpha.create(cp("u", workspace_id=None, spec_hash="h1"))
+        expected = {
+            "m": {
+                "definition_digest": "h2",
+                "workflow_version": 2,
+                "started_workflow_version": 1,
+            },
+            "u": {
+                "definition_digest": "h1",
+                "workflow_version": None,
+                "started_workflow_version": None,
+            },
+        }
+        assert await alpha.run_identities(["m", "u", "missing"]) == expected
+        assert await shared.run_identities(["m", "u"]) == expected
+        assert await beta.run_identities(["m", "u"]) == {}
+    finally:
+        for store in (shared, alpha, beta):
+            await store.close()
+
+
 # ------------------------------------------------------------------ migrations
 
 

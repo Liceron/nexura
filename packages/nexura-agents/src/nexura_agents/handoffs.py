@@ -120,8 +120,16 @@ class Handoff:
                 transfer,
                 description=self.description,
                 args_schema=self.input_type,
+                origin="handoff",
+                tags={f"handoff:{target}"},
             )
-        return Tool(self.tool_name, transfer, description=self.description)
+        return Tool(
+            self.tool_name,
+            transfer,
+            description=self.description,
+            origin="handoff",
+            tags={f"handoff:{target}"},
+        )
 
     def reason(self, arguments: dict[str, Any]) -> str:
         """Validated ``reason`` from the model's tool arguments.

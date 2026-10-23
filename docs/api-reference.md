@@ -142,7 +142,7 @@ state collisions or leaking conversation history between callers.
 
 ### `Runner`
 
-class `Runner(session_store: 'SessionStore | None' = None, *, hooks: 'AgentHooks | None' = None, usage_limits: 'UsageLimits | None' = None, model_settings: 'ModelSettings | None' = None, budget: 'Any | None' = None, max_handoffs: 'int | None' = None, checkpoint_store: 'RunCheckpointStore | None' = None, approval_ttl: 'float' = 3600.0, approval_signing_secret: 'str | bytes | None' = None, approval_store: 'ApprovalStore | None' = None, lease_ttl: 'float' = 30.0) -> 'None'`
+class `Runner(session_store: 'SessionStore | None' = None, *, hooks: 'AgentHooks | Sequence[AgentHooks] | None' = None, usage_limits: 'UsageLimits | None' = None, model_settings: 'ModelSettings | None' = None, budget: 'Any | None' = None, max_handoffs: 'int | None' = None, checkpoint_store: 'RunCheckpointStore | None' = None, approval_ttl: 'float' = 3600.0, approval_signing_secret: 'str | bytes | None' = None, approval_store: 'ApprovalStore | None' = None, lease_ttl: 'float' = 30.0, default_hooks: 'bool' = True) -> 'None'`
 
 ~~~text
 Orchestrates agent execution against models and registered tools.
@@ -151,6 +151,8 @@ Stateless: can be used to run multiple agents concurrently.
 Supports optional persistent session storage across runs.
 ~~~
 
+- `effective_hooks(self) -> 'AgentHooks | None'`
+  The hooks a run started now would use: the hooks inherited from an enclosing
 - `recover(self, agent: 'Agent[OutputT]', run_id: 'str', **kwargs: 'Any') -> 'RunResult[OutputT]'`
   Synchronous form of :meth:`recover_async`.
 - `recover_async(self, agent: 'Agent[OutputT]', run_id: 'str', *, deps: 'Any' = None, on_uncertain: 'str' = 'pause', timeout: 'float | None' = None, session_store: 'SessionStore | None' = None, cancel: 'CancelToken | None' = None) -> 'RunResult[OutputT]'`
@@ -341,7 +343,7 @@ single use is the caller's responsibility, including for signed envelopes.
 
 ### `tool`
 
-function `tool(fn: 'Callable[..., Any] | None' = None, *, name: 'str | None' = None, description: 'str | None' = None, args_schema: 'type[BaseModel] | None' = None, requires_approval: 'ApprovalRule' = False, max_retries: 'int | None' = None, idempotent: 'bool' = False, enabled: 'EnabledRule' = True, input_guardrails: 'Sequence[GuardrailFn]' = (), output_guardrails: 'Sequence[GuardrailFn]' = (), timeout: 'float | None' = None, on_timeout: 'OnTimeout' = 'tell_model', retry: 'ToolRetry | None' = None, cache: 'bool' = False, effect: 'EffectName | None' = None, reconcile: 'ReconcileFn | None' = None) -> 'Tool | Callable[[Callable[..., Any]], Tool]'`
+function `tool(fn: 'Callable[..., Any] | None' = None, *, name: 'str | None' = None, description: 'str | None' = None, args_schema: 'type[BaseModel] | None' = None, requires_approval: 'ApprovalRule' = False, max_retries: 'int | None' = None, idempotent: 'bool' = False, enabled: 'EnabledRule' = True, input_guardrails: 'Sequence[GuardrailFn]' = (), output_guardrails: 'Sequence[GuardrailFn]' = (), timeout: 'float | None' = None, on_timeout: 'OnTimeout' = 'tell_model', retry: 'ToolRetry | None' = None, cache: 'bool' = False, effect: 'EffectName | None' = None, reconcile: 'ReconcileFn | None' = None, tags: 'Iterable[str]' = ()) -> 'Tool | Callable[[Callable[..., Any]], Tool]'`
 
 ~~~text
 Decorator to define a typed Agent tool from a function.
@@ -351,11 +353,14 @@ Decorator to define a typed Agent tool from a function.
 ``"non_idempotent"`` (the default, also for undeclared tools) pauses the run, and
 ``"reconcilable"`` runs ``reconcile(ctx, intent)`` to find out. ``idempotent=True``
 is an alias of ``effect="idempotent"``.
+
+``tags`` are labels that hooks, guardrails and policy rules can match
+(``ctx.tool.tags``); the tool's ``origin`` is ``python:<module>.<qualname>``.
 ~~~
 
 ### `Tool`
 
-class `Tool(name: 'str', fn: 'Callable[..., Any]', *, description: 'str | None' = None, args_schema: 'type[BaseModel] | None' = None, requires_approval: 'ApprovalRule' = False, max_retries: 'int | None' = None, idempotent: 'bool' = False, enabled: 'EnabledRule' = True, input_guardrails: 'Sequence[GuardrailFn]' = (), output_guardrails: 'Sequence[GuardrailFn]' = (), timeout: 'float | None' = None, on_timeout: 'OnTimeout' = 'tell_model', retry: 'ToolRetry | None' = None, cache: 'bool' = False, effect: 'EffectName | None' = None, reconcile: 'ReconcileFn | None' = None) -> 'None'`
+class `Tool(name: 'str', fn: 'Callable[..., Any]', *, description: 'str | None' = None, args_schema: 'type[BaseModel] | None' = None, requires_approval: 'ApprovalRule' = False, max_retries: 'int | None' = None, idempotent: 'bool' = False, enabled: 'EnabledRule' = True, input_guardrails: 'Sequence[GuardrailFn]' = (), output_guardrails: 'Sequence[GuardrailFn]' = (), timeout: 'float | None' = None, on_timeout: 'OnTimeout' = 'tell_model', retry: 'ToolRetry | None' = None, cache: 'bool' = False, effect: 'EffectName | None' = None, reconcile: 'ReconcileFn | None' = None, origin: 'str | None' = None, tags: 'Iterable[str]' = ()) -> 'None'`
 
 ~~~text
 Represents a typed, executable tool for an agent.
@@ -367,6 +372,8 @@ Represents a typed, executable tool for an agent.
   The tool's effect class (``non_idempotent`` when a subclass never set one).
 - `execute(self, arguments: 'dict[str, Any]', ctx: 'RunContext[Any] | None' = None) -> 'str'`
   Validate arguments, execute the tool, and return JSON-serialized result.
+- `info(self) -> 'ToolInfo'`
+  This tool's metadata for hooks, guardrails and policies (``ctx.tool``).
 - `is_enabled(self, ctx: 'RunContext[Any]') -> 'bool'`
   Whether the model may see and call this tool now (the ``enabled`` flag or rule).
 - `needs_approval(self, ctx: 'RunContext[Any]', arguments: 'dict[str, Any]') -> 'bool'`
@@ -380,7 +387,7 @@ Represents a typed, executable tool for an agent.
 
 ### `RunContext`
 
-class `RunContext(deps: 'DepsT', run_id: 'str', agent_name: 'str', turn: 'int' = 0, usage: 'Usage' = <factory>, messages: 'list[Message]' = <factory>, tool_call_id: 'str | None' = None, tool_name: 'str | None' = None, retry: 'int' = 0, metadata: 'dict[str, Any]' = <factory>, state: 'dict[str, Any]' = <factory>, tags: 'list[str]' = <factory>, tool_attachments: 'list[Any]' = <factory>, prompt: 'dict[str, Any] | None' = None, idempotency_key: 'str | None' = None, fencing_token: 'int | None' = None, _nested_usage: 'list[Usage]' = <factory>, _events: '_EventChannel' = <factory>) -> None`
+class `RunContext(deps: 'DepsT', run_id: 'str', agent_name: 'str', turn: 'int' = 0, usage: 'Usage' = <factory>, messages: 'list[Message]' = <factory>, tool_call_id: 'str | None' = None, tool_name: 'str | None' = None, retry: 'int' = 0, metadata: 'dict[str, Any]' = <factory>, state: 'dict[str, Any]' = <factory>, tags: 'list[str]' = <factory>, tool_attachments: 'list[Any]' = <factory>, prompt: 'dict[str, Any] | None' = None, idempotency_key: 'str | None' = None, fencing_token: 'int | None' = None, tool: 'ToolInfo | None' = None, _nested_usage: 'list[Usage]' = <factory>, _events: '_EventChannel' = <factory>) -> None`
 
 ~~~text
 What a tool or callback can see about the run it belongs to.
@@ -394,8 +401,8 @@ annotated ``RunContext[YourDeps]``; that parameter is never shown to the model.
   Count usage from work done inside a tool (e.g. a sub-agent) toward this run.
 - `emit(self, name: 'str', **data: 'Any') -> 'None'`
   Send a custom progress event to whoever streams this run.
-- `for_tool(self, tool_call_id: 'str', tool_name: 'str', retry: 'int', *, idempotency_key: 'str | None' = None, fencing_token: 'int | None' = None) -> 'RunContext[DepsT]'`
-  Copy scoped to one tool call.
+- `for_tool(self, tool_call_id: 'str', tool_name: 'str', retry: 'int', *, idempotency_key: 'str | None' = None, fencing_token: 'int | None' = None, tool: 'ToolInfo | None' = None) -> 'RunContext[DepsT]'`
+  Copy scoped to one tool call (``tool``: its metadata, see ``ToolInfo``).
 - `take_nested_usage(self) -> 'list[Usage]'`
   Return the usage recorded by nested runs and clear the buffer.
 
@@ -714,6 +721,9 @@ nothing):
   result is not cached; ``after_tool`` and output guardrails still run.
 - ``after_tool`` returns a string to replace the result. Files the tool returned are
   then not sent, as when a guardrail rewrites a result.
+
+``tool_needs_approval`` is the one synchronous hook: return ``True`` to pause a tool
+call for human approval. It can add an approval gate, never remove one.
 ~~~
 
 - `after_model(self, ctx: 'RunContext[Any]', response: 'ModelResponse') -> 'ModelResponse | None'`
@@ -734,6 +744,93 @@ nothing):
   Called when the run finishes with its output; does nothing by default.
 - `on_run_start(self, ctx: 'RunContext[Any]') -> 'None'`
   Called once when a run starts; does nothing by default.
+- `tool_needs_approval(self, ctx: 'RunContext[Any]', tool: 'Tool', arguments: 'Mapping[str, Any]') -> 'bool | None'`
+  Sync. Return ``True`` to require human approval for this call.
+
+### `ComposedHooks`
+
+class `ComposedHooks(*hooks: 'Any') -> 'None'`
+
+~~~text
+Several hooks objects run as one: ``Runner(hooks=[policy, MyHooks()])``.
+
+``Runner`` builds this for a list; a single hooks object is used as it is. The order:
+
+- ``on_run_start``, ``on_agent_start`` and ``on_handoff``: every member, in list order.
+- ``before_model``: list order. The first member that returns a ``ModelResponse`` wins:
+  the model is not called and later members' ``before_model`` is skipped.
+- ``after_model``: **reverse** list order, chained. Each member gets the current
+  response (the original, or the latest replacement); the result is the last
+  replacement, or ``None`` when no member replaced it.
+- ``before_tool``: list order. The first member that returns a string wins: the tool
+  does not run and later members' ``before_tool`` is skipped (``after_tool`` and the
+  tool's output guardrails still run, as with a single hooks object).
+- ``after_tool``: reverse list order, chained like ``after_model``.
+- ``tool_needs_approval``: list order; any ``True`` requires approval (later members
+  are not asked). No member can remove a gate the tool itself declares.
+- ``on_agent_end`` and ``on_run_end``: every member, in reverse list order.
+
+So the first member is the outermost: its ``before_*`` hooks take over before the
+others and its ``after_*`` hooks see the final, replaced value. Put a policy first.
+
+The first exception a member raises propagates at once and the remaining members are
+not called, exactly as an exception from a single hooks object fails the run
+(``ModelRetry`` from ``before_tool`` keeps its meaning). A member's invalid return
+value raises ``SDKValidationError`` naming the member's class. Members may omit
+methods (objects that do not subclass ``AgentHooks``); a missing method is skipped.
+A nested plain ``ComposedHooks`` is flattened into the member list; a subclass of
+``ComposedHooks`` is kept as one member, so its own overrides still run. Members are
+not deduplicated. A member with none of the ``AgentHooks`` methods (for example a list
+passed as one member) raises ``SDKValidationError``.
+~~~
+
+- `after_model(self, ctx: 'RunContext[Any]', response: 'ModelResponse') -> 'ModelResponse | None'`
+  Members' ``after_model`` in reverse list order, each on the current response.
+- `after_tool(self, ctx: 'RunContext[Any]', call: 'ToolCall', result: 'str') -> 'str | None'`
+  Members' ``after_tool`` in reverse list order, each on the current result.
+- `before_model(self, ctx: 'RunContext[Any]', messages: 'list[Message]') -> 'ModelResponse | None'`
+  The first member's ``ModelResponse`` (list order); later members are skipped.
+- `before_tool(self, ctx: 'RunContext[Any]', call: 'ToolCall') -> 'str | None'`
+  The first member's string answer (list order); later members are skipped.
+- `on_agent_end(self, ctx: 'RunContext[Any]', agent: 'Agent', output: 'Any') -> 'None'`
+  Every member's ``on_agent_end``, in reverse list order.
+- `on_agent_start(self, ctx: 'RunContext[Any]', agent: 'Agent') -> 'None'`
+  Every member's ``on_agent_start``, in list order.
+- `on_handoff(self, ctx: 'RunContext[Any]', source: 'Agent', target: 'Agent') -> 'None'`
+  Every member's ``on_handoff``, in list order.
+- `on_run_end(self, ctx: 'RunContext[Any]', output: 'Any') -> 'None'`
+  Every member's ``on_run_end``, in reverse list order.
+- `on_run_start(self, ctx: 'RunContext[Any]') -> 'None'`
+  Every member's ``on_run_start``, in list order.
+- `tool_needs_approval(self, ctx: 'RunContext[Any]', tool: 'Tool', arguments: 'Mapping[str, Any]') -> 'bool | None'`
+  ``True`` when any member says so (list order, stopping at the first).
+
+### `set_default_hooks`
+
+function `set_default_hooks(hooks: 'AgentHooks | Sequence[AgentHooks] | None', *, locked: 'bool' = False) -> 'None'`
+
+~~~text
+Install hooks (a policy) that every ``Runner`` in this process uses.
+
+They run before the runner's own hooks, which cannot remove them. ``None`` removes
+the default. A list is composed in order. Runs already in progress keep the hooks
+they started with. Code is never loaded from the environment: the operator's
+process calls this (``nexura_guardrails.GuardrailPolicy.install()`` does).
+
+``locked=True`` makes the default binding for the rest of the process: later calls
+that remove or replace it, and ``Runner(default_hooks=False)`` /
+``AgentCoordinator(default_hooks=False)``, raise ``SDKValidationError``. Installing
+the same object again is allowed. Use it when the default is an operator's policy
+that application code must not be able to drop.
+~~~
+
+### `default_hooks`
+
+function `default_hooks() -> 'AgentHooks | None'`
+
+~~~text
+The process default hooks set with :func:`set_default_hooks` (``None`` when unset).
+~~~
 
 ### `GuardrailResult`
 
@@ -1126,7 +1223,9 @@ Args:
     requires_approval: ``True`` for every tool, a set of tool names, or a predicate
         ``(tool_name, arguments) -> bool``. Server-declared hints such as
         ``readOnlyHint`` are untrusted and never skip approval on their own.
-    read_only: Tool names the operator vouches are free of side effects.
+    read_only: Tool names the operator vouches are free of side effects. They get the
+        ``pure`` effect class (a durable run repeats them after a crash instead of
+        pausing); every other tool stays ``non_idempotent``.
     max_result_chars: Truncate long tool results before they reach the model.
     request_timeout: Seconds to wait for each server reply before failing
         (default: the transport's, 60 s for stdio and the HTTP ``timeout``).
@@ -1177,7 +1276,10 @@ Args:
     tools: Plain tools, exposed with their own schemas.
     deps: Passed to every run and tool call as ``RunContext.deps``.
     runner: Runner used for agent calls (for usage limits, hooks or budgets), and for
-        teams that were not given their own runner.
+        teams that were not given their own runner. Plain tools use the hooks a run of
+        this runner would use (``Runner.effective_hooks()``: the process default from
+        ``set_default_hooks`` plus the runner's own): ``before_tool``, ``after_tool``
+        and ``tool_needs_approval`` apply to them as in a run.
     list_ttl_ms: ``ttlMs`` cache hint on 2026-07-28 discover and list results. The
         tool list is fixed when the server is built, so clients may reuse it for this
         long (default 60 s).
@@ -1297,7 +1399,7 @@ Tools from one or more connected servers, in order.
 
 ### `openapi_tools`
 
-function `openapi_tools(spec: 'dict[str, Any] | str', *, base_url: 'str | None' = None, headers: 'dict[str, str] | None' = None, prefix: 'str | None' = None, include: 'Collection[str] | None' = None, exclude: 'Collection[str]' = (), requires_approval: 'ApprovalPolicy' = False, allow_loopback: 'bool' = False, allowed_hosts: 'Collection[str]' = (), transport: 'httpx.AsyncBaseTransport | None' = None, max_result_chars: 'int | None' = 20000, timeout: 'float | None' = None, on_timeout: 'OnTimeout' = 'tell_model', input_guardrails: 'Sequence[GuardrailFn]' = (), output_guardrails: 'Sequence[GuardrailFn]' = (), enabled: 'EnabledRule' = True) -> 'list[SchemaTool]'`
+function `openapi_tools(spec: 'dict[str, Any] | str', *, base_url: 'str | None' = None, headers: 'dict[str, str] | None' = None, prefix: 'str | None' = None, include: 'Collection[str] | None' = None, exclude: 'Collection[str]' = (), requires_approval: 'ApprovalPolicy' = False, allow_loopback: 'bool' = False, allowed_hosts: 'Collection[str]' = (), transport: 'httpx.AsyncBaseTransport | None' = None, max_result_chars: 'int | None' = 20000, timeout: 'float | None' = None, on_timeout: 'OnTimeout' = 'tell_model', input_guardrails: 'Sequence[GuardrailFn]' = (), output_guardrails: 'Sequence[GuardrailFn]' = (), enabled: 'EnabledRule' = True, toolset: 'str | None' = None, read_only: 'Collection[str]' = (), idempotent: 'Collection[str]' = ()) -> 'list[SchemaTool]'`
 
 ~~~text
 One agent tool per operation, named by ``operationId``.
@@ -1311,11 +1413,23 @@ loopback/private addresses are refused unless ``allow_loopback`` is set.
 opening every private range. ``timeout``, ``on_timeout``, ``input_guardrails``,
 ``output_guardrails`` and ``enabled`` apply to every generated tool, as on ``@tool``
 (``ctx.tool_name`` tells a guardrail or rule which operation is being called).
+Each tool's ``origin`` is ``openapi:<METHOD>:<path>`` and it carries the tag
+``toolset:<toolset>`` (default: ``prefix``, else ``openapi``), so a policy can match
+every operation of this API (``ctx.tool``), plus ``openapi.method:<METHOD>`` and,
+when the method or ``x-idempotent`` claims it, ``openapi.hint:idempotent=true``.
+
+Every tool is ``non_idempotent`` for durable recovery (a crash during the call pauses
+the run) unless you declare otherwise: ``read_only`` lists operationIds you vouch have
+no side effects (``pure``: repeated after a crash) and ``idempotent`` those that are
+safe to repeat (``idempotent``). The spec's HTTP method and ``x-idempotent`` are the
+API's own claims and never change the class. Unknown operationIds, or one listed in
+both, raise ``SDKValidationError``. These declarations do not change approval:
+``requires_approval="writes"`` still pauses before every non-GET/HEAD call.
 ~~~
 
 ### `module_tool`
 
-function `module_tool(module: 'BaseModule', *, name: 'str | None' = None, description: 'str | None' = None, config: 'dict[str, Any] | None' = None, requires_approval: 'ApprovalPolicy' = False, max_result_chars: 'int | None' = 20000, result: 'Callable[[dict[str, Any]], Any] | None' = None, timeout: 'float | None' = None, on_timeout: 'OnTimeout' = 'tell_model', input_guardrails: 'Sequence[GuardrailFn]' = (), output_guardrails: 'Sequence[GuardrailFn]' = (), enabled: 'EnabledRule' = True, context: 'ExecutionContext | None' = None) -> 'SchemaTool'`
+function `module_tool(module: 'BaseModule', *, name: 'str | None' = None, description: 'str | None' = None, config: 'dict[str, Any] | None' = None, requires_approval: 'ApprovalPolicy' = False, max_result_chars: 'int | None' = 20000, result: 'Callable[[dict[str, Any]], Any] | None' = None, timeout: 'float | None' = None, on_timeout: 'OnTimeout' = 'tell_model', input_guardrails: 'Sequence[GuardrailFn]' = (), output_guardrails: 'Sequence[GuardrailFn]' = (), enabled: 'EnabledRule' = True, context: 'ExecutionContext | None' = None, effect: 'EffectName | None' = None, tags: 'Iterable[str]' = ()) -> 'SchemaTool'`
 
 ~~~text
 Expose ``module`` to an agent.
@@ -1331,11 +1445,20 @@ the context window. ``timeout``, ``on_timeout``, ``input_guardrails``,
 workflow): each call's ``ExecutionContext`` takes its workspace, principal, run id,
 deadline, cancellation, budget, event sink, artifact store and credential resolver.
 Its approval is never inherited: only a call the approval gate let through is granted.
+
+The tool keeps the module's identity: ``origin`` is ``mcp:<server>:<tool>``,
+``openapi:<METHOD>:<path>`` or ``module:<module_id>``, the tags include
+``module:<module_id>`` plus ``tags``, and its effect class comes from the manifest's
+``effect_policy`` (see ``module_effect``). Pass ``effect=`` to override it.
+
+A call needs approval when any gate says so: ``requires_approval``, the manifest's
+write gate, or, for a module that wraps a ``Tool`` (``tool_to_module``), that tool's
+own ``requires_approval``. Wrapping a tool never removes its approval gate.
 ~~~
 
 ### `SchemaTool`
 
-class `SchemaTool(name: 'str', parameters: 'dict[str, Any]', handler: 'SchemaHandler', *, description: 'str' = '', requires_approval: 'ApprovalRule' = False, max_retries: 'int | None' = 1, enabled: 'EnabledRule' = True, input_guardrails: 'Sequence[GuardrailFn]' = (), output_guardrails: 'Sequence[GuardrailFn]' = (), timeout: 'float | None' = None, on_timeout: 'OnTimeout' = 'tell_model', retry: 'ToolRetry | None' = None, cache: 'bool' = False, idempotent: 'bool' = False, effect: 'EffectName | None' = None, reconcile: 'ReconcileFn | None' = None) -> 'None'`
+class `SchemaTool(name: 'str', parameters: 'dict[str, Any]', handler: 'SchemaHandler', *, description: 'str' = '', requires_approval: 'ApprovalRule' = False, max_retries: 'int | None' = 1, enabled: 'EnabledRule' = True, input_guardrails: 'Sequence[GuardrailFn]' = (), output_guardrails: 'Sequence[GuardrailFn]' = (), timeout: 'float | None' = None, on_timeout: 'OnTimeout' = 'tell_model', retry: 'ToolRetry | None' = None, cache: 'bool' = False, idempotent: 'bool' = False, effect: 'EffectName | None' = None, reconcile: 'ReconcileFn | None' = None, origin: 'str | None' = None, tags: 'Iterable[str]' = ()) -> 'None'`
 
 ~~~text
 A tool described by a raw JSON Schema instead of a Python signature.
@@ -1393,6 +1516,24 @@ A tool result with files: ``return ToolOutput("Here is the chart.", [chart])``.
 A tool can also return an ``Attachment`` or a list holding attachments and text. The
 text becomes the tool result; the files are shown to the model in the next message (see
 ``docs/multimodal.md``).
+~~~
+
+
+### `ToolInfo`
+
+class `ToolInfo(name: 'str', origin: 'str | None' = None, effect: 'str' = 'non_idempotent', requires_approval: 'bool' = False, tags: 'frozenset[str]' = frozenset()) -> None`
+
+~~~text
+What a hook, guardrail or policy rule may know about a tool: ``ctx.tool``.
+
+``origin`` says where the tool comes from: ``python:<module>.<qualname>`` for a
+``@tool`` function, ``mcp:<server>:<tool>`` and ``openapi:<METHOD>:<path>`` for MCP and
+OpenAPI tools, ``module:<module_id>`` for other module tools, ``agent:<name>`` for
+``Agent.as_tool``, ``builtin:<name>`` for the SDK's own tools, or ``None`` when unknown.
+``effect`` is the tool's effect class (``pure``, ``idempotent``, ``non_idempotent`` or
+``reconcilable``). ``requires_approval`` is ``True`` when the tool declares an approval
+flag or rule (a rule may still say no for a given call). ``tags`` are labels such as
+``toolset:<name>`` (MCP server or OpenAPI toolset) or your own ``@tool(tags=...)``.
 ~~~
 
 
@@ -3701,7 +3842,7 @@ Async iterator of one run's events as ``mapper`` shapes them (``build_kwargs`` g
 
 ### `WorkflowSpec`
 
-class `WorkflowSpec(name: 'str', entry_node: 'str', nodes: 'dict[str, WorkflowNode]', spec_version: 'int' = 1, terminal_nodes: 'list[str]' = <factory>, metadata: 'dict[str, Any]' = <factory>, presentation: 'dict[str, Any]' = <factory>) -> None`
+class `WorkflowSpec(name: 'str', entry_node: 'str', nodes: 'dict[str, WorkflowNode]', spec_version: 'int' = 1, terminal_nodes: 'list[str]' = <factory>, metadata: 'dict[str, Any]' = <factory>, presentation: 'dict[str, Any]' = <factory>, version: 'str | int | None' = None, migrations: 'dict[tuple[str | int, str | int], Callable[[str | int, str | int, dict[str, Any]], dict[str, Any]]]' = <factory>) -> None`
 
 ~~~text
 JSON-serializable, versioned workflow specification.
@@ -3713,6 +3854,8 @@ JSON-serializable, versioned workflow specification.
   Create specification from dictionary representation.
 - `from_json(cls, json_str: 'str') -> 'WorkflowSpec'`
   Deserialize specification from JSON string.
+- `register_migration(self, from_version: 'str | int', to_version: 'str | int', migrate: 'Callable[[str | int, str | int, dict[str, Any]], dict[str, Any]]') -> 'None'`
+  Register a pure state transformation; directed edges can form a chain.
 - `to_dict(self, include_presentation: 'bool' = True) -> 'dict[str, Any]'`
   Convert specification to a standard Python dictionary.
 - `to_json(self, indent: 'int | None' = 2) -> 'str'`
@@ -3776,15 +3919,19 @@ Executes workflows deterministically with checkpoints and approval gates.
 
 - `fork(self, workflow_run_id: 'str', checkpoint_index: 'int', *, state_update: 'dict[str, Any] | None' = None, new_run_id: 'str | None' = None) -> 'WorkflowRunResult'`
   Start a new run from a past checkpoint, optionally changing its state first.
+- `get_result(self, workflow_run_id: 'str') -> 'WorkflowRunResult'`
+  Inspect a run's latest checkpoint without dispatching or claiming approval.
 - `history(self, workflow_run_id: 'str') -> 'list[WorkflowCheckpoint]'`
   Every checkpoint of a run, oldest first: inspect state step by step.
-- `recover(self, workflow_run_id: 'str', *, on_uncertain: "Literal['pause', 'fail']" = 'pause') -> 'WorkflowRunResult'`
+- `migrate(self, workflow_run_id: 'str') -> 'WorkflowCheckpoint'`
+  Migrate checkpoint state to this definition under the run's fenced lease.
+- `recover(self, workflow_run_id: 'str', *, on_uncertain: "Literal['pause', 'fail']" = 'pause', continue_on_old_definition: 'bool' = False) -> 'WorkflowRunResult'`
   Continue a stopped run, or an ``effect_unknown`` pause a person resolved.
 - `resolve_effect(self, workflow_run_id: 'str', resolution: 'EffectResolution | str', *, actor: 'str', result: 'Any' = None, effect_id: 'str | None' = None) -> 'WorkflowRunResult'`
   Resolve the unknown effect a run is paused on, then continue it with :meth:`recover`.
-- `resume(self, workflow_run_id: 'str', approval_id: 'str', *, decision: "Literal['approve', 'reject']" = 'approve', state_update: 'dict[str, Any] | None' = None, workspace_id: 'str | None' = None, actor: 'str | None' = None, actor_role: 'str | None' = None, expected_payload_digest: 'str | None' = None) -> 'WorkflowRunResult'`
+- `resume(self, workflow_run_id: 'str', approval_id: 'str', *, decision: "Literal['approve', 'reject']" = 'approve', state_update: 'dict[str, Any] | None' = None, workspace_id: 'str | None' = None, actor: 'str | None' = None, actor_role: 'str | None' = None, expected_payload_digest: 'str | None' = None, continue_on_old_definition: 'bool' = False) -> 'WorkflowRunResult'`
   Resume an approval-gated workflow run with exact-action bindings.
-- `resume_interrupt(self, workflow_run_id: 'str', interrupt_id: 'str', value: 'Any', *, workspace_id: 'str | None' = None) -> 'WorkflowRunResult'`
+- `resume_interrupt(self, workflow_run_id: 'str', interrupt_id: 'str', value: 'Any', *, workspace_id: 'str | None' = None, continue_on_old_definition: 'bool' = False) -> 'WorkflowRunResult'`
   Answer an :func:`interrupt` and continue; the paused node runs again with it.
 - `resume_stream(self, workflow_run_id: 'str', approval_id: 'str', **kwargs: 'Any') -> 'AsyncGenerator[RunEvent, None]'`
   Event-stream form of :meth:`resume`; takes the same arguments.
@@ -3820,6 +3967,8 @@ Its execution journal (leases, intents, effects) is a ``MemoryExecutionStore``, 
   Ids of top-level runs whose latest checkpoint is ``running``, oldest update first.
 - `open_execution_store(self) -> 'ExecutionStore'`
   The execution journal kept next to these checkpoints (created on first use).
+- `run_identities(self, run_ids: 'list[str]') -> 'dict[str, dict[str, Any]]'`
+  Read a page's checkpoint identities under one store lock.
 - `save(self, checkpoint: 'WorkflowCheckpoint') -> 'None'`
   Store a checkpoint as the run's latest and append it to its history.
 
@@ -3852,6 +4001,8 @@ same database file, opened on first use with its own connection.
   Ids of top-level runs whose latest checkpoint is ``running``, oldest update first.
 - `open_execution_store(self) -> 'ExecutionStore'`
   The execution journal in the same database file (created on first use).
+- `run_identities(self, run_ids: 'list[str]') -> 'dict[str, dict[str, Any]]'`
+  Read a page's active and starting checkpoint identities in one query.
 - `save(self, checkpoint: 'WorkflowCheckpoint') -> 'None'`
   Store a checkpoint as the run's latest and append it to its history.
 
@@ -3942,7 +4093,7 @@ Explicit output from a workflow node handler.
 
 ### `WorkflowCheckpoint`
 
-class `WorkflowCheckpoint(workflow_run_id: 'str', spec_version: 'int', spec_hash: 'str', current_node_id: 'str | None', state: 'dict[str, Any]', step_count: 'int', status: 'WorkflowStatus', pending_approval: 'PendingApproval | None' = None, error: 'str | None' = None, updated_at: 'float' = <factory>, budget_state: 'dict[str, Any] | None' = None, interrupt: 'dict[str, Any] | None' = None, forked_from: 'dict[str, Any] | None' = None, workspace_id: 'str | None' = None, pending_effect: 'dict[str, Any] | None' = None, revision: 'int | None' = None) -> None`
+class `WorkflowCheckpoint(workflow_run_id: 'str', spec_version: 'int', spec_hash: 'str', current_node_id: 'str | None', state: 'dict[str, Any]', step_count: 'int', status: 'WorkflowStatus', pending_approval: 'PendingApproval | None' = None, error: 'str | None' = None, updated_at: 'float' = <factory>, budget_state: 'dict[str, Any] | None' = None, interrupt: 'dict[str, Any] | None' = None, forked_from: 'dict[str, Any] | None' = None, workspace_id: 'str | None' = None, pending_effect: 'dict[str, Any] | None' = None, revision: 'int | None' = None, workflow_version: 'str | int | None' = None) -> None`
 
 ~~~text
 Point-in-time execution snapshot for workflow resumption.
@@ -3951,7 +4102,7 @@ Point-in-time execution snapshot for workflow resumption.
 
 ### `WorkflowRunResult`
 
-class `WorkflowRunResult(workflow_run_id: 'str', status: 'WorkflowStatus', state: 'dict[str, Any]', step_count: 'int', current_node_id: 'str | None' = None, pending_approval: 'PendingApproval | None' = None, error: 'str | None' = None, budget_status: 'dict[str, Any] | None' = None, interrupt: 'dict[str, Any] | None' = None, pause_reason: 'str | None' = None, pending_effect: 'dict[str, Any] | None' = None) -> None`
+class `WorkflowRunResult(workflow_run_id: 'str', status: 'WorkflowStatus', state: 'dict[str, Any]', step_count: 'int', current_node_id: 'str | None' = None, pending_approval: 'PendingApproval | None' = None, error: 'str | None' = None, budget_status: 'dict[str, Any] | None' = None, interrupt: 'dict[str, Any] | None' = None, pause_reason: 'str | None' = None, pending_effect: 'dict[str, Any] | None' = None, workflow_version: 'str | int | None' = None, definition_digest: 'str' = '') -> None`
 
 ~~~text
 Final or paused result of a workflow run.

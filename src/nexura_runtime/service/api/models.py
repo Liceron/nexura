@@ -151,12 +151,23 @@ class RecoverRunRequest(BaseModel):
     )
 
 
+class MigrateRunRequest(RecoverRunRequest):
+    """Migrate to the run's saved workflow using trusted server registrations."""
+
+    expected_definition_digest: str | None = None
+    resume: bool = True
+
+
 class RunResponse(BaseModel):
     """Execution run snapshot representation."""
 
     run_id: str = Field(description="Unique run identifier")
     workflow_id: str | None = Field(default=None, description="Associated workflow ID")
     spec_hash: str = Field(description="Canonical spec hash")
+    workflow_version: str | int | None = None
+    definition_digest: str = ""
+    started_workflow_version: str | int | None = None
+    origin_definition_digest: str = ""
     status: str = Field(
         description="Run status: running, pending_approval, waiting_for_input, completed, etc."
     )

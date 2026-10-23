@@ -99,6 +99,8 @@ class DatasetRegistry:
                 input_data=ex.get("input_data", {}),
                 expected_output=ex.get("expected_output"),
                 expected_citations=ex.get("expected_citations"),
+                expected_trajectory=ex.get("expected_trajectory"),
+                simulation=ex.get("simulation"),
                 tags=ex.get("tags", []),
                 metadata=ex.get("metadata", {}),
             )

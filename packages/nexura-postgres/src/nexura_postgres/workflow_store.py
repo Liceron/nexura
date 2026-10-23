@@ -261,6 +261,39 @@ class PostgresWorkflowStore:
             )
         return None if row is None else self._checkpoint(row)
 
+    async def run_identities(self, run_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """A page of runs' active and starting identities in one query (P38 C6).
+
+        Returns ``{run_id: {"definition_digest", "workflow_version",
+        "started_workflow_version"}}`` for the runs visible to this store; missing runs are
+        left out. Only the identity fields are read from the checkpoint JSON, never the
+        run's state. ``workflow_run_identities`` and ``GET /runs`` use it.
+        """
+        if not run_ids:
+            return {}
+        pool = await self._get_pool()
+        scope, args = self._scope_sql(2)
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT c.workflow_run_id, c.spec_hash, "
+                "c.checkpoint_json::json->'workflow_version' AS version, "
+                "(SELECT h.checkpoint_json::json->'workflow_version' "
+                "FROM nexura_workflow_checkpoint_history h "
+                "WHERE h.workflow_run_id = c.workflow_run_id ORDER BY h.seq LIMIT 1) AS started "
+                "FROM nexura_workflow_checkpoints c "
+                f"WHERE c.workflow_run_id = ANY($1::text[]){scope}",
+                list(run_ids),
+                *args,
+            )
+        return {
+            row["workflow_run_id"]: {
+                "definition_digest": row["spec_hash"],
+                "workflow_version": json.loads(row["version"]) if row["version"] else None,
+                "started_workflow_version": json.loads(row["started"]) if row["started"] else None,
+            }
+            for row in rows
+        }
+
     async def save(self, checkpoint: WorkflowCheckpoint) -> None:
         """Store a checkpoint as the run's latest and append it to its history.
 

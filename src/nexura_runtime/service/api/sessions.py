@@ -40,6 +40,11 @@ from nexura_runtime.service.api.models import PaginatedResponse
 from nexura_runtime.service.auth.errors import PermissionDeniedError
 from nexura_runtime.service.auth.models import ActionPermission, Principal, WorkspaceRole
 from nexura_runtime.service.auth.permissions import check_permission
+from nexura_runtime.service.stream_adapters import (
+    StreamFormat,
+    select_stream_format,
+    stream_response,
+)
 from nexura_runtime.service.workspaces.repository import WorkspaceRepository
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -434,6 +439,9 @@ def knowledge_search_tool(
         "knowledge_search",
         knowledge_search,
         description="Search the workspace knowledge base; returns context with citations.",
+        # Policies match "knowledge:*"; one tag per searched collection.
+        origin=f"knowledge:{','.join(ids)}",
+        tags={f"knowledge:{c}" for c in ids},
     )
 
 
@@ -1136,6 +1144,21 @@ async def _chat_event_stream(
     t0 = time.perf_counter()
     try:
         chat_agent = agent or _build_playground_agent(payload, model, knowledge_tool, has_documents)
+        # P38 C3 review: hold text until the active agent's output guardrails pass.
+        # Traverse handoffs without executing them; unknown agents fail closed.
+        guarded: dict[str, bool] = {}
+        pending_agents = [chat_agent]
+        seen_agents: set[int] = set()
+        while pending_agents:
+            candidate = pending_agents.pop()
+            if id(candidate) in seen_agents:
+                continue
+            seen_agents.add(id(candidate))
+            guarded[candidate.name] = guarded.get(candidate.name, False) or bool(
+                candidate.output_guardrails
+            )
+            pending_agents.extend(handoff.agent for handoff in candidate.handoffs)
+        hold_text = bool(chat_agent.output_guardrails)
         stream = runner.stream_async(
             chat_agent,
             payload.message,
@@ -1147,6 +1170,10 @@ async def _chat_event_stream(
             paused: Any = None
             async with aclosing(stream):
                 async for event in stream:
+                    if event.type == RunEventType.AGENT_STARTED:
+                        hold_text = guarded.get(str(event.data.get("agent")), True)
+                    if event.type == RunEventType.TEXT_DELTA and hold_text:
+                        continue
                     events.append(event)
                     seq += 1
                     if event.type == RunEventType.TEXT_DELTA:
@@ -1207,7 +1234,10 @@ async def _chat_event_stream(
 
 @router.post("/{session_id}/chat/stream", dependencies=[_require("run")])
 async def stream_chat_in_session(
-    request: Request, session_id: str, payload: ChatRequest
+    request: Request,
+    session_id: str,
+    payload: ChatRequest,
+    stream_format: StreamFormat = Depends(select_stream_format),
 ) -> StreamingResponse:
     """Stream a chat turn's lifecycle events over SSE, ending with the full chat response."""
     _assert_session_ownership(request, session_id)
@@ -1220,7 +1250,7 @@ async def stream_chat_in_session(
         model = _resolve_chat_model(request, payload)
     session_store: SQLiteSessionStore = request.app.state.session_store
     await _ensure_session(request, session_id, session_store)
-    return StreamingResponse(
+    return stream_response(
         _chat_event_stream(
             session_store,
             session_id,
@@ -1233,6 +1263,8 @@ async def stream_chat_in_session(
             agent=agent,
             model_name=model_name,
         ),
-        media_type="text/event-stream",
+        stream_format,
+        thread_id=session_id,
+        chat=True,
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

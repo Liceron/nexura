@@ -28,8 +28,8 @@ built on semantic-conventions v1.44.0). See :data:`SEMCONV_GENAI_COMMIT`.
   ``gen_ai.client.inference.usage.*`` token counters and the
   ``gen_ai.client.inference.operation.*_tokens`` histograms, with low-cardinality attributes
   only (no ids or content).
-- Nexura events: ``nexura.approval.*``, ``nexura.budget.*`` and ``nexura.effect.*`` (see
-  :func:`record_event`).
+- Nexura events: ``nexura.approval.*``, ``nexura.budget.*``, ``nexura.effect.*`` and
+  ``nexura.guardrail.decision`` (see :func:`record_event`).
 
 Deprecated aliases kept for one release (removed in 0.5.0): ``gen_ai.system`` (same value as
 ``gen_ai.provider.name``), ``nexura.usage.reasoning_tokens``, ``nexura.operation.name``
@@ -1219,6 +1219,20 @@ EVENT_EFFECT_INTENT = "nexura.effect.intent"
 EVENT_EFFECT_OUTCOME = "nexura.effect.outcome"
 EVENT_EFFECT_UNKNOWN = "nexura.effect.unknown"
 EVENT_EFFECT_RESOLVED = "nexura.effect.resolved"
+EVENT_GUARDRAIL_DECISION = "nexura.guardrail.decision"
+# Attributes of nexura.guardrail.decision (P39 design section 8.6).
+GUARDRAIL_STAGE = "nexura.guardrail.stage"
+GUARDRAIL_RULE = "nexura.guardrail.rule"
+GUARDRAIL_CHECK = "nexura.guardrail.check"
+GUARDRAIL_BACKEND = "nexura.guardrail.backend"
+GUARDRAIL_ACTION = "nexura.guardrail.action"
+GUARDRAIL_CATEGORIES = "nexura.guardrail.categories"
+GUARDRAIL_SCORE = "nexura.guardrail.score"
+GUARDRAIL_LATENCY_MS = "nexura.guardrail.latency_ms"
+GUARDRAIL_CACHED = "nexura.guardrail.cached"
+GUARDRAIL_SOURCE = "nexura.guardrail.source"
+GUARDRAIL_POLICY_DIGEST = "nexura.guardrail.policy_digest"
+GUARDRAIL_DECISION_VALUE = "nexura.guardrail.decision"
 _EFFECT_EVENTS = {
     "pending": EVENT_EFFECT_INTENT,
     "confirmed": EVENT_EFFECT_OUTCOME,
@@ -1356,3 +1370,37 @@ def effects_committed(effects: Sequence[Any], *, run_id: str, on: Any = None) ->
         name = _EFFECT_EVENTS.get(status)
         if name is not None:
             record_event(name, attributes, on=on)
+
+
+def guardrail_decision(on: Any, decision: dict[str, Any]) -> None:
+    """``nexura.guardrail.decision`` for one guardrail outcome; never raises.
+
+    ``decision`` is the redacted record the runner also sends as a ``GUARDRAIL_DECISION``
+    run event (stage, guardrail, action, tool name and call id, latency and plain
+    classification fields). Only those keys are mapped; nothing else is recorded, so no
+    content can reach the span.
+    """
+    if _STATE is None:
+        return
+    mapping = {
+        "stage": GUARDRAIL_STAGE,
+        "guardrail": GUARDRAIL_CHECK,
+        "action": GUARDRAIL_ACTION,
+        "rule": GUARDRAIL_RULE,
+        "backend": GUARDRAIL_BACKEND,
+        "categories": GUARDRAIL_CATEGORIES,
+        "score": GUARDRAIL_SCORE,
+        "latency_ms": GUARDRAIL_LATENCY_MS,
+        "cached": GUARDRAIL_CACHED,
+        "decision": GUARDRAIL_DECISION_VALUE,
+        "policy_digest": GUARDRAIL_POLICY_DIGEST,
+        "tool_name": TOOL_NAME,
+        "tool_call_id": TOOL_CALL_ID,
+        "error_type": ERROR_TYPE,
+    }
+    attributes: dict[str, Any] = {GUARDRAIL_SOURCE: "live"}
+    for key, name in mapping.items():
+        value = decision.get(key)
+        if value is not None:
+            attributes[name] = value
+    record_event(EVENT_GUARDRAIL_DECISION, attributes, on=on)

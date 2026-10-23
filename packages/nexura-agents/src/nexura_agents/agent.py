@@ -48,7 +48,7 @@ def _ask_user_tool() -> Tool:
         # Never runs: the call pauses the run, and resume(answers=...) supplies the result.
         raise ToolError("ask_user needs an answer from a person; resume with answers=.")
 
-    built_in = Tool(ASK_USER_TOOL, ask_user, requires_approval=True)
+    built_in = Tool(ASK_USER_TOOL, ask_user, requires_approval=True, origin="builtin:ask_user")
     built_in.asks_user = True  # answers= may only supply results for this tool
     return built_in
 
@@ -547,6 +547,7 @@ class Agent(Generic[OutputT]):  # noqa: UP046 (a TypeVar default needs typing_ex
             tool_name,
             call_agent,
             description=description or self.description or f"Ask the {self.name} agent.",
+            origin=f"agent:{self.name}",
         )
         wrapped.nexura_agent = self  # type: ignore[attr-defined]  # for to_mermaid()
         return wrapped

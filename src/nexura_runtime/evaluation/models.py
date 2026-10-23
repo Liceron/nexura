@@ -10,10 +10,84 @@ from decimal import Decimal
 from typing import Any, Literal
 
 from nexura_agents.contracts.canonical import canonical_digest, canonical_json
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 GraderKind = Literal["deterministic", "model_judge"]
 QualityEvidence = Literal["verified_human", "model_judge", "mock_simulated"]
+
+TrajectoryMode = Literal["exact", "subset", "in_order", "any_order", "strict"]
+
+
+class ArgumentMatch(BaseModel):
+    """Rules for one argument (keyed by dotted path or ``tool.path``)."""
+
+    model_config = ConfigDict(extra="forbid")
+    normalisers: list[Literal["strip", "casefold", "whitespace", "numeric"]] = Field(
+        default_factory=list
+    )
+    absolute_tolerance: float = Field(default=0, ge=0, allow_inf_nan=False)
+    relative_tolerance: float = Field(default=0, ge=0, allow_inf_nan=False)
+
+
+class TrajectoryStep(BaseModel):
+    """Expected or observed tool invocation; expected args are a required subset."""
+
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1)
+    args: dict[str, Any] = Field(default_factory=dict)
+
+
+class UserSimulation(BaseModel):
+    """Multi-turn user plan. Persona models are injected by the host, never named here."""
+
+    model_config = ConfigDict(extra="forbid")
+    turns: list[str] | None = None
+    persona: str | None = None
+    max_turns: int = Field(default=10, ge=1, le=100)
+    stop_on_agent: list[str] = Field(default_factory=list)
+    stop_on_user: list[str] = Field(default_factory=lambda: ["[DONE]"])
+
+    @model_validator(mode="after")
+    def one_source(self) -> UserSimulation:
+        if (self.turns is None) == (self.persona is None):
+            raise ValueError("Set exactly one of turns or persona")
+        if any(not text for text in self.stop_on_agent + self.stop_on_user):
+            raise ValueError("Stop markers must be non-empty")
+        return self
+
+
+class StoredTrace(BaseModel):
+    """Portable snapshot of a recorded run, separate from its evaluation expectations."""
+
+    run_id: str
+    workflow_id: str | None = None
+    agent_id: str | None = None
+    timestamp: float = Field(allow_inf_nan=False)
+    output: Any = None
+    events: list[dict[str, Any]] = Field(default_factory=list)
+    messages: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class OnlineEvalConfig(BaseModel):
+    """Stable hash sampling and inclusive UTC epoch-second filters over stored traces."""
+
+    model_config = ConfigDict(extra="forbid")
+    sampling_rate: float = Field(default=1, ge=0, le=1, allow_inf_nan=False)
+    seed: int = 42
+    workflow_id: str | None = None
+    agent_id: str | None = None
+    start_time: float | None = Field(default=None, allow_inf_nan=False)
+    end_time: float | None = Field(default=None, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def time_range(self) -> OnlineEvalConfig:
+        if (
+            self.start_time is not None
+            and self.end_time is not None
+            and self.start_time > self.end_time
+        ):
+            raise ValueError("start_time must be <= end_time")
+        return self
 
 
 class DatasetExample(BaseModel):
@@ -23,6 +97,8 @@ class DatasetExample(BaseModel):
     input_data: dict[str, Any]
     expected_output: Any | None = None
     expected_citations: list[str] | None = None
+    expected_trajectory: list[TrajectoryStep | str] | None = None
+    simulation: UserSimulation | None = None
     tags: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -104,6 +180,7 @@ class EvaluationSummary(BaseModel):
     failed_examples: int = 0
     pass_rate: float = 0.0
     mean_score: float = 0.0
+    grader_scores: dict[str, float] = Field(default_factory=dict)
     total_latency_ms: float = 0.0
     total_cost_usd: Decimal = Decimal("0")
     total_tokens: int = 0

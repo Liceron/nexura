@@ -116,9 +116,9 @@ records; their constructors restore nested identity/intent records and enums.
 
 | Class | Declaration or existing alias | Recovery promise |
 | --- | --- | --- |
-| `pure` | Manifest `pure` or `read`; handler `effect="pure"` | May repeat freely. |
-| `idempotent` | Manifest `idempotent_write`; `@tool(idempotent=True)`; `effect="idempotent"` | Repeat with the same key from the intent. The tool must forward `ctx.idempotency_key` or be naturally idempotent. |
-| `non_idempotent` | Manifest `non_idempotent_write`; plain `@tool`; undeclared workflow function | Never silently repeat after an uncertain dispatch. |
+| `pure` | Manifest `pure` or `read`; handler `effect="pure"`; `MCPServer(read_only=...)`; `openapi_tools(read_only=...)` | May repeat freely. |
+| `idempotent` | Manifest `idempotent_write`; `@tool(idempotent=True)`; `effect="idempotent"`; `openapi_tools(idempotent=...)` | Repeat with the same key from the intent. The tool must forward `ctx.idempotency_key` or be naturally idempotent. |
+| `non_idempotent` | Manifest `non_idempotent_write`; plain `@tool`; undeclared workflow function; any MCP tool or OpenAPI operation you did not declare | Never silently repeat after an uncertain dispatch. |
 | `reconcilable` | Tool `effect="reconcilable", reconcile=fn`; module `reconcile_operation` | Probe with `reconcile(ctx, intent)` before deciding whether to repeat. |
 
 Model calls are `pure` for execution; reservations handle uncertain billing.
@@ -127,7 +127,18 @@ importing `nexura_runtime`. `effect_class_from_idempotent` maps the tool
 boolean. Missing declarations map to `non_idempotent`; unknown policy strings
 are rejected. SDK tools declare their class with `@tool(effect=..., reconcile=...)`
 since S5; workflow handlers use `register_handler(name, effect=..., reconcile=...)` since
-S6.
+S6. A `module_tool` takes its class from the module manifest's explicit `effect_policy`
+(an unset policy stays `non_idempotent`), except for classes that would rest on a third
+party's claim: an MCP server's `readOnlyHint` and an OpenAPI spec's HTTP method or
+`x-idempotent` are recorded as tool tags only, and those tools are `non_idempotent` unless
+the operator lists them in `MCPServer(read_only=...)` or
+`openapi_tools(read_only=..., idempotent=...)` (or passes `module_tool(effect=...)`).
+Generic wrappers declare nothing about the code they wrap: `tool_to_module(tool)` takes the
+wrapped tool's own class (an undeclared `@tool` is `non_idempotent_write`), and a
+`module_tool` over it runs under the stricter of the manifest class and the tool's class, so
+`tool_to_module(charge_card, effect_policy="read")` still pauses after a crash.
+`register_legacy` handlers (`LegacyModuleAdapter`), `AgentCoordinatorModule` and
+`AgentDefinition` default to `non_idempotent_write`.
 
 ## Recovery after a crash
 
@@ -162,10 +173,101 @@ engine envelope (agent and workflow checkpoint v2), and `definition_digest`.
 Readers accept versions N and N-1; writers write N. Journal migrations go through
 `nexura_agents.execution_store.migrations`, shared by SQLite and Postgres.
 
-Takeover with a different digest raises `DefinitionMismatchError`. A future
-explicit `migrate=` hook is the only bypass. Agents get one release of warnings
+Workflow takeover with a different digest fails closed unless a registered state
+migration applies or the caller explicitly selects the saved old definition (see below).
+Agents get one release of warnings
 before this check becomes mandatory: since S5, recovering or resuming an agent run
 with a different `Agent.definition_digest()` emits a `RuntimeWarning` and continues.
+
+## Changing a workflow while runs are paused
+
+The workflow's own `version` (string or integer) is distinct from `spec_version`, the
+JSON schema version. Run checkpoints/results expose `workflow_version` alongside
+`definition_digest`; `spec_hash` remains the checkpoint's compatible spelling. The
+execution journal's row digest pins the origin, while fenced journal state records the
+active definition/digest/version and the original `started_workflow_version`.
+
+Register pure `migrate(from_version, to_version, state) -> state` functions on
+`WorkflowSpec.register_migration`. `resume`, `resume_interrupt` and `recover` migrate
+before proceeding; `migrate(run_id)` commits state without dispatching a node. The
+complete runnable SQLite example in
+[Changing a workflow while runs are paused](workflows.md#changing-a-workflow-while-runs-are-paused)
+reopens the database, converts amounts, and requests a fresh approval. This smaller
+example demonstrates a two-edge chain with a local fake action:
+
+```python
+import asyncio
+from nexura_runtime.workflow import (
+    MemoryWorkflowStore, ModuleRegistry, WorkflowEngine, WorkflowNode, WorkflowSpec,
+)
+
+
+async def main():
+    store = MemoryWorkflowStore()
+    registry = ModuleRegistry()
+
+    async def local_fake(state):
+        return {"seen": state["count"]}
+
+    registry.register("local_fake", local_fake, effect="pure")
+    old = WorkflowSpec(name="counter", version=1, entry_node="n", nodes={
+        "n": WorkflowNode(id="n", handler="local_fake", requires_approval=True),
+    })
+    paused = await WorkflowEngine(old, registry, store=store).run({"count": 1})
+    new = WorkflowSpec.from_dict({**old.to_dict(), "workflow_version": 3})
+    new.register_migration(1, 2, lambda a, b, state: {**state, "count": state["count"] + 1})
+    new.register_migration(2, 3, lambda a, b, state: {**state, "count": state["count"] + 1})
+    engine = WorkflowEngine(new, registry, store=store)
+    checkpoint = await engine.migrate(paused.workflow_run_id)
+    assert checkpoint.state["count"] == 3
+    assert checkpoint.pending_approval.spec_hash == old.canonical_hash()
+    assert (await engine.migrate(paused.workflow_run_id)).state["count"] == 3
+
+
+asyncio.run(main())
+```
+
+A fenced transaction stores the entire migrated checkpoint, active identity and a
+`state_migrated` receipt before the checkpoint store is updated. A worker killed between
+these writes projects the receipt, so a committed transformation is never applied twice.
+Uncommitted calculations may repeat. Hooks must be pure, synchronous and return JSON
+objects; state is copied before every hook. Hook failures leave the previous state intact.
+Migration requires a journal-capable workflow store; it adds no second execution engine.
+
+No path, a same-version digest change, or missing paused/pending/intent node IDs refuses
+with `WorkflowMigrationError`, naming missing IDs where applicable. An explicit
+`continue_on_old_definition=True` uses the saved graph only after compatibility checks;
+the operator must retain the old handler code. Pending approval digests never change in
+place: a decision on the old request re-gates the migrated action. Effect-unknown runs
+retain their existing intents, idempotency keys and operator resolution requirements.
+Parent migration does not migrate separately journaled child state.
+In-flight idempotent and reconcilable intents refuse changes to their bound inputs or
+node definitions; recover those on the saved definition first.
+
+`GET /api/v1/runs/{id}` exposes the active identity. With trusted Python hooks installed
+in `app.state.workflow_migrations[workflow_name]`, update the run's saved workflow and
+POST `{}` to `/api/v1/runs/{id}/migrate` to migrate and recover. Both `run` and `edit`
+permissions are required. The target comes only from the saved workflow with the same
+workflow name; ad-hoc runs and supplied specs are refused. Optionally provide
+`expected_definition_digest` to pin the saved target. An audit event records the actor,
+from/to versions and digests. Set `resume` to false to stop after
+migration; waiting approvals and interrupts always need their existing decide/input
+endpoint. No hook code is accepted over HTTP. SQLite persistence and optional Postgres
+use the same journal receipt and checkpoint serialization. Service routes reject
+`continue_on_old_definition`; the explicit old-definition fallback is SDK-only.
+
+The active digest is rechecked after acquiring the lease, and execution checks the
+checkpoint digest again under that lease. A stale deployment cannot run against migrated
+state or repeat an already committed hook. Migration preserves a paused journal's status
+in its receipt commit, including when the subsequent checkpoint projection is lost.
+Only pending/in-flight nodes constrain graph compatibility; completed history may be removed.
+Paused child subgraphs need an unchanged digest or their own registered migration path.
+Non-idempotent retries after `not_applied` require fresh approval when migration changes
+their bound inputs or removes the old gate, before any send. Hook results must have string
+object keys and finite JSON values; tuples normalize to lists before being returned or stored.
+
+In serialized specs `workflow_version` carries `WorkflowSpec.version`. Legacy top-level
+`version` fields remain ignored so older imported specs keep their executable hashes.
 
 ## Approvals and budgets across takeover
 
@@ -443,7 +545,8 @@ in [Durable agent runs](durable-runs.md).
   attempt) and `ctx.fencing_token` (the run lease's token; `None` without a journal).
 - **Effect classes.** `@tool(effect="pure" | "idempotent" | "non_idempotent" |
   "reconcilable", reconcile=fn)`; `idempotent=True` is the alias of
-  `effect="idempotent"`; undeclared tools are `non_idempotent`.
+  `effect="idempotent"`; undeclared tools are `non_idempotent`, including MCP tools and
+  OpenAPI operations the operator did not declare (see [Effect classes](#effect-classes)).
 - **Unknown outcome.** A dispatched `non_idempotent` call (or a reconcilable one whose
   probe says `Unknown`) pauses the run: `RunResult.interruption.pause_reason ==
   "effect_unknown"` (its `reason` stays `"outcome_unknown_after_crash"`), journal status
@@ -1036,6 +1139,16 @@ dispatch (an intent carries it) from one that was not (the claim alone):
   on record answers the call, the earlier claim's rejection or answer holds, and a gated
   call without a decision is asked for again. A call a person rejected is never sent after
   a crash.
+- "Requires approval" includes a hook's gate (`AgentHooks.tool_needs_approval`, P39 G2).
+  The runner records each call a hook gated in the journal's run state (`hook_gates`,
+  step keys of the current turn, written with the commit that pauses the run), so a
+  resume or recovery by a runner without that hook still treats the call as gated: it is
+  asked for again instead of being sent, and an expired claim is not used. A resume's
+  claim commit also records every call the pause asks about (questions excepted), and if
+  the paused checkpoint was saved but the pause commit was lost, recovery records them
+  when it writes the pause. Without a journal-capable store no gate is recorded, and runs
+  paused before this release carry none: keep the gating hook on the runners that
+  continue them.
 
 A paused agent run now also gives back its checkpoint claim with the pause commit. A
 process killed right after pausing does not block `resume` elsewhere until its claim

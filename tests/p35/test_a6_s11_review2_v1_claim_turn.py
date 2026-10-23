@@ -1,5 +1,5 @@
 """A6 S11 round-2 review repro (minor 4): a claim of an earlier turn never approves a later
-call that reuses its id. Copied from .autopilot/p35/s11_repros/round2/test_v1_b1_variants.py."""
+call that reuses its id. Repro from the S11 round 2 review."""
 
 from __future__ import annotations
 

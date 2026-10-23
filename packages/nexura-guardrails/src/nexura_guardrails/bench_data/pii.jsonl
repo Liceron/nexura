@@ -1,0 +1,40 @@
+{"text": "Please send the invoice to john.doe@example.com when it is ready.", "label": "positive", "source": "nexura-authored", "license": "MIT"}
+{"text": "You can reach our lead architect at alice.smith@techcorp.org for details.", "label": "positive", "source": "nexura-authored", "license": "MIT"}
+{"text": "The customer requested account confirmation at billing-support@services.net.", "label": "positive", "source": "nexura-authored", "license": "MIT"}
+{"text": "Send the payment receipt to executive.assistant@company.co.uk.", "label": "positive", "source": "nexura-authored", "license": "MIT"}
+{"text": "Direct inquiries to press-office@globalmedia.io for public statements.", "label": "positive", "source": "nexura-authored", "license": "MIT"}
+{"text": "Call our primary helpline at +14155552671 to resolve this issue.", "label": "positive", "source": "nexura-authored", "license": "MIT"}
+{"text": "Please contact customer support at (555) 234-5678 during business hours.", "label": "positive", "source": "nexura-authored", "license": "MIT"}
+{"text": "My alternate emergency contact number is +1-202-555-0199.", "label": "positive", "source": "nexura-authored", "license": "MIT"}
+{"text": "My mobile contact number for SMS updates is +447911123456.", "label": "positive", "source": "nexura-authored", "license": "MIT"}
+{"text": "The vendor emergency dispatch number is +18005550143.", "label": "positive", "source": "nexura-authored", "license": "MIT"}
+{"text": "Please charge the payment to Visa card 4111 1111 1111 1111 expiring next year.", "label": "positive", "source": "nexura-authored", "license": "MIT"}
+{"text": "The card number on file for billing is 4000 0000 0000 0002.", "label": "positive", "source": "nexura-authored", "license": "MIT"}
+{"text": "Customer provided Mastercard number 5105 1051 0510 5100 for payment.", "label": "positive", "source": "nexura-authored", "license": "MIT"}
+{"text": "Card details for monthly subscription: 4000 0000 0000 1000.", "label": "positive", "source": "nexura-authored", "license": "MIT"}
+{"text": "The primary corporate card is 4000 0000 0000 2008.", "label": "positive", "source": "nexura-authored", "license": "MIT"}
+{"text": "Use OpenAI API key sk-EXAMPLE-not-a-real-openai-key to authenticate requests.", "label": "positive", "source": "nexura-authored", "license": "MIT"}
+{"text": "The deployment token is ghp_EXAMPLExNOTxAxREALxTOKENxxxxxxxxxxxx for GitHub access.", "label": "positive", "source": "nexura-authored", "license": "MIT"}
+{"text": "Export your Slack bot token as xoxb-EXAMPLE-not-a-real-token.", "label": "positive", "source": "nexura-authored", "license": "MIT"}
+{"text": "Configured backup secret sk-EXAMPLE-not-a-real-backup-key in the environment.", "label": "positive", "source": "nexura-authored", "license": "MIT"}
+{"text": "The internal staging database is located at 192.168.1.100 on the local subnet.", "label": "positive", "source": "nexura-authored", "license": "MIT"}
+{"text": "Upgraded the production server to version 1.2.3.4 of the framework.", "label": "negative", "source": "nexura-authored", "license": "MIT"}
+{"text": "The latest stable release is Python 3.11.9 available for download.", "label": "negative", "source": "nexura-authored", "license": "MIT"}
+{"text": "Order #ORD-987654321 was packaged and shipped via express courier.", "label": "negative", "source": "nexura-authored", "license": "MIT"}
+{"text": "Customer reference ID is REF-8849-ZZ99 for tracking purposes.", "label": "negative", "source": "nexura-authored", "license": "MIT"}
+{"text": "Merged pull request into commit SHA a1b2c3d4e5f678901234567890abcdef12345678.", "label": "negative", "source": "nexura-authored", "license": "MIT"}
+{"text": "Generated unique session token uuid 550e8400-e29b-41d4-a716-446655440000.", "label": "negative", "source": "nexura-authored", "license": "MIT"}
+{"text": "The invoice total was $1,250.75 for 14 items ordered last month.", "label": "negative", "source": "nexura-authored", "license": "MIT"}
+{"text": "Product SKU number is SKU-4421-9908 in the warehouse inventory.", "label": "negative", "source": "nexura-authored", "license": "MIT"}
+{"text": "HTTP status 404 was returned by the web server when fetching the page.", "label": "negative", "source": "nexura-authored", "license": "MIT"}
+{"text": "The benchmark completed in 245 milliseconds across 500 iterations.", "label": "negative", "source": "nexura-authored", "license": "MIT"}
+{"text": "The dataset contains 10000 records processed in batches of 64.", "label": "negative", "source": "nexura-authored", "license": "MIT"}
+{"text": "Flight AA-1234 departs from terminal 3 at 14:30 local time.", "label": "negative", "source": "nexura-authored", "license": "MIT"}
+{"text": "The meeting is scheduled for 2026-10-23 in conference room B.", "label": "negative", "source": "nexura-authored", "license": "MIT"}
+{"text": "Calculate the area using width 1920 and height 1080 pixels.", "label": "negative", "source": "nexura-authored", "license": "MIT"}
+{"text": "Container ID 7f3a9c8b1d2e was stopped after 3600 seconds of uptime.", "label": "negative", "source": "nexura-authored", "license": "MIT"}
+{"text": "Device serial number is SN-9988-7766-5544 stamped on the chassis.", "label": "negative", "source": "nexura-authored", "license": "MIT"}
+{"text": "The temperature sensor recorded 23.5 degrees Celsius at 12:00.", "label": "negative", "source": "nexura-authored", "license": "MIT"}
+{"text": "Database port 5432 is standard for PostgreSQL installations.", "label": "negative", "source": "nexura-authored", "license": "MIT"}
+{"text": "Hash verification succeeded with MD5 checksum 098f6bcd4621d373cade4e832627b4f6.", "label": "negative", "source": "nexura-authored", "license": "MIT"}
+{"text": "The package requires 256 megabytes of available RAM to run.", "label": "negative", "source": "nexura-authored", "license": "MIT"}

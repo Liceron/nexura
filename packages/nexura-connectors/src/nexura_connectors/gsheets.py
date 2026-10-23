@@ -9,6 +9,7 @@ from urllib.parse import quote
 
 from pydantic import Field
 
+from nexura_connectors._auth import RefreshingRestConnector
 from nexura_connectors._core import (
     Call,
     Op,
@@ -16,25 +17,31 @@ from nexura_connectors._core import (
     result_data,
     safe_id,
 )
-from nexura_connectors._rest import RestConnector
+from nexura_connectors._pagination import page_items
 
 Cell = str | int | float | bool | None
 
 
-class ReadRange(StrictParams):
+class SheetRange(StrictParams):
     """Parameters for reading an A1 range."""
 
     spreadsheet_id: str = Field(min_length=1, max_length=128)
     range: str = Field(min_length=1, max_length=200)
 
 
-class WriteRange(ReadRange):
+class ReadRange(SheetRange):
+    """Read a range, optionally limiting returned rows (values.get has no pageToken)."""
+
+    max_items: int | None = Field(default=None, ge=1, le=10000)
+
+
+class WriteRange(SheetRange):
     """Parameters for writing rows (at most 1000 rows)."""
 
     values: list[list[Cell]] = Field(min_length=1, max_length=1000)
 
 
-class GoogleSheetsConnector(RestConnector):
+class GoogleSheetsConnector(RefreshingRestConnector):
     """Read ranges; append rows or overwrite a range."""
 
     MODULE_ID: ClassVar[str] = "nexura.connectors.gsheets"
@@ -42,20 +49,24 @@ class GoogleSheetsConnector(RestConnector):
     DESCRIPTION: ClassVar[str] = "Google Sheets v4 values API with an OAuth access token."
     CREDENTIAL_TYPE: ClassVar[str] = "google_oauth_token"
     DEFAULT_BASE_URL: ClassVar[str | None] = "https://sheets.googleapis.com"
+    AUTH_FAMILY: ClassVar[str] = "google"
+    TOKEN_URL: ClassVar[str] = "https://oauth2.googleapis.com/token"
     OPS: ClassVar[dict[str, Op]] = {
-        "read_range": Op("read_range", False, ReadRange),
-        "append_rows": Op("append_rows", True, WriteRange),
-        "update_range": Op("update_range", True, WriteRange),
+        "read_range": Op("read_range", False, ReadRange, effect_class="pure"),
+        "append_rows": Op("append_rows", True, WriteRange, effect_class="non_idempotent"),
+        "update_range": Op("update_range", True, WriteRange, effect_class="non_idempotent"),
     }
 
     @staticmethod
-    def _values_path(p: ReadRange) -> str:
+    def _values_path(p: SheetRange) -> str:
         return f"/v4/spreadsheets/{safe_id(p.spreadsheet_id)}/values/{quote(p.range, safe='')}"
 
     async def op_read_range(self, p: ReadRange, call: Call) -> dict[str, Any]:
         """Read a range; rows beyond the response cap are rejected (read)."""
         data = (await self.api(call, "GET", self._values_path(p))).json()
-        return result_data(data.get("values", []))
+        rows = page_items(data, "values")
+        truncated = p.max_items is not None and len(rows) > p.max_items
+        return result_data(rows[: p.max_items], truncated=truncated)
 
     async def op_append_rows(self, p: WriteRange, call: Call) -> dict[str, Any]:
         """Append rows after the table in the range (write)."""

@@ -15,6 +15,7 @@ from nexura_runtime.evaluation.models import (
     DatasetExample,
     EvaluationDataset,
     EvaluationSummary,
+    StoredTrace,
 )
 
 
@@ -33,6 +34,8 @@ class EvaluationStore(Protocol):
     def list_runs(
         self, workspace_id: str = "default", limit: int = 50, offset: int = 0
     ) -> list[dict[str, Any]]: ...
+    def save_trace(self, trace: StoredTrace, workspace_id: str = "default") -> None: ...
+    def list_traces(self, workspace_id: str = "default") -> list[StoredTrace]: ...
 
 
 class SqliteEvaluationStore:
@@ -89,6 +92,13 @@ class SqliteEvaluationStore:
 
                 CREATE INDEX IF NOT EXISTS idx_eval_runs_ws
                     ON eval_runs (workspace_id, created_at DESC);
+
+                CREATE TABLE IF NOT EXISTS eval_traces (
+                    run_id TEXT NOT NULL,
+                    workspace_id TEXT NOT NULL,
+                    trace_json TEXT NOT NULL,
+                    PRIMARY KEY (run_id, workspace_id)
+                );
             """)
 
     def save_dataset(self, dataset: EvaluationDataset, workspace_id: str = "default") -> None:
@@ -282,6 +292,23 @@ class SqliteEvaluationStore:
                 }
                 for r in rows
             ]
+
+    def save_trace(self, trace: StoredTrace, workspace_id: str = "default") -> None:
+        """Store an imported recorded run snapshot without executing it."""
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO eval_traces VALUES (?, ?, ?) ON CONFLICT(run_id, workspace_id) "
+                "DO UPDATE SET trace_json=excluded.trace_json",
+                (trace.run_id, workspace_id, trace.model_dump_json()),
+            )
+
+    def list_traces(self, workspace_id: str = "default") -> list[StoredTrace]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT trace_json FROM eval_traces WHERE workspace_id=? ORDER BY run_id",
+                (workspace_id,),
+            ).fetchall()
+            return [StoredTrace.model_validate_json(row["trace_json"]) for row in rows]
 
     def close(self) -> None:
         with self._lock:

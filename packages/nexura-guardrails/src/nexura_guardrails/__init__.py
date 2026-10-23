@@ -32,7 +32,6 @@ _EXPORTS: dict[str, str] = {
     "CheckInput": "nexura_guardrails.verdict",
     "Category": "nexura_guardrails.verdict",
     "CATEGORIES": "nexura_guardrails.verdict",
-    "INDIAN_CATEGORY_IDS": "nexura_guardrails.verdict",
     "DEFAULT_JUDGE_CATEGORIES": "nexura_guardrails.verdict",
     "LABEL_MAPS": "nexura_guardrails.verdict",
     "map_label": "nexura_guardrails.verdict",
@@ -68,6 +67,9 @@ _EXPORTS: dict[str, str] = {
     "Cached": "nexura_guardrails.compose",
     "VerdictCache": "nexura_guardrails.compose",
     "is_fallback": "nexura_guardrails.compose",
+    # Benchmark
+    "run_benchmark": "nexura_guardrails.bench",
+    "run_benchmark_sync": "nexura_guardrails.bench",
 }
 
 __all__ = [
@@ -78,7 +80,6 @@ __all__ = [
     "CheckInput",
     "DEFAULT_JUDGE_CATEGORIES",
     "Decision",
-    "INDIAN_CATEGORY_IDS",
     "JudgeCheck",
     "LABEL_MAPS",
     "MalformedVerdictError",
@@ -105,6 +106,8 @@ __all__ = [
     "pii",
     "policy_for",
     "rejection_message",
+    "run_benchmark",
+    "run_benchmark_sync",
     "run_check",
     "tiered",
     "topics",
@@ -126,6 +129,10 @@ def __dir__() -> list[str]:
 
 
 if TYPE_CHECKING:
+    from nexura_guardrails.bench import (
+        run_benchmark,
+        run_benchmark_sync,
+    )
     from nexura_guardrails.checks import (
         Check,
         as_guardrail,
@@ -163,7 +170,6 @@ if TYPE_CHECKING:
     from nexura_guardrails.verdict import (
         CATEGORIES,
         DEFAULT_JUDGE_CATEGORIES,
-        INDIAN_CATEGORY_IDS,
         LABEL_MAPS,
         Category,
         CheckInput,

@@ -5,6 +5,222 @@ has been published.
 
 ## Unreleased (0.4.0)
 
+### Added (P38 C3: frontend streaming adapters)
+- Review fixes: Unicode-preserving CR/LF SSE parsing, terminal errors on malformed,
+  failed or incomplete sources, and native Accept fallback. Active agents with
+  output guardrails hold chat text until the checked final output; tripwires emit
+  no blocked text. Reducer-sensitive state uses authoritative snapshots only.
+  Approval finishes identify the pause; Nexura-defined selectors and stock AG-UI
+  query usage are documented, with inverted repros and route-level wire goldens.
+- Opt-in AG-UI protocol 1.0 and AI SDK 5.0.0 UI message SSE streams on existing
+  chat and workflow event endpoints, selected by `stream_format` or vendor `Accept`.
+  Native SSE remains the default. Adapters consume only existing public frames,
+  omit raw tool-call deltas and expose approval notices without pending arguments.
+- Frontend integration guide and offline FakeModel wire-sequence, redaction,
+  negotiation, replay and disconnect tests; no new dependencies.
+
+### Added (P38 C7: GitHub, Slack and Google connector depth)
+- Review fixes: accept same-origin GitHub repository-ID pagination links, retain fetched
+  items on later failures, bind partial cursors to state and stop pagination loops explicitly.
+  Redact secret fields without corrupting auth metadata or normal API data. Bound total
+  retries by the manifest timeout and return retry-after metadata when deferring reads.
+  Refresh serialises across threads, transient exchanges are retryable, read 401s refresh
+  once, and write 5xx/408 outcomes are indeterminate. Hide helper secrets in repr, run App
+  JWT signers off the event loop, normalise expiry to UTC and discard consumed JWTs.
+  Declare read effects, avoid JSON parsing binary downloads, reject multipart boundary
+  collisions and clarify that Slack correlation IDs provide no de-duplication guarantee.
+- Refreshable OAuth secret records with expiry/skew checks, persisted token rotation,
+  in-process single-flight refresh across connector instances, and GitHub App installation
+  exchange through an application-supplied JWT. Static PAT/bot/access tokens remain supported.
+- GitHub Link, Slack cursor and Drive page-token pagination with `max_items`, explicit
+  truncation and partial-page resume cursors; Sheets row caps and Drive incomplete-search flags.
+- Provider rate-limit handling, budgeted Retry-After/reset waits and jittered read-only retries.
+  Writes keep approval gates, explicit conservative effect classes and no automatic retries;
+  Slack client_msg_id and pre-generated Drive file IDs are forwarded where supplied.
+- Offline wire-contract and negative tests for refresh/concurrency, pagination, rate limits,
+  write keys/effects, actionable errors and token redaction. No live calls or new dependencies.
+
+### Added (P38 C5: runtime evaluations)
+- Recorded tool trajectory and argument accuracy graders with exact, in-order subset,
+  and any-order matching, named argument normalisers, numeric tolerances, and aggregates.
+- Scripted and injected-model persona user simulation with conversation history,
+  bounded turns, explicit stops, transcripts, and offline FakeModel examples.
+- Post-hoc stored-trace evaluation with deterministic sampling, workflow/agent/time
+  filters, workspace-scoped trace persistence, and existing evaluation result storage.
+- Evaluation capability, trace import, online and simulation API routes; Studio scorer
+  support for argument accuracy while preserving existing routes and report formats.
+
+### Added (P38 C6: workflow state migrations)
+- Workflow versions on checkpoints/results and run API responses, with definition digests.
+- Registered pure, chained state migrations before resume/recover; fenced journal receipts
+  recover a committed migration without applying it twice after a crash.
+- Missing-path and missing-node refusals, an explicit saved-definition fallback, approval
+  re-gating across definition changes, and `POST /api/v1/runs/{id}/migrate` with trusted
+  server hooks. Existing resume/input/recover routes remain supported.
+- Review fixes: fence active definitions after lease acquisition, refuse incompatible
+  paused child subgraphs before claiming approval, and re-gate migrated payment retries.
+  Service migration requires `run` and `edit`, uses the saved workflow and audits the
+  actor and version change. Imported legacy `version` fields keep their old hash;
+  executable workflow versions serialize as `workflow_version`.
+
+### Added (P39 G2: default policy and coverage gaps)
+- `set_default_hooks(hooks)` and `default_hooks()` (`nexura_agents`, module
+  `nexura_agents.policy`): hooks every `Runner` uses. A run's hooks are the hooks inherited
+  from an enclosing run, then the process default, then the runner's own `hooks=`, each
+  object once; the default is the outermost member. `Runner(hooks=...)` adds to it and can
+  never replace it. `Runner.effective_hooks()` shows the result.
+- Inheritance mirrors budgets: the run's hooks are active (`policy.active_hooks`) while its
+  steps execute, so a `Runner()` built inside a run, `Agent.as_tool()` sub-runs, team
+  members, `AgentMCPServer` agent calls, modules and templates that run an agent use them.
+- `Runner(default_hooks=False)` and `AgentCoordinator(default_hooks=False)` leave out the
+  process default. **For tests only**; hooks inherited from an enclosing run still apply.
+- `set_default_hooks(policy, locked=True)` and `policy.default_hooks_locked()`: while the
+  default is locked, `default_hooks=False`, `set_default_hooks(None)` and installing
+  another default raise `SDKValidationError` (the same object may be installed again).
+  The service will install its policy this way (G6).
+- `AgentCoordinator.replace(**changes)`; `AgentCoordinatorModule` with skills now keeps the
+  coordinator's `hooks` and `default_hooks` (it used to rebuild the coordinator without
+  them).
+- `CoordinatorCallLedger`, `MemoryCallLedger` and `purge_coordinator_ledger`
+  (`nexura_runtime.runtime.agents.call_ledger`), `CoordinatorCallOutcomeUnknownError`,
+  `CoordinatorRunCompletedError` and `AgentCoordinator(replay_model_responses=...)`: see
+  "Changed (P39 G2)".
+- `AgentCoordinator(hooks=...)`. Coordinator tool calls (and tools inside
+  `AgentDefinition.as_tool()` subagents) now run through the tool's input and output
+  guardrails and the hooks' `before_tool`/`after_tool`, and need approval when the tool has
+  `requires_approval` or a hook's `tool_needs_approval` says so, as well as for the agent's
+  `approval_required`. Before G2 they ran with no guardrails, hooks or tool approval gate.
+- `AgentMCPServer` plain tools run the hooks of the server's runner (`before_tool`,
+  `after_tool`, `tool_needs_approval`; a hook-gated call is refused over MCP).
+- `policy.tool_call_needs_approval` and `policy.run_tool_call`: the runner's approval rule
+  and guardrail/hook order for code that runs a tool outside a `Runner`.
+- Origins: handoff transfer tools `origin="handoff"` (tag `handoff:<target>`); the
+  runtime's knowledge-search tools `origin="knowledge:<collection>"` (tags
+  `knowledge:<collection>`); `AgentDefinition.as_tool()` `origin="agent:<name>"`.
+
+### Changed (P39 G2)
+- **Hook approval gates survive a crash (G1 review MIN7).** A call a hook's
+  `tool_needs_approval` gated is recorded in the run's journal (`hook_gates`, written with
+  the commit that pauses the run). A resume or recovery by a runner without that hook
+  still treats it as gated: an undecided call of a recovered batch, a `not_applied`
+  outcome and a reconcile `NotApplied` all wait for a fresh approval instead of being
+  sent. If the paused checkpoint was saved but its journal commit was lost, recovery
+  records every call the pause asks about, and a resume's approval claim commit records
+  them too, so an expired claim after a lost pause commit is asked for again instead of
+  being used (G2 review M1). Needs a journal-capable checkpoint store; runs paused before
+  this release carry no record (keep the gating hook on runners that continue them).
+  `tests/agents/test_p39_g1_approval_hook.py::test_the_same_recovery_without_the_hook_gate_sends_the_call`
+  now also clears the recorded gate (a pre-G2 journal) to stay a control.
+- Hooks objects passed to a runner now also run for runs nested inside its runs (for
+  example `Agent.as_tool()` sub-agents): `on_run_start` and the tool hooks are called for
+  the sub-run too, so keep per-run state keyed by `ctx.run_id`. A plain
+  `threading.Thread` does not inherit them (use `contextvars.copy_context().run`). A
+  hooks object that also sits inside a `ComposedHooks` subclass runs once.
+- Hooks now get copies of the tool call in `before_tool` and `after_tool` (each
+  `ComposedHooks` member its own): changing `call.arguments` no longer changes the
+  approved arguments the tool runs with.
+- **Coordinator re-runs after an approval never repeat earlier calls.** G2 made coordinator
+  tools with `requires_approval` or a hook gate pause (they used to run unasked). That
+  exposed the coordinator's "re-run after approval" model, so with an `approval_gate`
+  every run visit now has a ledger (`coordinator_call_ledger` in the approvals database,
+  or in memory for one coordinator object without a database). A visit is workspace,
+  run, node and workflow step, so a node revisited in a cycle starts fresh.
+  - A call that ran is replayed by position; a run with several gated calls completes,
+    each approval claimed once.
+  - A dispatched call without a result is sent again only for `pure`/`idempotent` tools.
+  - A diverging re-run (another call at a position that ran, or an ungated non-idempotent
+    call an earlier attempt already sent) raises `CoordinatorCallOutcomeUnknownError`
+    before sending.
+  - `AgentCoordinator(replay_model_responses=True)` replays the recorded model responses
+    instead of calling the model again.
+  - Replays emit `coordinator.*_replayed` progress events and a
+    `nexura.coordinator.replayed` trace event.
+  - A completed visit keeps only a marker: running it again raises
+    `ApprovalClaimConflictError` (approvals used) or `CoordinatorRunCompletedError`.
+  - `purge_coordinator_ledger(manager, older_than_seconds)` removes old rows.
+  - The approval request id now includes the workflow step and the agent definition
+    digest keys the ledger, so pending coordinator approvals made before this change
+    are requested again.
+- A `tool_to_module` module whose tool has `requires_approval` (flag or rule) runs a gated
+  call only with `ExecutionContext.approval_granted`. As a workflow node it pauses on the
+  approval path (`request_approval`, details `{"tool_requires_approval", "arguments"}`) and
+  runs once a person approves those arguments (compared by canonical digest); a node that
+  is itself approved covers it; elsewhere the call raises `ContractError`
+  (`APPROVAL_REQUIRED`). `module_tool` grants the approval when the wrapped tool's gate
+  paused the call, and the rule sees the agent run's context (its `deps`), so agent use
+  is unchanged. As a workflow node a rule sees `deps=None`.
+
+### Added (P39 G1: hook composition and guardrail plumbing in `nexura-agents`)
+- `Runner(hooks=[a, b])` accepts a list, composed by the new `ComposedHooks`: observers in
+  list order (`on_agent_end`/`on_run_end` in reverse), `before_model`/`before_tool` take the
+  first non-None answer, `after_model`/`after_tool` chain in reverse. A single hooks object
+  is used as before. `runner.hooks` is now a property that composes a list on assignment.
+- `AgentHooks.tool_needs_approval(ctx, tool, arguments)` (sync) adds approval gates through
+  the existing approval contract, at every place the runner decides approval (pause,
+  not-applied resend, recovery claims, reconcile). It can never remove a tool's own gate.
+- Tool metadata: `Tool.origin`, `Tool.tags`, `@tool(tags=...)`, `Tool.info()` returning a
+  frozen `ToolInfo`, and `RunContext.tool` inside tool calls. MCP tools get
+  `mcp:<server>:<tool>` and `toolset:<server>`; the server's hints become
+  `mcp.hint:<hint>=<bool>` tags (metadata only). OpenAPI tools get `openapi:<METHOD>:<path>`,
+  `toolset:<toolset>` (new `openapi_tools(toolset=...)`), `openapi.method:<METHOD>` and, when
+  the spec claims it, `openapi.hint:idempotent=true` (metadata only).
+- `openapi_tools(read_only=[...], idempotent=[...])`: the operator declares, by operationId,
+  which operations are `pure` or `idempotent` for durable recovery (mirrors
+  `MCPServer(read_only=...)`). Undeclared operations stay `non_idempotent`.
+- `RunEventType.GUARDRAIL_DECISION` run events and `nexura.guardrail.decision` trace events
+  (redacted) for every guardrail outcome other than a pass; `check_tool_input` /
+  `check_tool_output` take an optional `on_decision` callback.
+
+### Changed (P39 G1)
+- `module_tool` keeps a module's explicit, operator- or developer-declared effect policy, so
+  MCP tools listed in `MCPServer(read_only=...)` and modules whose manifest sets
+  `effect_policy="pure"`/`"read"`/`"idempotent_write"` are repeated by durable recovery
+  instead of pausing. Third-party claims and wrapper defaults never set the class: unmarked
+  MCP tools (whatever their `readOnlyHint`), OpenAPI operations (whatever their HTTP method
+  or `x-idempotent`) and modules without an explicit `effect_policy` stay `non_idempotent`,
+  and a module that wraps a `Tool` (`tool_to_module`) runs under the stricter of its
+  manifest class and the tool's own class. `module_tool(effect=...)` overrides the class.
+- Generic wrappers no longer default to `idempotent_write`: `tool_to_module` / `ToolModule`
+  take the wrapped tool's declared class (an undeclared `@tool` is `non_idempotent_write`),
+  and `LegacyModuleAdapter` (`register_legacy`), `AgentCoordinatorModule` and
+  `AgentDefinition` / `AgentDefinition.from_agent` default to `non_idempotent_write`. A durable
+  workflow therefore pauses (`effect_unknown`) instead of repeating such a node after a crash,
+  a workflow node that retries one of them is refused at validation, and the default
+  `AgentDefinition.definition_digest()` changes, so a pending coordinator approval created
+  before the upgrade must be requested again. Pass `effect_policy=` to declare a class.
+- Upgrading with runs in flight: `Agent.definition_digest()` is unchanged for agents with
+  OpenAPI tools, unmarked MCP tools, `tool_to_module` tools and modules without an explicit
+  policy. It changes for agents with `MCPServer(read_only=...)` tools or `module_tool` modules
+  whose manifest explicitly sets `effect_policy` to `pure`, `read` or `idempotent_write`
+  (Studio saved agents using such runtime modules included). With a journal-capable
+  checkpoint store, recovery of such a run keeps the stricter class its call was sent under
+  (it pauses) and warns that the definition changed. Without a journal there is no recorded
+  class or digest: the first recovery after upgrading applies the new class silently, so a
+  call that crashed in flight is sent again.
+- Agent input and output guardrails are bounded by the run's `timeout` and stop when the
+  run is cancelled; an answer whose output validators or output guardrails were interrupted
+  by a cancel is not returned in `result.messages`.
+- Usage recorded with `ctx.add_usage` in agent input/output guardrails (judge calls) and
+  output validators now counts in `RunResult.usage`, also when the stage trips, times out or
+  is cancelled, and the `UsageLimits` token caps are checked again after each guardrail stage
+  that recorded usage (an output judge that crosses a cap fails the run with
+  `UsageLimitExceededError`). It counts in the total only, not in `usage_by_agent` or
+  `usage_by_model`, which cover the agents' own model calls (as for nested tool usage).
+- `ComposedHooks` flattens only plain nested compositions (a subclass keeps its overrides)
+  and refuses members with no hook methods. Approval hooks get copies of the tool and its
+  arguments. Only the four MCP specification hint keys become `mcp.hint:` tags.
+  `GUARDRAIL_DECISION` records copy only identifier tokens (no `@`, runs of 6+ digits, 9+
+  digits joined by `-`, `.` or spaces, or key-shaped strings) and a fixed `decision`
+  vocabulary. `Runner(hooks=...)` refuses a set, dict, generator, class or other non-hooks
+  value when the runner is built.
+- `module_tool` over a module that wraps a `Tool` (`tool_to_module`) now also applies that
+  tool's own `requires_approval` flag or rule (before, `module_tool(tool_to_module(t))`
+  dropped `t`'s gate and the first call ran without approval). Any gate on either side
+  gates the call.
+- The `nexura.usage.budget` module (`UsageBudgetModule`) now declares `non_idempotent_write`
+  (was `idempotent_write`): `reserve` and `record_usage` are not idempotent, so a durable run
+  pauses instead of repeating them after a crash.
+
 ### Added (P39 G3: the `nexura-guardrails` package)
 - New workspace package `nexura-guardrails` (import `nexura_guardrails`, MIT, Python 3.11 to
   3.13), depending on `nexura-agents` only. Extras: `judge` (empty marker) and `yaml` (PyYAML).
@@ -12,9 +228,7 @@ has been published.
   `as_guardrail` / `as_tool_guardrail`, which turn any check into a plain guardrail for the
   existing `Agent(input_guardrails=..., output_guardrails=...)` and `@tool(...)` parameters.
 - A category taxonomy with classifier label maps (Llama Guard, ShieldGemma, Granite Guardian,
-  Nemotron Safety Guard v3, OpenAI moderation) and opt-in Indian-context categories
-  (`caste_hate`, `communal_hate`, `id_exposure_in`, `financial_fraud_in`, `election_in`;
-  wording pending founder review).
+  Nemotron Safety Guard v3, OpenAI moderation). Indian-context categories were removed before release (not needed for 0.4).
 - Pre-filter checks `pii`, `injection`, `length`, `topics`, `json_only` that call the
   `nexura_agents` built-ins (one implementation).
 - `JudgeCheck`: an LLM judge with the policy in the system message, the content in a per-call
@@ -26,6 +240,7 @@ has been published.
   no `on_error` setting softens. Tool rejections the agent reads are fixed text with category
   ids only, never the judge's free-text reason.
 - `tiered`, `parallel` and `cached` composition. New guide: docs/guardrails-package.md.
+- Offline guardrails benchmark harness (`nexura_guardrails.bench`) for JSONL datasets, measuring recall, false-positive rate, precision, F1, p50/p95 latency and error counts across pre-filters and `JudgeCheck` with SHA-256 hashes and license tracking.
 
 ### Changed (P39 G0: guardrail docs honesty)
 - The stdlib guardrails are documented as fast heuristic pre-filters, with the measured misses

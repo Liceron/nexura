@@ -9,6 +9,7 @@ from typing import Any, ClassVar
 
 from pydantic import Field
 
+from nexura_connectors._auth import RefreshingRestConnector
 from nexura_connectors._core import (
     Call,
     Op,
@@ -17,7 +18,8 @@ from nexura_connectors._core import (
     result_data,
     safe_id,
 )
-from nexura_connectors._rest import RestConnector
+from nexura_connectors._pagination import page_items, partial, resume
+from nexura_connectors.errors import InvalidParamsError, UpstreamError
 
 _BOUNDARY = "nexura-connector-boundary-7c1e"
 
@@ -29,6 +31,7 @@ class ListFiles(StrictParams):
     page_size: int = Field(default=50, ge=1, le=100)
     page_token: str | None = None  # alias of ``cursor`` (kept for compatibility)
     cursor: str | None = None
+    max_items: int | None = Field(default=None, ge=1, le=10000)
 
 
 class FileId(StrictParams):
@@ -44,9 +47,10 @@ class UploadText(StrictParams):
     content: str = Field(max_length=1_000_000)
     mime_type: str = Field(default="text/plain", pattern=r"^[a-z]+/[a-z0-9.+-]+$")
     parent_id: str | None = Field(default=None, max_length=128)
+    file_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
-class GoogleDriveConnector(RestConnector):
+class GoogleDriveConnector(RefreshingRestConnector):
     """List, inspect and download files; upload small text files."""
 
     MODULE_ID: ClassVar[str] = "nexura.connectors.gdrive"
@@ -54,30 +58,54 @@ class GoogleDriveConnector(RestConnector):
     DESCRIPTION: ClassVar[str] = "Google Drive v3 with an OAuth access token."
     CREDENTIAL_TYPE: ClassVar[str] = "google_oauth_token"
     DEFAULT_BASE_URL: ClassVar[str | None] = "https://www.googleapis.com"
+    AUTH_FAMILY: ClassVar[str] = "google"
+    TOKEN_URL: ClassVar[str] = "https://oauth2.googleapis.com/token"
     OPS: ClassVar[dict[str, Op]] = {
-        "list_files": Op("list_files", False, ListFiles),
-        "get_file": Op("get_file", False, FileId),
-        "download_file": Op("download_file", False, FileId),
-        "upload_text": Op("upload_text", True, UploadText),
+        "list_files": Op("list_files", False, ListFiles, effect_class="pure"),
+        "get_file": Op("get_file", False, FileId, effect_class="pure"),
+        "download_file": Op("download_file", False, FileId, effect_class="pure"),
+        "upload_text": Op("upload_text", True, UploadText, effect_class="non_idempotent"),
     }
 
     async def op_list_files(self, p: ListFiles, call: Call) -> dict[str, Any]:
         """List files with page-token pagination (read)."""
         files: list[Any] = []
-        token = pick_cursor(p.cursor, p.page_token, "page_token")
+        token, offset, size = resume(
+            pick_cursor(p.cursor, p.page_token, "page_token"), p.page_size, 100
+        )
+        seen: set[str | None] = set()
         for _ in range(call.max_pages):
+            current = token
+            seen.add(current)
             query: dict[str, Any] = {
-                "pageSize": p.page_size,
-                "fields": "nextPageToken,files(id,name,mimeType,size,modifiedTime)",
+                "pageSize": size,
+                "fields": (
+                    "nextPageToken,incompleteSearch,files(id,name,mimeType,size,modifiedTime)"
+                ),
             }
             if p.query:
                 query["q"] = p.query
             if token:
                 query["pageToken"] = token
             data = (await self.api(call, "GET", "/drive/v3/files", params=query)).json()
-            files.extend(data.get("files", []))
+            page = page_items(data, "files", offset)
+            remaining = len(page) if p.max_items is None else p.max_items - len(files)
+            files.extend(page[offset : offset + remaining])
+            if offset + remaining < len(page):
+                return result_data(
+                    files, next_cursor=partial(current, offset + remaining, size), truncated=True
+                )
+            offset = 0
             token = data.get("nextPageToken")
-            if not token:
+            if token is not None and not isinstance(token, str):
+                raise UpstreamError("Drive nextPageToken must be a string")
+            if token and token in seen:
+                return {**result_data(files, truncated=True), "pagination_loop": True}
+            if data.get("incompleteSearch"):
+                out = result_data(files, next_cursor=token, truncated=True)
+                out["incomplete_search"] = True
+                return out
+            if not token or (p.max_items is not None and len(files) >= p.max_items):
                 break
         return result_data(files, next_cursor=token, truncated=bool(token))
 
@@ -105,8 +133,13 @@ class GoogleDriveConnector(RestConnector):
         import json
 
         meta: dict[str, Any] = {"name": p.name, "mimeType": p.mime_type}
+        if p.file_id:
+            # Drive accepts IDs reserved by files.generateIds, not arbitrary UUIDs.
+            meta["id"] = safe_id(p.file_id, "pre-generated Drive file id")
         if p.parent_id:
-            meta["parents"] = [p.parent_id]
+            meta["parents"] = [safe_id(p.parent_id, "parent id")]
+        if _BOUNDARY in p.content or _BOUNDARY in json.dumps(meta):
+            raise InvalidParamsError("multipart boundary occurs in file content or metadata")
         body = (
             f"--{_BOUNDARY}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n"
             f"{json.dumps(meta)}\r\n--{_BOUNDARY}\r\nContent-Type: {p.mime_type}\r\n\r\n"

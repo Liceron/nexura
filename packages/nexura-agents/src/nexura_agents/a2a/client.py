@@ -654,5 +654,9 @@ def remote_agent_tool(
         )
 
     return Tool(
-        tool_label, call_remote, description=description, requires_approval=requires_approval
+        tool_label,
+        call_remote,
+        description=description,
+        requires_approval=requires_approval,
+        origin=f"a2a:{host}",  # the URL the operator chose, not the remote card
     )

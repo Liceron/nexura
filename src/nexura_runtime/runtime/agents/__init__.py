@@ -15,6 +15,8 @@ from nexura_runtime.runtime.agents.errors import (
     AgentApprovalRequiredError,
     AgentRuntimeError,
     CapabilityEscalationError,
+    CoordinatorCallOutcomeUnknownError,
+    CoordinatorRunCompletedError,
     HandoffFuelExhaustedError,
     HandoffTargetNotFoundError,
     MaxHandoffDepthExceededError,
@@ -70,4 +72,6 @@ __all__ = [
     "ModelLengthExceededError",
     "HandoffTargetNotFoundError",
     "AgentApprovalRequiredError",
+    "CoordinatorCallOutcomeUnknownError",
+    "CoordinatorRunCompletedError",
 ]

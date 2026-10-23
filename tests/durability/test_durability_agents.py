@@ -285,3 +285,30 @@ def test_kill_during_non_idempotent_tool_pauses_without_a_budget(
     assert result["pending"] == ["charge"]
     assert result["budget_max_tokens"] is None
     assert harness.ledger.applied("charge") == 1
+
+
+@ON_BACKENDS
+def test_hook_gated_pause_killed_then_recovered_without_the_hook_stays_paused(
+    harness: Harness, backend: Backend
+) -> None:
+    """P39 G2 (MIN7): ``hookpay`` is gated only by an approval hook of the process that
+    started the run. That process is killed right after the paused checkpoint is saved,
+    before the journal's pause commit. A recovery by a process without the hook must not
+    send it: the run stays paused for a person, and recording the pause there records the
+    gate. A person's approval, given from a process without the hook, pays once."""
+    backend.require("agent")
+    run, run_id = _crash_run(harness, "hookpay", "after_paused", hook_gate=["hookpay"])
+    run.kill()
+    assert harness.ledger.applied("hookpay") == 0
+
+    recovered = _recover(harness, run_id)
+    assert recovered["status"] == "paused", recovered
+    assert recovered["pending"] == ["hookpay"]
+    assert harness.ledger.applied("hookpay") == 0
+    again = _recover(harness, run_id, name="recover_again")
+    assert again["status"] == "paused", again
+    assert harness.ledger.applied("hookpay") == 0
+
+    done = harness.spawn("agent", "approve", mode="resume", run_id=run_id).result()
+    assert done["status"] == "completed", done
+    assert harness.ledger.applied("hookpay") == 1

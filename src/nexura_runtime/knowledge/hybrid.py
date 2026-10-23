@@ -967,4 +967,6 @@ def create_hybrid_search_tool(
         name=name,
         fn=search_knowledge,
         description="Search the workspace knowledge base; returns context with citations.",
+        origin=f"knowledge:{collection_id}",
+        tags={f"knowledge:{collection_id}"},
     )

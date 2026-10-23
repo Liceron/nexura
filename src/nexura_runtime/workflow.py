@@ -713,6 +713,12 @@ class WorkflowCheckpoint:
     # WorkflowConflictError), and the store then sets it to the new revision. None saves
     # unconditionally (last writer wins), as before.
     revision: int | None = None
+    workflow_version: str | int | None = None
+
+    @property
+    def definition_digest(self) -> str:
+        """Executable definition identity (``spec_version`` is the schema version)."""
+        return self.spec_hash
 
     @property
     def pause_reason(self) -> str | None:
@@ -744,6 +750,8 @@ class WorkflowRunResult:
     # crash (see WorkflowEngine.recover); pending_effect then describes that effect.
     pause_reason: str | None = None
     pending_effect: dict[str, Any] | None = None
+    workflow_version: str | int | None = None
+    definition_digest: str = ""
 
 
 @dataclass
@@ -1051,6 +1059,14 @@ class ModuleRegistry:
 SUPPORTED_SPEC_VERSIONS: frozenset[int] = frozenset({1})
 
 
+class WorkflowMigrationError(WorkflowSpecMismatchError):
+    """A changed workflow cannot safely continue its recorded execution."""
+
+    def __init__(self, expected_hash: str, actual_hash: str, reason: str) -> None:
+        super().__init__(expected_hash=expected_hash, actual_hash=actual_hash)
+        self.args = (f"Workflow definition changed: {reason}",)
+
+
 def _mermaid_spec(spec: WorkflowSpec, lines: list[str], prefix: str, depth: int) -> None:
     from nexura_agents.diagrams import mermaid_label
 
@@ -1105,6 +1121,30 @@ class WorkflowSpec:
     terminal_nodes: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
     presentation: dict[str, Any] = field(default_factory=dict)
+    version: str | int | None = None
+    # Code registrations are deliberately excluded from serialized definitions/digests.
+    migrations: dict[
+        tuple[str | int, str | int],
+        Callable[[str | int, str | int, dict[str, Any]], dict[str, Any]],
+    ] = field(default_factory=dict, repr=False, compare=False)
+
+    def register_migration(
+        self,
+        from_version: str | int,
+        to_version: str | int,
+        migrate: Callable[[str | int, str | int, dict[str, Any]], dict[str, Any]],
+    ) -> None:
+        """Register a pure state transformation; directed edges can form a chain.
+
+        Functions receive a deep copy and must return a JSON object. Never perform I/O:
+        an uncommitted calculation can repeat after a crash. Committed results do not.
+        """
+        for version in (from_version, to_version):
+            if isinstance(version, bool) or not isinstance(version, (str, int)):
+                raise WorkflowValidationError("Migration versions must be strings or integers.")
+        if from_version == to_version or not callable(migrate):
+            raise WorkflowValidationError("A migration needs distinct versions and a callable.")
+        self.migrations[from_version, to_version] = migrate
 
     def to_mermaid(self) -> str:
         """A Mermaid ``flowchart`` of this workflow: steps, branch labels and composites.
@@ -1139,6 +1179,10 @@ class WorkflowSpec:
             },
             "terminal_nodes": sorted(self.terminal_nodes),
         }
+        if self.version is not None:
+            # ``version`` was historically an ignored extension in imported specs.
+            # Use an unambiguous serialized identity so those imports keep their hash.
+            res["workflow_version"] = self.version
         if self.metadata:
             meta = copy.deepcopy(self.metadata)
             if not include_presentation:
@@ -1217,6 +1261,7 @@ class WorkflowSpec:
             terminal_nodes=list(data.get("terminal_nodes", [])),
             metadata=metadata,
             presentation=presentation,
+            version=data.get("workflow_version"),
         )
 
     @classmethod
@@ -1236,6 +1281,10 @@ class WorkflowSpec:
         """Validate specification graph completeness, entries, handler bindings, and policies."""
         if self.spec_version not in SUPPORTED_SPEC_VERSIONS:
             raise UnsupportedWorkflowVersionError(self.spec_version, SUPPORTED_SPEC_VERSIONS)
+        if self.version is not None and (
+            isinstance(self.version, bool) or not isinstance(self.version, (str, int))
+        ):
+            raise WorkflowValidationError("Workflow version must be a string or integer.")
         if not self.nodes:
             raise WorkflowValidationError("WorkflowSpec must have at least one node.")
         if self.entry_node not in self.nodes:
@@ -1485,6 +1534,8 @@ def checkpoint_to_dict(cp: WorkflowCheckpoint) -> dict[str, Any]:
         "workflow_run_id": cp.workflow_run_id,
         "spec_version": cp.spec_version,
         "spec_hash": cp.spec_hash,
+        "workflow_version": cp.workflow_version,
+        "definition_digest": cp.spec_hash,
         "current_node_id": cp.current_node_id,
         "state": copy.deepcopy(cp.state),
         "step_count": cp.step_count,
@@ -1508,6 +1559,7 @@ def checkpoint_from_dict(data: dict[str, Any]) -> WorkflowCheckpoint:
         workflow_run_id=data["workflow_run_id"],
         spec_version=int(data["spec_version"]),
         spec_hash=data["spec_hash"],
+        workflow_version=data.get("workflow_version"),
         current_node_id=data.get("current_node_id"),
         state=copy.deepcopy(data.get("state", {})),
         step_count=int(data["step_count"]),
@@ -1546,6 +1598,41 @@ def _revision_conflict(run_id: str, expected: int, actual: int) -> WorkflowConfl
     return error
 
 
+async def workflow_run_identities(store: Any, run_ids: list[str]) -> dict[str, dict[str, Any]]:
+    """Active (and, where the store knows it, starting) identity of each listed run.
+
+    Returns ``{run_id: {"definition_digest", "workflow_version", "started_workflow_version"}}``
+    for the runs that have a checkpoint; missing runs are left out. A store may provide
+    ``async run_identities(run_ids)`` to read a whole page at once without loading
+    checkpoint state (the built-in memory, SQLite and ``nexura-postgres`` stores do). Any
+    other store is read run by run: ``get()`` for the active identity and, when the store
+    has ``history()``, its first checkpoint for the starting version (otherwise
+    ``started_workflow_version`` is left out and callers use the run's origin definition).
+    """
+    if not run_ids:
+        return {}
+    batch = getattr(store, "run_identities", None)
+    if batch is not None:
+        result: dict[str, dict[str, Any]] = await batch(run_ids)
+        return result
+    history = getattr(store, "history", None)
+    identities: dict[str, dict[str, Any]] = {}
+    for run_id in run_ids:
+        cp = await store.get(run_id)
+        if cp is None:
+            continue
+        identity: dict[str, Any] = {
+            "definition_digest": cp.spec_hash,
+            "workflow_version": cp.workflow_version,
+        }
+        if history is not None:
+            saved = await history(run_id)
+            if saved:
+                identity["started_workflow_version"] = saved[0].workflow_version
+        identities[run_id] = identity
+    return identities
+
+
 class MemoryWorkflowStore:
     """In-memory checkpoint store for transient workflow runs and tests.
 
@@ -1574,6 +1661,19 @@ class MemoryWorkflowStore:
             if cp is None:
                 return None
             return copy.deepcopy(cp)
+
+    async def run_identities(self, run_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """Read a page's checkpoint identities under one store lock."""
+        async with self._lock:
+            return {
+                run_id: {
+                    "definition_digest": self._checkpoints[run_id].spec_hash,
+                    "workflow_version": self._checkpoints[run_id].workflow_version,
+                    "started_workflow_version": self._history[run_id][0].workflow_version,
+                }
+                for run_id in run_ids
+                if run_id in self._checkpoints
+            }
 
     async def save(self, checkpoint: WorkflowCheckpoint) -> None:
         """Store a checkpoint as the run's latest and append it to its history.
@@ -1723,6 +1823,7 @@ class SQLiteWorkflowStore:
                 "meta_json",
                 "workspace_id",
                 "effect_json",
+                "workflow_version_json",
             ):
                 with contextlib.suppress(sqlite3.OperationalError):
                     self._conn.execute(
@@ -1809,7 +1910,7 @@ class SQLiteWorkflowStore:
             SELECT spec_version, spec_hash, current_node_id, state_json,
                    step_count, status, approval_json, error, updated_at,
                    budget_json, interrupt_json, meta_json, workspace_id,
-                   effect_json, revision
+                   effect_json, revision, workflow_version_json
             FROM nexura_workflow_checkpoints
             WHERE workflow_run_id = ?
             """,
@@ -1835,6 +1936,7 @@ class SQLiteWorkflowStore:
             owner,
             effect_json,
             revision,
+            workflow_version_json,
         ) = row
 
         state = json.loads(state_json)
@@ -1862,6 +1964,7 @@ class SQLiteWorkflowStore:
             workspace_id=owner,
             pending_effect=json.loads(effect_json) if effect_json else None,
             revision=int(revision or 0),
+            workflow_version=json.loads(workflow_version_json) if workflow_version_json else None,
         )
 
     def _list_children_sync(self, parent_id: str) -> list[WorkflowCheckpoint]:
@@ -1939,8 +2042,8 @@ class SQLiteWorkflowStore:
                         workflow_run_id, spec_version, spec_hash, current_node_id,
                         state_json, step_count, status, approval_id, approval_json,
                         error, updated_at, budget_json, interrupt_json, meta_json,
-                        workspace_id, effect_json, revision
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        workspace_id, effect_json, revision, workflow_version_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """
             try:
                 with conn:
@@ -1965,6 +2068,7 @@ class SQLiteWorkflowStore:
                         meta_json = excluded.meta_json,
                         workspace_id = excluded.workspace_id,
                         effect_json = excluded.effect_json,
+                        workflow_version_json = excluded.workflow_version_json,
                         revision = nexura_workflow_checkpoints.revision + 1
                     WHERE ? IS NULL OR nexura_workflow_checkpoints.revision = ?
                     """,
@@ -1986,6 +2090,7 @@ class SQLiteWorkflowStore:
                             owner,
                             effect_json,
                             1 if expected is None else expected + 1,
+                            json.dumps(checkpoint.workflow_version),
                         )
                         + (() if create else (expected, expected)),
                     )
@@ -2076,6 +2181,38 @@ class SQLiteWorkflowStore:
     async def get(self, workflow_run_id: str) -> WorkflowCheckpoint | None:
         """The latest checkpoint of a run, or ``None`` if it does not exist."""
         return await asyncio.to_thread(self._get_sync, workflow_run_id)
+
+    async def run_identities(self, run_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """Read a page's active and starting checkpoint identities in one query."""
+        if not run_ids:
+            return {}
+
+        def read() -> dict[str, dict[str, Any]]:
+            with self._lock:
+                rows = (
+                    self._ensure_open()
+                    .execute(
+                        "SELECT c.workflow_run_id, c.spec_hash, c.workflow_version_json, "
+                        "(SELECT json_extract(h.checkpoint_json, '$.workflow_version') "
+                        "FROM nexura_workflow_checkpoint_history h "
+                        "WHERE h.workflow_run_id = c.workflow_run_id ORDER BY h.seq LIMIT 1) "
+                        "FROM nexura_workflow_checkpoints c WHERE c.workflow_run_id IN ("
+                        + ",".join("?" for _ in run_ids)
+                        + ")",
+                        run_ids,
+                    )
+                    .fetchall()
+                )
+            return {
+                run_id: {
+                    "definition_digest": digest,
+                    "workflow_version": json.loads(version) if version else None,
+                    "started_workflow_version": started,
+                }
+                for run_id, digest, version, started in rows
+            }
+
+        return await asyncio.to_thread(read)
 
     async def save(self, checkpoint: WorkflowCheckpoint) -> None:
         """Store a checkpoint as the run's latest and append it to its history."""
@@ -2319,6 +2456,7 @@ class WorkflowEngine:
         self._written: set[str] = set()
 
     async def _save(self, checkpoint: WorkflowCheckpoint) -> None:
+        checkpoint.workflow_version = self.spec.version
         if checkpoint.workspace_id is None:
             checkpoint.workspace_id = self.workspace_id
         assert self.store is not None
@@ -2386,7 +2524,10 @@ class WorkflowEngine:
         """
         if journal is None:
             if self.store is not None:
-                return await run()  # terminal saves end open reservations (_save)
+                result = await run()  # terminal saves end open reservations (_save)
+                result.workflow_version = self.spec.version
+                result.definition_digest = self.spec.canonical_hash()
+                return result
             try:
                 result = await run()
             except Exception:
@@ -2394,6 +2535,8 @@ class WorkflowEngine:
                 raise
             if result.status in ("completed", "failed", "rejected"):
                 await self._settle_reservations(run_id, None, "terminal")
+            result.workflow_version = self.spec.version
+            result.definition_digest = self.spec.canonical_hash()
             return result
         token = _JOURNAL.set(journal)
         journal.start_heartbeat()
@@ -2402,7 +2545,10 @@ class WorkflowEngine:
                 self._restore_budget(journal)
                 await self._settle_reservations(journal.run_id, journal, "takeover")
             try:
-                return await run()
+                result = await run()
+                result.workflow_version = self.spec.version
+                result.definition_digest = self.spec.canonical_hash()
+                return result
             except Exception:
                 if journal.status in _JOURNAL_TERMINAL and journal.lost is None:
                     # A terminal commit made outside a checkpoint save (none today): end them.
@@ -2651,8 +2797,24 @@ class WorkflowEngine:
         from nexura_agents.durable import new_lease_owner
 
         journal = await self._open_journal(workflow_run_id)
+        snapshot = await journal.snapshot()
+        if snapshot is not None:
+            active = snapshot.run.state.get("definition_digest", snapshot.run.definition_digest)
+            if active != self.spec.canonical_hash():
+                raise WorkflowSpecMismatchError(
+                    expected_hash=str(active), actual_hash=self.spec.canonical_hash()
+                )
+            # The store row pins the original definition; active identity is fenced state.
+            journal.digest = snapshot.run.definition_digest
         if not await journal.take(new_lease_owner()):
             journal.owner = None
+        else:
+            # take() reloads state under the lease. The preflight snapshot may have
+            # preceded a migration; never dispatch using that stale definition.
+            active = journal.state.get("definition_digest", journal.digest)
+            if active != self.spec.canonical_hash():
+                await journal.close()
+                raise WorkflowSpecMismatchError(str(active), self.spec.canonical_hash())
         return journal
 
     async def _take_claimed_journal(self, workflow_run_id: str) -> WorkflowJournal | None:
@@ -2902,6 +3064,7 @@ class WorkflowEngine:
                 step_count=0,
                 status="running",
                 workspace_id=self.workspace_id,
+                workflow_version=self.spec.version,
             )
             create = getattr(self.store, "create", None)
             if create is None:
@@ -2946,7 +3109,11 @@ class WorkflowEngine:
 
         journal = await self._open_journal(workflow_run_id)
         try:
-            await journal.create(new_lease_owner(), budget_scope=budget_scope(self.budget))
+            await journal.create(
+                new_lease_owner(),
+                budget_scope=budget_scope(self.budget),
+                definition=self.spec.to_dict(),
+            )
         except ExecutionConflictError as exc:
             raise WorkflowError(
                 f"Workflow run '{workflow_run_id}' already has an execution journal; "
@@ -2966,8 +3133,21 @@ class WorkflowEngine:
         actor: str | None = None,
         actor_role: str | None = None,
         expected_payload_digest: str | None = None,
+        continue_on_old_definition: bool = False,
     ) -> WorkflowRunResult:
         """Resume an approval-gated workflow run with exact-action bindings."""
+        selected = await self._version_engine(workflow_run_id, continue_on_old_definition)
+        if selected is not self:
+            return await selected.resume(
+                workflow_run_id,
+                approval_id,
+                decision=decision,
+                state_update=state_update,
+                workspace_id=workspace_id,
+                actor=actor,
+                actor_role=actor_role,
+                expected_payload_digest=expected_payload_digest,
+            )
         if self.store is None:
             raise WorkflowError("Cannot resume workflow without a configured checkpoint store.")
 
@@ -3061,7 +3241,11 @@ class WorkflowEngine:
             paused_child = await self._paused_child(
                 workflow_run_id, gate_node, step_count + 1, approval_id
             )
-        approval_stands = True
+            child, child_id = paused_child
+            paused_child = (await child._version_engine(child_id, False), child_id)
+        # A decision about an older definition never authorizes the deployed definition.
+        # Keep its recorded digest intact; the execution loop requests a fresh approval.
+        approval_stands = paused_child is not None or pending.spec_hash == current_spec_hash
         updated_state: dict[str, Any] | None = None
         if state_update:
             state_update = _as_json_update(state_update, cursor or "approval")
@@ -3070,7 +3254,7 @@ class WorkflowEngine:
                 if gate_node is not None:
                     before = canonical_digest(self._gate_binding(gate_node, state))
                     after = canonical_digest(self._gate_binding(gate_node, updated_state))
-                    approval_stands = before == after
+                    approval_stands = approval_stands and before == after
 
         # 6. Atomically claim the approval (the store refuses one past its stored
         # expires_at; the first claimer wins), then take the run's lease (journaled
@@ -3095,6 +3279,11 @@ class WorkflowEngine:
 
         async def claimed() -> WorkflowRunResult:
             nonlocal state, state_update
+            assert self.store is not None
+            fresh = await self.store.get(workflow_run_id)
+            assert fresh is not None
+            if fresh.spec_hash != current_spec_hash:
+                raise WorkflowSpecMismatchError(fresh.spec_hash, current_spec_hash)
             # The claim moved the stored revision on by one; saves continue from there.
             if checkpoint.revision is not None:
                 checkpoint.revision += 1
@@ -3194,7 +3383,11 @@ class WorkflowEngine:
                 {
                     "node_id": cursor,
                     "supersedes_approval_id": approval_id,
-                    "regate_reason": "inputs_edited",
+                    "regate_reason": (
+                        "definition_migrated"
+                        if pending.spec_hash != current_spec_hash
+                        else "inputs_edited"
+                    ),
                     "previous_input_state": copy.deepcopy(pending.input_state),
                 }
                 if not approval_stands
@@ -3225,8 +3418,14 @@ class WorkflowEngine:
         value: Any,
         *,
         workspace_id: str | None = None,
+        continue_on_old_definition: bool = False,
     ) -> WorkflowRunResult:
         """Answer an :func:`interrupt` and continue; the paused node runs again with it."""
+        selected = await self._version_engine(workflow_run_id, continue_on_old_definition)
+        if selected is not self:
+            return await selected.resume_interrupt(
+                workflow_run_id, interrupt_id, value, workspace_id=workspace_id
+            )
         checkpoint = await self._paused_checkpoint(workflow_run_id)
         pending = checkpoint.interrupt
         if pending is None or pending.get("interrupt_id") != interrupt_id:
@@ -3244,6 +3443,13 @@ class WorkflowEngine:
                 approval_id=interrupt_id,
             )
         _validate_json_serializable(value, str(pending.get("node_id")))
+        paused_child = None
+        asking = self.spec.nodes.get(checkpoint.current_node_id or "")
+        if asking is not None and self._waits_on_subgraph(asking, str(pending.get("node_id"))):
+            child, child_id = await self._paused_child(
+                workflow_run_id, asking, checkpoint.step_count + 1, interrupt_id
+            )
+            paused_child = (await child._version_engine(child_id, False), child_id)
         assert self.store is not None
         await self._precheck_budget(workflow_run_id)  # before the answer is claimed (S11)
         if not await self.store.claim_approval(workflow_run_id, interrupt_id):
@@ -3254,6 +3460,11 @@ class WorkflowEngine:
         journal = await self._take_claimed_journal(workflow_run_id)
 
         async def answered() -> WorkflowRunResult:
+            assert self.store is not None
+            fresh = await self.store.get(workflow_run_id)
+            assert fresh is not None
+            if fresh.spec_hash != self.spec.canonical_hash():
+                raise WorkflowSpecMismatchError(fresh.spec_hash, self.spec.canonical_hash())
             journal = self._journal_for(workflow_run_id)
             if journal is not None:
                 journal.cp_revision = (checkpoint.revision or 0) + 1  # the claim's write
@@ -3271,11 +3482,9 @@ class WorkflowEngine:
                 and isinstance(approved_binding, str)
                 and approved_binding == self._binding_digest(asking, checkpoint.state)
             )
-            if asking is not None and self._waits_on_subgraph(asking, str(pending.get("node_id"))):
+            if paused_child is not None:
                 # The question came from inside the sub-workflow: answer it there.
-                child, child_id = await self._paused_child(
-                    workflow_run_id, asking, checkpoint.step_count + 1, interrupt_id
-                )
+                child, child_id = paused_child
                 with contextlib.suppress(WorkflowExecutionError, WorkflowTimeoutError):
                     await child.resume_interrupt(
                         child_id, interrupt_id, value, workspace_id=workspace_id
@@ -3358,6 +3567,7 @@ class WorkflowEngine:
             workflow_run_id=run_id,
             spec_version=self.spec.spec_version,
             spec_hash=current_hash,
+            workflow_version=self.spec.version,
             current_node_id=source.current_node_id,
             state=copy.deepcopy(state),
             step_count=source.step_count,
@@ -3395,8 +3605,385 @@ class WorkflowEngine:
 
     # ------------------------------------------------------------------ recovery
 
+    def _migration_path(self, source: str | int | None) -> list[tuple[str | int, str | int]] | None:
+        target = self.spec.version
+        if source is None or target is None or source == target:
+            return None
+        queue: list[tuple[str | int, list[tuple[str | int, str | int]]]] = [(source, [])]
+        seen: set[str | int] = {source}
+        for current, path in queue:
+            for start, end in self.spec.migrations:
+                if start != current or end in seen:
+                    continue
+                candidate = [*path, (start, end)]
+                if end == target:
+                    return candidate
+                seen.add(end)
+                queue.append((end, candidate))
+        return None
+
+    def _check_migration_graph(self, cp: WorkflowCheckpoint, snapshot: Any) -> None:
+        available: set[str] = set()
+
+        def collect(spec: WorkflowSpec, prefix: str = "") -> None:
+            for node in spec.nodes.values():
+                available.add(prefix + node.id)
+                for branch in node.parallel:
+                    available.add(prefix + node.id + "/" + branch)
+                if node.subgraph is not None:
+                    collect(node.subgraph, prefix + node.id + "/")
+
+        collect(self.spec)
+        required = {cp.current_node_id} if cp.current_node_id else set()
+        if cp.pending_approval:
+            required.add(cp.pending_approval.node_id)
+        for pending in (cp.pending_effect, cp.interrupt):
+            if pending and pending.get("node_id"):
+                required.add(str(pending["node_id"]))
+        for step in snapshot.steps.values():
+            if step.intent is not None and step.outcome is None:
+                effect = next(
+                    (
+                        e
+                        for e in snapshot.effects.values()
+                        if e.intent.step_key == step.intent.step_key
+                    ),
+                    None,
+                )
+                if (
+                    effect is not None
+                    and effect.status == EffectStatus.RESOLVED
+                    and (effect.resolution != EffectResolution.NOT_APPLIED)
+                ):
+                    continue
+                # Workflow keys: node[/branch]#visit[attempt/item]. Check branch ids too.
+                required.add(str(step.intent.step_key).split("#", 1)[0])
+        missing = sorted(required - available)
+        if missing:
+            raise WorkflowMigrationError(
+                cp.spec_hash,
+                self.spec.canonical_hash(),
+                "missing node ids: " + ", ".join(missing),
+            )
+
+    async def _version_engine(self, run_id: str, continue_old: bool) -> WorkflowEngine:
+        if self.store is None:
+            return self
+        cp = await self.store.get(run_id)
+        if cp is None or cp.status in ("completed", "failed", "rejected"):
+            return self
+        self._check_owner(cp)
+        if self._journaled_store():
+            view = await self._open_journal(run_id)
+            recorded = await view.snapshot()
+            if recorded is not None:
+                active = recorded.run.state.get("definition_digest", recorded.run.definition_digest)
+                if cp.spec_hash == self.spec.canonical_hash() and active != cp.spec_hash:
+                    raise WorkflowMigrationError(
+                        cp.spec_hash,
+                        str(active),
+                        "a newer definition is committed in the journal; use that definition",
+                    )
+        if continue_old and cp.spec_hash != self.spec.canonical_hash():
+            if not self._journaled_store():
+                raise WorkflowMigrationError(
+                    cp.spec_hash, self.spec.canonical_hash(), "the old definition was not journaled"
+                )
+            journal = await self._open_journal(run_id)
+            snapshot = await journal.snapshot()
+            if snapshot is None or not snapshot.run.state.get("definition"):
+                raise WorkflowMigrationError(
+                    cp.spec_hash, self.spec.canonical_hash(), "the old definition was not journaled"
+                )
+            self._check_migration_graph(cp, snapshot)
+            await self._check_migration_children(cp, journal)
+            selected = copy.copy(self)
+            selected.spec = WorkflowSpec.from_dict(snapshot.run.state["definition"])
+            return selected
+        await self.migrate(run_id)
+        return self
+
+    async def _check_migration_children(
+        self, cp: WorkflowCheckpoint, journal: WorkflowJournal
+    ) -> None:
+        """Check separately journaled child intents against their proposed subgraphs."""
+        assert self.store is not None
+        list_children = getattr(self.store, "list_children", None)
+        if list_children is None:
+            return
+        for child in await list_children(cp.workflow_run_id):
+            if child.status in ("completed", "failed", "rejected"):
+                continue
+            relative = child.workflow_run_id[len(cp.workflow_run_id) + 1 :]
+            target = self.spec
+            for segment in relative.split("/"):
+                node_id = segment.split("#", 1)[0]
+                node = target.nodes.get(node_id)
+                if node is None or node.subgraph is None:
+                    raise WorkflowMigrationError(
+                        cp.spec_hash,
+                        self.spec.canonical_hash(),
+                        f"missing node ids: {relative} (sub-workflow {node_id})",
+                    )
+                target = node.subgraph
+            try:
+                snapshot = await journal.store.get(
+                    ExecutionId(journal.eid.workspace_id, child.workflow_run_id)
+                )
+            except KeyError:
+                continue
+            checker = copy.copy(self)
+            checker.spec = target
+            checker._check_migration_graph(child, snapshot)
+            if (
+                child.spec_hash != target.canonical_hash()
+                and checker._migration_path(child.workflow_version) is None
+            ):
+                raise WorkflowMigrationError(
+                    child.spec_hash,
+                    target.canonical_hash(),
+                    f"child '{relative}' subgraph digest changed without a migration path "
+                    f"({child.workflow_version!r} to {target.version!r})",
+                )
+
+    async def migrate(self, workflow_run_id: str) -> WorkflowCheckpoint:
+        """Migrate checkpoint state to this definition under the run's fenced lease.
+
+        Resume/recover call this automatically. A directed chain registered on the spec
+        is required for every changed digest. The original journal row's digest remains
+        immutable; its state records the active definition and atomic migration receipt.
+        A committed receipt repairs a lost checkpoint save without calling a hook again.
+        Pending approvals keep their original digests and are re-gated on resume.
+        """
+        from nexura_agents.durable import new_lease_owner
+
+        if self.store is None:
+            raise WorkflowError("State migration requires a checkpoint store.")
+        cp = await self.store.get(workflow_run_id)
+        if cp is None:
+            raise WorkflowError(f"Workflow run '{workflow_run_id}' not found.")
+        self._check_owner(cp)
+        current = self.spec.canonical_hash()
+        if cp.status in ("completed", "failed", "rejected"):
+            raise WorkflowTerminalError(f"Workflow run '{workflow_run_id}' is terminal.")
+        if not self._journaled_store():
+            if cp.spec_hash == current:
+                return cp
+            raise WorkflowMigrationError(cp.spec_hash, current, "migration requires a journal")
+        journal = await self._open_journal(workflow_run_id)
+        snapshot = await journal.snapshot()
+        if snapshot is None:
+            if cp.spec_hash == current:
+                return cp
+            raise WorkflowMigrationError(cp.spec_hash, current, "run has no execution journal")
+        active = snapshot.run.state.get("definition_digest", snapshot.run.definition_digest)
+        if cp.spec_hash == current:
+            if active != current:
+                raise WorkflowMigrationError(
+                    cp.spec_hash, str(active), "journal has a different active definition"
+                )
+            return cp
+        self._check_migration_graph(cp, snapshot)
+        await self._check_migration_children(cp, journal)
+        receipt = snapshot.run.state.get("state_migration")
+        source = receipt.get("source_checkpoint") if isinstance(receipt, dict) else None
+        claimed_during_commit = (
+            isinstance(source, dict)
+            and isinstance(receipt, dict)
+            and cp.revision == (receipt.get("source_revision") or 0) + 1
+            and source["status"] == "paused"
+            and cp.status == "running"
+            and cp.spec_hash == source["spec_hash"]
+            and cp.state == source["state"]
+            and cp.current_node_id == source["current_node_id"]
+            and cp.step_count == source["step_count"]
+            and _pending_id(cp) == _pending_id(checkpoint_from_dict(source))
+        )
+        projecting = (
+            isinstance(receipt, dict)
+            and (receipt.get("source_revision") == cp.revision or claimed_during_commit)
+            and receipt["checkpoint"]["spec_hash"] != cp.spec_hash
+        )
+        if projecting:
+            assert isinstance(receipt, dict)
+            effective = checkpoint_from_dict(receipt["checkpoint"])
+            if effective.spec_hash != active:
+                raise WorkflowMigrationError(
+                    cp.spec_hash,
+                    str(active),
+                    "migration receipt disagrees with the active definition",
+                )
+        else:
+            effective = cp
+            if active != cp.spec_hash:
+                raise WorkflowMigrationError(
+                    cp.spec_hash,
+                    str(active),
+                    "checkpoint disagrees with the active journal definition; "
+                    "no matching migration receipt, refusing to repeat migration hooks",
+                )
+        path = self._migration_path(effective.workflow_version)
+        if effective.spec_hash != current and path is None:
+            raise WorkflowMigrationError(
+                cp.spec_hash,
+                current,
+                (
+                    "digest changed without a version change; "
+                    if effective.workflow_version == self.spec.version
+                    else ""
+                )
+                + f"no migration path from {effective.workflow_version!r} "
+                f"to {self.spec.version!r}; "
+                "register_migration() or explicitly continue_on_old_definition=True "
+                "with a compatible graph and the journaled old definition",
+            )
+        journal.digest = snapshot.run.definition_digest
+        try:
+            if not await journal.take(new_lease_owner()) or not journal.held:
+                raise _LeaseBusyError(f"Workflow run '{workflow_run_id}' has a live run lease.")
+            journal.start_heartbeat()
+            if journal.state.get("definition_digest", journal.digest) != active:
+                raise WorkflowMigrationError(
+                    cp.spec_hash,
+                    current,
+                    "active definition changed while acquiring the migration lease; retry",
+                )
+            fresh = await self.store.get(workflow_run_id)
+            assert fresh is not None
+            # The preflight read is never authority after claiming the lease.
+            if fresh.spec_hash != cp.spec_hash:
+                raise WorkflowSpecMismatchError(fresh.spec_hash, cp.spec_hash)
+            if fresh.revision != cp.revision:
+                raise WorkflowConflictError(workflow_run_id, cp.revision or 0, fresh.revision or 0)
+            receipt = journal.state.get("state_migration")
+            if projecting:
+                assert isinstance(receipt, dict)
+                migrated = checkpoint_from_dict(receipt["checkpoint"])
+                migrated.revision = cp.revision
+                await self.store.save(migrated)
+                cp = migrated
+            else:
+                migrated = copy.deepcopy(cp)
+            if migrated.spec_hash != current:
+                assert path is not None
+                for start, end in path:
+                    try:
+                        result = self.spec.migrations[start, end](
+                            start, end, copy.deepcopy(migrated.state)
+                        )
+                    except Exception as exc:
+                        raise WorkflowMigrationError(
+                            cp.spec_hash,
+                            current,
+                            f"migration {start!r} -> {end!r} raised {type(exc).__name__}: {exc}",
+                        ) from exc
+                    if not isinstance(result, dict):
+                        raise WorkflowValidationError(
+                            f"Migration {start!r} -> {end!r} must return a JSON object."
+                        )
+                    try:
+
+                        def check_keys(value: Any) -> None:
+                            if isinstance(value, dict):
+                                if any(not isinstance(k, str) for k in value):
+                                    raise ValueError("JSON object keys must be strings")
+                                for item in value.values():
+                                    check_keys(item)
+                            elif isinstance(value, (list, tuple)):
+                                for item in value:
+                                    check_keys(item)
+
+                        check_keys(result)
+                        migrated.state = json.loads(json.dumps(result, allow_nan=False))
+                    except (TypeError, ValueError, RecursionError) as exc:
+                        raise WorkflowValidationError(
+                            f"Migration {start!r} -> {end!r} returned invalid JSON: {exc}"
+                        ) from exc
+                previous_definition = journal.state.get("definition")
+                if previous_definition:
+                    previous_engine = copy.copy(self)
+                    previous_engine.spec = WorkflowSpec.from_dict(previous_definition)
+                    for record in journal.steps.values():
+                        intent = record.intent
+                        if intent is None or record.outcome is not None:
+                            continue
+                        effect = journal.effects.get(str(intent.step_key))
+                        if (
+                            effect is not None
+                            and effect.status == EffectStatus.RESOLVED
+                            and (effect.resolution != EffectResolution.NOT_APPLIED)
+                        ):
+                            continue
+                        if intent.effect_class not in (
+                            EffectClass.IDEMPOTENT,
+                            EffectClass.RECONCILABLE,
+                            EffectClass.NON_IDEMPOTENT,
+                        ):
+                            continue
+                        node_id = str(intent.step_key).split("#", 1)[0].split("/", 1)[0]
+                        old_node = previous_engine.spec.nodes[node_id]
+                        new_node = self.spec.nodes[node_id]
+                        if old_node.to_dict(False) != new_node.to_dict(
+                            False
+                        ) or previous_engine._binding_digest(
+                            old_node, cp.state
+                        ) != self._binding_digest(new_node, migrated.state):
+                            if intent.effect_class == EffectClass.NON_IDEMPOTENT:
+                                regates = dict(journal.state.get("migration_regates") or {})
+                                regates[str(intent.step_key)] = {
+                                    "node_id": node_id,
+                                    "supersedes_approval_id": intent.approval_id,
+                                    "regate_reason": "definition_migrated",
+                                    "previous_input_state": copy.deepcopy(cp.state),
+                                }
+                                journal.state["migration_regates"] = regates
+                                continue
+                            raise WorkflowMigrationError(
+                                cp.spec_hash,
+                                current,
+                                f"in-flight intent '{intent.step_key}' changes bound inputs or "
+                                "node definition; recover it on the old definition first",
+                            )
+                migrated.workflow_version = self.spec.version
+                migrated.spec_hash = current
+                journal.state["definition"] = self.spec.to_dict()
+                journal.state["definition_digest"] = current
+                journal.state["workflow_version"] = self.spec.version
+                journal.state["state_migration"] = {
+                    "source_revision": cp.revision,
+                    "source_checkpoint": checkpoint_to_dict(cp),
+                    "checkpoint": checkpoint_to_dict(migrated),
+                }
+                await journal._commit(
+                    status="paused" if migrated.status == "paused" else "running",
+                    cursor=cp.current_node_id,
+                    events=[
+                        {
+                            "type": "state_migrated",
+                            "from_version": cp.workflow_version,
+                            "to_version": self.spec.version,
+                            "definition_digest": current,
+                            "path": [list(edge) for edge in path],
+                        }
+                    ],
+                )
+                await self.store.save(migrated)
+            if migrated.status == "paused" and journal.held:
+                await journal.pause(
+                    migrated.pause_reason or "approval",
+                    migrated.current_node_id,
+                    effect_id=(migrated.pending_effect or {}).get("effect_id"),
+                )
+            return migrated
+        finally:
+            await journal.close()
+
     async def recover(
-        self, workflow_run_id: str, *, on_uncertain: Literal["pause", "fail"] = "pause"
+        self,
+        workflow_run_id: str,
+        *,
+        on_uncertain: Literal["pause", "fail"] = "pause",
+        continue_on_old_definition: bool = False,
     ) -> WorkflowRunResult:
         """Continue a stopped run, or an ``effect_unknown`` pause a person resolved.
 
@@ -3438,6 +4025,9 @@ class WorkflowEngine:
         """
         if on_uncertain not in ("pause", "fail"):
             raise WorkflowValidationError("on_uncertain must be 'pause' or 'fail'.")
+        selected = await self._version_engine(workflow_run_id, continue_on_old_definition)
+        if selected is not self:
+            return await selected.recover(workflow_run_id, on_uncertain=on_uncertain)
         checkpoint = await self._recoverable_checkpoint(workflow_run_id)
         if checkpoint.status == "paused" and checkpoint.pending_effect is None:
             return self._result_from_checkpoint(checkpoint)  # waiting for a person
@@ -3597,6 +4187,16 @@ class WorkflowEngine:
             return state
         return None
 
+    async def get_result(self, workflow_run_id: str) -> WorkflowRunResult:
+        """Inspect a run's latest checkpoint without dispatching or claiming approval."""
+        if self.store is None:
+            raise WorkflowError("Reading a run requires a checkpoint store.")
+        cp = await self.store.get(workflow_run_id)
+        if cp is None:
+            raise WorkflowError(f"Workflow run '{workflow_run_id}' not found.")
+        self._check_owner(cp)
+        return self._result_from_checkpoint(cp)
+
     def _result_from_checkpoint(self, cp: WorkflowCheckpoint) -> WorkflowRunResult:
         budget_state = cp.budget_state
         return WorkflowRunResult(
@@ -3615,6 +4215,8 @@ class WorkflowEngine:
             ),
             pause_reason="effect_unknown" if cp.pending_effect is not None else None,
             pending_effect=copy.deepcopy(cp.pending_effect),
+            workflow_version=cp.workflow_version,
+            definition_digest=cp.spec_hash,
         )
 
     async def _project_finished(
@@ -3667,6 +4269,8 @@ class WorkflowEngine:
         same workspace, not expired (design §2.7, "claimed but no intent written")."""
         if pending.node_id != node.id:
             return False
+        if pending.spec_hash != self.spec.canonical_hash():
+            return False
         if pending.workspace_id and pending.workspace_id != self.workspace_id:
             return False
         deadline = self._approval_deadline(pending)
@@ -3705,6 +4309,8 @@ class WorkflowEngine:
         assert self.store is not None
         cp = await self.store.get(workflow_run_id)  # re-read under the lease
         assert cp is not None
+        if cp.spec_hash != self.spec.canonical_hash():
+            raise WorkflowSpecMismatchError(cp.spec_hash, self.spec.canonical_hash())
         journal.cp_revision = cp.revision
         if cp.status in ("completed", "failed", "rejected"):
             with contextlib.suppress(LeaseLostError):
@@ -3877,15 +4483,60 @@ class WorkflowEngine:
             cp.status = "running"
             cp.pending_effect = None
             await self._save(cp)
-        return await self._execute_loop(
-            workflow_run_id=cp.workflow_run_id,
-            cursor=cp.current_node_id,
-            current_state=copy.deepcopy(cp.state),
-            step_count=cp.step_count,
-            node_already_approved=approved,
-            operation="recover",
-            approval_id=approval_id if approved else None,
+        pending = cp.pending_approval
+        changed_approval = (
+            pending is not None
+            and pending.node_id == cp.current_node_id
+            and pending.spec_hash != self.spec.canonical_hash()
         )
+        if changed_approval:
+            approved = False
+        # A resolved not_applied intent is still bound to its original inputs. A
+        # migration may remove the gate, but cannot authorize sending changed inputs.
+        regates = journal.state.get("migration_regates") or {}
+        migrated_intent = next(
+            (
+                value
+                for key, value in regates.items()
+                if key.split("#", 1)[0].split("/", 1)[0] == cp.current_node_id
+                and key.split("#", 1)[1].split("[", 1)[0].split(".", 1)[0] == str(cp.step_count + 1)
+            ),
+            None,
+        )
+        if (
+            migrated_intent
+            and pending is not None
+            and self._approval_still_valid(
+                self.spec.nodes[cp.current_node_id or ""], pending, cp.state
+            )
+            and cp.status == "running"
+        ):
+            approved, approval_id = True, pending.approval_id
+            migrated_intent = None
+        elif migrated_intent:
+            approved = False
+        provenance = _REGATE_PROVENANCE.set(
+            {
+                "node_id": cp.current_node_id,
+                "supersedes_approval_id": pending.approval_id,
+                "regate_reason": "definition_migrated",
+                "previous_input_state": copy.deepcopy(pending.input_state),
+            }
+            if changed_approval and pending is not None
+            else migrated_intent
+        )
+        try:
+            return await self._execute_loop(
+                workflow_run_id=cp.workflow_run_id,
+                cursor=cp.current_node_id,
+                current_state=copy.deepcopy(cp.state),
+                step_count=cp.step_count,
+                node_already_approved=approved,
+                operation="recover",
+                approval_id=approval_id if approved else None,
+            )
+        finally:
+            _REGATE_PROVENANCE.reset(provenance)
 
     async def _continue_after(
         self,
@@ -4803,7 +5454,7 @@ class WorkflowEngine:
             input_state=copy.deepcopy(state),
             created_at=time.time(),
             workspace_id=self.workspace_id,
-            workflow_version="1.0.0",
+            workflow_version=str(self.spec.version if self.spec.version is not None else "1.0.0"),
             spec_hash=self.spec.canonical_hash(),
             required_role=getattr(node, "required_role", "admin"),
             expires_at=expires_at,
@@ -5089,8 +5740,15 @@ class WorkflowEngine:
                 )
 
             # 3. Handle approval requirement: pauses BEFORE handler runs
+            provenance = _REGATE_PROVENANCE.get()
+            migrated_gate = (
+                provenance is not None
+                and provenance.get("node_id") == node.id
+                and provenance.get("regate_reason") == "definition_migrated"
+            )
             is_approval_needed = (
                 node.requires_approval
+                or migrated_gate
                 or (
                     node.handler in self.approval_required_handlers
                     or (
@@ -5162,7 +5820,9 @@ class WorkflowEngine:
                     input_state=copy.deepcopy(current_state),
                     created_at=time.time(),
                     workspace_id=self.workspace_id,
-                    workflow_version="1.0.0",
+                    workflow_version=str(
+                        self.spec.version if self.spec.version is not None else "1.0.0"
+                    ),
                     spec_hash=self.spec.canonical_hash(),
                     required_role=getattr(node, "required_role", "admin"),
                     expires_at=expires_at,

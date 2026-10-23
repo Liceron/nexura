@@ -2,8 +2,8 @@
 # Copyright (c) 2026 Liceron
 """P39 G0/G3 final check (round 3) repros (offline; scripted local models only).
 
-Moved from ``.autopilot/p39/g0g3_repros``. Each test failed against the round-3 fixes and
-passes after round 4; ids match the "Round 3" section of ``.autopilot/p39/g0g3_review.md``.
+Repros from the final check (round 3). Each test failed against the round-3 fixes and
+passes after round 4; ids match the "Round 3" section of the review report.
 The assertions are unchanged.
 """
 

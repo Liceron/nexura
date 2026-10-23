@@ -39,4 +39,10 @@ def create_retrieval_tool(
             return "No relevant sources found in the knowledge base."
         return packed.formatted_context
 
-    return Tool(name=name, fn=search_knowledge_base, description=desc)
+    return Tool(
+        name=name,
+        fn=search_knowledge_base,
+        description=desc,
+        origin=f"knowledge:{collection_id}",
+        tags={f"knowledge:{collection_id}"},
+    )

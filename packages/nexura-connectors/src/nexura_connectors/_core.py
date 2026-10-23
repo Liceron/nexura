@@ -9,12 +9,15 @@ import base64
 import ipaddress
 import json as _json
 import os
+import random
 import re
 import socket
 import ssl
+import time
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
-from typing import Any, ClassVar
+from email.utils import parsedate_to_datetime
+from typing import Any, ClassVar, Literal
 from urllib.parse import quote, urlsplit
 
 import httpcore
@@ -91,6 +94,7 @@ class Op:
     write: bool
     model: type[StrictParams]
     description: str = ""
+    effect_class: Literal["pure", "idempotent", "non_idempotent"] | None = None
 
 
 MAX_REQUEST_BYTES = 262_144
@@ -145,9 +149,36 @@ def redact(text: str, secrets: list[str]) -> str:
     return redact_text(redact_secrets(text, ordered))
 
 
-def secret_variants(secret: str) -> list[str]:
+SECRET_FIELDS = frozenset(
+    {
+        "access_token",
+        "refresh_token",
+        "client_secret",
+        "app_jwt",
+        "jwt",
+        "private_key",
+        "token",
+        "id_token",
+    }
+)
+
+
+def secret_variants(secret: str, *, split: bool = True) -> list[str]:
     """Return the secret plus derived forms (parts, base64) that must never leak."""
     forms = {secret, base64.b64encode(secret.encode()).decode()}
+    if secret.lstrip().startswith("{"):
+        try:
+            data = _json.loads(secret)
+        except ValueError:
+            return sorted(forms)
+        if isinstance(data, dict):
+            for key in SECRET_FIELDS:
+                value = data.get(key)
+                if isinstance(value, str) and value:
+                    forms.update(secret_variants(value, split=False))
+        return sorted(forms)
+    if not split:
+        return sorted(forms)
     if "://" in secret:
         # webhook-style URL: the path segments and userinfo carry the token
         parts = urlsplit(secret)
@@ -422,8 +453,8 @@ class HttpResult:
     """A bounded upstream response."""
 
     status: int
-    headers: httpx.Headers
-    body: bytes
+    headers: httpx.Headers = field(repr=False)
+    body: bytes = field(repr=False)
 
     def json(self) -> Any:
         """Parse the body as JSON or raise UpstreamError."""
@@ -444,7 +475,7 @@ class ConnectorHttp:
     timeout: float
     max_bytes: int
     max_retries: int
-    secrets: list[str]
+    secrets: list[str] = field(repr=False)
     sleep: SleepFn = asyncio.sleep
     base_origin: str | None = None
     default_host: str | None = None
@@ -452,6 +483,71 @@ class ConnectorHttp:
     #: Sent as ``Idempotency-Key`` on writes that do not set one (the workflow step's key,
     #: stable across a crash recovery; see ``ExecutionContext.idempotency_key()``).
     idempotency_key: str | None = None
+    rate_profile: str | None = None
+    indeterminate_status: bool = False
+    refresh_auth: Callable[[], Awaitable[dict[str, str]]] | None = field(default=None, repr=False)
+    started_at: float = field(default_factory=time.monotonic, repr=False)
+    retry_waited: float = 0.0
+    retry_budget: float = 30.0
+
+    def remaining_budget(self) -> float:
+        """One invocation budget shared by pages, refreshes, requests and retry waits."""
+        return max(
+            0.0, self.retry_budget - (time.monotonic() - self.started_at) - self.retry_waited
+        )
+
+    def rate_limited(self, result: HttpResult) -> bool:
+        """Recognise vendor throttling, including throttling returned with HTTP 403/200."""
+        if result.status == 429:
+            return True
+        if self.rate_profile == "github" and result.status == 403:
+            body = result.body.lower()
+            return (
+                "retry-after" in result.headers
+                or result.headers.get("x-ratelimit-remaining") == "0"
+                or b"secondary rate limit" in body
+                or b"abuse detection" in body
+                or b"api rate limit exceeded" in body
+            )
+        if (
+            (self.rate_profile == "google" and result.status == 403)
+            or (self.rate_profile == "slack" and result.status in {200, 403})
+        ) and "json" in result.headers.get("content-type", "").lower():
+            try:
+                data = result.json()
+            except UpstreamError:
+                return False
+            if not isinstance(data, dict):
+                return False
+            if self.rate_profile == "slack":
+                return data.get("ok") is False and data.get("error") == "ratelimited"
+            if result.status == 403:
+                error = data.get("error")
+                if isinstance(error, dict):
+                    errors = error.get("errors", [])
+                    return isinstance(errors, list) and any(
+                        isinstance(e, dict)
+                        and e.get("reason") in {"rateLimitExceeded", "userRateLimitExceeded"}
+                        for e in errors
+                    )
+        return False
+
+    async def wait_retry(self, delay: float) -> None:
+        """Defer to the caller when a retry cannot fit within this invocation."""
+        if delay >= self.remaining_budget():
+            error = RateLimitedError(
+                "retry wait exceeds the remaining operation timeout; defer this read"
+            )
+            error.retry_after_seconds = delay
+            raise error
+        while delay > 0:
+            interval = min(delay, MAX_RETRY_AFTER_SECONDS)
+            before = time.monotonic()
+            await self.sleep(interval)
+            # Custom/mock sleepers may advance no real time; charge the promised wait
+            # without double counting time spent in a real sleep.
+            self.retry_waited += max(0.0, interval - (time.monotonic() - before))
+            delay -= interval
 
     def same_origin(self, url: str) -> bool:
         """True when ``url`` has the same scheme and host as the configured base."""
@@ -491,14 +587,26 @@ class ConnectorHttp:
             and not any(k.lower() == "idempotency-key" for k in (headers or {}))
         ):
             headers = {**(headers or {}), "Idempotency-Key": self.idempotency_key}
-        total = (0 if write else self.max_retries) + 1
+        retry_read = not write and (not self.rate_profile or method.upper() in {"GET", "HEAD"})
+        total = (self.max_retries if retry_read else 0) + 1
         for attempt in range(total):
             last = attempt == total - 1
+            if attempt and self.refresh_auth is not None:
+                headers = {**(headers or {}), **await self.refresh_auth()}
             self.attempts_made += 1
             try:
-                result = await self._once(
-                    method, url, headers=headers, params=params, json=json, content=content
-                )
+                remaining = self.remaining_budget() if self.rate_profile else self.timeout
+                if remaining <= 0:
+                    raise ConnectorTimeoutError("operation timeout budget exhausted")
+                try:
+                    result = await asyncio.wait_for(
+                        self._once(
+                            method, url, headers=headers, params=params, json=json, content=content
+                        ),
+                        timeout=min(self.timeout, remaining),
+                    )
+                except TimeoutError:
+                    raise ConnectorTimeoutError("operation timeout budget exhausted") from None
             except (ConnectorTimeoutError, ConnectorTransportError) as exc:
                 if write:
                     raise IndeterminateEffectError(
@@ -506,18 +614,50 @@ class ConnectorHttp:
                     ) from None
                 if last:
                     raise
-                await self.sleep(min(0.25 * (2**attempt), MAX_RETRY_AFTER_SECONDS))
+                await self.wait_retry(self._retry_delay(None, attempt))
                 continue
             status = result.status
-            if (status == 429 or status >= 500) and not write and not last:
-                await self.sleep(self._retry_delay(result, attempt))
+            if write and self.indeterminate_status and (status >= 500 or status == 408):
+                raise IndeterminateEffectError(
+                    f"write outcome unknown after HTTP {status}; reconcile before retrying"
+                )
+            if (self.rate_limited(result) or status >= 500) and not write and not last:
+                await self.wait_retry(self._retry_delay(result, attempt))
                 continue
             self._raise_for_status(result)
             return result
         raise UpstreamError("retries exhausted")  # pragma: no cover
 
-    def _retry_delay(self, result: HttpResult, attempt: int) -> float:
-        raw = result.headers.get("retry-after", "")
+    def _retry_delay(self, result: HttpResult | None, attempt: int) -> float:
+        raw = result.headers.get("retry-after", "") if result else ""
+        if self.rate_profile:
+            delays: list[float] = []
+            if raw:
+                try:
+                    value = float(raw)
+                except ValueError:
+                    try:
+                        value = parsedate_to_datetime(raw).timestamp() - time.time()
+                    except (ValueError, TypeError, OverflowError):
+                        value = 0.0
+                if 0 <= value < float("inf"):
+                    delays.append(value)
+            if result and self.rate_profile == "github":
+                if result.headers.get("x-ratelimit-remaining") == "0":
+                    try:
+                        value = float(result.headers["x-ratelimit-reset"]) - time.time()
+                        if 0 <= value < float("inf"):
+                            delays.append(value)
+                        elif value < 0:
+                            delays.append(random.uniform(0.1, 0.5))
+                    except (KeyError, ValueError):
+                        pass
+                if result.status == 403 and self.rate_limited(result) and not delays:
+                    delays.append(60.0)  # GitHub secondary-limit minimum without Retry-After
+            if delays:
+                delay = max(delays)
+                return delay + min(delay * random.uniform(0.0, 0.1), 3.0)
+            return random.uniform(0.5, 1.0) * min(2.0**attempt, 30.0)
         try:
             return float(max(0.0, min(float(raw), MAX_RETRY_AFTER_SECONDS)))
         except ValueError:
@@ -525,13 +665,33 @@ class ConnectorHttp:
 
     def _raise_for_status(self, result: HttpResult) -> None:
         status = result.status
+        if self.rate_limited(result):
+            error = RateLimitedError(
+                "upstream rate limit reached; wait for Retry-After/reset before retrying reads; "
+                "writes were not retried"
+            )
+            error.retry_after_seconds = self._retry_delay(result, 0)
+            raise error
         if 200 <= status < 300:
             return
         snippet = redact(result.body[:300].decode("utf-8", errors="replace"), self.secrets)
         if 300 <= status < 400:
             raise UpstreamError(f"upstream redirect ({status}) refused")
         if status in (401, 403):
-            raise AuthFailedError(f"upstream rejected the credential (HTTP {status})")
+            auth_error = AuthFailedError(
+                f"upstream rejected access (HTTP {status}); check token expiry, scopes, "
+                "resource permissions and installation access"
+            )
+            auth_error.status = status
+            raise auth_error
+        if self.rate_profile:
+            advice = {
+                400: "check operation parameters and resource identifiers",
+                404: "check the resource identifier and credential access to it",
+                409: "resource conflict; reconcile the existing resource before another write",
+                422: "check field values and repository/resource validation rules",
+            }.get(status, "check upstream availability and operation parameters")
+            raise UpstreamError(f"upstream error (HTTP {status}); {advice}")
         if status == 429:
             raise RateLimitedError("upstream rate limit reached (HTTP 429)")
         raise UpstreamError(f"upstream error (HTTP {status}): {snippet}")
@@ -592,10 +752,11 @@ class ConnectorHttp:
 class Call:
     """Everything an operation handler needs, resolved once per invocation."""
 
-    secret: str
+    secret: str = field(repr=False)
     http: ConnectorHttp
-    cfg: dict[str, Any]
-    context: ExecutionContext
+    cfg: dict[str, Any] = field(repr=False)
+    context: ExecutionContext = field(repr=False)
+    auth_retried: bool = False
 
     @property
     def max_pages(self) -> int:
@@ -725,7 +886,14 @@ class ConnectorModule(BaseModule):
             display=DisplayMetadata(
                 label=cls.TITLE,
                 group="connectors",
-                examples=[{"operation": n, "write": o.write} for n, o in cls.OPS.items()],
+                examples=[
+                    {
+                        "operation": n,
+                        "write": o.write,
+                        **({"effect_class": o.effect_class} if o.effect_class else {}),
+                    }
+                    for n, o in cls.OPS.items()
+                ],
                 secret_hints=["credential_ref"],
             ),
         )
@@ -824,6 +992,10 @@ class ConnectorModule(BaseModule):
             timeout=clamp_float(timeout, MIN_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS),
             max_bytes=clamp(max_bytes, 1, HARD_MAX_RESPONSE_BYTES),
             max_retries=clamp(retries, 0, HARD_MAX_RETRIES),
+            retry_budget=min(
+                clamp_float(timeout, MIN_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS),
+                self.manifest.timeout_seconds or 30.0,
+            ),
             secrets=secret_variants(secret) if secret else [],
             sleep=self.sleep,
             base_origin=str(base) if base else None,
@@ -876,6 +1048,8 @@ class ConnectorModule(BaseModule):
             call = Call(
                 secret=secret, http=self.build_http(cfg, secret, context), cfg=cfg, context=context
             )
+            # Refresh adds secrets to the same list used for output/error redaction.
+            secrets = call.http.secrets
             payload = await self.run(op, params, call)
             payload = scrub(payload, secrets)
             payload.update({"operation": op.name, "write": op.write})
@@ -883,11 +1057,25 @@ class ConnectorModule(BaseModule):
         except IndeterminateEffectError as exc:
             return ModuleResult.indeterminate(redact(exc.message, secrets))
         except ConnectorError as exc:
-            return ModuleResult.failure(
+            failure = ModuleResult.failure(
                 exc.code,
                 redact(exc.message, secrets),
-                metadata={"retryable": exc.retryable},
+                metadata={
+                    "retryable": exc.retryable,
+                    **(
+                        {"retry_after_seconds": exc.retry_after_seconds}
+                        if isinstance(exc, RateLimitedError) and exc.retry_after_seconds is not None
+                        else {}
+                    ),
+                },
             )
+            if exc.partial_outputs is not None:
+                failure.outputs = {
+                    **scrub(exc.partial_outputs, secrets),
+                    "operation": op.name,
+                    "write": op.write,
+                }
+            return failure
         except Exception as exc:
             return ModuleResult.failure(
                 UpstreamError.code, redact(f"unexpected {type(exc).__name__}", secrets)

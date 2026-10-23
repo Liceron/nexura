@@ -84,6 +84,8 @@ one owner's projects. They do not add accounts or tenant isolation.
   research team, approvals, reports, extraction) you can browse and instantiate from Studio.
 - [Service and Studio](studio-and-service.md): REST API, TypeScript client and the visual
   Studio.
+- [Streaming to frontends](streaming-to-frontends.md): native SSE, AG-UI and AI SDK
+  UI message streams, content negotiation and approval boundaries.
 - [Run Nexura on a server (single operator)](remote-single-operator.md): one operator token
   on every request, a TLS reverse proxy (Caddy, nginx) and Studio sign-in; multi-user is in
   the enterprise edition.

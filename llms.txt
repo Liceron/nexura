@@ -44,6 +44,7 @@ Every Python example in the docs runs offline with `FakeModel`, a scripted model
 - [Knowledge](https://github.com/Liceron/nexura/blob/main/docs/knowledge.md): ingest files, hybrid keyword and vector search, citations.
 - [Starter templates](https://github.com/Liceron/nexura/blob/main/docs/templates.md): tested, offline-runnable workflows.
 - [Service and Studio](https://github.com/Liceron/nexura/blob/main/docs/studio-and-service.md): the local REST API, TypeScript client and browser Studio.
+- [Streaming to frontends](https://github.com/Liceron/nexura/blob/main/docs/streaming-to-frontends.md): AG-UI and AI SDK UI message SSE, negotiation, approvals and replay.
 - [Run Nexura on a server (single operator)](https://github.com/Liceron/nexura/blob/main/docs/remote-single-operator.md): remote single-operator mode with one operator token behind a TLS reverse proxy.
 - [Agents in Studio](https://github.com/Liceron/nexura/blob/main/docs/agents-in-studio.md): saved workspace agents, chat, evals and red-team.
 - [Credentials and local secrets](https://github.com/Liceron/nexura/blob/main/docs/local-secrets.md): credential references and the local encrypted secrets file.

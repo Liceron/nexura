@@ -122,6 +122,8 @@ dev = [
     "nexura-vertex",
     "pytest>=8.0.0,<9.0.0",
     "pytest-asyncio>=0.24.0,<1.0.0",
+    # Parallel test runs: `pytest -n auto --dist loadfile` (see docs/testing.md).
+    "pytest-xdist>=3.6.0,<4.0.0",
     "ruff>=0.5.0,<1.0.0",
     "mypy>=1.10.0,<2.0.0",
     "fastapi>=0.111.0,<1.0.0",

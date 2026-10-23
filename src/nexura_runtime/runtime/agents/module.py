@@ -50,13 +50,9 @@ def _with_skills(
         if original.allowed_tools is not None:
             agent.allowed_tools = (*original.allowed_tools, loader.name)
         agents.append(agent)
-    return AgentCoordinator(
-        agents=agents,
-        max_handoff_depth=coordinator.max_handoff_depth,
-        total_fuel=coordinator.total_fuel,
-        approval_gate=coordinator.approval_gate,
-        session_store=coordinator.session_store,
-    )
+    # Every other setting (limits, approval gate, session store, hooks, default_hooks)
+    # carries over: a new field cannot be forgotten here (P39 G2 review M2).
+    return coordinator.replace(agents=agents)
 
 
 class AgentCoordinatorModule(BaseModule):
@@ -69,7 +65,8 @@ class AgentCoordinatorModule(BaseModule):
         default_agent_name: str | None = None,
         module_id: str = "nexura.agents.coordinator",
         version: str = "1.0.0",
-        effect_policy: EffectPolicy = "idempotent_write",
+        # The coordinator's agents may call any tool: undeclared effects are non_idempotent.
+        effect_policy: EffectPolicy = "non_idempotent_write",
         skill_source: SkillSource | None = None,
     ) -> None:
         self.coordinator = coordinator

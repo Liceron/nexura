@@ -44,6 +44,8 @@ When the model asks for a tool with `requires_approval`, the runner stops before
 
 If one model response contains several tool calls and any of them needs approval, the whole batch waits. On resume, the calls that did not need approval run together with the approved ones.
 
+A hook can also require approval without changing the tool: `AgentHooks.tool_needs_approval(ctx, tool, arguments)` returning `True` gates the call exactly as `requires_approval` would (same pause, digests, expiry, single use, resume and recovery rules). Hooks add gates only; they can never lift a tool's own `requires_approval`. A hook's gate is recorded in the run's journal (with the pause, and again with the approval claim of a resume), so a runner without that hook (another process, or one built without the policy) that resumes or recovers the run after a crash still waits for a person, and an expired claim is asked for again. Runs paused before this release carry no record: keep the hook on the runners that continue them. An operator policy installed with `set_default_hooks` applies to every runner and to nested runs. See [Adding approval gates](guardrails-hooks-limits.md#adding-approval-gates) and [Policies](guardrails-hooks-limits.md#policies-default-hooks-for-every-run).
+
 ## What a RunInterruption holds
 
 `RunInterruption` is a dataclass. The fields you will use:
@@ -475,6 +477,54 @@ Approvals protect the actions you mark or that declare writes, not every line of
     `AgentDefinition.as_tool` approvals are bound to `AgentDefinition.definition_digest()`,
     so editing the agent after the request invalidates them, and a nested subagent asks
     for its own approval instead of inheriting its parent's `approval_id`.
+  - A coordinator tool call also needs approval when its tool has `requires_approval` or
+    a hook's `tool_needs_approval` says so, not only when the agent has
+    `approval_required`. A tool called inside an `AgentDefinition.as_tool()` subagent that
+    needs approval raises `AgentApprovalRequiredError` before anything runs (a subagent
+    cannot wait for a person inside the delegation).
+  - The coordinator continues after an approval by running the run again (same
+    `ExecutionContext`). With an `approval_gate`, a ledger records what each run visit
+    did. A visit is the workspace, run, node and workflow step (`step_key`, else
+    `attempt_id`), so a node visited again in a cycle starts fresh. The ledger records
+    tool calls by position (agent and its definition digest, handoff count, turn, index)
+    with their tool, argument digest and result, and the model's responses. It lives in
+    the gate's `ApprovalPolicyManager` database (table `coordinator_call_ledger`), or in
+    memory for one `AgentCoordinator` object when the gate has no database. On the re-run:
+    - a call that already ran is replayed from its result, never executed again, so a
+      run with several gated calls completes, each approval claimed once;
+    - a call that was dispatched but has no result (the process stopped, the tool raised)
+      is sent again only when its tool is `pure` or `idempotent`;
+    - if the model asks for a different call at a position where a call already ran, or
+      asks again for an ungated, non-idempotent call an earlier attempt already sent, the
+      run stops with `CoordinatorCallOutcomeUnknownError` and sends nothing (check the
+      external system, then start a new run);
+    - `AgentCoordinator(replay_model_responses=True)` replays the recorded model responses
+      instead of calling the model again. The re-run then follows exactly the recorded
+      path, is not billed again for those turns, and continues live after it. It is off
+      by default because a re-asked model may legitimately propose a different call,
+      which then asks for its own approval.
+
+    Replayed steps emit `coordinator.tool_replayed` / `coordinator.model_replayed`
+    progress events on the context's event sink (`executed: False`, no arguments or
+    results) and a `nexura.coordinator.replayed` trace event; hooks are not called for a
+    replay. When a run visit completes, its entries are deleted and only a completion
+    marker stays. Running it again raises `ApprovalClaimConflictError` when it used
+    approvals, else `CoordinatorRunCompletedError`. `purge_coordinator_ledger(manager,
+    older_than_seconds)` removes old rows, markers included; run it periodically with a
+    TTL longer than your approval expiry.
+
+    Without a database, a re-run through another coordinator object or in another
+    process cannot see what ran, and ungated calls before the gate run again: configure
+    the gate with an `ApprovalPolicyManager` database for coordinator flows that pause.
+    For long multi-step gated flows, the SDK `Runner` with a checkpoint store is the
+    better fit (it resumes instead of re-running).
+  - A `tool_to_module` module whose tool has `requires_approval` runs a gated call only
+    with `approval_granted`: as a workflow node without its own approval it pauses for
+    approval (`request_approval` with the tool name and the arguments) and runs after a
+    person approves those arguments (compared by canonical digest, so `1`, `1.0` and
+    `True` differ); called anywhere else it raises `ContractError` (`APPROVAL_REQUIRED`).
+    Through `module_tool` the rule gets the agent run's context, with its `deps`; as a
+    workflow node there are no deps, so a rule that reads `ctx.deps` sees `None` there.
 - **Trusted code.** Python that builds `ExecutionContext(approval_granted=True)` itself, or
   calls a module directly with it, is part of your trusted code and is not gated. Keep such
   calls out of reach of model output and flow input.

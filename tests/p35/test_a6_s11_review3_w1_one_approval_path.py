@@ -1,6 +1,6 @@
 """A6 S11 round-3 review (F3-B1): one approved call is never paid twice.
 
-Adapted from ``.autopilot/p35/s11_repros/round3/test_w1_marker_claim_two_live_approvals.py``.
+Repro from the S11 round 3 review (marker claim with two live approvals).
 The marker-claim path it attacked was removed (lead direction): decisions are normalised to
 JSON at resume (tuples become lists), and a journaled resume refuses decisions that are not
 exactly representable before it takes the run or writes anything. Every claim is exact, so

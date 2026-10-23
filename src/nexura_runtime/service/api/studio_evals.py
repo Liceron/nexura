@@ -28,6 +28,7 @@ from nexura_agents.redteam import (
 from pydantic import BaseModel, Field
 
 from nexura_runtime.evaluation import studio_engine as engine
+from nexura_runtime.evaluation._service_access import registered_agents
 from nexura_runtime.evaluation.studio_engine import StudioEvalError
 from nexura_runtime.evaluation.studio_store import StudioEvalStore
 from nexura_runtime.observability.run_diagnostics import is_secret_key, redact_run_content
@@ -181,6 +182,10 @@ async def list_datasets(
     """All datasets, or only the test datasets bound to ``workflow_id``."""
     workspace, _, _ = _ctx(request)
     items = _store(request).list_datasets(workspace, workflow_id)
+    for item in items:
+        dataset = _store(request).get_dataset(workspace, item["dataset_id"])
+        if dataset is not None:
+            await _assert_cases_access(request, dataset["cases"])
     return {"datasets": items, "total": len(items)}
 
 
@@ -212,6 +217,9 @@ async def put_dataset(request: Request, dataset_id: str, body: DatasetBody) -> d
     except StudioEvalError as exc:
         raise _fail(exc) from exc
     existing = store.get_dataset(workspace, dataset_id)
+    if existing is not None:
+        await _assert_cases_access(request, existing["cases"])
+    await _assert_cases_access(request, cases)
     if existing is None and store.count_datasets(workspace) >= MAX_DATASETS_PER_WORKSPACE:
         raise _too_many_datasets()
     binding = existing.get("workflow_id") if existing else None
@@ -248,6 +256,7 @@ async def get_dataset(request: Request, dataset_id: str) -> dict[str, Any]:
     found = _store(request).get_dataset(workspace, dataset_id)
     if found is None:
         raise _not_found("DATASET_NOT_FOUND", f"Dataset '{dataset_id}'")
+    await _assert_cases_access(request, found["cases"])
     return found
 
 
@@ -257,6 +266,7 @@ async def export_dataset(request: Request, dataset_id: str) -> dict[str, Any]:
     found = _store(request).get_dataset(workspace, dataset_id)
     if found is None:
         raise _not_found("DATASET_NOT_FOUND", f"Dataset '{dataset_id}'")
+    await _assert_cases_access(request, found["cases"])
     exported: dict[str, Any] = {
         "format": engine.DATASET_FORMAT,
         "format_version": 1,
@@ -345,6 +355,48 @@ async def _owned_run(request: Request, run_id: str) -> dict[str, Any]:
     return run
 
 
+async def _assert_sources_access(request: Request, source_ids: list[str]) -> None:
+    for run_id in sorted(set(source_ids)):
+        run = await _owned_run(request, run_id)
+        workflow_id = run.get("workflow_id")
+        if workflow_id and await _owned_workflow(request, workflow_id) is None:
+            raise _not_found("WORKFLOW_NOT_FOUND", "Captured source workflow")
+
+
+async def _assert_cases_access(request: Request, cases: list[dict[str, Any]]) -> list[str]:
+    source_ids: set[str] = set()
+    for case in cases:
+        metadata = case.get("metadata") or {}
+        if "source_run_id" in metadata:
+            run_id = metadata["source_run_id"]
+            if not isinstance(run_id, str) or not run_id:
+                raise HTTPException(403, detail={"code": "SOURCE_PROVENANCE_UNAVAILABLE"})
+            source_ids.add(run_id)
+    result = sorted(source_ids)
+    await _assert_sources_access(request, result)
+    return result
+
+
+async def _assert_report_access(request: Request, saved: dict[str, Any]) -> None:
+    report = saved["report"]
+    if "source_run_ids" in report:
+        source_ids = report["source_run_ids"]
+        if not isinstance(source_ids, list) or any(
+            not isinstance(run_id, str) or not run_id for run_id in source_ids
+        ):
+            raise HTTPException(403, detail={"code": "SOURCE_PROVENANCE_UNAVAILABLE"})
+        await _assert_sources_access(request, source_ids)
+        await _assert_cases_access(request, report.get("results", []))
+        return
+    # Historical reports omitted provenance. Only the original, unchanged dataset
+    # can establish their sources; an edited/deleted dataset cannot declassify a copy.
+    workspace, _, _ = _ctx(request)
+    dataset = _store(request).get_dataset(workspace, saved["dataset_id"])
+    if dataset is None or dataset["content_hash"] != saved["dataset_hash"]:
+        raise HTTPException(403, detail={"code": "SOURCE_PROVENANCE_UNAVAILABLE"})
+    await _assert_cases_access(request, dataset["cases"])
+
+
 #: Run events that mean a person answered the run, so replaying its input would pause there.
 _HUMAN_GATE_EVENTS = frozenset({"RUN_PENDING_APPROVAL", "RUN_WAITING_FOR_INPUT"})
 
@@ -382,7 +434,9 @@ async def _recorded_path(request: Request, run: dict[str, Any]) -> list[str]:
         "The run's checkpoints do not account for every step, or its workflow no longer "
         "validates, so its path cannot be recorded; save it without record_path.",
     )
-    spec = WorkflowSpec.from_dict(run["spec"])
+    from nexura_runtime.service.api.runs import _bound_definition
+
+    spec = await _bound_definition(request.app.state, run)
     try:
         engine_ = WorkflowEngine(
             spec=spec,
@@ -515,6 +569,8 @@ async def add_case_from_run(request: Request, dataset_id: str, body: FromRunBody
         )
 
     dataset = store.get_dataset(workspace, dataset_id)
+    if dataset is not None:
+        await _assert_cases_access(request, dataset["cases"])
     if dataset is None:
         if not (body.dataset_name or "").strip():
             raise _invalid(
@@ -585,6 +641,7 @@ async def add_case_from_run(request: Request, dataset_id: str, body: FromRunBody
                 409,
             ) from exc
         raise _fail(exc) from exc
+    await _assert_cases_access(request, new_cases)
     try:
         saved = store.save_dataset(
             workspace,
@@ -625,7 +682,7 @@ async def _owned_workflow(request: Request, workflow_id: str) -> dict[str, Any] 
 
 @router.get("/targets", summary="Workflows and agents a dataset can be run against")
 async def list_targets(request: Request) -> dict[str, Any]:
-    workspace, _, _ = _ctx(request)
+    workspace, principal, _ = _ctx(request)
     workflows: list[dict[str, Any]] = []
     for wf in await request.app.state.store.list_workflows():
         if await _owned_workflow(request, wf["workflow_id"]) is not None:
@@ -642,7 +699,10 @@ async def list_targets(request: Request) -> dict[str, Any]:
     ]
     agents += [
         {"kind": "agent", "id": a, "name": a}
-        for a in sorted(getattr(request.app.state, "eval_agents", {}) or {})
+        for a in sorted(registered_agents(
+            request.app.state, workspace, local_owner=principal.profile == "local-owner"
+        ))
+        if a != engine.LOCAL_FAKE_AGENT
     ]
     store = getattr(request.app.state, "agent_store", None)
     if store is not None:
@@ -709,12 +769,13 @@ def _saved_agent_factory(request: Request, agent_id: str) -> tuple[Any, int]:
     "/runs", summary="Run a dataset against a workflow or agent", dependencies=[_require("run")]
 )
 async def create_run(request: Request, body: RunBody) -> dict[str, Any]:
-    workspace, _, _ = _ctx(request)
+    workspace, principal, _ = _ctx(request)
     store = _store(request)
     dataset = store.get_dataset(workspace, body.dataset_id)
     if dataset is None:
         raise _not_found("DATASET_NOT_FOUND", f"Dataset '{body.dataset_id}'")
     cases = dataset["cases"]
+    source_ids = await _assert_cases_access(request, cases)
     if len(cases) * body.repeats > MAX_CASE_RUNS:
         raise HTTPException(
             status_code=413,
@@ -757,7 +818,9 @@ async def create_run(request: Request, body: RunBody) -> dict[str, Any]:
         target["version"] = f"rev_{revision}"
         target["saved"] = True
     else:
-        registered = getattr(request.app.state, "eval_agents", {}) or {}
+        registered = registered_agents(
+            request.app.state, workspace, local_owner=principal.profile == "local-owner"
+        )
         if target_id == engine.LOCAL_FAKE_AGENT:
             factory = engine.local_fake_agent
             target["synthetic"] = True
@@ -793,6 +856,11 @@ async def create_run(request: Request, body: RunBody) -> dict[str, Any]:
             status_code=422,
             detail={"code": "TARGET_FAILED", "message": f"{type(exc).__name__}: {exc}"[:500]},
         ) from exc
+    await _assert_sources_access(request, source_ids)
+    captured_report = engine.redact_report(report)
+    captured_report["source_run_ids"] = source_ids
+    summary = engine.summarize(report)
+    summary["source_run_ids"] = source_ids
     return store.save_run(
         workspace,
         run_id=engine.new_run_id(),
@@ -802,8 +870,8 @@ async def create_run(request: Request, body: RunBody) -> dict[str, Any]:
         label=body.label,
         target=target,
         scorers=specs,
-        summary=engine.summarize(report),
-        report=engine.redact_report(report),
+        summary=summary,
+        report=captured_report,
     )
 
 
@@ -815,6 +883,10 @@ async def list_runs(
 ) -> dict[str, Any]:
     workspace, _, _ = _ctx(request)
     runs = _store(request).list_runs(workspace, dataset_id, limit)
+    for row in runs:
+        saved = _store(request).get_run(workspace, row["run_id"])
+        if saved is not None:
+            await _assert_report_access(request, saved)
     return {"runs": runs, "total": len(runs)}
 
 
@@ -824,6 +896,7 @@ async def get_run(request: Request, run_id: str) -> dict[str, Any]:
     found = _store(request).get_run(workspace, run_id)
     if found is None:
         raise _not_found("RUN_NOT_FOUND", f"Run '{run_id}'")
+    await _assert_report_access(request, found)
     return found
 
 
@@ -845,6 +918,8 @@ async def compare(request: Request, body: CompareBody) -> dict[str, Any]:
         raise _not_found("RUN_NOT_FOUND", f"Baseline run '{body.baseline_run_id}'")
     if cand is None:
         raise _not_found("RUN_NOT_FOUND", f"Candidate run '{body.candidate_run_id}'")
+    await _assert_report_access(request, base)
+    await _assert_report_access(request, cand)
     try:
         result = engine.compare_runs(
             engine.report_from_stored(base["report"]),

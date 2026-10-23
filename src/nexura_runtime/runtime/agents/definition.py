@@ -75,7 +75,7 @@ class AgentDefinition:
         allowed_tools: Sequence[str] | None = None,
         output_schema: type[BaseModel] | dict[str, Any] | None = None,
         approval_required: bool = False,
-        effect_policy: EffectPolicy = "idempotent_write",
+        effect_policy: EffectPolicy = "non_idempotent_write",
     ) -> None:
         if not isinstance(name, str) or not name.strip():
             raise SDKValidationError("Agent name must be a non-empty string.")
@@ -427,12 +427,33 @@ class AgentDefinition:
                                 tc.name, permitted_tools=list(self.tools_by_name.keys())
                             )
 
-                        tool_res = await tool_inst.arun(**tc.arguments)
-                        res_str = (
-                            tool_res
-                            if isinstance(tool_res, str)
-                            else json.dumps(tool_res, ensure_ascii=False)
+                        # P39 G2: the tool's guardrails, the inherited and default hooks,
+                        # and its approval gates apply here as in a Runner. A subagent
+                        # cannot wait for a person inside the delegation: a gated call
+                        # fails closed before anything runs.
+                        from nexura_agents import policy
+                        from nexura_agents.run_context import RunContext
+
+                        hooks = policy.effective_hooks()
+                        tool_ctx: RunContext[Any] = RunContext(
+                            deps=None,
+                            run_id=child_run_id,
+                            agent_name=self.name,
+                            turn=turn,
+                            messages=list(child_messages),
+                            tool_call_id=tc.id,
+                            tool_name=tc.name,
+                            tool=tool_inst.info(),
                         )
+                        if policy.tool_call_needs_approval(
+                            tool_inst, tool_ctx, dict(tc.arguments), hooks
+                        ):
+                            raise AgentApprovalRequiredError(self.name, action_name=tc.name)
+                        from nexura_runtime.runtime.agents.coordinator import (
+                            _run_coordinated_tool,
+                        )
+
+                        res_str = await _run_coordinated_tool(tool_inst, tool_ctx, tc, hooks)
                         child_messages.append(
                             Message(
                                 role="tool",
@@ -451,6 +472,7 @@ class AgentDefinition:
             name=tool_name,
             fn=_delegate,
             description=tool_desc,
+            origin=f"agent:{self.name}",
         )
 
     def to_agent(self) -> Agent:
@@ -475,7 +497,7 @@ class AgentDefinition:
         allowed_tools: Sequence[str] | None = None,
         approval_required: bool = False,
         output_schema: type[BaseModel] | dict[str, Any] | None = None,
-        effect_policy: EffectPolicy = "idempotent_write",
+        effect_policy: EffectPolicy = "non_idempotent_write",
     ) -> AgentDefinition:
         """Create AgentDefinition wrapping an existing Agent."""
         if callable(agent.instructions):

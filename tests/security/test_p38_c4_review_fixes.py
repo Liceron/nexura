@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Liceron
-# P38 C4 adversarial review repros (moved from .autopilot/p38/c4_repros). Each test asserts the
+# P38 C4 adversarial review repros. Each test asserts the
 # SECURE behaviour; all 11 failed before the review fixes. Offline: in-process apps and one tiny
 # Python child; no server, no provider calls.
 #

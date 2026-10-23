@@ -1,7 +1,7 @@
 # Nexura Guardrails
 
-Guardrails for Nexura agents: one verdict type, a category taxonomy (with opt-in
-Indian-context categories), fast regex pre-filters, an LLM judge that resists prompt
+Guardrails for Nexura agents: one verdict type, a category taxonomy, fast regex
+pre-filters, an LLM judge that resists prompt
 injection and fails closed, and tiered or parallel composition. Every check turns into a
 plain guardrail function for `Agent(input_guardrails=..., output_guardrails=...)` and
 `@tool(input_guardrails=..., output_guardrails=...)`.

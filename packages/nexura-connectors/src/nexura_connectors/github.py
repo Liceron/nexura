@@ -5,11 +5,14 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from typing import Any, ClassVar
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
+import httpx
 from pydantic import Field
 
+from nexura_connectors._auth import RefreshingRestConnector
 from nexura_connectors._core import (
     Call,
     Op,
@@ -17,10 +20,8 @@ from nexura_connectors._core import (
     result_data,
     safe_id,
 )
-from nexura_connectors._rest import RestConnector
-from nexura_connectors.errors import InvalidParamsError
-
-_NEXT = re.compile(r'<([^>]+)>;\s*rel="next"')
+from nexura_connectors._pagination import page_items, partial, resume
+from nexura_connectors.errors import ConnectorError, InvalidParamsError, SsrfBlockedError
 
 
 class RepoRef(StrictParams):
@@ -36,6 +37,7 @@ class ListItems(RepoRef):
     state: str = Field(default="open", pattern="^(open|closed|all)$")
     per_page: int = Field(default=30, ge=1, le=100)
     cursor: str | None = Field(default=None, max_length=2048)
+    max_items: int | None = Field(default=None, ge=1, le=10000)
 
 
 class CreateIssue(RepoRef):
@@ -53,7 +55,7 @@ class CreateComment(RepoRef):
     body: str = Field(min_length=1, max_length=20000)
 
 
-class GitHubConnector(RestConnector):
+class GitHubConnector(RefreshingRestConnector):
     """Read repositories, issues and pulls; create issues and comments."""
 
     MODULE_ID: ClassVar[str] = "nexura.connectors.github"
@@ -61,17 +63,25 @@ class GitHubConnector(RestConnector):
     DESCRIPTION: ClassVar[str] = "GitHub REST API with a personal or app token."
     CREDENTIAL_TYPE: ClassVar[str] = "github_token"
     DEFAULT_BASE_URL: ClassVar[str | None] = "https://api.github.com"
+    AUTH_FAMILY: ClassVar[str] = "github"
+    TOKEN_URL: ClassVar[str] = "https://github.com/login/oauth/access_token"
     EXTRA_HEADERS: ClassVar[dict[str, str]] = {
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
     OPS: ClassVar[dict[str, Op]] = {
-        "get_repo": Op("get_repo", False, RepoRef),
-        "list_issues": Op("list_issues", False, ListItems),
-        "list_pulls": Op("list_pulls", False, ListItems),
-        "create_issue": Op("create_issue", True, CreateIssue),
-        "create_comment": Op("create_comment", True, CreateComment),
+        "get_repo": Op("get_repo", False, RepoRef, effect_class="pure"),
+        "list_issues": Op("list_issues", False, ListItems, effect_class="pure"),
+        "list_pulls": Op("list_pulls", False, ListItems, effect_class="pure"),
+        "create_issue": Op("create_issue", True, CreateIssue, effect_class="non_idempotent"),
+        "create_comment": Op("create_comment", True, CreateComment, effect_class="non_idempotent"),
     }
+
+    def __init__(
+        self, *args: Any, app_jwt_provider: Callable[[], str] | None = None, **kwargs: Any
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.app_jwt_provider = app_jwt_provider
 
     @staticmethod
     def _repo_path(p: RepoRef) -> str:
@@ -83,32 +93,81 @@ class GitHubConnector(RestConnector):
 
     async def _list(self, p: ListItems, call: Call, kind: str) -> dict[str, Any]:
         items: list[Any] = []
+        try:
+            return await self._list_pages(p, call, kind, items)
+        except ConnectorError as exc:
+            if items:
+                exc.partial_outputs = result_data(items, truncated=True)
+            raise
+
+    async def _list_pages(
+        self, p: ListItems, call: Call, kind: str, items: list[Any]
+    ) -> dict[str, Any]:
         path = f"{self._repo_path(p)}/{kind}"
-        if p.cursor:
-            # a resume cursor is an absolute URL from an earlier next_cursor: it must stay on the
-            # API origin and on this repository's list endpoint before the token is sent to it
-            base = call.base_url(self.DEFAULT_BASE_URL)
-            parts = urlsplit(p.cursor)
-            if not call.http.same_origin(p.cursor) or not (
-                urlsplit(base).path.rstrip("/") + path == parts.path
-            ):
-                raise InvalidParamsError("cursor does not point at this repository's list endpoint")
-            resp = await self.api(call, "GET", "", url=p.cursor)
-        else:
-            resp = await self.api(
-                call, "GET", path, params={"state": p.state, "per_page": p.per_page}
+        base = call.base_url(self.DEFAULT_BASE_URL)
+        binding = {"path": path, "state": p.state}
+        cursor, offset, size = resume(p.cursor, p.per_page, 100, binding=binding)
+        prefix = urlsplit(base).path.rstrip("/")
+        seen: set[str] = set()
+
+        def page_key(url: str) -> str:
+            parsed = httpx.URL(url)
+            query = parsed.params
+            for key, default in (("page", "1"), ("state", p.state), ("per_page", str(size))):
+                if key not in query:
+                    query = query.set(key, default)
+            return str(
+                parsed.copy_with(query=str(httpx.QueryParams(sorted(query.multi_items()))).encode())
             )
-        pages = 1
-        while True:
-            items.extend(resp.json())
-            match = _NEXT.search(resp.headers.get("link", ""))
-            if not match:
-                return result_data(items)
-            if pages >= call.max_pages:
-                return result_data(items, next_cursor=match.group(1), truncated=True)
-            pages += 1
-            # same-origin is enforced by ConnectorHttp before any credential is sent
-            resp = await self.api(call, "GET", "", url=match.group(1))
+
+        def validate(url: str, *, upstream: bool = False) -> None:
+            parts = urlsplit(url)
+            if (
+                not call.http.same_origin(url)
+                or parts.username
+                or parts.password
+                or parts.fragment
+                or not (
+                    parts.path == prefix + path
+                    or re.fullmatch(re.escape(prefix) + r"/repositories/[0-9]+/" + kind, parts.path)
+                )
+            ):
+                error = SsrfBlockedError if upstream else InvalidParamsError
+                raise error("cursor does not point at this repository's list endpoint")
+
+        if cursor:
+            validate(cursor)
+        for _ in range(call.max_pages):
+            current = cursor
+            resp = await self.api(
+                call,
+                "GET",
+                path,
+                url=current,
+                params=None if current else {"state": p.state, "per_page": size},
+            )
+            # Compare normalised request URLs, including the initial query parameters.
+            seen.add(page_key(current or base + path))
+            page = page_items(resp.json(), offset=offset)
+            remaining = len(page) if p.max_items is None else p.max_items - len(items)
+            items.extend(page[offset : offset + remaining])
+            if offset + remaining < len(page):
+                return result_data(
+                    items,
+                    next_cursor=partial(current, offset + remaining, size, binding=binding),
+                    truncated=True,
+                )
+            offset = 0
+            links = httpx.Response(200, headers=resp.headers).links
+            link = links.get("next", {}).get("url")
+            cursor = urljoin(current or base + path, link) if link else None
+            if cursor:
+                validate(cursor, upstream=True)
+                if page_key(cursor) in seen:
+                    return {**result_data(items, truncated=True), "pagination_loop": True}
+            if not cursor or (p.max_items is not None and len(items) >= p.max_items):
+                break
+        return result_data(items, next_cursor=cursor, truncated=bool(cursor))
 
     async def op_list_issues(self, p: ListItems, call: Call) -> dict[str, Any]:
         """List issues, following Link pagination up to max_pages (read)."""

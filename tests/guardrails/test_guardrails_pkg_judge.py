@@ -439,8 +439,8 @@ def test_configuration_errors() -> None:
 
 
 def test_policy_from_categories_and_file(tmp_path: Path) -> None:
-    from_categories = JudgeCheck(FakeModel([]), categories=["caste_hate", "communal_hate"])
-    assert "caste" in from_categories.policy and "religious" in from_categories.policy
+    from_categories = JudgeCheck(FakeModel([]), categories=["violence", "weapons"])
+    assert "violence" in from_categories.policy and "weapons" in from_categories.policy
     path = tmp_path / "policy.md"
     path.write_text("Block loan guarantees.", encoding="utf-8")
     from_file = JudgeCheck(FakeModel([]), policy_file=path)

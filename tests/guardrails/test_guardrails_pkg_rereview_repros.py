@@ -2,8 +2,8 @@
 # Copyright (c) 2026 Liceron
 """P39 G0/G3 re-review (round 2) repros (offline; scripted local models only).
 
-Moved from ``.autopilot/p39/g0g3_repros``. Each test failed against the round-2 fixes and
-passes after round 3; ids match the "Re-review" section of ``.autopilot/p39/g0g3_review.md``.
+Repros from the round 2 re-review. Each test failed against the round-2 fixes and
+passes after round 3; ids match the "Re-review" section of the review report.
 The assertions are unchanged.
 """
 

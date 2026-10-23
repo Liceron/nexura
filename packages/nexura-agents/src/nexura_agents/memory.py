@@ -751,4 +751,7 @@ class Memory:
                 for r in records
             ]
 
-        return [Tool(REMEMBER_TOOL, remember), Tool(RECALL_TOOL, recall)]
+        return [
+            Tool(REMEMBER_TOOL, remember, origin="builtin:memory"),
+            Tool(RECALL_TOOL, recall, origin="builtin:memory"),
+        ]

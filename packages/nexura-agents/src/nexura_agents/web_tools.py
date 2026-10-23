@@ -285,6 +285,7 @@ def web_fetch_tool(
             "Private, local and metadata addresses are refused. Large pages are truncated."
         ),
         idempotent=True,
+        origin="builtin:web",
     )
 
 

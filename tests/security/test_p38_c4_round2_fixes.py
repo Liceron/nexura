@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Liceron
-# P38 C4 re-review (round 2) repros, moved from .autopilot/p38/c4_repros/round2. Each asserts
-# the secure / documented behaviour; all three failed before the R2 fixes. Offline: in-process
-# apps and one short child process. Only ROOT (new location) and the header changed, plus
-# tests added for the fixes at the end.
+# P38 C4 re-review (round 2) repros. Each asserts the secure / documented
+# behaviour; all three failed before the R2 fixes. Offline: in-process apps and one
+# short child process. Only ROOT (new location) and the header changed, plus tests
+# added for the fixes at the end.
 from __future__ import annotations
 
 import os

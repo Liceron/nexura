@@ -36,7 +36,8 @@ jobs:
           echo "67e1c32a85d5e0600c0939f5fd4023ca0127f1a9e81f5499697467bda67af78d  $RUNNER_TEMP/python-wasi.zip" | sha256sum -c -
           echo "NEXURA_WASI_RUNTIME_ZIP=$RUNNER_TEMP/python-wasi.zip" >> "$GITHUB_ENV"
       # b22 needs live Postgres/Qdrant services; see the vector-stores job.
-      - run: uv run --frozen pytest --deselect tests/backend/b22
+      # Files run in parallel, each file on one worker (pytest-xdist); see CONTRIBUTING.md.
+      - run: uv run --frozen pytest -n auto --dist loadfile --deselect tests/backend/b22
       - run: uv run --frozen python examples/oss/o07.py
 
   agents-python-versions:

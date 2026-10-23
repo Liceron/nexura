@@ -299,7 +299,11 @@ class Negatives:
         module, rec, sleeps = self._mod(s, handler)
         res = await self._read(s, module)
         assert res.status == "success", res.error_message
-        assert len(rec.requests) == 2 and sleeps.delays == [2.0]
+        assert len(rec.requests) == 2
+        if module.build_http({}, "").rate_profile:
+            assert 2.0 <= sum(sleeps.delays) <= 2.2
+        else:
+            assert sleeps.delays == [2.0]
 
     async def case_retry_5xx_then_ok(self, s: Spec) -> None:
         state = {"n": 0}
@@ -319,7 +323,11 @@ class Negatives:
         )
         res = await self._read(s, module, cfg={"max_retries": 2})
         assert res.error_code == "RATE_LIMITED" and res.metadata["retryable"] is True
-        assert len(rec.requests) == 3
+        if module.build_http({}, "").rate_profile:
+            assert len(rec.requests) == 1 and not sleeps.delays
+            assert res.metadata["retry_after_seconds"] >= 99
+        else:
+            assert len(rec.requests) == 3
         assert all(d <= 5.0 for d in sleeps.delays), "Retry-After must be capped"
 
     async def case_exhausted_5xx(self, s: Spec) -> None:
@@ -331,7 +339,10 @@ class Negatives:
     async def case_write_5xx_not_retried(self, s: Spec) -> None:
         module, rec, sleeps = self._mod(s, lambda r: httpx.Response(502, text="bad gateway"))
         res = await self._write(s, module)
-        assert res.error_code == "UPSTREAM_ERROR"
+        if module.build_http({}, "").indeterminate_status:
+            assert res.error_code == "INDETERMINATE_EFFECT" and res.status == "indeterminate"
+        else:
+            assert res.error_code == "UPSTREAM_ERROR"
         assert len(rec.requests) == 1 and sleeps.delays == []
 
     async def case_write_timeout_indeterminate(self, s: Spec) -> None:

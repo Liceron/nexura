@@ -41,6 +41,14 @@ class RunEventType(StrEnum):
     # ctx.emit(name, **data) from a tool or hook: data "name", "data", "agent",
     # "tool_call_id" and "tool_name" (None outside a tool call).
     CUSTOM = "custom"
+    # A guardrail did more than pass: it tripped (action "fail"), rewrote ("scrub") or
+    # rejected ("reject"), or crashed or timed out ("fail" with "error_type"). data
+    # "stage" ("input", "output", "tool_input" or "tool_output"), "guardrail", "action",
+    # "agent", "latency_ms"; on tool stages "tool_name" and "tool_call_id"; and, only when
+    # the guardrail's info holds them as plain values, "categories", "score", "backend",
+    # "cached", "rule", "decision" and "error_type". Never the checked content, the
+    # rejection message or other info. Precedes RUN_FAILED when the run stops.
+    GUARDRAIL_DECISION = "guardrail_decision"
     # Team streaming (Team.stream_async). data has "team" and "member_path" (list of path
     # segments of the team inside the root team; empty for the root team).
     TEAM_STARTED = "team_started"

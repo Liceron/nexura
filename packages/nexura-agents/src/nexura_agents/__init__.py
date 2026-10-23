@@ -53,6 +53,9 @@ _EXPORTS: dict[str, str] = {
     "UsageLimits": "nexura_agents.limits",
     "ModelSettings": "nexura_agents.limits",
     "AgentHooks": "nexura_agents.hooks",
+    "ComposedHooks": "nexura_agents.hooks",
+    "set_default_hooks": "nexura_agents.policy",
+    "default_hooks": "nexura_agents.policy",
     "GuardrailResult": "nexura_agents.guardrails",
     "detect_pii": "nexura_agents.guardrails_builtin",
     "redact_pii": "nexura_agents.guardrails_builtin",
@@ -87,6 +90,7 @@ _EXPORTS: dict[str, str] = {
     "StopAtTools": "nexura_agents.tools",
     "ToolRetry": "nexura_agents.tools",
     "ToolOutput": "nexura_agents.tools",
+    "ToolInfo": "nexura_agents.tools",
     # Memory
     "SessionStore": "nexura_agents.session",
     "MemorySessionStore": "nexura_agents.session",
@@ -184,6 +188,9 @@ __all__ = [
     "UsageLimits",
     "ModelSettings",
     "AgentHooks",
+    "ComposedHooks",
+    "set_default_hooks",
+    "default_hooks",
     "GuardrailResult",
     "detect_pii",
     "redact_pii",
@@ -216,6 +223,7 @@ __all__ = [
     "StopAtTools",
     "ToolRetry",
     "ToolOutput",
+    "ToolInfo",
     "SessionStore",
     "MemorySessionStore",
     "SQLiteSessionStore",
@@ -341,7 +349,7 @@ if TYPE_CHECKING:
         redact_pii,
     )
     from nexura_agents.history import fit_token_budget, keep_last_turns, summarize_older_turns
-    from nexura_agents.hooks import AgentHooks
+    from nexura_agents.hooks import AgentHooks, ComposedHooks
     from nexura_agents.limits import ModelSettings, UsageLimits
     from nexura_agents.mcp.serve import AgentMCPServer
     from nexura_agents.mcp.toolset import MCPServer, mcp_tools
@@ -361,6 +369,7 @@ if TYPE_CHECKING:
     from nexura_agents.models.resilience import FallbackModel, RetryModel
     from nexura_agents.module_tools import module_tool
     from nexura_agents.openapi.toolset import openapi_tools
+    from nexura_agents.policy import default_hooks, set_default_hooks
     from nexura_agents.prompts import (
         FilePromptStore,
         InMemoryPromptStore,
@@ -398,7 +407,15 @@ if TYPE_CHECKING:
         TerminationCondition,
         TextMention,
     )
-    from nexura_agents.tools import SchemaTool, StopAtTools, Tool, ToolOutput, ToolRetry, tool
+    from nexura_agents.tools import (
+        SchemaTool,
+        StopAtTools,
+        Tool,
+        ToolInfo,
+        ToolOutput,
+        ToolRetry,
+        tool,
+    )
     from nexura_agents.types import (
         ApproveWith,
         Message,

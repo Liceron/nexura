@@ -7,8 +7,6 @@ from __future__ import annotations
 import pytest
 from nexura_guardrails import (
     CATEGORIES,
-    DEFAULT_JUDGE_CATEGORIES,
-    INDIAN_CATEGORY_IDS,
     LABEL_MAPS,
     Verdict,
     map_label,
@@ -61,26 +59,6 @@ def test_unmapped_labels_go_to_other_and_unknown_sources_fail() -> None:
         map_label("unknown_guard", "S1")
 
 
-def test_indian_categories_are_opt_in_and_pending_founder_review() -> None:
-    assert INDIAN_CATEGORY_IDS == (
-        "caste_hate",
-        "communal_hate",
-        "id_exposure_in",
-        "financial_fraud_in",
-        "election_in",
-    )
-    for item in INDIAN_CATEGORY_IDS:
-        category = CATEGORIES[item]
-        assert category.region == "in"
-        assert category.review_status == "pending founder review"
-        assert category.parent in CATEGORIES and CATEGORIES[category.parent].region == "global"
-    assert not set(INDIAN_CATEGORY_IDS) & set(DEFAULT_JUDGE_CATEGORIES)
-    assert "Aadhaar" in CATEGORIES["id_exposure_in"].title
-    assert "UPI" in CATEGORIES["financial_fraud_in"].description
-    assert "loan" in CATEGORIES["financial_fraud_in"].description
-    assert "religio" in CATEGORIES["communal_hate"].description
-
-
 def test_general_categories_are_approved() -> None:
     general = [c for c in CATEGORIES.values() if c.region == "global"]
     assert all(c.review_status == "approved" and c.parent is None for c in general)
@@ -92,8 +70,8 @@ def test_validate_and_policy_for() -> None:
     assert validate_categories("fraud") == ("fraud",)
     with pytest.raises(ValueError):
         validate_categories(["nope"])
-    text = policy_for(["caste_hate", "fraud"])
-    assert "- caste_hate:" in text and "- fraud:" in text and "Allow everything else." in text
+    text = policy_for(["hate", "fraud"])
+    assert "- hate:" in text and "- fraud:" in text and "Allow everything else." in text
 
 
 def test_verdict_validation_and_info() -> None:

@@ -5,6 +5,151 @@ engine saves a checkpoint after every step, so a run can pause for a human, surv
 process restart, retry a flaky step, or be forked from an earlier point. Everything on
 this page lives in `nexura_runtime.workflow` and runs without a model or a network.
 
+## Changing a workflow while runs are paused
+
+`WorkflowSpec.version` is your workflow's string or integer version. `spec_version=1`
+describes the JSON schema and stays unchanged. Checkpoints and `WorkflowRunResult`
+expose `workflow_version` and `definition_digest` (the checkpoint's `spec_hash`).
+Unversioned specs remain supported; a changed executable digest always needs an explicit
+migration or the old-definition option below. Presentation-only edits keep the digest.
+
+Register pure Python functions with `spec.register_migration(from_version, to_version,
+migrate)`. Each function receives `(from_version, to_version, state)` and returns a new
+JSON object. Register every edge needed for a chain, for example `1 -> 2 -> 3`.
+`resume`, `resume_interrupt` and `recover` automatically find and commit a path before
+continuing. `engine.migrate(run_id)` applies it without executing a node.
+
+This runnable example uses a local fake action and a disposable SQLite database:
+
+```python
+import asyncio
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from nexura_runtime.workflow import (
+    ModuleRegistry, SQLiteWorkflowStore, WorkflowEngine, WorkflowNode, WorkflowSpec,
+)
+
+
+async def main():
+    registry = ModuleRegistry()
+
+    async def local_fake_action(state):
+        return {"receipt": state["amount_cents"]}
+
+    registry.register("local_fake_action", local_fake_action, effect="pure")
+    v1 = WorkflowSpec(
+        name="payments", version=1, entry_node="send",
+        nodes={"send": WorkflowNode(
+            id="send", handler="local_fake_action", requires_approval=True,
+        )},
+    )
+    with TemporaryDirectory() as directory:
+        database = Path(directory) / "runs.sqlite3"
+        store = SQLiteWorkflowStore(database)
+        first = await WorkflowEngine(v1, registry, store=store).run({"amount": 5})
+        store.close_sync()
+
+        # A new process/deploy would reopen the same database and register these hooks.
+        v2 = WorkflowSpec.from_dict({**v1.to_dict(), "workflow_version": 2})
+
+        def migrate_amount(from_version, to_version, state):
+            return {"amount_cents": state["amount"] * 100}
+
+        v2.register_migration(1, 2, migrate_amount)
+        store = SQLiteWorkflowStore(database)
+        try:
+            engine = WorkflowEngine(v2, registry, store=store)
+            checkpoint = await engine.migrate(first.workflow_run_id)
+            assert checkpoint.workflow_version == 2
+            assert checkpoint.pending_approval.spec_hash == v1.canonical_hash()
+            # An old decision cannot authorize the changed definition or inputs.
+            fresh = await engine.resume(
+                first.workflow_run_id, first.pending_approval.approval_id,
+            )
+            assert fresh.status == "paused"
+            assert fresh.pending_approval.regate_reason == "definition_migrated"
+            done = await engine.resume(
+                first.workflow_run_id, fresh.pending_approval.approval_id,
+            )
+            assert done.state["receipt"] == 500
+        finally:
+            store.close_sync()
+
+
+asyncio.run(main())
+```
+
+Migration requires a journal-capable memory, SQLite or Postgres workflow store. The
+fenced journal stores the transformed checkpoint before the checkpoint table moves. A
+crash after that commit projects the saved result without invoking the function again.
+An uncommitted pure calculation can run again: hooks must not make provider calls, send
+messages, write files, or perform other effects. Exceptions or invalid output refuse the
+migration. The original journal-row digest remains the run's origin; journal state
+`definition_digest`, `workflow_version` and `definition` describe its active definition,
+and append-only `state_migrated` events describe each committed path.
+An in-flight idempotent or reconcilable intent must keep its bound inputs and node
+definition. Finish recovering that intent on the saved definition before migrating a
+change to those values; reusing its key for a different payload would be unsafe.
+
+Missing migration paths raise `WorkflowMigrationError` (a `WorkflowSpecMismatchError`).
+Changing a digest without changing the declared version also refuses. The paused node,
+pending approval/input/effect node IDs and in-flight intent node IDs must exist in the
+new graph; errors name missing IDs. IDs alone do not prove semantic compatibility.
+Pending child workflows retain their own state and definition checks: a parent migration
+does not transform a child's state. An incompatible paused child subgraph refuses the
+parent migration before any approval is claimed. Register a path on a changed child.
+
+`continue_on_old_definition=True` on `resume`, `resume_interrupt` or `recover` explicitly
+uses the journal's saved definition after checking node IDs against the proposed graph.
+It does not adopt the proposed graph or version. Keep the old handler implementations
+available in the registry; definition snapshots cannot preserve Python executable code.
+Runs predating saved definitions cannot use this fallback. Default calls fail closed.
+
+An approval stays bound to its original digest and payload through migration. Deciding
+it requests a fresh approval for the active definition, even if inputs are unchanged or
+the new graph removed its gate. No old decision is silently rebound. Unknown effects
+keep their intents, keys and resolution requirements; migration does not prove an
+external effect happened or permit repeating an uncertain non-idempotent action.
+
+The service exposes the active identity in `GET /api/v1/runs/{id}` and checkpoint
+history. Install trusted hooks on
+`app.state.workflow_migrations = {"payments": {(1, 2): migrate_amount}}`, then POST
+`{"resume": true}` to `/api/v1/runs/{id}/migrate` after updating the run's saved workflow
+to v2. The endpoint requires both `run` and `edit` permissions, ownership, resource-scope
+and approval-policy checks. It reads the target from that saved workflow and refuses
+ad-hoc run migrations and client-supplied specs. An optional
+`expected_definition_digest` must match the saved target. The workflow name must match
+the origin. A `RUN_DEFINITION_MIGRATED` event records the actor and from/to versions
+and digests. Hooks cannot be uploaded through JSON.
+`resume` defaults to true and recovers interrupted or
+effect-unknown runs. Approval and input pauses stay pending; use `/decide` or `/input`
+afterward. `resume: false` only migrates. `continue_on_old_definition` is an SDK-only
+option; service routes reject that field. Existing decide/input/recover endpoints use the journal's
+active definition after migration and retain their existing request contracts.
+The first-party clients send the same body: Python
+`await client.runs.migrate(run_id, expected_definition_digest=None, resume=True,
+on_uncertain="pause")` and TypeScript `client.runs.migrate(runId, {
+expectedDefinitionDigest, resume, onUncertain })`; neither takes a definition.
+
+A `/decide` or `/input` that races a `/migrate` (it read the old definition, and the
+migration committed before it claimed) returns 409 `WORKFLOW_DEFINITION_CHANGED`, records
+`RUN_DEFINITION_CHANGED` and never marks the run failed; nothing runs. If the approval or
+question was still pending, the same request can be sent again. If the stale request had
+already claimed it, the run is recovered under the new definition, which asks again: a
+fresh approval of the migrated input, or the question again. When that cannot happen at
+once (another worker holds the run lease), the run is left `interrupted` and
+`POST /runs/{id}/recover` asks again. `/migrate` on a run whose checkpoint already finished
+while its row still says `interrupted` records the finished result, as `/recover` does.
+
+Non-idempotent intents retain their effect identities. A changed binding requires a fresh
+approval before a `not_applied` retry, even if the new node removed its approval gate.
+Completed historical nodes may be removed; pending nodes and unresolved intents must remain.
+
+JSON definitions serialize the Python `version` as `workflow_version`. A legacy top-level
+`version` extension remains ignored, preserving pre-existing import hashes. Set
+`workflow_version` explicitly to opt an imported definition into workflow versioning.
+
 ## A first workflow
 
 ```python

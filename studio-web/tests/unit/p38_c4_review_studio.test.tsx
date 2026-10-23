@@ -1,4 +1,4 @@
-// P38 C4 review: Studio repros (from .autopilot/p38/c4_repros). Each asserts the secure behaviour; all three failed before the review fixes.
+// P38 C4 security review: Studio repros. Each asserts the secure behaviour; all three failed before the review fixes.
 import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from 'vitest';
 import { render, screen, waitFor, act } from '@testing-library/react';
 import { I18nProvider } from '../../src/i18n';
@@ -73,7 +73,7 @@ describe('C4 review repros (Studio)', () => {
     expect(leaked).toHaveLength(0);
   });
 
-  // Round 5 review B1 (repro moved from .autopilot/p36/round5_repros/r5_token_origin.test.tsx).
+  // Round 5 review B1: token origin boundary repro.
   it('a token accepted by https://remote.example is not sent to /api after a reload', async () => {
     const REMOTE = 'remote-operator-token-sentinel-0123456789';
     fetchSpy.mockImplementation(async (input, init) => {

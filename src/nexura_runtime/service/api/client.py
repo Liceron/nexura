@@ -285,6 +285,31 @@ class RunsClient:
         """
         return await self._root._request("GET", f"/runs/{_safe_quote(run_id)}/repro")
 
+    async def migrate(
+        self,
+        run_id: str,
+        *,
+        expected_definition_digest: str | None = None,
+        resume: bool = True,
+        on_uncertain: str = "pause",
+    ) -> dict[str, Any]:
+        """Migrate a run to its saved workflow's current definition and optionally recover it.
+
+        The target is always the run's saved workflow on the server (ad-hoc runs are
+        refused), migrated with the server's trusted hooks; the caller needs ``run`` and
+        ``edit``. ``expected_definition_digest`` refuses the call (409) if the saved
+        definition changed since you read it. Pending approvals and input stay pending.
+        Set ``resume=False`` to migrate only. Unknown effects pause by default;
+        ``on_uncertain="fail"`` fails them instead. Migration refusals raise
+        ``NexuraApiError`` with code ``WORKFLOW_MIGRATION_REFUSED``.
+        """
+        payload: dict[str, Any] = {"resume": resume, "on_uncertain": on_uncertain}
+        if expected_definition_digest is not None:
+            payload["expected_definition_digest"] = expected_definition_digest
+        return await self._root._request(
+            "POST", f"/runs/{_safe_quote(run_id)}/migrate", json_data=payload
+        )
+
     async def effects(self, run_id: str) -> dict[str, Any]:
         """List the run's journaled external effects: ``{"effects": [...]}``.
 
@@ -989,6 +1014,61 @@ class EvaluationsClient:
         self._root = root
         self.studio = StudioEvaluationsClient(root)
 
+    async def graders(self) -> dict[str, Any]:
+        """Retrieve supported grader types, trajectory modes, and evaluation JSON schemas."""
+        return await self._root._request("GET", "/evaluations/graders")
+
+    async def import_trace(self, trace: dict[str, Any]) -> dict[str, Any]:
+        """Import a recorded run snapshot for post-hoc grading; requires edit permission.
+
+        The snapshot requires ``run_id`` and an epoch-second ``timestamp``. Optional
+        fields include ``workflow_id``, ``agent_id``, ``output``, ``events`` and ``messages``.
+        The server redacts content before persistence.
+        """
+        return await self._root._request("POST", "/evaluations/traces", json_data=trace)
+
+    async def evaluate_online(
+        self,
+        example: dict[str, Any],
+        *,
+        graders: list[dict[str, Any]] | None = None,
+        config: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Grade stored traces against an example without executing a target.
+
+        Requires run permission. Omitted graders use tool trajectory grading; omitted
+        config uses the server's sampling and filter defaults. An explicit empty grader
+        list is sent unchanged so the server can reject it.
+        """
+        payload: dict[str, Any] = {"example": example}
+        if graders is not None:
+            payload["graders"] = graders
+        if config is not None:
+            payload["config"] = config
+        return await self._root._request("POST", "/evaluations/online", json_data=payload)
+
+    async def simulate(
+        self,
+        dataset_id: str,
+        *,
+        dataset_version: str | None = None,
+        agent_id: str | None = None,
+        graders: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Evaluate simulated conversations from a versioned dataset; requires run permission.
+
+        Agents and persona models are registered by the host. Omitted options use the
+        server's dataset version, local-fake agent and exact-match grader defaults.
+        """
+        payload: dict[str, Any] = {"dataset_id": dataset_id}
+        if dataset_version is not None:
+            payload["dataset_version"] = dataset_version
+        if agent_id is not None:
+            payload["agent_id"] = agent_id
+        if graders is not None:
+            payload["graders"] = graders
+        return await self._root._request("POST", "/evaluations/simulate", json_data=payload)
+
     async def list_datasets(self) -> dict[str, Any]:
         return await self._root._request("GET", "/evaluations/datasets")
 
@@ -1376,6 +1456,7 @@ class NexuraClient:
         ("GET", "/api/v1/runs/{run_id}/effects"): ("runs", "effects"),
         ("POST", "/api/v1/runs/{run_id}/effects/{effect_id}/resolve"): ("runs", "resolve_effect"),
         ("POST", "/api/v1/runs/{run_id}/recover"): ("runs", "recover"),
+        ("POST", "/api/v1/runs/{run_id}/migrate"): ("runs", "migrate"),
         # Descriptors & Capabilities
         ("GET", "/api/v1/modules"): ("modules", "list"),
         ("GET", "/api/v1/modules/{module_id}"): ("modules", "get"),
@@ -1428,6 +1509,10 @@ class NexuraClient:
         ("POST", "/api/v1/integrations/register"): ("integrations", "register"),
         # Evaluations (Core & Studio)
         ("GET", "/api/v1/evaluations/datasets"): ("evaluations", "list_datasets"),
+        ("GET", "/api/v1/evaluations/graders"): ("evaluations", "graders"),
+        ("POST", "/api/v1/evaluations/traces"): ("evaluations", "import_trace"),
+        ("POST", "/api/v1/evaluations/online"): ("evaluations", "evaluate_online"),
+        ("POST", "/api/v1/evaluations/simulate"): ("evaluations", "simulate"),
         ("POST", "/api/v1/evaluations/datasets"): ("evaluations", "create_dataset"),
         ("GET", "/api/v1/evaluations/datasets/{dataset_id}"): ("evaluations", "get_dataset"),
         ("DELETE", "/api/v1/evaluations/datasets/{dataset_id}"): ("evaluations", "delete_dataset"),
