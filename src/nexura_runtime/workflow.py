@@ -3175,6 +3175,15 @@ class WorkflowEngine:
 
         # Verify pending approval ID
         if (
+            checkpoint.status == "running"
+            and checkpoint.pending_approval is not None
+            and checkpoint.pending_approval.approval_id == approval_id
+        ):
+            # Another resume claimed this approval a moment ago and is running it.
+            raise ApprovalAlreadyClaimedError(
+                f"Approval '{approval_id}' for workflow '{workflow_run_id}' was already claimed."
+            )
+        if (
             checkpoint.status != "paused"
             or checkpoint.pending_approval is None
             or checkpoint.pending_approval.approval_id != approval_id

@@ -343,12 +343,17 @@ async def test_atomic_claim_prevents_duplicate_resume(tmp_path: Path) -> None:
     registry = ModuleRegistry()
 
     dispatch_count = 0
+    # The first resume is held inside the handler until the second has tried to claim, so
+    # the two resumes really overlap even on a slow machine (CI ran them one after another).
+    in_handler = asyncio.Event()
+    release = asyncio.Event()
 
     @registry.register_handler("critical_action")
     async def critical_action(state: dict[str, Any]) -> dict[str, Any]:
         nonlocal dispatch_count
         dispatch_count += 1
-        await asyncio.sleep(0.05)
+        in_handler.set()
+        await release.wait()
         return {"dispatched": True}
 
     spec = WorkflowSpec(
@@ -372,7 +377,14 @@ async def test_atomic_claim_prevents_duplicate_resume(tmp_path: Path) -> None:
         except ApprovalAlreadyClaimedError:
             return "claimed_conflict"
 
-    results = await asyncio.gather(try_resume(), try_resume())
+    async def try_resume_while_first_is_dispatching() -> str:
+        await asyncio.wait_for(in_handler.wait(), timeout=30)
+        try:
+            return await try_resume()
+        finally:
+            release.set()
+
+    results = await asyncio.gather(try_resume(), try_resume_while_first_is_dispatching())
 
     # Exactly one succeeded and one raised ApprovalAlreadyClaimedError
     assert "completed" in results

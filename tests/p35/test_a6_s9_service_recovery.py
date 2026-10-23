@@ -242,13 +242,14 @@ def test_live_lease_is_running_and_expiry_makes_it_interrupted(tmp_path: Path) -
     fakes = Fakes()
     app = _app(tmp_path, fakes)
     asyncio.run(_crashed_run(app, fakes, "run-l"))
-    asyncio.run(_hold_lease(app, "run-l", 1.0))
+    # A lease long enough to outlast a slow CI runner's startup, then waited out below.
+    asyncio.run(_hold_lease(app, "run-l", 4.0))
     with TestClient(app, raise_server_exceptions=False) as client:  # startup reconcile runs
         headers = local_headers(WS)
         assert client.get(f"{API}/runs/run-l", headers=headers).json()["status"] == "running"
         listed = client.get(f"{API}/runs", params={"status": "running"}, headers=headers)
         assert [r["run_id"] for r in listed.json()["items"]] == ["run-l"]
-        time.sleep(1.2)  # the other process stopped renewing: its lease expires
+        time.sleep(4.3)  # the other process stopped renewing: its lease expires
         run = client.get(f"{API}/runs/run-l", headers=headers).json()
         assert run["status"] == "interrupted"
         assert run["error"] == LEASE_EXPIRED_ERROR.replace("{run_id}", "run-l")

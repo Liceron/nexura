@@ -245,7 +245,11 @@ def test_approval_claimed_then_killed_is_consumed_and_nothing_dispatched(
     assert harness.ledger.applied("pay") == 0
     assert _checkpoint(harness, run_id).status == "running"
 
-    assert _resume_in_parent(harness, run_id, approval_id, gated=True) == "ApprovalError"
+    # The claimed approval is reported precisely (a subclass of ApprovalError), the same
+    # error a concurrent second resume gets.
+    assert _resume_in_parent(harness, run_id, approval_id, gated=True) == (
+        "ApprovalAlreadyClaimedError"
+    )
     assert harness.ledger.applied("pay") == 0
 
 
