@@ -7,6 +7,7 @@ Local FakeModels and an in-process ASGI transport only; never a paid provider.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,14 @@ FORMATS: list[StreamFormat] = ["native", "ag-ui", "ai-sdk"]
 CARD = "4111 1111 1111 1111"
 REPLY = "Thanks for asking. " * 3 + f"Card {CARD} is on file. " + "Goodbye now. " * 3
 CHECKED = REPLY.replace(CARD, "[REDACTED:card]")
+
+
+def leaked_card_digits(text: str) -> bool:
+    """True if the card's leading digits appear outside event timestamps.
+
+    Timestamps such as ``1792855522.154111`` can contain ``4111`` by chance.
+    """
+    return "4111" in re.sub(r'"timestamp": [0-9.]+', '"timestamp": 0', text)
 
 
 @pytest.fixture(autouse=True)
@@ -94,7 +103,7 @@ async def test_chunked_chat_streams_only_checked_windows(
         stream_guard=StreamGuard(mode="chunked", chunk_chars=16, overlap_chars=32),
     )
     text = await chat(tmp_path, monkeypatch, agent, format_)
-    assert "4111" not in text
+    assert not leaked_card_digits(text)
     if format_ == "native":
         runs = native_runs(text)
         started = next(e for e in runs if e["type"] == "MODEL_STARTED")
@@ -126,7 +135,7 @@ async def test_default_policy_holds_the_chat_reply_of_an_agent_without_guardrail
         model=FakeModel([REPLY], stream=True, chunk_size=3),
     )
     text = await chat(tmp_path, monkeypatch, agent, format_)
-    assert "4111" not in text
+    assert not leaked_card_digits(text)
     if format_ == "native":
         runs = native_runs(text)
         assert not any(e["type"] == "TEXT_DELTA" for e in runs)
@@ -153,7 +162,7 @@ async def test_chunked_trip_reports_guardrail_tripped_natively_and_errors_in_ada
         stream_guard=StreamGuard(mode="chunked", chunk_chars=16, overlap_chars=32),
     )
     text = await chat(tmp_path, monkeypatch, agent, format_)
-    assert "4111" not in text and "Card" not in adapted_text(text)
+    assert not leaked_card_digits(text) and "Card" not in adapted_text(text)
     if format_ == "native":
         runs = native_runs(text)
         tripped = next(e for e in runs if e["type"] == "GUARDRAIL_TRIPPED")["data"]
