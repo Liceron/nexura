@@ -119,7 +119,7 @@ Options: `policy` text, or `policy_file="policies/bank.md"`, or only `categories
 
 `context_tokens` is the judge model's context window in tokens, 4096 by default (Ollama's default `num_ctx`). Before each call the fully built prompt (the policy and instructions, the fenced text, the context and the tool name, after marker neutralisation) is measured with a conservative token estimate, `estimate_tokens`: one token per 3 ASCII letters and spaces; one token for every ASCII digit, punctuation mark or symbol (Qwen and Llama tokenizers split digits one by one); and for any other character its full UTF-8 length (3 tokens for each Devanagari, Tamil, Bengali or CJK character, 4 for an emoji). For byte-level tokenizers everything except runs of ASCII letters is then an upper bound. If it is more than `context_tokens - max_output_tokens - 256` (3,640 with the defaults), nothing is sent: the verdict is `error` with `error_type="ContentTooLong"` and `evidence["hard"] = True`. A hard error cannot be softened by any `on_error` setting, neither the judge's nor the one on `as_guardrail` or `as_tool_guardrail`, and inside `parallel` it wins over every other member's outcome (whatever the order or the deadline), so the guardrail always blocks. With the defaults and a short policy that leaves room for about 8,000 to 8,800 characters of English prose, 2,700 to 2,900 digits or symbols, or 880 to 970 Devanagari characters; `JudgeCheck` refuses at construction a policy that leaves no room at all.
 
-The reason: a small local model with a short context window silently drops the start of an over-long prompt, which is where the policy and the opening fence are, and an instruction at the end of the content would then no longer be inside any fence. To judge longer text, raise the model's context (Ollama `num_ctx`, in tokens) and set `context_tokens` to the same number; it must cover the estimated prompt plus `max_output_tokens`. Judging long content in overlapping windows, each with the full instructions, is planned for a later release; until then, check long tool results with the pre-filters, or split them yourself.
+The reason: a small local model with a short context window silently drops the start of an over-long prompt, which is where the policy and the opening fence are, and an instruction at the end of the content would then no longer be inside any fence. To judge longer text, raise the model's context (Ollama `num_ctx`, in tokens) and set `context_tokens` to the same number; it must cover the estimated prompt plus `max_output_tokens`. Judging long content in overlapping windows, each with the full instructions, is planned for a later release; until then, check long tool results with the pre-filters, or split them yourself. For a streamed reply, `Agent(stream_guard="chunked")` already checks it in windows of `chunk_chars` characters (see [Streaming replies](#streaming-replies)); the final check still sends the whole answer, so a reply over the cap fails closed after the shown windows.
 
 ### How the prompt resists injection
 
@@ -193,6 +193,61 @@ assert allowed.decision == "allow" and len(judge_model.calls) == 1
 - `cached(check, maxsize=256, ttl=None)` adds a verdict cache to any check.
 
 Compositions are checks, so they nest and convert with `as_guardrail`. Their usage is the sum of their members' usage.
+
+## Streaming replies
+
+Every check converted with `as_guardrail(check, stage="output")` is an ordinary output
+guardrail, so it holds a streamed reply like any other (P39 G4; see
+[Streaming and output guardrails](guardrails-hooks-limits.md#streaming-and-output-guardrails)).
+By default (`stream_guard="auto"`) nothing of the reply is streamed until every output check
+passed; the checked text, with redactions, arrives in `FINAL_OUTPUT`. With
+`Agent(stream_guard=StreamGuard(mode="chunked", chunk_chars=400, overlap_chars=120))` the
+checks run on each window and only text that passed is shown:
+
+- **Pre-filters** (`pii`, `injection`, `length`, `topics`) are regex and cost about 1 ms per
+  KB, so checking every window is cheap. Windows are raw model text, and their raw end is held
+  back and checked again with the next window, so `pii(action="redact")` sees a card, an
+  Aadhaar number or a key split across deltas or windows whole before any of it is shown,
+  even when a shorter prefix of it would match on its own. The hold-back is measured in
+  visible characters (zero-width and other invisible characters do not count), at least
+  `overlap_chars`; keep that at least as long as the longest value a check must see whole
+  (32 is the minimum).
+- **`JudgeCheck`** is called once per window plus once for the whole raw answer, each call
+  admitted against the run's budget and counted in its usage; `UsageLimits` are checked after
+  every window and `max_windows` (default 64) bounds the window calls per turn. Windows are
+  small, but the cap of the [content size](#content-size) section still applies to every
+  call, and an error verdict (timeout, budget refusal, malformed reply, content too long)
+  trips the window: nothing of it is shown. A judge that only blocks fits chunked mode; a
+  check that rewrites the whole answer differently from its windows makes the run fail
+  closed, because shown text cannot be taken back.
+- Text a model writes before tool calls passes the same checks (as one piece) before it is
+  stored, in every mode.
+
+```python
+import asyncio
+
+from nexura_agents import Agent, FakeModel, RunEventType, Runner, StreamGuard
+from nexura_guardrails import as_guardrail, pii
+
+reply = "Thanks for waiting. Card 4111 1111 1111 1111 is on file. Anything else?"
+agent = Agent(
+    name="Support",
+    instructions="Help.",
+    model=FakeModel(responses=[reply], stream=True, chunk_size=3),
+    output_guardrails=[as_guardrail(pii(["card"], action="redact"), stage="output")],
+    stream_guard=StreamGuard(mode="chunked", chunk_chars=16, overlap_chars=32),
+)
+
+
+async def main():
+    events = [e async for e in Runner().stream_async(agent, "Card?", stream_text=True)]
+    shown = [e.data["text"] for e in events if e.type == RunEventType.TEXT_DELTA]
+    assert len(shown) > 1 and not any("4111" in piece for piece in shown)
+    assert "".join(shown) == events[-1].data["output"]
+
+
+asyncio.run(main())
+```
 
 ## Tool guardrails
 
@@ -316,7 +371,7 @@ Always check dataset licenses before use. Datasets with non-commercial or restri
 
 - These checks are not a security boundary (see the first paragraph).
 - The judge is only as good as its model. Published recall for dedicated guard models ranges from about 70% to 97% depending on the dataset, is lower in Hindi, and is unknown for Tamil, Bengali or Hinglish. The project's Hindi and Hinglish test strings have not had a native-speaker review yet.
-- Streamed text deltas are not checked: output guardrails see the final text only.
+- Streamed replies are held until the output guardrails passed, or checked in windows with `Agent(stream_guard="chunked")` (see [Streaming replies](#streaming-replies)). A judge used in chunked mode is called once per window.
 - Agent guardrails, including a judge, are bounded by the run's `timeout` and stop when the run is cancelled; the judge's own `timeout` still bounds each call.
 
 ## See also

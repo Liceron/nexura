@@ -57,6 +57,7 @@ _EXPORTS: dict[str, str] = {
     "set_default_hooks": "nexura_agents.policy",
     "default_hooks": "nexura_agents.policy",
     "GuardrailResult": "nexura_agents.guardrails",
+    "StreamGuard": "nexura_agents.stream_guard",
     "detect_pii": "nexura_agents.guardrails_builtin",
     "redact_pii": "nexura_agents.guardrails_builtin",
     "block_pii": "nexura_agents.guardrails_builtin",
@@ -192,6 +193,7 @@ __all__ = [
     "set_default_hooks",
     "default_hooks",
     "GuardrailResult",
+    "StreamGuard",
     "detect_pii",
     "redact_pii",
     "block_pii",
@@ -393,6 +395,7 @@ if TYPE_CHECKING:
         retry_last_turn,
     )
     from nexura_agents.skills import Skill, SkillLibrary
+    from nexura_agents.stream_guard import StreamGuard
     from nexura_agents.teams import (
         GroupChat,
         GroupChatTurn,

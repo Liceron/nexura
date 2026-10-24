@@ -766,8 +766,108 @@ async def scenario_selftest(config: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True}
 
 
+# ------------------------------------------------- P39 G4: guarded streaming replies
+
+STREAM_SECRET = "4111 1111 1111 1111"
+STREAM_REPLY = "Thanks for waiting. " * 3 + f"Your card {STREAM_SECRET} is on file. " + "Bye. " * 4
+
+
+async def scenario_stream(config: dict[str, Any]) -> dict[str, Any]:
+    """A streamed agent reply under an output guardrail (``stream_guard`` hold or chunked).
+
+    Every event the consumer receives is appended to ``<name>.events.jsonl`` (flushed and
+    synced) before the next one is read, so a SIGKILL shows exactly what was delivered.
+    The guardrail marks ``in_guardrail_<n>`` on its n-th check (a kill point)."""
+    import os
+
+    from nexura_agents import (
+        Agent,
+        FakeModel,
+        GuardrailResult,
+        Runner,
+        RunRecoveryError,
+        ToolCall,
+        tool,
+    )
+    from nexura_agents.stream_guard import StreamGuard
+    from nexura_agents.types import Message, ModelResponse
+
+    store = _open_checkpoint_store(config)
+    runner = Runner(checkpoint_store=store, lease_ttl=float(config.get("lease_ttl", 2.0)))
+    checks = {"n": 0}
+
+    def scrub_card(ctx: RunContext[Any], output: Any) -> GuardrailResult:
+        checks["n"] += 1
+        h.point(f"in_guardrail_{checks['n']}", run_id=ctx.run_id)
+        text = str(output)
+        if STREAM_SECRET in text:
+            return GuardrailResult.rewritten(text.replace(STREAM_SECRET, "[card]"))
+        return GuardrailResult.passed()
+
+    @tool(idempotent=True)
+    def look_up(order: str) -> str:
+        """Look an order up (idempotent: safe to repeat after a crash)."""
+        h.point("in_tool")
+        return "on file"
+
+    replies: list[Any] = [STREAM_REPLY]
+    if config.get("pre_tool"):
+        # Text before a tool call: it is stored and journaled, so it is checked first.
+        replies.insert(
+            0,
+            ModelResponse(
+                message=Message(
+                    role="assistant",
+                    content=f"Checking card {STREAM_SECRET} now.",
+                    tool_calls=[ToolCall(id="c1", name="look_up", arguments={"order": "A1"})],
+                )
+            ),
+        )
+    agent = Agent(
+        name="Streamer",
+        instructions="Answer.",
+        model=FakeModel(replies, stream=True, chunk_size=4),
+        tools=[look_up],
+        output_guardrails=[scrub_card],
+        stream_guard=StreamGuard(
+            mode=config.get("stream_guard", "hold"), chunk_chars=20, overlap_chars=32
+        ),
+    )
+    log_path = Path(config["workdir"]) / f"{config['name']}.events.jsonl"
+
+    async def consume() -> dict[str, Any]:
+        if config["mode"] == "run":
+            stream = runner.stream_async(agent, "card?", stream_text=True)
+        else:
+            stream = runner.recover_stream_async(agent, config["run_id"], stream_text=True)
+        final: dict[str, Any] = {}
+        with log_path.open("a") as log:
+            async for event in stream:
+                keep = {k: event.data[k] for k in ("text", "output", "turn") if k in event.data}
+                log.write(json.dumps({"type": event.type.value, "data": keep}) + "\n")
+                log.flush()
+                os.fsync(log.fileno())
+                if event.type.value == "run_completed":
+                    final = {"status": "completed", "final_output": event.data["output"]}
+        return {**final, "run_id": config.get("run_id")}
+
+    deadline = time.monotonic() + float(config.get("claim_wait", 0))
+
+    async def attempt() -> dict[str, Any]:
+        while True:
+            try:
+                return await consume()
+            except RunRecoveryError as exc:
+                if "already being recovered" not in str(exc) or time.monotonic() > deadline:
+                    raise
+                await asyncio.sleep(0.1)
+
+    return await outcome(attempt, lambda value: value)
+
+
 SCENARIOS: dict[str, Callable[[dict[str, Any]], Coroutine[Any, Any, dict[str, Any]]]] = {
     "agent": scenario_agent,
+    "stream": scenario_stream,
     "workflow": scenario_workflow,
     "trigger": scenario_trigger,
     "service": scenario_service,

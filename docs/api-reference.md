@@ -104,7 +104,7 @@ when ``nexura_runtime`` is installed and imported.
 
 ### `Agent`
 
-class `Agent(name: 'str', instructions: 'Instructions', model: 'ModelProtocol | str', *, tools: 'Sequence[Tool] | None' = None, max_turns: 'int' = 10, max_tool_calls: 'int' = 20, timeout: 'float | None' = None, output_type: 'type[BaseModel] | dict[str, Any] | None' = None, output_retries: 'int' = 1, input_guardrails: 'Sequence[GuardrailFn]' = (), output_guardrails: 'Sequence[GuardrailFn]' = (), parallel_tool_calls: 'bool' = False, description: 'str' = '', memory: 'Memory | None' = None, handoffs: 'Sequence[Agent | Handoff]' = (), max_handoffs: 'int' = 10, history_processors: 'Sequence[HistoryProcessor]' = (), prepare_tools: 'PrepareTools | None' = None, model_settings: 'ModelSettings | None' = None, tool_use_behavior: 'ToolUseBehavior' = 'run_llm_again', output_validators: 'Sequence[OutputValidator]' = (), reset_tool_choice: 'bool' = True, ask_user: 'bool' = False) -> 'None'`
+class `Agent(name: 'str', instructions: 'Instructions', model: 'ModelProtocol | str', *, tools: 'Sequence[Tool] | None' = None, max_turns: 'int' = 10, max_tool_calls: 'int' = 20, timeout: 'float | None' = None, output_type: 'type[BaseModel] | dict[str, Any] | None' = None, output_retries: 'int' = 1, input_guardrails: 'Sequence[GuardrailFn]' = (), output_guardrails: 'Sequence[GuardrailFn]' = (), parallel_tool_calls: 'bool' = False, description: 'str' = '', memory: 'Memory | None' = None, handoffs: 'Sequence[Agent | Handoff]' = (), max_handoffs: 'int' = 10, history_processors: 'Sequence[HistoryProcessor]' = (), prepare_tools: 'PrepareTools | None' = None, model_settings: 'ModelSettings | None' = None, tool_use_behavior: 'ToolUseBehavior' = 'run_llm_again', output_validators: 'Sequence[OutputValidator]' = (), reset_tool_choice: 'bool' = True, ask_user: 'bool' = False, stream_guard: 'StreamGuardMode | StreamGuard' = 'auto') -> 'None'`
 
 ~~~text
 Stateless configuration defining an agent.
@@ -744,6 +744,8 @@ call for human approval. It can add an approval gate, never remove one.
   Called when the run finishes with its output; does nothing by default.
 - `on_run_start(self, ctx: 'RunContext[Any]') -> 'None'`
   Called once when a run starts; does nothing by default.
+- `output_guardrails(self, ctx: 'RunContext[Any]', agent: 'Agent') -> 'Sequence[Any]'`
+  Sync. Output guardrails these hooks add to ``agent``'s own (P39 G4).
 - `tool_needs_approval(self, ctx: 'RunContext[Any]', tool: 'Tool', arguments: 'Mapping[str, Any]') -> 'bool | None'`
   Sync. Return ``True`` to require human approval for this call.
 
@@ -769,6 +771,7 @@ Several hooks objects run as one: ``Runner(hooks=[policy, MyHooks()])``.
 - ``tool_needs_approval``: list order; any ``True`` requires approval (later members
   are not asked). No member can remove a gate the tool itself declares.
 - ``on_agent_end`` and ``on_run_end``: every member, in reverse list order.
+- ``output_guardrails``: every member's guardrails, concatenated in list order.
 
 So the first member is the outermost: its ``before_*`` hooks take over before the
 others and its ``after_*`` hooks see the final, replaced value. Put a policy first.
@@ -802,6 +805,8 @@ passed as one member) raises ``SDKValidationError``.
   Every member's ``on_run_end``, in reverse list order.
 - `on_run_start(self, ctx: 'RunContext[Any]') -> 'None'`
   Every member's ``on_run_start``, in list order.
+- `output_guardrails(self, ctx: 'RunContext[Any]', agent: 'Agent') -> 'Sequence[Any]'`
+  Every member's output guardrails, in list order.
 - `tool_needs_approval(self, ctx: 'RunContext[Any]', tool: 'Tool', arguments: 'Mapping[str, Any]') -> 'bool | None'`
   ``True`` when any member says so (list order, stopping at the first).
 
@@ -848,6 +853,22 @@ Outcome of one guardrail check. ``tripwire=True`` stops the run.
   Build a non-tripping result that replaces the final text output.
 - `tripped(cls, info: 'Any' = None) -> 'GuardrailResult'`
   Build a result whose tripwire stops the run.
+
+### `StreamGuard`
+
+class `StreamGuard(mode: 'StreamGuardMode' = 'auto', chunk_chars: 'int' = 400, overlap_chars: 'int' = 120, max_windows: 'int' = 64) -> None`
+
+~~~text
+Streaming settings for an agent with output guardrails (see the module docstring).
+
+``chunk_chars``: new characters per checked window (``"chunked"``). ``overlap_chars``:
+visible characters (after NFKC, without invisible characters) held back from each window
+and checked again with the next one; at least :data:`MIN_OVERLAP_CHARS` (32), default 120.
+Make it at least as long as the longest value a guardrail must see whole.
+``max_windows``: window checks per model turn (default 64); after that the rest of the
+turn is held until the check of the whole answer, so guardrail calls stay bounded.
+~~~
+
 
 ### `detect_pii`
 
@@ -2390,7 +2411,7 @@ Raised when a run exceeds a configured ``UsageLimits`` value.
 
 ### `OutputValidationError`
 
-class `OutputValidationError(message: str, *, raw_output: str, attempts: int) -> None`
+class `OutputValidationError(message: str, *, raw_output: str | None, attempts: int) -> None`
 
 ~~~text
 Raised when the model's final output still fails ``output_type`` after all retries.

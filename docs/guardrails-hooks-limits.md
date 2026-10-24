@@ -98,8 +98,10 @@ event. `action` is `"fail"` for a tripwire (also for a guardrail that crashed or
 with `error_type`), `"scrub"` for a rewrite and `"reject"` for a tool guardrail rejection.
 The event also holds `stage` (`"input"`, `"output"`, `"tool_input"` or `"tool_output"`),
 `guardrail` (the function's name), `agent` and `latency_ms`, plus `tool_name` and
-`tool_call_id` on tool stages. A tripwire's event comes just before `RUN_FAILED`; a tool
-guardrail's comes with that call's result.
+`tool_call_id` on tool stages. A tripwire's event comes just before `RUN_FAILED` (an
+output tripwire's is followed by `GUARDRAIL_TRIPPED`, see
+[Streaming and output guardrails](#streaming-and-output-guardrails)); a tool guardrail's
+comes with that call's result.
 
 The events are redacted: they never carry the checked text, the rejection message or your
 `info`. From a mapping `info` they copy only plain classification fields: `categories`,
@@ -222,7 +224,129 @@ Tripwire evidence (`exc.info`) holds the reason, the kinds, character spans and 
 
 ### Rewriting output
 
-A guardrail can change the final text instead of stopping the run by returning `GuardrailResult.rewritten(new_text, info)`. This is how `redact_output_pii` works. The rewrite applies to output guardrails only, to text output only, and later guardrails see the rewritten text. The caller receives the new text and the stored session history holds it too. Returning a rewrite for an agent that has `output_type` fails the run with `TypeError`; `redact_output_pii` instead trips when structured output contains PII (set `on_structured="pass"` to let it through unredacted). Streamed text deltas are not rewritten.
+A guardrail can change the final text instead of stopping the run by returning `GuardrailResult.rewritten(new_text, info)`. This is how `redact_output_pii` works. The rewrite applies to output guardrails only, to text output only, and later guardrails see the rewritten text. The caller receives the new text and the stored session history holds it too. Returning a rewrite for an agent that has `output_type` fails the run with `TypeError`; `redact_output_pii` instead trips when structured output contains PII (set `on_structured="pass"` to let it through unredacted). With `stream_text=True` the consumer never sees the text before the rewrite: see [Streaming and output guardrails](#streaming-and-output-guardrails).
+
+### Streaming and output guardrails
+
+With `Runner.stream_async(..., stream_text=True)` the model's text arrives as `TEXT_DELTA`
+events while it is written. Output guardrails need the text first, so when the active agent
+has any output guardrail (its own `output_guardrails`, or guardrails that the run's hooks
+contribute through `AgentHooks.output_guardrails`, see [Policies](#policies-default-hooks-for-every-run))
+its reply is never streamed unchecked. `Agent(stream_guard=...)` chooses how:
+
+| `stream_guard` | Reply text the consumer sees |
+| --- | --- |
+| `"auto"` (default) | `"hold"` when the agent has output guardrails, otherwise every delta as it is written (unchanged) |
+| `"hold"` | No `TEXT_DELTA` for the reply. The checked text arrives in `FINAL_OUTPUT` once every output guardrail passed, with rewrites applied |
+| `"chunked"` | Opt-in. `TEXT_DELTA` events with `checked: True`, each shown only after every output guardrail passed it (see below) |
+| `"passthrough"` | Today's behaviour: deltas as written, the final answer checked afterwards. Only for the agent's own guardrails; guardrails from hooks (a policy) still hold |
+
+The turn's `MODEL_STARTED` event carries `stream_guard: "hold"` or `"chunked"` when the reply
+is checked before it is shown, so a client can show "checking reply" instead of a typing
+indicator. Agents without output guardrails stream exactly as before (no new keys).
+
+**Chunked mode** (`StreamGuard(mode="chunked", chunk_chars=400, overlap_chars=120,
+max_windows=64)`) checks the reply in windows of raw model text. Each time `chunk_chars` new
+characters arrive, every output guardrail runs on the window: the new text plus the raw text
+held back from the previous window. A window that passes is shown, rewritten if a guardrail
+rewrote it, except its raw end, which is held back and checked again, still raw, with the next
+window. The held part is at least `overlap_chars` visible characters (counted after NFKC,
+without zero-width and other invisible characters, with a whitespace run counted once), and
+when a rewrite changed anything inside it (a match cut short by the window end), everything
+from the window's first change on. So a value split across deltas or windows is seen whole,
+raw, before any of it is shown, as long as it is no longer than `overlap_chars` visible
+characters. When the reply is complete, the output guardrails check the whole raw answer once
+more, and only then is the rest shown. Things to know:
+
+- `overlap_chars` must be at least 32 (`MIN_OVERLAP_CHARS`); 0 is refused. Set it to at least
+  the longest value a guardrail must see whole.
+- Each guardrail runs once per window plus once on the whole answer, so a model judge costs
+  about `ceil(len / chunk_chars) + 1` calls per turn. Their usage counts for the run at once,
+  and `UsageLimits` caps are checked after every window: past a cap the run fails before
+  anything more is shown. After `max_windows` window checks in a turn (default 64) the rest of
+  the turn is held until the check of the whole answer. A judge's own input cap still applies:
+  content over it is an error verdict, which fails closed.
+- Shown text cannot be taken back. If the check of the whole answer rewrites text that was
+  already shown, the run fails closed (`GuardrailTripwireTriggered` with guardrail
+  `"stream_guard"`). Use rewriters that work on windows, such as PII redaction. A model
+  refusal that arrives after text was shown also ends this way (the refusal is put before
+  the text it follows).
+- Agents with `output_type` use `"hold"` (partial JSON is not shown).
+- `after_model` hooks see the complete response after it streamed; to check streamed text,
+  contribute output guardrails instead.
+
+**Text written before tool calls** is not a final answer, but it is kept in the transcript,
+journaled in checkpoints, saved with the session and shown in chat transcripts. So, whenever
+the agent has output guardrails (in any mode except `"passthrough"`, with or without
+`stream_text`), the whole text passes the output guardrails before it is stored: a rewrite is
+what gets stored (and, in chunked mode, shown), a trip stops the run before any of the tools
+run (`GUARDRAIL_TRIPPED` with `phase: "chunk"`). An agent with `output_type` gets parsed
+answers in its guardrails, so its text before tool calls is not kept at all.
+
+**Other places a reply could appear** are covered too, for agents with output guardrails:
+
+- With `tool_use_behavior="stop_on_first_tool"` or `StopAtTools`, a tool result may be the
+  final answer, so `TOOL_COMPLETED` of such a call has `result_withheld: True` instead of
+  `result`; the checked answer arrives in `FINAL_OUTPUT`. The tool message in the transcript
+  keeps the tool's result (scrub tool results with tool output guardrails).
+- A typed reply that fails validation is never checked by the output guardrails, so `RETRY`,
+  `RUN_FAILED` and `OutputValidationError` give only the locations and kinds of the problems,
+  never the values (`raw_output` is `None`), and the rejected reply is replaced in the
+  transcript by a fixed note before the retry.
+- With content capture on ([tracing](observability.md)), the model call's span leaves the reply
+  text out; the checked answer is recorded on the run span as `nexura.output.checked`.
+- `hooks.output_guardrails` is asked at the start of each model turn and again for the final
+  check. If guardrails appear only at the final check after unchecked text was streamed, the
+  run fails closed (`"stream_guard"`, `shown: True`).
+
+A trip stops the run: the blocked window is never shown, and the events are
+`GUARDRAIL_DECISION` (`action: "fail"`), `GUARDRAIL_TRIPPED` and `RUN_FAILED`.
+`GUARDRAIL_TRIPPED` has `stage` (`"output"`), `guardrail`, `agent`, `turn`, `phase`
+(`"chunk"` for a window or text written before tool calls, `"final"` for the whole answer),
+`stream_guard` (the turn's mode, or `None` without `stream_text`) and `shown` (`True` when
+checked text of the reply was already shown, so a client should discard it), never any
+content. The frontend adapters pass this on as a `guardrail-tripped` notice with
+`discard: true` (see [Streaming to frontends](streaming-to-frontends.md)).
+
+```python
+import asyncio
+
+from nexura_agents import (
+    Agent,
+    FakeModel,
+    RunEventType,
+    Runner,
+    StreamGuard,
+    redact_output_pii,
+)
+
+reply = "Your card 4111 1111 1111 1111 is on file. Anything else I can help with today?"
+
+
+async def stream(mode):
+    agent = Agent(
+        name="Support",
+        instructions="Help.",
+        model=FakeModel(responses=[reply], stream=True, chunk_size=3),
+        output_guardrails=[redact_output_pii(["card"])],
+        stream_guard=mode,
+    )
+    events = [e async for e in Runner().stream_async(agent, "Which card?", stream_text=True)]
+    shown = [e.data["text"] for e in events if e.type == RunEventType.TEXT_DELTA]
+    final = next(e.data["output"] for e in events if e.type == RunEventType.FINAL_OUTPUT)
+    return shown, final
+
+
+shown, final = asyncio.run(stream("auto"))  # held: nothing until the check passed
+assert shown == [] and final == reply.replace("4111 1111 1111 1111", "[REDACTED:card]")
+
+shown, final = asyncio.run(stream(StreamGuard(mode="chunked", chunk_chars=12, overlap_chars=32)))
+assert len(shown) > 1 and all("4111" not in piece for piece in shown)
+assert "".join(shown) == final
+```
+
+The service's chat and run streams and the [frontend adapters](streaming-to-frontends.md)
+use this rule; Studio shows "Checking reply…" while a held reply is checked.
 
 ### Limitations
 
@@ -599,6 +723,30 @@ remember to pass it. `set_default_hooks(policy)` installs hooks that every `Runn
 - Hooks get copies of the tool call: changing `call.arguments` in `before_tool` or
   `after_tool` changes neither what runs (the approved, checked arguments) nor what other
   hooks see.
+- **A policy checks final answers with `output_guardrails(ctx, agent)`**, a sync hook that
+  returns guardrail functions. They run after the agent's own output guardrails (a
+  `ComposedHooks` concatenates its members' lists in order), also on answers chosen by
+  `tool_use_behavior`, and they hold streamed text like the agent's own: an agent's
+  `stream_guard="passthrough"` cannot stream past them. Return the same guardrails for the
+  same agent every time; a non-list, a non-function or an `async def` method fails the run
+  with `SDKValidationError`.
+
+```python
+from nexura_agents import Agent, AgentHooks, FakeModel, Runner, redact_output_pii, set_default_hooks
+
+
+class RedactCards(AgentHooks):
+    def output_guardrails(self, ctx, agent):
+        return [redact_output_pii(["card"])]
+
+
+set_default_hooks(RedactCards())
+try:
+    agent = Agent(name="Plain", instructions="Help.", model=FakeModel(["Card 4111 1111 1111 1111."]))
+    assert Runner().run(agent, "Card?").output == "Card [REDACTED:card]."
+finally:
+    set_default_hooks(None)
+```
 
 ```python
 from nexura_agents import Agent, AgentHooks, FakeModel, Runner, ToolCall, set_default_hooks, tool

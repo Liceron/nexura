@@ -91,6 +91,18 @@ class AgentHooks:
         """
         return None
 
+    def output_guardrails(self, ctx: RunContext[Any], agent: Agent) -> Sequence[Any]:
+        """Sync. Output guardrails these hooks add to ``agent``'s own (P39 G4).
+
+        A policy installed with ``set_default_hooks`` or inherited from an enclosing run
+        uses this to check every final answer. The guardrails run after the agent's own,
+        in order, exactly like ``Agent(output_guardrails=...)``, and they count for
+        streaming: with them the reply is held (or checked in windows) before it is shown,
+        and ``Agent(stream_guard="passthrough")`` cannot opt them out. Return the same
+        guardrails for the same agent every time (it is asked per model turn). Default: none.
+        """
+        return ()
+
     async def on_run_end(self, ctx: RunContext[Any], output: Any) -> None:
         """Called when the run finishes with its output; does nothing by default."""
         return None
@@ -128,6 +140,7 @@ HOOK_NAMES = (
     "on_agent_start",
     "on_agent_end",
     "on_handoff",
+    "output_guardrails",
 )
 
 
@@ -173,6 +186,7 @@ class ComposedHooks(AgentHooks):
     - ``tool_needs_approval``: list order; any ``True`` requires approval (later members
       are not asked). No member can remove a gate the tool itself declares.
     - ``on_agent_end`` and ``on_run_end``: every member, in reverse list order.
+    - ``output_guardrails``: every member's guardrails, concatenated in list order.
 
     So the first member is the outermost: its ``before_*`` hooks take over before the
     others and its ``after_*`` hooks see the final, replaced value. Put a policy first.
@@ -304,6 +318,50 @@ class ComposedHooks(AgentHooks):
             if approval_vote(member, ctx, copy.copy(tool), copy.deepcopy(dict(arguments))):
                 return True
         return None
+
+    def output_guardrails(self, ctx: RunContext[Any], agent: Agent) -> Sequence[Any]:
+        """Every member's output guardrails, in list order."""
+        found: list[Any] = []
+        for member in self._members:
+            found.extend(hook_output_guardrails(member, ctx, agent))
+        return tuple(found)
+
+
+def hook_output_guardrails(hooks: Any, ctx: RunContext[Any], agent: Agent) -> tuple[Any, ...]:
+    """``hooks.output_guardrails(ctx, agent)`` checked: a sync method returning a list of
+    guardrail functions; a missing method contributes nothing."""
+    method = getattr(hooks, "output_guardrails", None)
+    if method is None:
+        return ()
+    if not callable(method):
+        # A list assigned as a class attribute (``output_guardrails = [check]``) would
+        # otherwise add no guardrail and no hold: fail closed instead.
+        raise SDKValidationError(
+            f"AgentHooks.output_guardrails of {_member_name(hooks)} must be a method "
+            "(def output_guardrails(self, ctx, agent): return [...]), not "
+            f"{type(method).__name__}."
+        )
+    value = method(ctx, agent)
+    if inspect.isawaitable(value):
+        if inspect.iscoroutine(value):
+            value.close()  # never awaited: avoid the "never awaited" warning
+        raise SDKValidationError(
+            f"AgentHooks.output_guardrails of {_member_name(hooks)} must be a regular (sync) "
+            "method; it returned an awaitable."
+        )
+    if value is None:
+        return ()
+    if isinstance(value, (str, bytes, Mapping)) or not isinstance(value, Sequence):
+        raise SDKValidationError(
+            f"AgentHooks.output_guardrails of {_member_name(hooks)} must return a list of "
+            f"guardrail functions, not {type(value).__name__}."
+        )
+    if not all(callable(fn) for fn in value):
+        raise SDKValidationError(
+            f"AgentHooks.output_guardrails of {_member_name(hooks)} returned a value that is "
+            "not a function."
+        )
+    return tuple(value)
 
 
 def _call_copy(call: ToolCall) -> ToolCall:

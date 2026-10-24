@@ -17,12 +17,18 @@ class RunEventType(StrEnum):
     MODEL_STARTED = "model_started"
     MODEL_COMPLETED = "model_completed"
     TOOL_STARTED = "tool_started"
+    # data "tool_call_id", "tool_name", "result". When the result may become the final answer
+    # (tool_use_behavior) of an agent with output guardrails, "result_withheld": True instead
+    # of "result": the checked answer arrives in FINAL_OUTPUT (P39 G4).
     TOOL_COMPLETED = "tool_completed"
     FINAL_OUTPUT = "final_output"
     RUN_COMPLETED = "run_completed"
     RUN_FAILED = "run_failed"
     RUN_CANCELLED = "run_cancelled"
     # Model text as it is generated (only when streaming is requested and supported).
+    # data "turn", "text". When the active agent has output guardrails the reply is not
+    # streamed unchecked (Agent(stream_guard=...), P39 G4): "hold" sends none (the checked
+    # text is in FINAL_OUTPUT); "chunked" sends only checked windows, with "checked": True.
     TEXT_DELTA = "text_delta"
     # A tool error or invalid output was sent back to the model to try again.
     RETRY = "retry"
@@ -49,6 +55,14 @@ class RunEventType(StrEnum):
     # "cached", "rule", "decision" and "error_type". Never the checked content, the
     # rejection message or other info. Precedes RUN_FAILED when the run stops.
     GUARDRAIL_DECISION = "guardrail_decision"
+    # An output guardrail stopped the reply (P39 G4). data "stage" ("output"), "guardrail",
+    # "agent", "turn", "phase" ("chunk": a streamed window or text written before tool
+    # calls, "final": the whole answer),
+    # "stream_guard" (the turn's mode: "hold", "chunked", "passthrough", or None when text
+    # was not streamed) and "shown" (True when checked text of this reply was already
+    # shown, so a client should discard it). Never the checked or blocked text. Follows the
+    # GUARDRAIL_DECISION of the trip and precedes RUN_FAILED.
+    GUARDRAIL_TRIPPED = "guardrail_tripped"
     # Team streaming (Team.stream_async). data has "team" and "member_path" (list of path
     # segments of the team inside the root team; empty for the root team).
     TEAM_STARTED = "team_started"

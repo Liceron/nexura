@@ -1144,21 +1144,10 @@ async def _chat_event_stream(
     t0 = time.perf_counter()
     try:
         chat_agent = agent or _build_playground_agent(payload, model, knowledge_tool, has_documents)
-        # P38 C3 review: hold text until the active agent's output guardrails pass.
-        # Traverse handoffs without executing them; unknown agents fail closed.
-        guarded: dict[str, bool] = {}
-        pending_agents = [chat_agent]
-        seen_agents: set[int] = set()
-        while pending_agents:
-            candidate = pending_agents.pop()
-            if id(candidate) in seen_agents:
-                continue
-            seen_agents.add(id(candidate))
-            guarded[candidate.name] = guarded.get(candidate.name, False) or bool(
-                candidate.output_guardrails
-            )
-            pending_agents.extend(handoff.agent for handoff in candidate.handoffs)
-        hold_text = bool(chat_agent.output_guardrails)
+        # P39 G4: the Runner itself holds reply text until the active agent's output
+        # guardrails (its own and any policy hooks') pass, or shows only checked windows
+        # (stream_guard="chunked"). Handoff targets follow their own setting, so this source
+        # forwards TEXT_DELTA as the Runner emits it (P38 C3's own holding is replaced).
         stream = runner.stream_async(
             chat_agent,
             payload.message,
@@ -1170,10 +1159,6 @@ async def _chat_event_stream(
             paused: Any = None
             async with aclosing(stream):
                 async for event in stream:
-                    if event.type == RunEventType.AGENT_STARTED:
-                        hold_text = guarded.get(str(event.data.get("agent")), True)
-                    if event.type == RunEventType.TEXT_DELTA and hold_text:
-                        continue
                     events.append(event)
                     seq += 1
                     if event.type == RunEventType.TEXT_DELTA:

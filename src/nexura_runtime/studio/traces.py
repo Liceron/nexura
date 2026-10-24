@@ -44,6 +44,8 @@ _KEPT = frozenset(
         "run_cancelled",
         "run_paused",
         "final_output",
+        # P39 G4: which output guardrail stopped a reply (no content in it).
+        "guardrail_tripped",
     }
 )
 _DROP_KEYS = frozenset({"messages", "state", "last_agent", "usage_by_agent", "usage_by_model"})

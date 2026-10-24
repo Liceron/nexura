@@ -152,15 +152,25 @@ def _check_node(root: dict[str, Any], node: Any, path: str, problems: list[str])
                 _check_node(root, sub, f"$defs.{name}", problems)
 
 
-def validate_instance(schema: dict[str, Any], value: Any) -> list[str]:
-    """Return human-readable errors (empty when ``value`` matches ``schema``)."""
+def validate_instance(schema: dict[str, Any], value: Any, *, show_values: bool = True) -> list[str]:
+    """Return human-readable errors (empty when ``value`` matches ``schema``).
+
+    ``show_values=False`` leaves the checked values out of the messages (only locations,
+    expected types and limits), for text that has not passed output guardrails yet.
+    """
     errors: list[str] = []
-    _validate(schema, schema, value, "$", errors, 0)
+    _validate(schema, schema, value, "$", errors, 0, show_values)
     return errors
 
 
 def _validate(
-    root: dict[str, Any], node: dict[str, Any], value: Any, path: str, errors: list[str], depth: int
+    root: dict[str, Any],
+    node: dict[str, Any],
+    value: Any,
+    path: str,
+    errors: list[str],
+    depth: int,
+    show: bool = True,
 ) -> None:
     if len(errors) >= _MAX_ERRORS:
         return
@@ -170,7 +180,7 @@ def _validate(
     if "$ref" in node:
         target = _resolve(root, node["$ref"])
         if target is not None:
-            _validate(root, target, value, path, errors, depth + 1)
+            _validate(root, target, value, path, errors, depth + 1, show)
         siblings = {k: v for k, v in node.items() if k != "$ref"}
         if not siblings:
             return
@@ -182,14 +192,17 @@ def _validate(
             errors.append(f"{path}: expected {' or '.join(names)}, got {_type_name(value)}")
             return
     if "enum" in node and not any(_same(value, option) for option in node["enum"]):
-        errors.append(f"{path}: {value!r} is not one of {node['enum']!r}")
+        shown = repr(value) if show else "the value"
+        errors.append(f"{path}: {shown} is not one of {node['enum']!r}")
     if "const" in node and not _same(value, node["const"]):
-        errors.append(f"{path}: expected the constant {node['const']!r}, got {value!r}")
+        got = f", got {value!r}" if show else ""
+        errors.append(f"{path}: expected the constant {node['const']!r}{got}")
     if _is_number(value):
+        number = str(value) if show else "the value"
         if "minimum" in node and value < node["minimum"]:
-            errors.append(f"{path}: {value} is less than the minimum {node['minimum']}")
+            errors.append(f"{path}: {number} is less than the minimum {node['minimum']}")
         if "maximum" in node and value > node["maximum"]:
-            errors.append(f"{path}: {value} is greater than the maximum {node['maximum']}")
+            errors.append(f"{path}: {number} is greater than the maximum {node['maximum']}")
     if isinstance(value, str):
         if "minLength" in node and len(value) < node["minLength"]:
             errors.append(f"{path}: text is shorter than minLength {node['minLength']}")
@@ -203,7 +216,7 @@ def _validate(
         items = node.get("items")
         if isinstance(items, dict):
             for index, element in enumerate(value):
-                _validate(root, items, element, f"{path}[{index}]", errors, depth + 1)
+                _validate(root, items, element, f"{path}[{index}]", errors, depth + 1, show)
     if isinstance(value, dict):
         for name in node.get("required", []):
             if name not in value:
@@ -212,11 +225,12 @@ def _validate(
         extra = node.get("additionalProperties")
         for name, member in value.items():
             if name in props:
-                _validate(root, props[name], member, f"{path}.{name}", errors, depth + 1)
+                _validate(root, props[name], member, f"{path}.{name}", errors, depth + 1, show)
             elif extra is False:
-                errors.append(f"{path}: unexpected property '{name}'")
+                errors.append(f"{path}: unexpected property" + (f" '{name}'" if show else ""))
             elif isinstance(extra, dict):
-                _validate(root, extra, member, f"{path}.{name}", errors, depth + 1)
+                where = f"{path}.{name}" if show else f"{path}.*"
+                _validate(root, extra, member, where, errors, depth + 1, show)
 
 
 def _matches_type(name: str, value: Any) -> bool:

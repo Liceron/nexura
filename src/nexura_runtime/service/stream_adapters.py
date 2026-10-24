@@ -222,6 +222,16 @@ class _Adapter:
             out += self.close_text(scope)
         elif kind == "TEXT_DELTA":
             out += self.content(scope, data.get("text"))
+        elif kind == "GUARDRAIL_TRIPPED":
+            # P39 G4: an output guardrail stopped a reply. When checked text of it was
+            # already shown (chunked mode), tell the client to discard it. No content.
+            if data.get("shown") is True or data.get("stream_guard") == "chunked":
+                out += self.close_text(scope)
+                notice: dict[str, Any] = {"discard": data.get("shown") is True}
+                for field in ("phase", "stream_guard"):
+                    if isinstance(data.get(field), str):
+                        notice[field] = data[field]
+                out.append(self.custom("guardrail-tripped", notice))
         elif kind == "FINAL_OUTPUT" and scope not in self.saw_text:
             out += self.content(scope, data.get("output"))
             out += self.close_text(scope)

@@ -21,6 +21,7 @@ from nexura_agents.json_schema import check_schema
 from nexura_agents.limits import ModelSettings
 from nexura_agents.models.base import ModelProtocol
 from nexura_agents.run_context import RunContext
+from nexura_agents.stream_guard import StreamGuard, StreamGuardMode, coerce_stream_guard
 from nexura_agents.tools import StopAtTools, Tool
 from nexura_agents.types import OutputT
 
@@ -99,6 +100,7 @@ class Agent(Generic[OutputT]):  # noqa: UP046 (a TypeVar default needs typing_ex
         output_validators: Sequence[OutputValidator] = (),
         reset_tool_choice: bool = True,
         ask_user: bool = False,
+        stream_guard: StreamGuardMode | StreamGuard = "auto",
     ) -> None: ...
 
     @overload
@@ -128,6 +130,7 @@ class Agent(Generic[OutputT]):  # noqa: UP046 (a TypeVar default needs typing_ex
         output_validators: Sequence[OutputValidator] = (),
         reset_tool_choice: bool = True,
         ask_user: bool = False,
+        stream_guard: StreamGuardMode | StreamGuard = "auto",
     ) -> None: ...
 
     @overload
@@ -157,6 +160,7 @@ class Agent(Generic[OutputT]):  # noqa: UP046 (a TypeVar default needs typing_ex
         output_validators: Sequence[OutputValidator] = (),
         reset_tool_choice: bool = True,
         ask_user: bool = False,
+        stream_guard: StreamGuardMode | StreamGuard = "auto",
     ) -> None: ...
 
     def __init__(
@@ -185,6 +189,7 @@ class Agent(Generic[OutputT]):  # noqa: UP046 (a TypeVar default needs typing_ex
         output_validators: Sequence[OutputValidator] = (),
         reset_tool_choice: bool = True,
         ask_user: bool = False,
+        stream_guard: StreamGuardMode | StreamGuard = "auto",
     ) -> None:
         # The constructor arguments, so clone() can rebuild the agent with overrides.
         self._init_kwargs: dict[str, Any] = {
@@ -215,6 +220,9 @@ class Agent(Generic[OutputT]):  # noqa: UP046 (a TypeVar default needs typing_ex
         self.output_retries = output_retries
         self.input_guardrails: tuple[GuardrailFn, ...] = tuple(input_guardrails)
         self.output_guardrails: tuple[GuardrailFn, ...] = tuple(output_guardrails)
+        # How streamed text meets output guardrails (P39 G4): "auto" holds the reply when
+        # there are output guardrails; "chunked" checks it in windows (see stream_guard.py).
+        self.stream_guard: StreamGuard = coerce_stream_guard(stream_guard)
         self.parallel_tool_calls = parallel_tool_calls
         # Shape the per-call copy of the conversation (trimming, redaction); see history.py
         self.history_processors = check_processors(history_processors)

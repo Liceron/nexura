@@ -5,6 +5,56 @@ has been published.
 
 ## Unreleased (0.4.0)
 
+### Added (P39 G4: streaming and output guardrails)
+- `Agent(stream_guard=...)` and `StreamGuard(mode, chunk_chars=400, overlap_chars=120)`:
+  with `stream_text=True`, an agent with output guardrails never streams its reply
+  unchecked. `"auto"` (default) holds it until every output guardrail passed and delivers
+  the checked text in `FINAL_OUTPUT`; opt-in `"chunked"` checks the reply in windows with
+  every output guardrail and emits only windows that passed (`TEXT_DELTA` with
+  `checked: True`), holding back an overlap so a value split across deltas is seen whole;
+  `"passthrough"` keeps the old behaviour for an agent's own guardrails only. The turn's
+  `MODEL_STARTED` carries `stream_guard` when the reply is checked first.
+- `RunEventType.GUARDRAIL_TRIPPED` (deferred from G1): after the `GUARDRAIL_DECISION` of an
+  output tripwire and before `RUN_FAILED`, with `stage`, `guardrail`, `agent`, `turn`,
+  `phase` (`chunk`/`final`), `stream_guard` and `shown`; never content.
+- `AgentHooks.output_guardrails(ctx, agent)`: hooks (a default or inherited policy) add output
+  guardrails that run after the agent's own, also hold streamed text, and cannot be opted
+  out with `passthrough`. `ComposedHooks` concatenates members' lists in order.
+- Studio Playground shows "Checking reply…" (English and Hindi) for a guarded agent's
+  reply, then only checked text; a trip discards anything shown.
+
+### Fixed (P39 G4 review)
+- Chunked mode holds back the RAW end of each window (at least `overlap_chars` visible
+  characters, measured after NFKC without invisible characters, and everything from a
+  rewrite that reached it) and checks the whole raw answer at the end, so a key or a card
+  with a Luhn-valid prefix cut by a window end is never shown or stored in part.
+  `overlap_chars` must be at least 32; `StreamGuard(max_windows=64)` bounds window checks per
+  turn (the rest is held until the final check); `UsageLimits` are checked after every window.
+- Text written before tool calls passes the output guardrails before it is stored, journaled
+  or shown (all modes except `passthrough`); typed agents' is withheld.
+- `TOOL_COMPLETED` of a call whose result may end the run (`tool_use_behavior`) has
+  `result_withheld: True` instead of the result for agents with output guardrails.
+- Typed-output validation errors (`RETRY`, `RUN_FAILED`, `OutputValidationError`) carry
+  locations and kinds only, never values; `raw_output` is `None` for guarded agents and the
+  rejected reply is replaced in the transcript by a fixed note.
+- A non-method `output_guardrails` attribute on hooks, or a hook that raises, fails the run
+  with `RUN_FAILED`; guardrails that appear after unchecked text was streamed fail closed.
+- Content capture records the checked answer (`nexura.output.checked`), not the raw reply,
+  for agents with output guardrails.
+- The AG-UI and AI SDK adapters pass on `nexura.guardrail-tripped` with `discard` after a
+  chunked trip.
+
+### Changed (P39 G4)
+- **Behaviour change:** streamed runs of agents with output guardrails no longer emit
+  unchecked `TEXT_DELTA` events (they did before, and redacted text reached the screen).
+  Opt out per agent with `stream_guard="passthrough"`. Output trips now also emit
+  `GUARDRAIL_TRIPPED` (input trips are unchanged).
+- The service chat stream no longer filters deltas itself (P38 C3); it forwards what the
+  Runner emits, which also covers policy guardrails and chunked mode. Workflow agent traces
+  record `guardrail_tripped`.
+- In chunked mode, a final check that rewrites text already shown fails the run closed
+  (`GuardrailTripwireTriggered`, guardrail `"stream_guard"`).
+
 ### Added (P38 C3: frontend streaming adapters)
 - Review fixes: Unicode-preserving CR/LF SSE parsing, terminal errors on malformed,
   failed or incomplete sources, and native Accept fallback. Active agents with

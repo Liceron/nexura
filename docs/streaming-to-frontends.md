@@ -54,13 +54,18 @@ or browser SDK compatibility testing.
 ## AG-UI example
 
 Send the normal Nexura chat body. Agents without output guardrails stream text
-as native `TEXT_DELTA` events arrive. For an active agent with output guardrails,
-the source holds model text, emits no deltas, and publishes only guardrail-checked
-`FINAL_OUTPUT` (or the saved reply). Rewrites replace the unchecked answer before
-it is published; a tripwire publishes no blocked text, only an error. This rule
-also applies to native Studio chat and to guarded handoff targets. Workflow traces
-already omit raw deltas and expose checked final output. Tool results retain the
-native visibility policy; output guardrails are not a general tool-content scrubber.
+as native `TEXT_DELTA` events arrive. For an active agent with output guardrails
+(its own, or a policy's contributed through hooks), the Runner itself holds the
+reply (P39 G4, see [streaming and output guardrails](guardrails-hooks-limits.md#streaming-and-output-guardrails)):
+with the default `stream_guard` no deltas are emitted and only guardrail-checked
+`FINAL_OUTPUT` (or the saved reply) is published; with `stream_guard="chunked"`
+only windows that passed every output guardrail are emitted as deltas. Rewrites
+replace the unchecked answer before it is published; a tripwire publishes no
+blocked text, only an error. The service forwards what the Runner emits, so the
+rule applies to every format, to native Studio chat and to guarded handoff
+targets. Workflow traces omit raw deltas and expose checked final output. Tool
+results retain the native visibility policy; output guardrails are not a general
+tool-content scrubber.
 
 ```javascript
 const response = await fetch(
@@ -150,7 +155,7 @@ A client disconnect cannot receive a guaranteed terminator.
 | Public Nexura event | AG-UI | AI SDK 5 |
 | --- | --- | --- |
 | First frame / run start | `RUN_STARTED` | `start` |
-| `TEXT_DELTA` | `TEXT_MESSAGE_START/CONTENT/END` | `text-start/delta/end` |
+| `TEXT_DELTA` (unguarded, or a checked window) | `TEXT_MESSAGE_START/CONTENT/END` | `text-start/delta/end` |
 | `FINAL_OUTPUT` without deltas for that model turn | Text message | Text part |
 | `TOOL_STARTED` | `TOOL_CALL_START/ARGS/END` | `tool-input-start/delta/available` |
 | `TOOL_COMPLETED` for an observed call | `TOOL_CALL_RESULT` | `tool-output-available` |
@@ -158,6 +163,7 @@ A client disconnect cannot receive a guaranteed terminator.
 | Node `state_update` | Dropped; await next authoritative snapshot | Same |
 | `RUN_PENDING_APPROVAL` / `RUN_PAUSED` | `CUSTOM: nexura.approval` | `data-nexura-approval` |
 | Input/effect pause | `CUSTOM: nexura.paused` | `data-nexura-paused` |
+| `GUARDRAIL_TRIPPED` after shown or chunked text | `CUSTOM: nexura.guardrail-tripped` | `data-nexura-guardrail-tripped` |
 | Run success | `RUN_FINISHED` | `finish` |
 | Root failure/rejection | `RUN_ERROR` | `error`, `finish` |
 | Explicit cancellation | `CUSTOM: nexura.cancelled`, `RUN_FINISHED` | Cancellation data, `abort`, `finish` |
@@ -199,6 +205,31 @@ assembly or persistence exceptions become sanitized terminal stream errors rathe
 than a truncated success. This guarantee applies to the adapters; native error
 framing is unchanged. A disconnected chat closes its source generator and
 retains the existing persistence semantics.
+
+## Guarded replies in the native stream
+
+The native stream is where a client sees how a guarded reply is delivered:
+
+- The turn's `MODEL_STARTED` has `stream_guard: "hold"` or `"chunked"` when its reply is
+  checked before it is shown (absent for unguarded agents). Studio shows
+  "Checking reply…" in place of the live reply.
+- `"hold"`: no `TEXT_DELTA`; `FINAL_OUTPUT` carries the checked reply, then
+  `chat_completed` the saved one (`delivery: "final_only"`).
+- `"chunked"`: `TEXT_DELTA` events with `checked: true`, each after it passed; the rest of
+  the reply follows the check of the whole answer (`delivery: "streamed"`).
+- A trip: `GUARDRAIL_DECISION`, then `GUARDRAIL_TRIPPED` (`stage`, `guardrail`, `agent`,
+  `turn`, `phase` `"chunk"` or `"final"`, `stream_guard`, `shown`; never content), then
+  `RUN_FAILED` and `chat_failed`. With `shown: true`, discard the checked windows already
+  shown. The adapters close the open text message and pass this on as
+  `CUSTOM` `nexura.guardrail-tripped` (AG-UI) or a transient `data-nexura-guardrail-tripped`
+  part (AI SDK) with `{"discard": true|false, "phase", "stream_guard"}` when anything was
+  shown or the turn was chunked, then end with their error sequence. Nothing of the blocked
+  window was emitted.
+- With `tool_use_behavior` that ends the run on a tool result, that call's `TOOL_COMPLETED`
+  has `result_withheld: true` and no `result`: the adapters emit no tool result for it, and
+  the checked answer arrives as text from `FINAL_OUTPUT`.
+- Text a guarded agent writes before tool calls is checked before it is stored, so the
+  transcript in `chat_completed` holds only checked text.
 
 ## Replay and stream closure
 

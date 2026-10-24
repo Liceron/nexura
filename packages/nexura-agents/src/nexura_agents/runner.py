@@ -83,12 +83,19 @@ from nexura_agents.guardrails import (
     run_guardrail,
 )
 from nexura_agents.handoffs import Handoff
-from nexura_agents.hooks import AgentHooks, ComposedHooks, approval_vote, is_hooks_object
+from nexura_agents.hooks import (
+    AgentHooks,
+    ComposedHooks,
+    approval_vote,
+    hook_output_guardrails,
+    is_hooks_object,
+)
 from nexura_agents.json_schema import validate_instance
 from nexura_agents.limits import ModelSettings, UsageLimits
 from nexura_agents.models.resilience import _accepts_model_settings, _accepts_run_context
 from nexura_agents.run_context import RunContext
 from nexura_agents.session import SessionSnapshot, SessionStore, _accepts_state
+from nexura_agents.stream_guard import StreamGuard, TextGate, resolve_mode
 from nexura_agents.tools import StopAtTools, Tool
 from nexura_agents.types import (
     ApproveWith,
@@ -132,8 +139,11 @@ def _failed(run_id: str, exc: BaseException) -> RunEvent:
     )
 
 
-def _parse_output(agent: Agent, text: str) -> Any:
-    """Validate the final text against ``agent.output_type``; raises ValueError."""
+def _parse_output(agent: Agent, text: str, *, hide_values: bool = False) -> Any:
+    """Validate the final text against ``agent.output_type``; raises ValueError.
+
+    ``hide_values``: the error names locations and kinds of problems only, never values from
+    the reply (for agents with output guardrails: the reply is not checked yet, P39 G4)."""
     assert agent.output_type is not None
     match = _FENCE.match(text)
     candidate = match.group(1) if match else text.strip()
@@ -142,14 +152,27 @@ def _parse_output(agent: Agent, text: str) -> Any:
             parsed = json.loads(candidate)
         except ValueError as exc:
             raise ValueError(f"the reply is not valid JSON ({exc})") from exc
-        problems = validate_instance(agent.output_type, parsed)
+        problems = validate_instance(agent.output_type, parsed, show_values=not hide_values)
         if problems:
             raise ValueError("\n".join(problems))
         return parsed
     try:
         return agent.output_type.model_validate_json(candidate)
     except ValidationError as exc:
-        raise ValueError(str(exc)) from exc
+        # With output guardrails: locations and messages only, never the reply's values
+        # (pydantic's input_value), which have not passed the guardrails (P39 G4).
+        raise ValueError(_validation_summary(exc) if hide_values else str(exc)) from exc
+
+
+def _validation_summary(exc: ValidationError) -> str:
+    """A pydantic error without input values: ``<n> validation error(s) for <model>`` and one
+    ``<location>: <message> [type=<type>]`` line per problem."""
+    problems = exc.errors(include_url=False, include_context=False, include_input=False)
+    lines = [f"{len(problems)} validation error(s) for {exc.title}"]
+    for problem in problems:
+        where = ".".join(str(part) for part in problem.get("loc", ())) or "(root)"
+        lines.append(f"{where}: {problem.get('msg', '')} [type={problem.get('type', '')}]")
+    return "\n".join(lines)
 
 
 # A prompt: text, a list of messages, or a list mixing text and attachments
@@ -221,6 +244,23 @@ def _tool_final_text(agent: Agent, state: _RunState, calls: list[ToolCall]) -> s
             continue
         return text
     return None
+
+
+def _may_end_run(agent: Agent, call: ToolCall) -> bool:
+    """Whether ``call``'s result can be the final output under ``tool_use_behavior``."""
+    behavior = agent.tool_use_behavior
+    if behavior == "run_llm_again" or call.name in agent.handoffs_by_name:
+        return False
+    return not isinstance(behavior, StopAtTools) or call.name in behavior.tool_names
+
+
+def _has_output_checks(state: _RunState, agent: Agent) -> bool:
+    """``agent`` has output guardrails in this run; a hook that fails to answer counts as
+    yes (fail closed: the final pass reports its error)."""
+    try:
+        return bool(_output_checks(state, agent)[0])
+    except Exception:
+        return True
 
 
 async def _bounded(state: _RunState, awaitable: Awaitable[Any]) -> Any:
@@ -412,6 +452,18 @@ def _cancelled(state: _RunState) -> RunEvent:
             "tags": list(state.ctx.tags),
         },
     )
+
+
+class _GuardrailAbort(BaseException):  # noqa: N818 - internal control flow, never escapes
+    """An output guardrail stopped a streamed window inside the model call (P39 G4).
+
+    Carries the error to raise. A BaseException so the model-call error handlers do not
+    report it as a provider error; its GUARDRAIL_DECISION / GUARDRAIL_TRIPPED / RUN_FAILED
+    events were already yielded."""
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__(error)
+        self.error = error
 
 
 class _RunCancelled(BaseException):  # noqa: N818 - internal control flow, never escapes
@@ -675,6 +727,65 @@ def _drain_nested_usage(state: _RunState) -> bool:
     state.ctx.usage = state.usage
     state.span.set_usage(state.usage)
     return bool(nested_usage)
+
+
+_DEFAULT_STREAM_GUARD = StreamGuard()
+
+
+def _output_checks(state: _RunState, agent: Agent) -> tuple[tuple[Any, ...], bool]:
+    """The output guardrails of ``agent`` in this run: its own, then those the run's hooks
+    contribute (``AgentHooks.output_guardrails``: a default or inherited policy). The flag
+    says whether hooks contributed any (they cannot be streamed past, P39 G4)."""
+    hooks = state.hooks
+    extra = hook_output_guardrails(hooks, state.ctx, agent) if hooks is not None else ()
+    return (*agent.output_guardrails, *extra), bool(extra)
+
+
+def _turn_mode(agent: Agent, checks: tuple[Any, ...], from_hooks: bool) -> str:
+    """``hold``, ``chunked`` or ``passthrough`` for a streamed model turn of ``agent``."""
+    guard = getattr(agent, "stream_guard", None) or _DEFAULT_STREAM_GUARD
+    return resolve_mode(
+        guard, has_checks=bool(checks), from_hooks=from_hooks, typed=agent.output_type is not None
+    )
+
+
+#: Stored in place of a reply that never passed the output guardrails (P39 G4): a typed
+#: reply that failed validation, or text a typed agent wrote before tool calls.
+WITHHELD_REPLY = "[reply withheld: it was not checked by the output guardrails]"
+
+
+def _withhold_rejected(state: _RunState, messages: list[Message]) -> None:
+    """A reply rejected by validation is retried, so it never reaches the output
+    guardrails; with output guardrails its text is not kept in the transcript (which is
+    checkpointed, saved and sent back), only a fixed note. The retry feedback says why."""
+    if state.turn_checks and messages and messages[-1].role == "assistant":
+        messages[-1] = dataclasses.replace(messages[-1], content=WITHHELD_REPLY)
+
+
+def _withheld_response(response: ModelResponse) -> ModelResponse:
+    """``response`` without its text, for traces of a reply that is not checked yet."""
+    if not response.message.content:
+        return response
+    return dataclasses.replace(
+        response, message=dataclasses.replace(response.message, content=None)
+    )
+
+
+def _tripped_event(state: _RunState, agent: Agent, name: str, phase: str) -> RunEvent:
+    """``GUARDRAIL_TRIPPED``: which output guardrail stopped the reply. Never content."""
+    return RunEvent(
+        type=RunEventType.GUARDRAIL_TRIPPED,
+        run_id=state.run_id,
+        data={
+            "stage": "output",
+            "guardrail": name,
+            "agent": agent.name,
+            "turn": state.turn,
+            "phase": phase,
+            "stream_guard": state.turn_stream,
+            "shown": state.text_shown,
+        },
+    )
 
 
 def _custom_event(run_id: str, payload: dict[str, Any]) -> RunEvent:
@@ -1177,6 +1288,16 @@ class _RunState:
     # Hook approval gates of this turn ("turn:<n>/call:<id>"); with a journal they are
     # also in its state ("hook_gates") and survive a crash (P39 G2, MIN7).
     hook_gates: set[str] = field(default_factory=set)
+    # P39 G4, per model turn: the stream mode when text is streamed ("hold", "chunked",
+    # "passthrough"; None without stream_text), the held text, and whether any reply text
+    # of the turn reached the consumer.
+    turn_stream: str | None = None
+    text_gate: TextGate | None = None
+    text_shown: bool = False
+    # The output guardrails of the active agent this turn (its own, then its hooks'), and
+    # whether hooks contributed any; checked again at the final pass (P39 G4).
+    turn_checks: tuple[Any, ...] = ()
+    turn_from_hooks: bool = False
 
     def remaining(self) -> float | None:
         if self.effective_timeout is None:
@@ -2380,10 +2501,28 @@ class Runner:
                         yield _failed(run_id, budget_err)
                         raise
 
+                # P39 G4: does this turn's reply text stream as written, wait for the
+                # output guardrails ("hold") or go out in checked windows ("chunked")?
+                state.text_gate, state.text_shown, state.turn_stream = None, False, None
+                started_data: dict[str, Any] = {"turn": state.turn, "messages_count": len(messages)}
+                try:
+                    state.turn_checks, state.turn_from_hooks = _output_checks(state, agent)
+                except Exception as hook_err:  # a hook's output_guardrails failed: fail closed
+                    yield _failed(run_id, hook_err)
+                    raise
+                if stream_text:
+                    mode = _turn_mode(agent, state.turn_checks, state.turn_from_hooks)
+                    state.turn_stream = mode
+                    if mode in ("hold", "chunked"):
+                        state.text_gate = TextGate(
+                            mode,  # type: ignore[arg-type]
+                            getattr(agent, "stream_guard", None) or _DEFAULT_STREAM_GUARD,
+                        )
+                        started_data["stream_guard"] = mode
                 yield RunEvent(
                     type=RunEventType.MODEL_STARTED,
                     run_id=run_id,
-                    data={"turn": state.turn, "messages_count": len(messages)},
+                    data=started_data,
                 )
 
                 # 3. Invoke the model (unless a before_model hook answers instead)
@@ -2403,6 +2542,11 @@ class Runner:
                             agent, state, remaining_timeout, stream_text, holder, chat
                         ):
                             yield delta_event
+                except _GuardrailAbort as abort:
+                    # A streamed window tripped or a window guardrail failed; its events
+                    # (decision, GUARDRAIL_TRIPPED, RUN_FAILED where due) were yielded.
+                    chat.fail(abort.error)
+                    raise abort.error from abort.error.__cause__
                 except TimeoutError as exc:
                     chat.fail(exc)
                     elapsed = time.monotonic() - state.start_time
@@ -2424,7 +2568,11 @@ class Runner:
                     if not holder:  # failed or abandoned before a response arrived
                         chat.end()
                 response = holder[0]
-                tracing.record_response(chat, response)
+                # Content capture records reply text only after the output guardrails
+                # passed it (P39 G4): the run span gets the checked answer later.
+                tracing.record_response(
+                    chat, _withheld_response(response) if state.turn_checks else response
+                )
                 chat.end()
                 billed = response.usage  # what the provider charged, kept if a hook replaces it
                 try:
@@ -2473,6 +2621,21 @@ class Runner:
                 for custom in _pending_custom(state):  # from instructions and model hooks
                     yield custom
 
+                if response.message.tool_calls and response.message.content:
+                    # Text written before tool calls is no final answer, but it is stored,
+                    # journaled and shown: it passes the output guardrails first (P39 G4).
+                    checked_text: list[str] = []
+                    async for event in self._check_interim_text(
+                        state, agent, response.message.content, checked_text
+                    ):
+                        yield event
+                    if checked_text[0] != response.message.content:
+                        response = dataclasses.replace(
+                            response,
+                            message=dataclasses.replace(
+                                response.message, content=checked_text[0] or None
+                            ),
+                        )
                 messages.append(response.message)
 
                 # 4. Final answer (no tool calls)
@@ -2484,7 +2647,9 @@ class Runner:
                     output: Any = final_text
                     if agent.output_type is not None:
                         try:
-                            output = _parse_output(agent, final_text)
+                            output = _parse_output(
+                                agent, final_text, hide_values=bool(state.turn_checks)
+                            )
                         except ValueError as invalid:
                             if state.output_attempts < agent.output_retries:
                                 state.output_attempts += 1
@@ -2494,6 +2659,7 @@ class Runner:
                                 )
 
                                 feedback = f"{OUTPUT_RETRY_PREFIX}{invalid}{OUTPUT_RETRY_SUFFIX}"
+                                _withhold_rejected(state, messages)
                                 messages.append(Message(role="user", content=feedback))
                                 yield RunEvent(
                                     type=RunEventType.RETRY,
@@ -2503,7 +2669,7 @@ class Runner:
                                 continue
                             out_err = OutputValidationError(
                                 str(invalid),
-                                raw_output=final_text,
+                                raw_output=None if state.turn_checks else final_text,
                                 attempts=state.output_attempts + 1,
                             )
                             yield _failed(run_id, out_err)
@@ -2522,6 +2688,7 @@ class Runner:
                                     VALIDATOR_RETRY_SUFFIX,
                                 )
 
+                                _withhold_rejected(state, messages)
                                 messages.append(
                                     Message(
                                         role="user",
@@ -2537,7 +2704,7 @@ class Runner:
                                 continue
                             rejected = OutputValidationError(
                                 f"Output validator rejected the answer: {retry.message}",
-                                raw_output=final_text,
+                                raw_output=None if state.turn_checks else final_text,
                                 attempts=state.output_attempts + 1,
                             )
                             yield _failed(run_id, rejected)
@@ -2814,7 +2981,10 @@ class Runner:
         assembler = ToolCallAssembler()
         usage: Usage | None = None
         finish_reason: str | None = None
-        partials = _PartialOutput() if state.agent.output_type is not None else None
+        gate = state.text_gate  # P39 G4: reply text waits for the output guardrails
+        partials = (
+            _PartialOutput() if state.agent.output_type is not None and gate is None else None
+        )
         thinking: list[dict[str, Any]] = []  # Anthropic thinking blocks, sent back next call
         call_ids: dict[int, tuple[str | None, str | None]] = {}  # index -> (id, name) so far
         try:
@@ -2824,6 +2994,13 @@ class Runner:
                         raise _RunCancelled  # streamed calls stop at the next chunk
                     if delta.kind == "text_delta" and delta.text:
                         text_parts.append(delta.text)
+                        if gate is not None:
+                            gate.add(delta.text)  # held: never shown unchecked
+                            if gate.mode == "chunked":
+                                async for event in self._stream_windows(state, gate):
+                                    yield event
+                            continue
+                        state.text_shown = True
                         yield RunEvent(
                             type=RunEventType.TEXT_DELTA,
                             run_id=state.run_id,
@@ -2878,6 +3055,10 @@ class Runner:
             if callable(aclose):
                 await aclose()
         tool_calls = assembler.validate_and_assemble()
+        # Always the raw text: the whole of it is checked again by the output guardrails
+        # (the final answer in _finish_run, text before tool calls in _check_interim_text),
+        # and the rest of a chunked reply is shown only after that check.
+        content = "".join(text_parts) or None
         if partials is not None and not tool_calls and finish_reason != "refusal":
             last = partials.flush()
             if last is not None:
@@ -2890,7 +3071,7 @@ class Runner:
             ModelResponse(
                 message=Message(
                     role="assistant",
-                    content="".join(text_parts) or None,
+                    content=content,
                     tool_calls=tool_calls or None,
                     provider_data={"anthropic_thinking": thinking} if thinking else None,
                 ),
@@ -2898,6 +3079,171 @@ class Runner:
                 finish_reason=finish_reason,
             )
         )
+
+    async def _stream_windows(
+        self, state: _RunState, gate: TextGate
+    ) -> AsyncGenerator[RunEvent, None]:
+        """``chunked``: check every complete window of RAW text with the output guardrails
+        and show what passed as ``TEXT_DELTA`` (``checked: True``).
+
+        Window usage (a judge) counts at once and ``UsageLimits`` are checked after every
+        window, before anything more is shown. A trip, a guardrail error or a limit raises
+        ``_GuardrailAbort`` after its events; the window is never shown. Cancellation and the
+        run's deadline propagate as usual."""
+        agent = state.agent
+        while (bounds := gate.next_window()) is not None:
+            start, end = bounds
+            checked: list[Any] = []
+            try:
+                async for event in self._output_pass(
+                    state, agent, gate.raw[start:end], "chunk", checked, checks=state.turn_checks
+                ):
+                    yield event
+            except _RunCancelled:
+                raise
+            except Exception as exc:
+                raise _GuardrailAbort(exc) from exc
+            if _drain_nested_usage(state) and self.usage_limits is not None:
+                try:
+                    self.usage_limits.check(state.requests, state.usage)
+                except NexuraError as limit_err:
+                    yield _failed(state.run_id, limit_err)
+                    raise _GuardrailAbort(limit_err) from limit_err
+            shown = gate.accept(start, end, str(checked[0][0]))
+            if shown:
+                state.text_shown = True
+                yield RunEvent(
+                    type=RunEventType.TEXT_DELTA,
+                    run_id=state.run_id,
+                    data={"turn": state.turn, "text": shown, "checked": True},
+                )
+
+    async def _show_rest(
+        self, state: _RunState, agent: Agent, checked_text: str
+    ) -> AsyncGenerator[RunEvent, None]:
+        """``chunked``: after the whole raw text passed, show what is not shown yet.
+
+        Shown text cannot be taken back: a checked text that does not start with it fails
+        closed (``GuardrailTripwireTriggered`` named ``"stream_guard"``)."""
+        gate = state.text_gate
+        if gate is None or gate.mode != "chunked" or not gate.held:
+            return
+        shown = gate.shown_text()
+        if not checked_text.startswith(shown):
+            _drain_nested_usage(state)
+            conflict = GuardrailTripwireTriggered(
+                "stream_guard",
+                "output",
+                {"reason": "the checked answer changes text that was already shown"},
+            )
+            yield _decision_event(
+                state,
+                "output",
+                "stream_guard",
+                "fail",
+                time.monotonic(),
+                info={"reason": "stream_conflict"},
+            )
+            yield _tripped_event(state, agent, "stream_guard", "final")
+            yield _failed(state.run_id, conflict)
+            raise conflict
+        rest = checked_text[len(shown) :]
+        gate.shown.append(rest)
+        gate.done = len(gate.raw)
+        if rest:
+            state.text_shown = True
+            yield RunEvent(
+                type=RunEventType.TEXT_DELTA,
+                run_id=state.run_id,
+                data={"turn": state.turn, "text": rest, "checked": True},
+            )
+
+    async def _check_interim_text(
+        self, state: _RunState, agent: Agent, text: str, result: list[str]
+    ) -> AsyncGenerator[RunEvent, None]:
+        """Text written before tool calls, before it is stored, journaled or shown.
+
+        With output guardrails (and not ``passthrough``) the whole text passes them and the
+        checked text is kept (a trip stops the run, ``phase="chunk"``); a typed agent's
+        guardrails expect a parsed answer, so its text is withheld instead. ``result`` gets
+        the text to keep."""
+        checks = state.turn_checks
+        if not checks or state.turn_stream == "passthrough":
+            result.append(text)
+            return
+        if agent.output_type is not None:
+            result.append("")  # withheld: never stored or shown
+            return
+        checked: list[Any] = []
+        async for event in self._output_pass(state, agent, text, "chunk", checked, checks=checks):
+            yield event
+        _drain_nested_usage(state)
+        kept = str(checked[0][0])
+        async for event in self._show_rest(state, agent, kept):
+            yield event
+        result.append(kept)
+
+    async def _output_pass(
+        self,
+        state: _RunState,
+        agent: Agent,
+        value: Any,
+        phase: str,
+        result: list[Any],
+        *,
+        checks: tuple[Any, ...] | None = None,
+    ) -> AsyncGenerator[RunEvent, None]:
+        """Run every output guardrail (the agent's own, then the hooks') on ``value`` in
+        order; ``result`` gets ``(value, rewritten)``. ``phase``: ``"final"`` (the whole
+        answer) or ``"chunk"`` (a streamed window or text before tool calls). A trip yields
+        GUARDRAIL_DECISION, GUARDRAIL_TRIPPED and RUN_FAILED and raises
+        ``GuardrailTripwireTriggered``."""
+        run_id = state.run_id
+        if checks is None:
+            try:
+                checks, _ = _output_checks(state, agent)
+            except Exception as hook_err:  # a hook's output_guardrails failed: fail closed
+                yield _failed(run_id, hook_err)
+                raise
+        rewritten = False
+        for check in checks:
+            name = getattr(check, "__name__", "guardrail")
+            started = time.monotonic()
+            try:
+                outcome = await _agent_guardrail(state, check, value)
+            except _RunCancelled:
+                raise  # the loop drops the unchecked answer and counts finished judges
+            except Exception as exc:
+                _drain_nested_usage(state)
+                yield _decision_event(
+                    state, "output", name, "fail", started, error_type=type(exc).__name__
+                )
+                if isinstance(exc, ModelTimeoutError):
+                    yield _failed(run_id, exc)
+                raise  # any other error propagates as before
+            if outcome.tripwire:
+                _drain_nested_usage(state)  # the judge that tripped cost money too
+                tripped = GuardrailTripwireTriggered(name, "output", outcome.info)
+                yield _decision_event(state, "output", name, "fail", started, info=outcome.info)
+                yield _tripped_event(state, agent, name, phase)
+                yield _failed(run_id, tripped)
+                raise tripped
+            if outcome.replacement is not None:
+                if agent.output_type is not None:
+                    bad = TypeError(
+                        "An output guardrail returned a rewritten text for an "
+                        "agent with output_type; rewriting supports text only."
+                    )
+                    _drain_nested_usage(state)
+                    yield _decision_event(
+                        state, "output", name, "fail", started, error_type="TypeError"
+                    )
+                    yield _failed(run_id, bad)
+                    raise bad
+                yield _decision_event(state, "output", name, "scrub", started, info=outcome.info)
+                value = outcome.replacement
+                rewritten = True
+        result.append((value, rewritten))
 
     async def _finish_run(
         self,
@@ -2918,44 +3264,53 @@ class Runner:
         run_id = state.run_id
         ctx = state.ctx
         messages = state.messages
-        for check in agent.output_guardrails:
-            name = getattr(check, "__name__", "guardrail")
-            started = time.monotonic()
-            try:
-                outcome = await _agent_guardrail(state, check, output)
-            except _RunCancelled:
-                raise  # the loop drops the unchecked answer and counts finished judges
-            except Exception as exc:
-                _drain_nested_usage(state)
-                yield _decision_event(
-                    state, "output", name, "fail", started, error_type=type(exc).__name__
-                )
-                if isinstance(exc, ModelTimeoutError):
-                    yield _failed(run_id, exc)
-                raise  # any other error propagates as before
-            if outcome.tripwire:
-                _drain_nested_usage(state)  # the judge that tripped cost money too
-                tripped = GuardrailTripwireTriggered(name, "output", outcome.info)
-                yield _decision_event(state, "output", name, "fail", started, info=outcome.info)
-                yield _failed(run_id, tripped)
-                raise tripped
-            if outcome.replacement is not None:
-                if agent.output_type is not None:
-                    bad = TypeError(
-                        "An output guardrail returned a rewritten text for an "
-                        "agent with output_type; rewriting supports text only."
-                    )
-                    _drain_nested_usage(state)
-                    yield _decision_event(
-                        state, "output", name, "fail", started, error_type="TypeError"
-                    )
-                    yield _failed(run_id, bad)
-                    raise bad
-                yield _decision_event(state, "output", name, "scrub", started, info=outcome.info)
-                final_text = output = outcome.replacement
-                if not from_tool:
-                    # Keep the stored history in step with what the caller gets.
-                    messages[-1] = dataclasses.replace(messages[-1], content=final_text)
+        # The agent's own output guardrails, then those its hooks contribute (P39 G4).
+        try:
+            checks, from_hooks = _output_checks(state, agent)
+        except Exception as hook_err:  # a hook's output_guardrails failed: fail closed
+            yield _failed(run_id, hook_err)
+            raise
+        if (
+            not from_tool
+            and state.turn_stream == "passthrough"
+            and state.text_shown
+            and _turn_mode(agent, checks, from_hooks) != "passthrough"
+        ):
+            # The turn streamed its text because no output guardrail applied when it
+            # started, but one applies now (a hook that changed its answer): what was shown
+            # was never checked, so fail closed.
+            conflict = GuardrailTripwireTriggered(
+                "stream_guard",
+                "output",
+                {"reason": "output guardrails appeared after the reply was streamed"},
+            )
+            yield _decision_event(
+                state,
+                "output",
+                "stream_guard",
+                "fail",
+                time.monotonic(),
+                info={"reason": "stream_conflict"},
+            )
+            yield _tripped_event(state, agent, "stream_guard", "final")
+            yield _failed(run_id, conflict)
+            raise conflict
+        checked: list[Any] = []
+        async for event in self._output_pass(state, agent, output, "final", checked, checks=checks):
+            yield event
+        if checked[0][1]:
+            final_text = output = checked[0][0]
+            if not from_tool:
+                # Keep the stored history in step with what the caller gets.
+                messages[-1] = dataclasses.replace(messages[-1], content=final_text)
+        if not from_tool:
+            # The rest of a chunked reply is shown only now, after the whole RAW answer
+            # passed; a check that changes text already shown fails closed.
+            async for event in self._show_rest(state, agent, final_text):
+                yield event
+        if checks:
+            # Content capture: the checked answer, never the raw reply (P39 G4).
+            state.span.content("nexura.output.checked", "nexura.output.checked", final_text)
         state.unchecked_answer = None  # passed its validators and output guardrails
         # Usage recorded since the last model turn (judge calls in output guardrails,
         # output validators) is part of the run's usage, and is checked against
@@ -3030,12 +3385,14 @@ class Runner:
         output: Any = final_text
         if agent.output_type is not None:
             try:
-                output = _parse_output(agent, final_text)
+                output = _parse_output(
+                    agent, final_text, hide_values=_has_output_checks(state, agent)
+                )
             except ValueError as invalid:
                 out_err = OutputValidationError(
                     f"The tool result chosen as the final output does not match output_type: "
                     f"{invalid}",
-                    raw_output=final_text,
+                    raw_output=None if _has_output_checks(state, agent) else final_text,
                     attempts=1,
                 )
                 yield _failed(state.run_id, out_err)
@@ -3049,7 +3406,7 @@ class Runner:
                 # The output came from a tool: there is no model turn to retry.
                 rejected = OutputValidationError(
                     f"Output validator rejected the tool result: {retry.message}",
-                    raw_output=final_text,
+                    raw_output=None if _has_output_checks(state, agent) else final_text,
                     attempts=1,
                 )
                 yield _failed(state.run_id, rejected)
@@ -3424,11 +3781,14 @@ class Runner:
                     run_id=run_id,
                     data={"reason": retry_reason, "tool_call_id": tc.id, "tool_name": tc.name},
                 )
-            yield RunEvent(
-                type=RunEventType.TOOL_COMPLETED,
-                run_id=run_id,
-                data={"tool_call_id": tc.id, "tool_name": tc.name, "result": result_text},
-            )
+            completed: dict[str, Any] = {"tool_call_id": tc.id, "tool_name": tc.name}
+            if _may_end_run(agent, tc) and _has_output_checks(state, agent):
+                # This result may become the final answer (tool_use_behavior): it reaches
+                # the consumer only through FINAL_OUTPUT, after the output guardrails.
+                completed["result_withheld"] = True
+            else:
+                completed["result"] = result_text
+            yield RunEvent(type=RunEventType.TOOL_COMPLETED, run_id=run_id, data=completed)
             state.messages.append(
                 Message(role="tool", content=result_text, tool_call_id=tc.id, name=tc.name)
             )

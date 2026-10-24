@@ -220,8 +220,10 @@ class ModelRetry(ToolError):
 class OutputValidationError(RunnerError):
     """Raised when the model's final output still fails ``output_type`` after all retries."""
 
-    def __init__(self, message: str, *, raw_output: str, attempts: int) -> None:
+    def __init__(self, message: str, *, raw_output: str | None, attempts: int) -> None:
         super().__init__(f"Output failed validation after {attempts} attempt(s): {message}")
+        # The rejected reply; None when the agent has output guardrails (the reply never
+        # passed them, so it is not kept, P39 G4).
         self.raw_output = raw_output
         self.attempts = attempts
 
