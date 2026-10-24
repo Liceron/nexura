@@ -151,18 +151,18 @@ export function ModuleDrawer({ open, onClose, onAddNode }: ModuleDrawerProps) {
               <span style={{ fontWeight: 600, fontSize: 13 }}>{t(`builtinModules.${mod.id}.title`, mod.title)}</span>
               <Badge variant="neutral"><code>{mod.category}</code></Badge>
             </div>
-            <p style={{ fontSize: 11, color: 'var(--text-secondary)', lineHeight: 1.3, marginBottom: 6 }}>
+            <p style={{ fontSize: 'var(--type-meta)', color: 'var(--text-secondary)', lineHeight: 1.5, marginBottom: 6 }}>
               {t(`builtinModules.${mod.id}.description`, mod.description)}
             </p>
             {mod.operations && <OperationList operations={mod.operations} />}
             {mod.credential_type && (
-              <div data-testid="credential-type" style={{ fontSize: 11, marginBottom: 6 }}>
+              <div data-testid="credential-type" style={{ fontSize: 'var(--type-meta)', marginBottom: 6 }}>
                 {t('connectors.credentialType', { type: mod.credential_type })}
               </div>
             )}
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <code style={{ fontSize: 10 }}>{mod.name}</code>
-              <span style={{ fontSize: 11, color: 'var(--accent-primary)', fontWeight: 600 }}>{t('ui.addNode')}</span>
+              <code style={{ fontSize: 'var(--type-meta)' }}>{mod.name}</code>
+              <span style={{ fontSize: 'var(--type-meta)', color: 'var(--accent-primary)', fontWeight: 600 }}>{t('ui.addNode')}</span>
             </div>
           </Card>
         ))}

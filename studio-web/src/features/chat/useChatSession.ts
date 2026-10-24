@@ -48,6 +48,10 @@ export function useChatSession() {
   // Reply text of the current model turn, from the service's TEXT_DELTA events. Only a
   // model that really streams sends them; the saved transcript replaces it on completion.
   const [streamingText, setStreamingText] = useState<string>('');
+  // P39 G4: the agent's output guardrails check the reply before any of it is shown
+  // (MODEL_STARTED carries stream_guard "hold" or "chunked"). The live bubble then shows a
+  // "checking reply" state instead of unchecked text, and only checked text afterwards.
+  const [checkingReply, setCheckingReply] = useState<boolean>(false);
 
   const isMountedRef = useRef<boolean>(true);
   const turnAbortRef = useRef<AbortController | null>(null);
@@ -203,6 +207,7 @@ export function useChatSession() {
       let completed: ChatResponse | null = null;
       let failure: string | null = null;
       let failureCode: string | null = null;
+      let guardedTurn = false; // the current model turn's reply is checked before it is shown
 
       try {
         // A saved agent runs on its own model: send agent_id and never a model.
@@ -219,6 +224,19 @@ export function useChatSession() {
               if (piece) setStreamingText((prev) => prev + piece);
             } else if (ev.type === 'MODEL_STARTED') {
               setStreamingText(''); // a new model turn writes a new reply
+              guardedTurn = isGuardedTurn(ev.data);
+              setCheckingReply(guardedTurn);
+            } else if (ev.type === 'TOOL_STARTED') {
+              setCheckingReply(false); // the turn asked for tools; it was not the reply
+            } else if (ev.type === 'FINAL_OUTPUT' && guardedTurn) {
+              // FINAL_OUTPUT comes only after the output guardrails passed (rewrites applied).
+              // The guardrails passed: show the checked reply until the transcript arrives.
+              setStreamingText(typeof ev.data?.output === 'string' ? ev.data.output : '');
+              setCheckingReply(false);
+            } else if (ev.type === 'GUARDRAIL_TRIPPED') {
+              // Blocked: discard anything shown from this reply.
+              setStreamingText('');
+              setCheckingReply(false);
             }
             setActivity(describeRunEvent(ev.type, ev.data, t));
           } else if (ev.kind === 'chat_completed') {
@@ -236,6 +254,7 @@ export function useChatSession() {
       }
       if (!isMountedRef.current) return;
       setStreamingText('');
+      setCheckingReply(false);
 
       if (!stillShown()) {
         // The user moved to another conversation: this turn's text, transcript and notices
@@ -348,6 +367,7 @@ export function useChatSession() {
     interrupted,
     interruptedCode,
     streamingText,
+    checkingReply,
     error,
     setLanguage,
     refreshSessions,
@@ -360,10 +380,19 @@ export function useChatSession() {
   };
 }
 
+/** True when the model turn's reply is checked by output guardrails before it is shown. */
+export function isGuardedTurn(data: Record<string, any> | undefined): boolean {
+  const mode = data?.stream_guard;
+  return mode === 'hold' || mode === 'chunked';
+}
+
 function describeRunEvent(type: string, data: Record<string, any>, t: Translate = englishT): string {
   switch (type) {
     case 'MODEL_STARTED':
+      if (isGuardedTurn(data)) return t('chat.checkingReply');
       return t('chat.modelTurn').replace('{turn}', String(data.turn ?? '')).trim();
+    case 'GUARDRAIL_TRIPPED':
+      return t('chat.replyBlocked');
     case 'TOOL_STARTED':
       return t('chat.toolStarted').replace('{name}', String(data.tool_name ?? '')).trim();
     case 'TOOL_COMPLETED':

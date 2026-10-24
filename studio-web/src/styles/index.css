@@ -70,8 +70,10 @@
 .studio-action-disclosure { position: fixed; z-index: 1100; width: 240px; max-height: calc(100dvh - 24px); overflow: auto; padding: 4px; background: var(--bg-surface-elevated); border: 1px solid var(--border-strong); border-radius: 6px; box-shadow: var(--shadow-lg); display: flex; flex-direction: column; }
 .studio-action-disclosure > button { justify-content: flex-start !important; }
 .workflow-danger-action { color: var(--status-danger) !important; }
-.workflow-search { display: flex; flex: 1; gap: 8px; min-width: 0; }
+.workflow-search { display: flex; align-items: stretch; flex: 1; gap: 8px; min-width: 0; }
 .workflow-search > div { flex: 1; min-width: 0; max-width: 480px; }
+.workflow-search > .studio-field { margin-bottom: 0 !important; }
+.workflow-search input { flex: 1; }
 .workflow-phone-meta { display: none; }
 .workflow-table td, .workflow-table th { vertical-align: middle; }
 .workflow-table td:first-child { width: 40%; overflow-wrap: anywhere; }

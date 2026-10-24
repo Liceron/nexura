@@ -57,7 +57,7 @@ export function InputMappingForm({ inputSchema, mapping, onChange, portOverrides
         <Badge variant="neutral">{Object.keys(mapping).length} {t('ui.mapped')}</Badge>
       </div>
 
-      <p style={{ fontSize: 11, color: 'var(--text-secondary)', margin: 0 }}>
+      <p style={{ fontSize: 'var(--type-meta)', color: 'var(--text-secondary)', margin: 0 }}>
         {t('ui.bindModuleInputPortsToWorkflowStateKeysInputsWithoutExplicitMappingsReadFrom')}
       </p>
 
@@ -85,19 +85,19 @@ export function InputMappingForm({ inputSchema, mapping, onChange, portOverrides
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                   <code style={{ fontSize: 12, fontWeight: 600 }}>{port}</code>
-                  {isReq && <span style={{ color: 'var(--status-danger)', fontSize: 11 }}>{t('ui.required')}</span>}
+                  {isReq && <span style={{ color: 'var(--status-danger)', fontSize: 'var(--type-meta)' }}>{t('ui.required')}</span>}
                 </div>
                 <Badge variant="neutral">{prop.type || t('ui.any')}</Badge>
               </div>
 
               {prop.description && (
-                <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 6 }}>
+                <div style={{ fontSize: 'var(--type-meta)', color: 'var(--text-secondary)', marginBottom: 6 }}>
                   {prop.description}
                 </div>
               )}
 
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{t('ui.mapsFrom')}</span>
+                <span style={{ fontSize: 'var(--type-meta)', color: 'var(--text-muted)' }}>{t('ui.mapsFrom')}</span>
                 <input
                   type="text"
                   placeholder={`state.${port}`}

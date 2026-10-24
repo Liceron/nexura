@@ -128,7 +128,7 @@ export function ModulePalette({ open, onClose, onSelectModule }: ModulePalettePr
               border: 'none',
               backgroundColor: activeCategory === cat.id ? 'var(--bg-muted)' : 'transparent',
               color: activeCategory === cat.id ? 'var(--text-primary)' : 'var(--text-secondary)',
-              fontSize: 11,
+              fontSize: 'var(--type-meta)',
               fontWeight: 500,
               cursor: 'pointer',
               whiteSpace: 'nowrap',
@@ -179,7 +179,7 @@ export function ModulePalette({ open, onClose, onSelectModule }: ModulePalettePr
                     <div style={{ fontWeight: 600, fontSize: 13, color: 'var(--text-primary)' }}>
                       {mod.title || mod.module_id}
                     </div>
-                    <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                    <div style={{ fontSize: 'var(--type-meta)', color: 'var(--text-muted)' }}>
                       <code>{mod.module_id}</code> v{mod.version}
                     </div>
                   </div>
@@ -195,17 +195,17 @@ export function ModulePalette({ open, onClose, onSelectModule }: ModulePalettePr
                   </div>
                 </div>
 
-                <p style={{ fontSize: 11, color: 'var(--text-secondary)', lineHeight: 1.3, margin: '4px 0 8px 0' }}>
+                <p style={{ fontSize: 'var(--type-meta)', color: 'var(--text-secondary)', lineHeight: 1.5, margin: '4px 0 8px 0' }}>
                   {mod.description}
                 </p>
 
                 <OperationList operations={connectorOperations(mod)} />
                 {requiredCredentialTypes(mod).length > 0 && (
-                  <div data-testid="credential-type" style={{ fontSize: 11, marginBottom: 6 }}>
+                  <div data-testid="credential-type" style={{ fontSize: 'var(--type-meta)', marginBottom: 6 }}>
                     {t('connectors.credentialType', { type: requiredCredentialTypes(mod).join(', ') })}
                   </div>
                 )}
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: 10 }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: 'var(--type-meta)' }}>
                   <div style={{ display: 'flex', gap: 6, color: 'var(--text-muted)' }}>
                     <span>{t('ui.kind2') + " "}{mod.kind}</span>
                     {mod.requires_approval && <Badge variant="warning">{t('ui.approvalGate')}</Badge>}

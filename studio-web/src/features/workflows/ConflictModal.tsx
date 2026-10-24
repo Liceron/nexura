@@ -70,7 +70,7 @@ export function ConflictModal({
             border: '1px solid var(--status-danger)',
             fontSize: 13,
             color: 'var(--status-danger)',
-            lineHeight: 1.4,
+            lineHeight: 1.5,
           }}
         >
           <Icon name="warning" /> <strong>{t('ui.concurrentModificationConflict')}</strong> {t('ui.theServerVersionOfThisWorkflowWasModifiedByAnotherEditorSessionAfterRevision')}{' '}
@@ -157,7 +157,7 @@ export function ConflictModal({
             >
               <div>
                 <div style={{ fontWeight: 600, fontSize: 13 }}>{t('ui.saveAsNewCopy')}</div>
-                <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+                <div style={{ fontSize: 'var(--type-meta)', color: 'var(--text-secondary)' }}>
                   {t('ui.createAnIndependentCopyPreservingAllYourLocalEdits')}
                 </div>
               </div>
@@ -182,7 +182,7 @@ export function ConflictModal({
             >
               <div>
                 <div style={{ fontWeight: 600, fontSize: 13 }}>{t('ui.reloadFromServer')}</div>
-                <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+                <div style={{ fontSize: 'var(--type-meta)', color: 'var(--text-secondary)' }}>
                   {t('ui.discardLocalEditsAndReloadTheLatestServerRevision')}
                 </div>
               </div>
@@ -210,7 +210,7 @@ export function ConflictModal({
             >
               <div>
                 <div style={{ fontWeight: 600, fontSize: 13 }}>{t('ui.keepLocalEdits')}</div>
-                <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+                <div style={{ fontSize: 'var(--type-meta)', color: 'var(--text-secondary)' }}>
                   {t('ui.remainInEditorToInspectOrExportJsonManually')}
                 </div>
               </div>

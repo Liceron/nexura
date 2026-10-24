@@ -93,7 +93,7 @@ test.describe('Accessibility, Bilingual UX & Performance (F14)', () => {
     await page.goto(cluster.frontendUrl);
 
     // Create a workflow with Hindi/Devanagari title and descriptions
-    const createBtn = page.getByRole('button', { name: /New workflow|नया कार्यप्रवाह/i });
+    const createBtn = page.getByRole('button', { name: /New workflow|नया वर्कफ़्लो/i });
     await expect(createBtn).toBeVisible();
     await createBtn.click();
 

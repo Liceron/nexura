@@ -144,7 +144,7 @@ export function StateReplayer({
           style={{
             display: 'flex',
             justifyContent: 'space-between',
-            fontSize: 11,
+            fontSize: 'var(--type-meta)',
             color: 'var(--text-muted)',
           }}
         >
@@ -178,7 +178,7 @@ export function StateReplayer({
             <pre
               style={{
                 margin: 0,
-                fontSize: 11,
+                fontSize: 'var(--type-meta)',
                 fontFamily: 'var(--font-mono)',
                 color: 'var(--status-success)',
                 overflowX: 'auto',
@@ -211,7 +211,7 @@ export function StateReplayer({
           <pre
             style={{
               margin: 0,
-              fontSize: 11,
+              fontSize: 'var(--type-meta)',
               fontFamily: 'var(--font-mono)',
               overflowX: 'auto',
               maxHeight: 220,

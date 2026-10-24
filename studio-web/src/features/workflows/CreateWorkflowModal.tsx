@@ -194,7 +194,7 @@ export function CreateWorkflowModal({
                   }`,
                   backgroundColor:
                     selectedTemplateId === tmpl.id
-                      ? 'rgba(37, 99, 235, 0.05)'
+                      ? 'var(--accent-subtle)'
                       : 'var(--bg-surface)',
                   cursor: 'pointer',
                 }}
@@ -213,7 +213,7 @@ export function CreateWorkflowModal({
                     {tmpl.is_synthetic && <Badge variant="info">{t('ui.syntheticFixture')}</Badge>}
                     {tmpl.category === 'testing' && <Badge variant="warning">{t('ui.incompatibleTest')}</Badge>}
                   </div>
-                  <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.4 }}>
+                  <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.5 }}>
                     {t(`examples.${tmpl.id}.description`, tmpl.description)}
                   </div>
                 </div>
@@ -234,7 +234,7 @@ export function CreateWorkflowModal({
                 }`,
                 backgroundColor:
                   selectedTemplateId === 'blank'
-                    ? 'rgba(37, 99, 235, 0.05)'
+                    ? 'var(--accent-subtle)'
                     : 'var(--bg-surface)',
                 cursor: 'pointer',
               }}

@@ -18,9 +18,9 @@ export function SecurityNotice() {
         padding: '6px 10px',
         backgroundColor: 'var(--status-danger-bg)',
         color: 'var(--status-danger)',
-        fontSize: 11,
+        fontSize: 'var(--type-meta)',
         borderRadius: 'var(--radius-sm)',
-        lineHeight: 1.3,
+        lineHeight: 1.5,
       }}
     >
       <Icon name="warning" /> <strong>{t('ui.securityNotice')}</strong> {t('ui.thisFieldLooksLikeARawSecretOrApiKeyDoNotEmbedCredentialsInWorkflowSpecifi')}
@@ -89,7 +89,7 @@ export function SchemaField({
           ))}
         </select>
         {description && (
-          <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 4 }}>{description}</div>
+          <div style={{ fontSize: 'var(--type-meta)', color: 'var(--text-secondary)', marginTop: 4 }}>{description}</div>
         )}
       </div>
     );
@@ -120,7 +120,7 @@ export function SchemaField({
           {isRequired && <span style={{ color: 'var(--status-danger)' }}>*</span>}
         </label>
         {description && (
-          <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 4, marginLeft: 24 }}>
+          <div style={{ fontSize: 'var(--type-meta)', color: 'var(--text-secondary)', marginTop: 4, marginLeft: 24 }}>
             {description}
           </div>
         )}
@@ -165,7 +165,7 @@ export function SchemaField({
           }}
         />
         {description && (
-          <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 4 }}>{description}</div>
+          <div style={{ fontSize: 'var(--type-meta)', color: 'var(--text-secondary)', marginTop: 4 }}>{description}</div>
         )}
       </div>
     );
@@ -210,7 +210,7 @@ export function SchemaField({
           </Button>
         </div>
         {description && (
-          <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 8 }}>{description}</div>
+          <div style={{ fontSize: 'var(--type-meta)', color: 'var(--text-secondary)', marginBottom: 8 }}>{description}</div>
         )}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           {list.map((item, idx) => (
@@ -248,7 +248,7 @@ export function SchemaField({
             </div>
           ))}
           {list.length === 0 && (
-            <div style={{ fontSize: 11, color: 'var(--text-muted)', fontStyle: 'italic' }}>
+            <div style={{ fontSize: 'var(--type-meta)', color: 'var(--text-muted)', fontStyle: 'italic' }}>
               {t('ui.noItemsInList')}
             </div>
           )}
@@ -299,7 +299,7 @@ export function SchemaField({
         </div>
 
         {description && !collapsed && (
-          <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 8 }}>{description}</div>
+          <div style={{ fontSize: 'var(--type-meta)', color: 'var(--text-secondary)', marginBottom: 8 }}>{description}</div>
         )}
 
         {!collapsed && (
@@ -316,7 +316,7 @@ export function SchemaField({
               />
             ))}
             {Object.keys(childProps).length === 0 && (
-              <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+              <div style={{ fontSize: 'var(--type-meta)', color: 'var(--text-muted)' }}>
                 {t('ui.freeformObjectUseAdvancedJsonModeToEditCustomKeys')}
               </div>
             )}
@@ -384,7 +384,7 @@ export function SchemaField({
       {isSecret && <SecurityNotice />}
 
       {description && !isSecret && (
-        <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 4 }}>{description}</div>
+        <div style={{ fontSize: 'var(--type-meta)', color: 'var(--text-secondary)', marginTop: 4 }}>{description}</div>
       )}
     </div>
   );

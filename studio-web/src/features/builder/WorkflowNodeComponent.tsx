@@ -103,12 +103,12 @@ export const WorkflowNodeComponent = memo(({ id, data, selected }: NodeProps<Bui
         )}
       </div>
       {kind === 'map' && (
-        <div data-testid="node-composite-summary" style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+        <div data-testid="node-composite-summary" style={{ fontSize: 'var(--type-meta)', color: 'var(--text-muted)' }}>
           {compositeSummary}
         </div>
       )}
       {kind === 'parallel' && (data.parallel || []).length > 0 && (
-        <div style={{ fontSize: 11, color: 'var(--text-muted)', wordBreak: 'break-all' }}>
+        <div style={{ fontSize: 'var(--type-meta)', color: 'var(--text-muted)', wordBreak: 'break-all' }}>
           {(data.parallel || []).join(' | ')}
         </div>
       )}
@@ -118,7 +118,7 @@ export const WorkflowNodeComponent = memo(({ id, data, selected }: NodeProps<Bui
         <div
           style={{
             marginTop: 6,
-            fontSize: 11,
+            fontSize: 'var(--type-meta)',
             color: 'var(--status-danger)',
             backgroundColor: 'var(--status-danger-bg)',
             padding: '4px 6px',

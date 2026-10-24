@@ -190,7 +190,7 @@ export function DescribePanel({ onCreated, onClose }: DescribePanelProps) {
         <div data-testid="describe-result" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           <div
             data-testid="describe-unsaved"
-            style={{ ...box, background: 'rgba(245, 158, 11, 0.08)', borderColor: 'var(--status-warning)' }}
+            style={{ ...box, background: 'var(--status-warning-bg)', borderColor: 'var(--status-warning)' }}
           >
             {t('workflows.describeUnsaved')}
           </div>

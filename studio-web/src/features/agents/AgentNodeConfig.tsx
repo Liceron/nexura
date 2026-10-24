@@ -74,28 +74,28 @@ export function AgentNodeConfig({
         </select>
       </label>
       {agents === null && !error && (
-        <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{t('common.loading')}</span>
+        <span style={{ fontSize: 'var(--type-meta)', color: 'var(--text-secondary)' }}>{t('common.loading')}</span>
       )}
       {error && (
-        <span role="alert" style={{ fontSize: 11, color: 'var(--status-danger)' }}>
+        <span role="alert" style={{ fontSize: 'var(--type-meta)', color: 'var(--status-danger)' }}>
           {t('agents.pickerError')} {error}
         </span>
       )}
       {agents !== null && agents.length === 0 && !missing && (
-        <span data-testid="agent-node-empty" style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+        <span data-testid="agent-node-empty" style={{ fontSize: 'var(--type-meta)', color: 'var(--text-secondary)' }}>
           {t('agents.pickerEmpty')}
         </span>
       )}
       {missing && (
-        <span role="alert" data-testid="agent-node-missing" style={{ fontSize: 11, color: 'var(--status-warning)' }}>
+        <span role="alert" data-testid="agent-node-missing" style={{ fontSize: 'var(--type-meta)', color: 'var(--status-warning)' }}>
           {t('agents.pickerMissingHelp').replace('{id}', agentId)}
         </span>
       )}
       {!agentId && (
-        <span style={{ fontSize: 11, color: 'var(--status-danger)' }}>{t('agents.pickerRequired')}</span>
+        <span style={{ fontSize: 'var(--type-meta)', color: 'var(--status-danger)' }}>{t('agents.pickerRequired')}</span>
       )}
       {chosen && (
-        <span data-testid="agent-node-summary" style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+        <span data-testid="agent-node-summary" style={{ fontSize: 'var(--type-meta)', color: 'var(--text-secondary)' }}>
           {chosen.model} · {t('agents.toolCount').replace('{count}', String(chosen.tool_count))}
           {(chosen.approval_tools?.length ?? 0) > 0 ? ` · ${t('agents.needsApproval')}` : ''}
         </span>
@@ -110,7 +110,7 @@ export function AgentNodeConfig({
           onChange={(e) => update('input_key', e.target.value)}
           style={fieldStyle}
         />
-        <span style={{ fontSize: 11, fontWeight: 400, color: 'var(--text-secondary)' }}>{t('agents.inputKeyHelp')}</span>
+        <span style={{ fontSize: 'var(--type-meta)', fontWeight: 400, color: 'var(--text-secondary)' }}>{t('agents.inputKeyHelp')}</span>
       </label>
       <label style={labelStyle}>
         {t('agents.outputKey')}
@@ -122,7 +122,7 @@ export function AgentNodeConfig({
           onChange={(e) => update('output_key', e.target.value)}
           style={fieldStyle}
         />
-        <span style={{ fontSize: 11, fontWeight: 400, color: 'var(--text-secondary)' }}>{t('agents.outputKeyHelp')}</span>
+        <span style={{ fontSize: 'var(--type-meta)', fontWeight: 400, color: 'var(--text-secondary)' }}>{t('agents.outputKeyHelp')}</span>
       </label>
     </div>
   );

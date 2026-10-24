@@ -47,9 +47,9 @@ export function SkillsPicker({ value, onChange }: { value: unknown; onChange: (n
   return (
     <fieldset data-testid="skills-picker" style={{ border: 'none', margin: '0 0 10px', padding: 0 }}>
       <legend style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>{t('skills.pickerTitle')}</legend>
-      {failed && <div style={{ fontSize: 11, color: 'var(--status-danger)' }}>{t('skills.pickerError')}</div>}
+      {failed && <div style={{ fontSize: 'var(--type-meta)', color: 'var(--status-danger)' }}>{t('skills.pickerError')}</div>}
       {skills !== null && skills.length === 0 && missing.length === 0 && (
-        <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{t('skills.pickerEmpty')}</div>
+        <div style={{ fontSize: 'var(--type-meta)', color: 'var(--text-secondary)' }}>{t('skills.pickerEmpty')}</div>
       )}
       {(skills ?? []).map((s) => (
         <label key={s.name} style={{ display: 'flex', gap: 6, fontSize: 12, alignItems: 'baseline' }}>

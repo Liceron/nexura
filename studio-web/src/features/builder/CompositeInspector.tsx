@@ -35,7 +35,7 @@ const selectStyle: React.CSSProperties = {
 };
 
 const labelStyle: React.CSSProperties = { display: 'block', fontSize: 13, fontWeight: 500, marginBottom: 6 };
-const helpStyle: React.CSSProperties = { fontSize: 11, color: 'var(--text-muted)', marginTop: 4 };
+const helpStyle: React.CSSProperties = { fontSize: 'var(--type-meta)', color: 'var(--text-muted)', marginTop: 4 };
 
 function FieldError({ id, text }: { id: string; text?: string }) {
   if (!text) return null;

@@ -126,7 +126,7 @@ export function SchemaForm({ schema, value, onChange, title, fieldOverrides }: S
             }}
           />
           {jsonError && (
-            <div style={{ color: 'var(--status-danger)', fontSize: 11, marginTop: 4 }}>
+            <div style={{ color: 'var(--status-danger)', fontSize: 'var(--type-meta)', marginTop: 4 }}>
               {t('ui.syntaxError') + " "}{jsonError}
             </div>
           )}
@@ -147,9 +147,9 @@ export function SchemaForm({ schema, value, onChange, title, fieldOverrides }: S
                   padding: '6px 10px',
                   backgroundColor: 'var(--status-danger-bg)',
                   color: 'var(--status-danger)',
-                  fontSize: 11,
+                  fontSize: 'var(--type-meta)',
                   borderRadius: 'var(--radius-sm)',
-                  lineHeight: 1.3,
+                  lineHeight: 1.5,
                 }}
               >
                 <Icon name="warning" /> <strong>{t('ui.securityNotice')}</strong> {t('ui.thisFieldLooksLikeARawSecretOrApiKeyDoNotEmbedCredentialsInWorkflowSpecifi')}
@@ -193,7 +193,7 @@ export function SchemaForm({ schema, value, onChange, title, fieldOverrides }: S
                 backgroundColor: 'var(--bg-canvas)',
                 borderRadius: 'var(--radius-sm)',
                 border: '1px solid var(--border-subtle)',
-                fontSize: 11,
+                fontSize: 'var(--type-meta)',
               }}
             >
               <div style={{ fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 4 }}>
@@ -216,9 +216,9 @@ export function SchemaForm({ schema, value, onChange, title, fieldOverrides }: S
                             padding: '6px 10px',
                             backgroundColor: 'var(--status-danger-bg)',
                             color: 'var(--status-danger)',
-                            fontSize: 11,
+                            fontSize: 'var(--type-meta)',
                             borderRadius: 'var(--radius-sm)',
-                            lineHeight: 1.3,
+                            lineHeight: 1.5,
                           }}
                         >
                           <Icon name="warning" /> <strong>{t('ui.securityNotice')}</strong> {t('ui.thisFieldLooksLikeARawSecretOrApiKeyDoNotEmbedCredentialsInWorkflowSpecifi')}

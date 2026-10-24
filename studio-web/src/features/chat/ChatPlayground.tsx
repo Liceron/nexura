@@ -126,6 +126,7 @@ export function ChatPlayground() {
     interrupted,
     interruptedCode,
     streamingText,
+    checkingReply,
     error,
     setLanguage,
     selectSession,
@@ -414,6 +415,19 @@ export function ChatPlayground() {
               <div data-testid="message-bubble-streaming" className="chat-message chat-message--assistant" aria-busy="true">
                 <span className="chat-message-role">{t('ui.agent')} · {t('chat.replyInProgress')}</span>
                 <div className="chat-message-body">{streamingText}</div>
+                {checkingReply && (
+                  <div className="chat-message-role" data-testid="reply-checking-rest">
+                    {t('chat.checkingRest')}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {sending && checkingReply && !streamingText && (
+              // P39 G4: a guarded agent's reply is checked before any of it is shown.
+              <div data-testid="message-bubble-checking" className="chat-message chat-message--assistant" aria-busy="true">
+                <span className="chat-message-role">{t('ui.agent')} · {t('chat.checkingReply')}</span>
+                <div className="chat-message-body">{t('chat.checkingReplyNote')}</div>
               </div>
             )}
 

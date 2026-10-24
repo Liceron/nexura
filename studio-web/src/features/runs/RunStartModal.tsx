@@ -154,7 +154,7 @@ export function RunStartModal({
               borderRadius: 'var(--radius-sm)',
               border: '1px solid var(--status-warning)',
               fontSize: 12,
-              lineHeight: 1.4,
+              lineHeight: 1.5,
             }}
           >
             <Icon name="warning" /> <strong>{t('ui.notice')}</strong> {t('ui.youHaveUncommittedLocalEditsOnTheCanvasRunningThisWorkflowExecutesAuthoritativ')}{' '}

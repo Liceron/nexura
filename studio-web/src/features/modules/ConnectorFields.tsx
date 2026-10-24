@@ -27,7 +27,7 @@ export function OperationList({ operations }: { operations: ConnectorOperation[]
   const t = useBuilderT();
   if (operations.length === 0) return null;
   return (
-    <div data-testid="operation-list" style={{ margin: '0 0 8px 0', fontSize: 11 }}>
+    <div data-testid="operation-list" style={{ margin: '0 0 8px 0', fontSize: 'var(--type-meta)' }}>
       <div style={{ fontWeight: 600, color: 'var(--text-secondary)' }}>{t('connectors.operationsHeading')}</div>
       <ul style={{ margin: '2px 0 0 0', padding: 0, listStyle: 'none' }}>
         {operations.map((op) => (
@@ -161,7 +161,7 @@ export function CredentialRefPicker({
         </select>
       </label>
       {choices !== null && choices.length === 0 && (
-        <div data-testid="credential-ref-empty" style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 4 }}>
+        <div data-testid="credential-ref-empty" style={{ fontSize: 'var(--type-meta)', color: 'var(--text-secondary)', marginTop: 4 }}>
           {t('connectors.noCredentialOfType', { type: typeLabel })}{' '}
           <a href="#/credentials" data-testid="credential-ref-add-link">
             {t('connectors.addInCredentials')}

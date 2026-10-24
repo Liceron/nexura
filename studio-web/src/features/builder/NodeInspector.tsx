@@ -257,7 +257,7 @@ function NodeInspectorFields({ selectedNode, allNodes, allEdges, entryNode, onUp
                 padding: '8px 10px',
                 backgroundColor: 'var(--status-warning-bg)',
                 color: 'var(--status-warning)',
-                fontSize: 11,
+                fontSize: 'var(--type-meta)',
                 borderRadius: 'var(--radius-sm)',
               }}
             >
@@ -276,7 +276,7 @@ function NodeInspectorFields({ selectedNode, allNodes, allEdges, entryNode, onUp
                 display: 'flex',
                 flexDirection: 'column',
                 gap: 4,
-                fontSize: 11,
+                fontSize: 'var(--type-meta)',
               }}
             >
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -299,7 +299,7 @@ function NodeInspectorFields({ selectedNode, allNodes, allEdges, entryNode, onUp
                 backgroundColor: 'var(--bg-canvas)',
                 borderRadius: 'var(--radius-sm)',
                 border: '1px solid var(--border-subtle)',
-                fontSize: 11,
+                fontSize: 'var(--type-meta)',
               }}
             >
               <strong>{t('ui.requiredCredentialTypes')}</strong>{' '}
@@ -404,7 +404,7 @@ function NodeInspectorFields({ selectedNode, allNodes, allEdges, entryNode, onUp
                 </option>
               ))}
             </select>
-            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+            <div style={{ fontSize: 'var(--type-meta)', color: 'var(--text-muted)', marginTop: 4 }}>
               {t('ui.unconditionalNextStepWhenHandlerReturnsWithoutCustomBranchRoute')}
             </div>
           </div>
