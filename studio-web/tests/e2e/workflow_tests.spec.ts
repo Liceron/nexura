@@ -88,6 +88,8 @@ test.describe('Workflow tests (P22)', () => {
 
     // Saving the same case name again is refused by the server and shown as text.
     await page.getByTestId('save-as-test').click();
+    // Wait for the prefilled output key, or a fast submit reports OUTPUT_KEY_MISMATCH first.
+    await expect(dialog.getByTestId('save-as-test-output-key')).toHaveValue('route');
     await dialog.getByTestId('save-as-test-case-name').fill('mumbai');
     await dialog.getByTestId('save-as-test-submit').click();
     await expect(dialog.getByTestId('save-as-test-error')).toContainText('CASE_NAME_TAKEN');
