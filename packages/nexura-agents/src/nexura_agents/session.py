@@ -17,7 +17,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
 
 from nexura_agents._lazy import LazyModule
 from nexura_agents.attachments import Attachment
@@ -40,6 +40,7 @@ else:
     asyncio = LazyModule("asyncio")
 
 SCHEMA_VERSION = 1
+_CleanupT = TypeVar("_CleanupT")
 
 
 @dataclass(frozen=True)
@@ -364,21 +365,52 @@ async def retry_last_turn(
     (unless the session changed meanwhile, in which case nothing is overwritten). Raises
     ``SDKValidationError`` when there is no turn to retry and ``SessionConflictError`` when
     the session changed during the pop.
+
+    Returned ``cancelled`` or ``failed`` results also restore before returning. A
+    ``paused`` result stays in progress so its approval can resume the popped session.
     """
     store = runner.session_store
     if store is None:
         raise SDKValidationError("retry_last_turn needs a Runner with a session_store.")
     if "session_id" in run_kwargs:
         raise SDKValidationError("retry_last_turn takes the session id as its own argument.")
-    popped = await _pop_last_turn(store, session_id)
+    popping = asyncio.create_task(_pop_last_turn(store, session_id))
+    try:
+        popped = await asyncio.shield(popping)
+    except asyncio.CancelledError as cancelled:
+        # save() can commit before returning (notably SQLite's thread offload).
+        # Complete that pop before restoring, so cancellation cannot lose its result.
+        try:
+            popped = await _finish_cleanup(popping)
+            if popped is not None:
+                await _finish_cleanup(
+                    asyncio.create_task(_restore(store, session_id, popped[1], popped[2]))
+                )
+        finally:
+            raise cancelled
     if popped is None:
         raise SDKValidationError(f"Session '{session_id}' has no user turn to retry.")
     removed, before, after = popped
     try:
-        return await runner.run_async(agent, [removed], session_id=session_id, **run_kwargs)
+        result = await runner.run_async(agent, [removed], session_id=session_id, **run_kwargs)
     except BaseException:
-        await asyncio.shield(_restore(store, session_id, before, after))
+        await _finish_cleanup(asyncio.create_task(_restore(store, session_id, before, after)))
         raise
+    if result.status in ("cancelled", "failed"):
+        await _finish_cleanup(asyncio.create_task(_restore(store, session_id, before, after)))
+    return result
+
+
+async def _finish_cleanup(  # noqa: UP047 - keeps Python 3.11 support
+    task: asyncio.Task[_CleanupT],
+) -> _CleanupT:
+    """Finish rollback before returning, even if cancellation is requested again."""
+    while True:
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.done():
+                return task.result()
 
 
 async def _restore(

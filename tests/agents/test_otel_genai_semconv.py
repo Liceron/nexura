@@ -11,6 +11,7 @@ check (scripts/test_agents_wheel.py) runs it too.
 from __future__ import annotations
 
 import contextlib
+import hmac
 import json
 import subprocess
 import sys
@@ -184,7 +185,9 @@ async def test_spec_names_kinds_and_attributes(otel: Telemetry) -> None:
     assert call.kind == SpanKind.INTERNAL
     assert call.attributes["gen_ai.operation.name"] == "execute_tool"
     assert call.attributes["gen_ai.tool.name"] == "lookup"
-    assert call.attributes["gen_ai.tool.call.id"] == "call_1"
+    run_id = str(dict(run.attributes or {})["nexura.run_id"])
+    expected_id = "call-" + hmac.digest(run_id.encode(), b"call_1", "sha256").hex()[:16]
+    assert call.attributes["gen_ai.tool.call.id"] == expected_id
 
     # Run totals carry the spec usage names too.
     assert run.attributes["gen_ai.usage.reasoning.output_tokens"] == 10

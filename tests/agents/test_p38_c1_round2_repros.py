@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from _c1_platform import requires_landlock, requires_linux_landlock_api
 from nexura_agents import (
     Agent,
     FakeModel,
@@ -53,7 +54,7 @@ async def test_todo_identifier_cannot_bypass_guardrails(guard: str) -> None:
     assert secret not in str(custom), f"unchecked todo id leaked: {custom}"
 
 
-@pytest.mark.parametrize("disk", [False, True])
+@pytest.mark.parametrize("disk", [False, pytest.param(True, marks=requires_landlock)])
 async def test_filesystem_approval_digest_cannot_be_reused_for_another_run(
     tmp_path: Path, disk: bool
 ) -> None:
@@ -85,6 +86,7 @@ async def test_filesystem_approval_digest_cannot_be_reused_for_another_run(
 
 
 @pytest.mark.parametrize("abi", [-1, 0, 1, 2])
+@requires_linux_landlock_api
 def test_unavailable_or_old_landlock_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, abi: int
 ) -> None:
@@ -106,6 +108,7 @@ def test_unavailable_or_old_landlock_fails_closed(
         assert memory.read("note") == "ok"
 
 
+@requires_landlock
 def test_landlock_worker_isolation_does_not_restrict_sibling_threads(tmp_path: Path) -> None:
     first_root, second_root = tmp_path / "one", tmp_path / "two"
     first_root.mkdir()
@@ -137,6 +140,7 @@ def test_landlock_worker_isolation_does_not_restrict_sibling_threads(tmp_path: P
     assert outside.read_text() == "sibling allowed"
 
 
+@requires_landlock
 def test_landlock_uapi_layout_and_running_kernel() -> None:
     from nexura_agents._filesystem_sandbox import _Beneath, _Ruleset
 

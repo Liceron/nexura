@@ -214,16 +214,19 @@ def _stale_task(tmp_path: Path, leaf: Path | None) -> Path:
     return task
 
 
-@pytest.mark.parametrize("populated", ["0", "1"])
+@pytest.mark.parametrize("parent", ["nexura", "unused/../nexura"])
 def test_startup_sweep_removes_an_absent_runs_empty_leaf(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, populated: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, parent: str
 ) -> None:
+    populated = "0"
     cgroups = tmp_path / "cg"
     leaf = _make_leaf(cgroups / "nexura" / CONTAINER, populated)
     task = _stale_task(tmp_path, leaf)
     calls: list[list[str]] = []
     monkeypatch.setattr(life, "command", _prefix_runner(calls))
-    life.sweep_gvisor_tasks("/runsc", ["fake-sudo"], "service-a", task.parent, cgroup_root=cgroups)
+    life.sweep_gvisor_tasks(
+        "/runsc", ["fake-sudo"], "service-a", task.parent, cgroup_parent=cgroups / parent
+    )
     assert not task.exists()
     assert leaf.exists() is (populated == "1")  # a populated leaf is never removed
 
@@ -236,7 +239,11 @@ def test_startup_sweep_ignores_a_leaf_outside_the_cgroup_root_or_misnamed(
     calls: list[list[str]] = []
     monkeypatch.setattr(life, "command", _prefix_runner(calls))
     life.sweep_gvisor_tasks(
-        "/runsc", ["fake-sudo"], "service-a", task.parent, cgroup_root=tmp_path / "cg"
+        "/runsc",
+        ["fake-sudo"],
+        "service-a",
+        task.parent,
+        cgroup_parent=tmp_path / "cg" / "nexura",
     )
     assert elsewhere.exists() and not any("/usr/bin/rmdir" in c for c in calls)
 
@@ -272,3 +279,75 @@ def test_crash_watchdog_removes_the_runs_empty_leaf(tmp_path: Path) -> None:
             os.close(fd)
     assert not leaf.exists() and not task.exists()
     assert ["fake-sudo", "/usr/bin/rmdir", "--", str(leaf)] in calls
+
+
+@pytest.mark.parametrize("parent", ["some/other", "nexura/nested", "nexura-other"])
+def test_startup_sweep_keeps_a_leaf_outside_the_configured_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, parent: str
+) -> None:
+    cgroups = tmp_path / "cg"
+    leaf = _make_leaf(cgroups / parent / CONTAINER, "0")
+    task = _stale_task(tmp_path, leaf)
+    record = (task / "owner.json").read_bytes()
+    calls: list[list[str]] = []
+    monkeypatch.setattr(life, "command", _prefix_runner(calls))
+    life.sweep_gvisor_tasks(
+        "/runsc", ["fake-sudo"], "service-a", task.parent, cgroup_parent=cgroups / "nexura"
+    )
+    assert leaf.exists() and task.exists()
+    assert (task / "owner.json").read_bytes() == record
+    assert not any("/usr/bin/rmdir" in c or "/usr/bin/rm" in c or "delete" in c for c in calls)
+    assert "outside configured cgroup parent" in caplog.text and str(leaf) in caplog.text
+
+
+def test_startup_sweep_keeps_a_populated_runs_task_and_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    cgroups = tmp_path / "cg"
+    leaf = _make_leaf(cgroups / "nexura" / CONTAINER, "1")
+    task = _stale_task(tmp_path, leaf)
+    record = (task / "owner.json").read_bytes()
+    calls: list[list[str]] = []
+    monkeypatch.setattr(life, "command", _prefix_runner(calls))
+    life.sweep_gvisor_tasks(
+        "/runsc", ["fake-sudo"], "service-a", task.parent, cgroup_parent=cgroups / "nexura"
+    )
+    assert leaf.exists() and task.exists()
+    assert (task / "owner.json").read_bytes() == record
+    assert not any("/usr/bin/rmdir" in c or "/usr/bin/rm" in c for c in calls)
+    assert "not proven stale" in caplog.text and str(leaf) in caplog.text
+
+
+def test_crash_watchdog_cleans_task_and_reports_an_invalid_leaf(tmp_path: Path) -> None:
+    leaf = tmp_path / "cg" / ".." / CONTAINER
+    task = tmp_path / "nexura_gvisor_crashed"
+    task.mkdir(mode=0o700)
+    calls: list[list[str]] = []
+    control_read, control_write = os.pipe()
+    parent_read, parent_write = os.pipe()
+    ready = os.memfd_create("c8-invalid-leaf-ready")
+    os.close(parent_write)  # EOF simulates the readable pidfd of a dead service.
+    try:
+        with pytest.raises(OSError, match="not a gVisor run cgroup leaf") as exc:
+            life._watch(
+                {
+                    "parent": parent_read,
+                    "control": control_read,
+                    "ready": ready,
+                    "info": None,
+                    "cgroup": None,
+                    "task": str(task),
+                    "runtime": ["fake-sudo", "/runsc", f"--root={task / 'state'}"],
+                    "prefix": ["fake-sudo"],
+                    "container": CONTAINER,
+                    "cgroup_leaf": str(leaf),
+                },
+                _prefix_runner(calls),
+            )
+    finally:
+        for fd in (parent_read, control_read, control_write, ready):
+            os.close(fd)
+    assert not task.exists()
+    assert isinstance(exc.value.__cause__, ValueError) and str(leaf) in str(exc.value)
+    assert any("/usr/bin/rm" in c for c in calls)
+    assert not any("/usr/bin/rmdir" in c for c in calls)

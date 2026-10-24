@@ -699,7 +699,7 @@ def _decision_event(
         agent=state.agent.name,
         error_type=error_type,
     )
-    tracing.guardrail_decision(state.span, record)
+    tracing.guardrail_decision(state.span, record, run_id=state.run_id)
     return RunEvent(type=RunEventType.GUARDRAIL_DECISION, run_id=state.run_id, data=record)
 
 
@@ -2766,7 +2766,9 @@ class Runner:
                 ]
                 if pending:
                     for waiting in pending:
-                        pause_span = tracing.start_tool(state.span, waiting, pending_approval=True)
+                        pause_span = tracing.start_tool(
+                            state.span, waiting, run_id=state.run_id, pending_approval=True
+                        )
                         pause_span.content(
                             "gen_ai.tool.call.arguments",
                             "gen_ai.tool.call.arguments",
@@ -3856,7 +3858,7 @@ class Runner:
         decisions: _Decisions | None,
     ) -> tuple[str, str | None]:
         """Run one tool call inside an ``execute_tool`` span when tracing is on."""
-        span = tracing.start_tool(state.span, tc)
+        span = tracing.start_tool(state.span, tc, run_id=state.run_id)
         if span is tracing.NOOP:
             return await self._invoke_tool_inner(state, hooks, tc, tool, decisions)
         span.content("gen_ai.tool.call.arguments", "gen_ai.tool.call.arguments", tc.arguments)
@@ -3909,7 +3911,8 @@ class Runner:
         limit = tool.max_retries if tool.max_retries is not None else 1
 
         def on_decision(record: dict[str, Any]) -> None:
-            tracing.guardrail_decision(None, record)  # on the current execute_tool span
+            # On the current execute_tool span; the run event keeps its application id.
+            tracing.guardrail_decision(None, record, run_id=state.run_id)
             state.guard_events.setdefault(tc.id, []).append(
                 RunEvent(type=RunEventType.GUARDRAIL_DECISION, run_id=state.run_id, data=record)
             )

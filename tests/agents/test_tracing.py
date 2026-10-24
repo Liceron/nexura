@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import subprocess
 import sys
 import textwrap
@@ -99,7 +100,8 @@ async def test_agent_chat_and_tool_spans_nest(exporter: InMemorySpanExporter) ->
     assert call.attributes is not None
     assert call.attributes["gen_ai.operation.name"] == "execute_tool"
     assert call.attributes["gen_ai.tool.name"] == "lookup"
-    assert call.attributes["gen_ai.tool.call.id"] == "c0"
+    expected_id = "call-" + hmac.digest(result.run_id.encode(), b"c0", "sha256").hex()[:16]
+    assert call.attributes["gen_ai.tool.call.id"] == expected_id
     assert parent_id(call) == run.context.span_id
     assert call.status.status_code is not StatusCode.ERROR
 
@@ -215,15 +217,14 @@ async def test_parallel_tool_calls_keep_the_run_as_parent(
     exporter: InMemorySpanExporter,
 ) -> None:
     agent = make_agent(calls("lookup", "lookup", "lookup"), "done", tools=[lookup])
-    await Runner().run_async(agent, "hi")
+    result = await Runner().run_async(agent, "hi")
     run = one(exporter, "invoke_agent")
     tool_spans = by_name(exporter, "execute_tool")
     assert len(tool_spans) == 3
     assert {parent_id(s) for s in tool_spans} == {run.context.span_id}
     assert {s.attributes["gen_ai.tool.call.id"] for s in tool_spans if s.attributes} == {
-        "c0",
-        "c1",
-        "c2",
+        "call-" + hmac.digest(result.run_id.encode(), call_id.encode(), "sha256").hex()[:16]
+        for call_id in ("c0", "c1", "c2")
     }
 
 

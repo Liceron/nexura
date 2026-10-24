@@ -574,7 +574,9 @@ class GVisorOCIWorker:
         assert runsc_path and rootfs_path
         identity = service_identity(str(runsc_path), str(rootfs_path), cmd_prefix)
         if identity not in self._swept:
-            sweep_gvisor_tasks(str(runsc_path), cmd_prefix, identity, cgroup_root=CGROUP_ROOT)
+            sweep_gvisor_tasks(
+                str(runsc_path), cmd_prefix, identity, cgroup_parent=cgroup_parent_dir(config)
+            )
             self._swept.add(identity)
         if request.env:
             raise SecurityViolationError("env", "gVisor refuses caller environment variables")

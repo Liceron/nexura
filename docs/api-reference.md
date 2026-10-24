@@ -1792,6 +1792,9 @@ gets a new reply. ``run_kwargs`` (``deps``, ``timeout``, ``cancel``, ...) go to
 (unless the session changed meanwhile, in which case nothing is overwritten). Raises
 ``SDKValidationError`` when there is no turn to retry and ``SessionConflictError`` when
 the session changed during the pop.
+
+Returned ``cancelled`` or ``failed`` results also restore before returning. A
+``paused`` result stays in progress so its approval can resume the popped session.
 ~~~
 
 ### `RateLimiter`

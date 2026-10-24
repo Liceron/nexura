@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from _c1_platform import requires_landlock
 from nexura_agents import (
     Agent,
     AgentHooks,
@@ -227,7 +228,7 @@ async def test_summary_accounting_cache_and_budget_refusal() -> None:
     assert not refused_summary.calls and not refused_main.calls
 
 
-@pytest.mark.parametrize("rooted", [False, True])
+@pytest.mark.parametrize("rooted", [False, pytest.param(True, marks=requires_landlock)])
 def test_filesystem_operations_containment_and_caps(tmp_path: Path, rooted: bool) -> None:
     with ScopedFilesystem(
         tmp_path if rooted else None, max_file_bytes=12, max_total_bytes=20, max_entries=4
@@ -260,6 +261,7 @@ def test_filesystem_operations_containment_and_caps(tmp_path: Path, rooted: bool
         fs.list()
 
 
+@requires_landlock
 def test_filesystem_symlinks_hardlinks_and_special_files(tmp_path: Path) -> None:
     root = tmp_path / "workspace"
     root.mkdir()

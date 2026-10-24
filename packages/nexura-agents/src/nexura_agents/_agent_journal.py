@@ -124,6 +124,9 @@ class AgentJournal:
         self.on_lost: Callable[[], None] | None = None
         # The run's tracing span handle: committed effects are recorded on it (opt-in).
         self.trace_span: Any = None
+        # Telemetry-only lookup: journal encoding loses the distinction between "" and "-".
+        # Rebuilt from raw call ids during dispatch/recovery; never persisted in the journal.
+        self._trace_call_ids: dict[str, str] = {}
 
     @classmethod
     async def open(cls, checkpoints: Any, run_id: str, ttl: float) -> AgentJournal:
@@ -408,7 +411,9 @@ class AgentJournal:
         self.status = status
         if status in ("paused", *_TERMINAL):
             self.lease = None  # the store released it with this commit
-        tracing.effects_committed(effects, run_id=self.run_id, on=self.trace_span)
+        tracing.effects_committed(
+            effects, run_id=self.run_id, on=self.trace_span, raw_call_ids=self._trace_call_ids
+        )
 
     async def ensure_running(self) -> None:
         """A resumed or recovered run is ``running`` again before it does anything."""
@@ -429,10 +434,13 @@ class AgentJournal:
 
         attempt = 1
         if base not in self.steps:
-            return attempt, key_of(1), None
+            key = key_of(1)
+            self._trace_call_ids[str(key)] = call_id
+            return attempt, key, None
         while str(key_of(attempt + 1)) in self.steps:
             attempt += 1
         key = key_of(attempt)
+        self._trace_call_ids[str(key)] = call_id
         return attempt, key, self.steps[str(key)]
 
     def dispatch_key(self, turn: int, call_id: str) -> StepKey:
@@ -448,7 +456,9 @@ class AgentJournal:
         effect = self.effects.get(str(key))
         if step.outcome is None and (effect is None or effect.status == EffectStatus.PENDING):
             return key
-        return StepKey(f"{str(key).rsplit('#', 1)[0] if attempt > 1 else key}#{attempt + 1}")
+        key = StepKey(f"{str(key).rsplit('#', 1)[0] if attempt > 1 else key}#{attempt + 1}")
+        self._trace_call_ids[str(key)] = call_id
+        return key
 
     async def record_intent(self, intent: StepIntent, tool_name: str) -> None:
         """Commit the intent and a pending effect just before the call starts."""

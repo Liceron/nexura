@@ -71,7 +71,7 @@ class ScopedFilesystem:
         if root is not None:
             if not hasattr(os, "O_NOFOLLOW") or os.open not in os.supports_dir_fd:
                 raise SDKValidationError(
-                    "Directory workspaces require POSIX no-follow dir_fd support."
+                    "Directory workspaces require POSIX no-follow dir_fd support; use memory mode."
                 )
             absolute = Path(root).absolute()
             if ".." in absolute.parts:

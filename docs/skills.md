@@ -60,6 +60,22 @@ text. In Python, `Skill(tools=...)` takes a list of names; a bare string counts 
   (including a symlinked `SKILL.md`) and subdirectories, so a copied skill that ships code is
   noticed rather than silently trimmed.
 
+For the standard Agent Skills format, `SkillLibrary.from_directory(root)` and
+`Skill.from_directory(path, format="agent-skills")` use a portable, bounded read-only
+snapshot on Linux, macOS and Windows. They walk with `os.scandir`, refuse symlinks and
+Windows junctions/reparse points on every path component, and refuse hard links and
+special files. Each opened file's `fstat` device/inode must match its `lstat` identity;
+`O_NOFOLLOW` is also used where available. Discovery needs no Landlock support and
+never executes scripts. Each skill has at most 256 entries, 64 KiB per file and
+256 KiB total (including ignored scripts/assets); the library has at most 256 immediate
+entries, and the stored skill still has the 64 KiB canonical-content limit.
+
+The operator controls this folder. A local user who can rename directories inside
+the skill folder during loading is out of scope; the loader is not a sandbox for
+concurrent hostile directory mutations. Loaded resources are snapshots, so later file
+changes require an explicit reload. See [Harness](harness.md#skills-from-skillmd) for
+progressive loading and the supported front matter.
+
 ## Use skills in an agent
 
 ```python

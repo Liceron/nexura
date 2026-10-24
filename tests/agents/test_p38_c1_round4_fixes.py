@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from _c1_platform import requires_landlock
 from nexura_agents import (
     Agent,
     FakeModel,
@@ -129,7 +130,15 @@ def pending_agent(
 
 
 @pytest.mark.parametrize("disk", [False, True])
-@pytest.mark.parametrize("capability", ["plain", "todo", "filesystem-memory", "filesystem-disk"])
+@pytest.mark.parametrize(
+    "capability",
+    [
+        "plain",
+        "todo",
+        "filesystem-memory",
+        pytest.param("filesystem-disk", marks=requires_landlock),
+    ],
+)
 async def test_recovered_pause_accepts_its_original_occurrence_decision(
     tmp_path: Path, disk: bool, capability: str
 ) -> None:

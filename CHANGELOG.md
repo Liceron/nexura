@@ -5,6 +5,21 @@ has been published.
 
 ## Unreleased (0.4.0)
 
+### Fixed (P38 C1 platforms, OpenTelemetry privacy, gVisor recovery)
+- `SkillLibrary.from_directory` works on macOS and Windows: a portable read-only loader
+  rejects links, junctions and special files and re-checks each opened file's identity.
+  Disk-mode `ScopedFilesystem` stays Linux-only (Landlock ABI >= 3) and fails closed
+  elsewhere with an error that names memory mode.
+- `retry_last_turn` puts the original turn back when the retry is cancelled (task
+  cancellation or `CancelToken`) or fails, without overwriting a newer save; a paused
+  retry stays resumable.
+- With content capture off, exported `gen_ai.tool.call.id` and the call part of
+  `nexura.effect.step_key` are per-run HMAC pseudonyms instead of the raw model call id;
+  capture on keeps the raw id. Journal identities and recovery are unchanged.
+- gVisor crash recovery only sweeps cgroup leaves under the configured parent, keeps task
+  records for runs not proven stale, and cleans the task directory before reporting a
+  watchdog leaf-validation error.
+
 ### Added (P38 C8: production gVisor profile)
 - Sandbox: `SandboxConfig.gvisor_production(...)`, a hardened gVisor profile for servers.
   It enforces only `gvisor_oci` at `min_isolation="gvisor"`, no network, a read-only root,

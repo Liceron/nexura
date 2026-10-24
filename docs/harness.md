@@ -36,6 +36,14 @@ entries/256 KiB with a 64 KiB file cap; the final skill's canonical text is capp
 binary assets are not exposed as resource text. Text uses the suffix allowlist in
 [skills.py](../packages/nexura-agents/src/nexura_agents/skills.py).
 
+Skill discovery is a portable, read-only `os.scandir` snapshot on Linux, macOS and
+Windows; it does not use the Linux-only disk workspace below. Every directory
+component is checked with `lstat`, including Windows junction/reparse-point attributes.
+File opens use `O_NOFOLLOW` where available and compare `fstat` device/inode identity
+with `lstat` before reading bounded content. The operator controls the source folder:
+a local user who can rename directories inside it during loading is out of scope.
+This loader is not a sandbox for a folder concurrently controlled by an attacker.
+
 This example runs with an explicitly local fake model:
 
 ```python

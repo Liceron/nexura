@@ -286,6 +286,24 @@ To export, configure a `MeterProvider` with an OTLP metric exporter
 
 ## Privacy: `capture_content`
 
+With content capture off, model/adapter-supplied tool call ids in `gen_ai.tool.call.id`
+(on tool spans and guardrail events) and the call part of `nexura.effect.step_key` are
+exported as `call-` plus the first 16 hexadecimal characters of HMAC-SHA256 of the raw
+call id, keyed by the run id. The same call id within one run has the same pseudonym
+across spans and effect events, including retries; different runs have different
+pseudonyms. Turn numbers and retry suffixes in effect keys are preserved. With
+`capture_content=True`, the original ids and step-key representations are exported.
+Only telemetry attributes change: journal step keys, effect ids, payload digests,
+idempotency and recovery identities retain their original values. The pinned
+`semconv-genai@8538971` defines `gen_ai.tool.call.id` as a string identifier, so a
+pseudonym is compliant. These pseudonyms provide correlation within a run; they are
+not a claim of anonymization (the run id is also exported).
+A trace reader can recompute candidate HMACs using the exported run id to confirm
+short or guessable call ids: this protects against verbatim export and direct
+cross-run pseudonym correlation, not anonymization. Application `RunEvents` retain
+raw ids, as do logs that record those events; this OTel projection does not redact
+application logs.
+
 By default no instructions, prompts, completions, tool arguments or results, or workflow
 state are recorded; spans carry only names, ids, counts, statuses and token usage. Pass
 `instrument(capture_content=True)` to add them. Content is recorded as span attributes in

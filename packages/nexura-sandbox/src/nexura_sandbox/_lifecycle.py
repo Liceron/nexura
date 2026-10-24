@@ -13,6 +13,7 @@ import contextlib
 import ctypes
 import hashlib
 import json
+import logging
 import os
 import re
 import selectors
@@ -23,6 +24,8 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def enable_subreaper() -> None:
@@ -242,14 +245,15 @@ def sweep_gvisor_tasks(
     identity: str,
     root: Path | None = None,
     *,
-    cgroup_root: Path | None = None,
+    cgroup_parent: Path | None = None,
 ) -> None:
     """Conservative bounded startup sweep: unknown, live or ambiguous state is untouched.
 
     Old unmarked directories cannot be attributed safely and need operator cleanup.
     A successful runsc list is required before deciding a container no longer exists.
-    With ``cgroup_root``, a recorded cgroup leaf of that absent container (named after it,
-    under ``cgroup_root``) is removed too, but only once it is empty.
+    A recorded leaf must be named after the absent container and be an immediate child
+    of ``cgroup_parent`` after path normalisation. Unknown or nonempty leaves keep the
+    task and its record for the operator.
     """
     root = root or Path(tempfile.gettempdir())
     deadline = time.monotonic() + 5
@@ -300,16 +304,38 @@ def sweep_gvisor_tasks(
                     continue
                 if any(item["id"] == container for item in containers):
                     continue  # Never delete or unmount a live/stopped-but-existing container.
-                command([*runtime, "delete", "--force", container], timeout=1)
                 leaf = owner.get("cgroup_leaf")
-                if cgroup_root is not None and isinstance(leaf, str):
-                    leaf_path = Path(leaf)
-                    if leaf_path.name == container and leaf_path.is_relative_to(cgroup_root):
-                        remove_empty_cgroup_leaf(
-                            leaf_path,
-                            prefix,
-                            timeout=max(0.01, min(1, deadline - time.monotonic())),
+                if leaf is not None:
+                    leaf_path = Path(leaf) if isinstance(leaf, str) else None
+                    if (
+                        cgroup_parent is None
+                        or leaf_path is None
+                        or not leaf_path.is_absolute()
+                        or ".." in leaf_path.parts
+                        or leaf_path.name != container
+                        or leaf_path.resolve().name != container
+                        or leaf_path.resolve().parent != cgroup_parent.resolve()
+                    ):
+                        _LOGGER.warning(
+                            "Keeping gVisor task %s: recorded leaf %r is outside configured "
+                            "cgroup parent %s or invalid",
+                            task,
+                            leaf,
+                            cgroup_parent,
                         )
+                        continue
+                    if not remove_empty_cgroup_leaf(
+                        leaf_path.resolve(),
+                        prefix,
+                        timeout=max(0.01, min(1, deadline - time.monotonic())),
+                    ):
+                        _LOGGER.warning(
+                            "Keeping gVisor task %s: not proven stale; cgroup leaf remains: %s",
+                            task,
+                            leaf,
+                        )
+                        continue
+                command([*runtime, "delete", "--force", container], timeout=1)
                 remove_gvisor_task(task, prefix)
             except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
                 continue  # Failure is not proof of stale state; leave it for the operator.
@@ -439,11 +465,19 @@ def _watch(data: dict[str, Any], runner: Callable[..., tuple[int, bytes]]) -> No
                 ):
                     raise OSError("cannot prove crashed gVisor container was deleted")
             leaf_left = False
+            leaf_error: ValueError | None = None
             if data.get("cgroup_leaf"):
-                leaf_left = not remove_empty_cgroup_leaf(
-                    Path(data["cgroup_leaf"]), data["prefix"], runner=runner
-                )
+                try:
+                    leaf_left = not remove_empty_cgroup_leaf(
+                        Path(data["cgroup_leaf"]), data["prefix"], runner=runner
+                    )
+                except ValueError as exc:
+                    leaf_error = exc
             remove_gvisor_task(Path(data["task"]), data["prefix"], runner=runner)
+            if leaf_error is not None:
+                raise OSError(
+                    f"crashed gVisor run's cgroup leaf removal failed: {leaf_error}"
+                ) from leaf_error
             if leaf_left:
                 raise OSError("crashed gVisor run's cgroup leaf remains: " + data["cgroup_leaf"])
     finally:

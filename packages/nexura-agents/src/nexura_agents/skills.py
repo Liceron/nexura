@@ -35,7 +35,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import stat
 import threading
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -325,22 +327,15 @@ class Skill:
         """
         root = Path(path)
         if format == "agent-skills":
-            from nexura_agents.filesystem import ScopedFilesystem
+            from nexura_agents._skill_directory import snapshot_skill
 
             # Snapshot bounded text only. Scripts/binary assets remain inaccessible;
             # no metadata value can install a tool or grant execution permission.
             try:
-                with ScopedFilesystem(root, max_total_bytes=MAX_SKILL_BYTES * 4) as files:
-                    standard_resources = {
-                        p: files.read(p)
-                        for p in files.list()
-                        if p != "SKILL.md"
-                        and not p.startswith("scripts/")
-                        and p.lower().endswith(TEXT_SUFFIXES)
-                    }
-                    skill = cls.from_markdown(
-                        files.read("SKILL.md"), resources=standard_resources, format=format
-                    )
+                texts = snapshot_skill(
+                    root, file_limit=MAX_SKILL_BYTES, text_suffixes=TEXT_SUFFIXES
+                )
+                skill = cls.from_markdown(texts.pop("SKILL.md"), resources=texts, format=format)
             except (OSError, UnicodeError, SDKValidationError) as exc:
                 raise SkillError(f"Cannot load skill directory: {exc}") from exc
             if skill.name != root.name:
@@ -397,22 +392,24 @@ class SkillLibrary:
         """Load a bounded directory of Agent Skills, in sorted order, without execution.
 
         Each immediate subdirectory contains SKILL.md. Unrelated files are ignored;
-        symlinks are refused. No home-directory discovery or network access occurs.
+        symlinks/junctions and special files are refused. No home-directory discovery
+        or network access occurs. Local directory renames during loading are outside
+        the boundary: the operator controls this read-only source folder.
         """
+        from nexura_agents._skill_directory import directory_entries
+
         root = Path(path)
-        if root.is_symlink():
-            raise SkillError("A skill library root cannot be a symlink.")
         entries: list[Path] = []
-        for entry in root.iterdir():
-            if len(entries) >= 256:
-                raise SkillError("A skill library may contain at most 256 entries.")
-            if entry.is_symlink():
-                raise SkillError("A skill library cannot contain symlinks.")
-            entries.append(entry)
+        try:
+            entries = [
+                entry for entry, info in directory_entries(root) if stat.S_ISDIR(info.st_mode)
+            ]
+        except (OSError, SDKValidationError) as exc:
+            raise SkillError(f"Cannot load skill library: {exc}") from exc
         return cls(
             Skill.from_directory(entry, format="agent-skills")
             for entry in sorted(entries)
-            if entry.is_dir() and (entry / "SKILL.md").exists()
+            if os.path.lexists(entry / "SKILL.md")
         )
 
     def add(self, skill: Skill, *, labels: Sequence[str] = ()) -> SkillVersion:

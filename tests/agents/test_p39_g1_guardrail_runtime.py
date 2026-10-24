@@ -9,6 +9,7 @@ OpenTelemetry exporter.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import time
 from collections.abc import Iterator
@@ -457,7 +458,7 @@ async def test_decisions_are_trace_events_on_the_run_and_tool_spans(
         tools=[send],
         output_guardrails=[redact],
     )
-    await Runner().run_async(agent, f"hi {SECRET}")
+    result = await Runner().run_async(agent, f"hi {SECRET}")
     spans = exporter.get_finished_spans()
     found = {
         span.name: [e for e in span.events if e.name == "nexura.guardrail.decision"]
@@ -475,5 +476,9 @@ async def test_decisions_are_trace_events_on_the_run_and_tool_spans(
     assert on_tool["nexura.guardrail.stage"] == "tool_input"
     assert on_tool["nexura.guardrail.action"] == "reject"
     assert on_tool["gen_ai.tool.name"] == "send"
-    assert on_tool["gen_ai.tool.call.id"] == "c1"
+    tool_span = next(span for span in spans if span.name == "execute_tool send")
+    assert tool_span.attributes is not None
+    assert on_tool["gen_ai.tool.call.id"] == tool_span.attributes["gen_ai.tool.call.id"]
+    expected_id = "call-" + hmac.digest(result.run_id.encode(), b"c1", "sha256").hex()[:16]
+    assert on_tool["gen_ai.tool.call.id"] == expected_id
     assert_no_secret([on_run, on_tool])

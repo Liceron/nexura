@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from _c1_platform import requires_landlock
 from nexura_agents import (
     Agent,
     ApproveWith,
@@ -29,6 +30,7 @@ from nexura_agents.errors import ApprovalDecisionError
 
 
 @pytest.mark.parametrize("operation", ["read", "replace"])
+@requires_landlock
 def test_kernel_denies_directory_move_after_last_path_check(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -139,6 +141,7 @@ async def test_canonical_scoped_arguments_cannot_be_retargeted(
 
 
 @pytest.mark.parametrize("replaced", [False, True])
+@requires_landlock
 async def test_rebuilt_disk_scope_resumes_but_replaced_root_does_not(
     tmp_path: Path,
     replaced: bool,

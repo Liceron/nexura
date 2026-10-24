@@ -228,7 +228,9 @@ Four helpers, importable from `nexura_agents`, tidy up stored conversations:
   user input again, so you get a fresh reply. Extra arguments (`deps`, `timeout`,
   `cancel`, ...) go to `run_async`. If the retry fails or is cancelled, the original turn is
   put back (unless the session was saved by someone else meanwhile). It is a helper
-  function, not a `Runner` method.
+  function, not a `Runner` method. This also covers returned `cancelled` or `failed`
+  results; restoration finishes before the result returns. A `paused` result remains
+  in progress so approval can resume it. A completed retry keeps the new reply.
 
 `MemorySessionStore` and `SQLiteSessionStore` have `delete` and `list_sessions` methods. They
 are optional for custom stores: without them `delete_session` and `list_sessions` raise

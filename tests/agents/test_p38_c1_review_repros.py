@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from _c1_platform import requires_landlock
 from nexura_agents import (
     Agent,
     FakeModel,
@@ -32,6 +33,7 @@ def call(name: str, **arguments: Any) -> Message:
 
 
 @pytest.mark.parametrize("operation", ["read", "write"])
+@requires_landlock
 def test_open_directory_renamed_outside_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -94,7 +96,7 @@ async def test_todo_final_event_does_not_bypass_g4_hold() -> None:
     assert secret not in str(custom), f"G4 held tool result but CUSTOM leaked: {custom}"
 
 
-@pytest.mark.parametrize("rooted", [False, True])
+@pytest.mark.parametrize("rooted", [False, pytest.param(True, marks=requires_landlock)])
 def test_path_encodings_are_literal_and_not_traversal(tmp_path: Path, rooted: bool) -> None:
     with ScopedFilesystem(tmp_path if rooted else None) as fs:
         for path in ("../secret", "/secret", "C:/secret", "C:\\secret", "a\\..\\secret", "a\x00b"):
@@ -113,7 +115,7 @@ def test_path_encodings_are_literal_and_not_traversal(tmp_path: Path, rooted: bo
             assert fs.read(path) == "literal"
 
 
-@pytest.mark.parametrize("rooted", [False, True])
+@pytest.mark.parametrize("rooted", [False, pytest.param(True, marks=requires_landlock)])
 def test_shared_filesystem_concurrent_cap_enforcement(tmp_path: Path, rooted: bool) -> None:
     with ScopedFilesystem(
         tmp_path if rooted else None, max_file_bytes=8, max_total_bytes=10, max_entries=10
@@ -173,6 +175,7 @@ def test_skills_remain_progressive_with_hostile_body() -> None:
     assert set(agent.tools_by_name) == {"load_skill", "read_skill_resource"}
 
 
+@requires_landlock
 async def test_approval_cannot_be_retargeted_to_different_filesystem(tmp_path: Path) -> None:
     """Resume reconstructed agent with another root, without changing approved args."""
     from nexura_agents import MemoryCheckpointStore
@@ -240,7 +243,7 @@ async def test_summary_model_calls_repeat_in_addition_to_main_model_after_crash(
     )
 
 
-@pytest.mark.parametrize("rooted", [False, True])
+@pytest.mark.parametrize("rooted", [False, pytest.param(True, marks=requires_landlock)])
 def test_many_empty_files_count_toward_entry_cap(tmp_path: Path, rooted: bool) -> None:
     with ScopedFilesystem(tmp_path if rooted else None, max_entries=3) as fs:
         for i in range(3):

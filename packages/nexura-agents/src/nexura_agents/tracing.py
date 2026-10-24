@@ -48,12 +48,14 @@ never sets the global ``TracerProvider`` or ``MeterProvider``.
 from __future__ import annotations
 
 import contextlib
+import hashlib
+import hmac
 import json
 import math
 import re
 import threading
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -1160,10 +1162,32 @@ def start_chat(parent: Any, model: Any) -> Any:
     return start(f"chat {name}", attributes, parent=parent, client=True)
 
 
-def start_tool(parent: Any, call: Any, *, pending_approval: bool = False) -> Any:
+def _export_tool_call_id(call_id: str, *, run_id: str, capture_content: bool) -> str:
+    """Run-scoped telemetry identity; never replace an application or journal id."""
+    if capture_content:
+        return call_id
+    # Even a Python string containing a lone surrogate must not make tracing fail a run.
+    digest = hmac.new(
+        run_id.encode("utf-8", errors="surrogatepass"),
+        call_id.encode("utf-8", errors="surrogatepass"),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"call-{digest[:16]}"
+
+
+def start_tool(parent: Any, call: Any, *, run_id: str, pending_approval: bool = False) -> Any:
+    state = _STATE
+    if state is None:
+        return NOOP
     handle = start(
         f"execute_tool {call.name}",
-        {OPERATION_NAME: "execute_tool", TOOL_NAME: call.name, TOOL_CALL_ID: call.id},
+        {
+            OPERATION_NAME: "execute_tool",
+            TOOL_NAME: call.name,
+            TOOL_CALL_ID: _export_tool_call_id(
+                call.id, run_id=run_id, capture_content=state.capture_content
+            ),
+        },
         parent=parent,
     )
     if pending_approval:
@@ -1339,14 +1363,42 @@ def budget_event(kind: str, model_id: str, *, method: str | None = None, **value
     record_event(f"nexura.budget.{kind}", attributes)
 
 
-def effects_committed(effects: Sequence[Any], *, run_id: str, on: Any = None) -> None:
+def _export_effect_step_key(
+    step_key: str, *, run_id: str, capture_content: bool, raw_call_id: str | None = None
+) -> str:
+    """Project an agent call key without changing its journal representation."""
+    if capture_content:
+        return step_key
+    from nexura_agents._agent_journal import call_step_key, parse_call_step_key
+
+    try:
+        turn, call_id, attempt = parse_call_step_key(step_key)
+    except ValueError:
+        return step_key  # Other (for example workflow) step keys have no call id.
+    # Prefer the model's raw id: the journal codec normalizes an empty id to "-".
+    # Decoding remains a fallback for standalone records without a supplied raw id.
+    pseudonym = _export_tool_call_id(
+        call_id if raw_call_id is None else raw_call_id, run_id=run_id, capture_content=False
+    )
+    return str(call_step_key(turn, pseudonym, attempt))
+
+
+def effects_committed(
+    effects: Sequence[Any],
+    *,
+    run_id: str,
+    on: Any = None,
+    raw_call_ids: Mapping[str, str] | None = None,
+) -> None:
     """``nexura.effect.*`` for journal effect records committed by a durable run.
 
     ``pending`` is the intent written before dispatch, ``confirmed`` the outcome,
     ``indeterminate`` an unknown outcome and ``resolved`` a person's resolution. Results
-    are never recorded.
+    are never recorded. ``raw_call_ids`` supplies telemetry-only identities keyed by
+    journal step key, preserving ids (including "") the journal codec normalizes.
     """
-    if _STATE is None or not effects:
+    state = _STATE
+    if state is None or not effects:
         return
     for effect in effects:
         try:
@@ -1354,7 +1406,14 @@ def effects_committed(effects: Sequence[Any], *, run_id: str, on: Any = None) ->
             intent = effect.intent
             attributes: dict[str, Any] = {
                 "nexura.effect.id": effect.effect_id,
-                "nexura.effect.step_key": str(intent.step_key),
+                "nexura.effect.step_key": _export_effect_step_key(
+                    str(intent.step_key),
+                    run_id=run_id,
+                    capture_content=state.capture_content,
+                    raw_call_id=(
+                        raw_call_ids.get(str(intent.step_key)) if raw_call_ids is not None else None
+                    ),
+                ),
                 "nexura.effect.class": str(getattr(intent.effect_class, "value", "")),
                 "nexura.effect.status": status,
                 "nexura.run_id": run_id,
@@ -1372,7 +1431,7 @@ def effects_committed(effects: Sequence[Any], *, run_id: str, on: Any = None) ->
             record_event(name, attributes, on=on)
 
 
-def guardrail_decision(on: Any, decision: dict[str, Any]) -> None:
+def guardrail_decision(on: Any, decision: dict[str, Any], *, run_id: str) -> None:
     """``nexura.guardrail.decision`` for one guardrail outcome; never raises.
 
     ``decision`` is the redacted record the runner also sends as a ``GUARDRAIL_DECISION``
@@ -1380,7 +1439,8 @@ def guardrail_decision(on: Any, decision: dict[str, Any]) -> None:
     classification fields). Only those keys are mapped; nothing else is recorded, so no
     content can reach the span.
     """
-    if _STATE is None:
+    state = _STATE
+    if state is None:
         return
     mapping = {
         "stage": GUARDRAIL_STAGE,
@@ -1402,5 +1462,9 @@ def guardrail_decision(on: Any, decision: dict[str, Any]) -> None:
     for key, name in mapping.items():
         value = decision.get(key)
         if value is not None:
+            if name == TOOL_CALL_ID:
+                value = _export_tool_call_id(
+                    value, run_id=run_id, capture_content=state.capture_content
+                )
             attributes[name] = value
     record_event(EVENT_GUARDRAIL_DECISION, attributes, on=on)

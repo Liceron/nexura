@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from _c1_platform import requires_landlock
 from nexura_agents import (
     Agent,
     FakeModel,
@@ -101,7 +102,7 @@ async def test_todo_version_survives_json_replay_without_reverting_later_plan() 
     }
 
 
-@pytest.mark.parametrize("disk", [False, True])
+@pytest.mark.parametrize("disk", [False, pytest.param(True, marks=requires_landlock)])
 async def test_edit_approval_requires_this_run_and_leaves_its_own_grant_usable(
     tmp_path: Path,
     disk: bool,
