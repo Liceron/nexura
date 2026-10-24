@@ -466,6 +466,238 @@ same body as the non-streaming endpoint. Reply text arrives whole (no token delt
 A turn is saved only when it completes; if the client disconnects or stops it, nothing
 is saved. The TS client exposes this as `sessions.chatStream()`.
 
+## Retention and cleanup
+
+For 0.4, retention deletes only database rows. Export bundles and trace files are
+reported as eligible for manual removal (path, run ID, age, size, reason).
+Retention never deletes, renames, or opens those files for writing, even with
+`--apply`. The CLI prints **"Files listed, not deleted"**.
+Retention is operator-run, opt-in, and previews database deletions by default.
+Database paths must name an existing local SQLite file. Missing paths, URI targets
+(including `file:` and `postgresql://`) and in-memory targets fail with
+`RetentionError`; the CLI exits nonzero. Export inventory without `db_path` is
+available through the Python API, but cannot authorize database deletion.
+`--apply` explicitly enables database row deletion. Ages must be finite numbers from 0 through 365250 days,
+in the CLI and Python API. Comparisons are strictly older than the cutoff; equal,
+future, missing, and ambiguous timestamps are retained.
+
+StudioStore reads a run and its events on one SQLite snapshot. Event appends take
+a write reservation and check parent existence in the same transaction, so they
+serialize with retention. If a parent no longer exists, the append logs a warning
+with its run ID and event type, returns `None`, and creates no orphan event. This
+applies to every missing parent, including IDs never created; no event payload is
+logged. Concurrent use requires all service processes to use this updated Store
+code. Older processes without these transaction boundaries are unsupported.
+An append within an existing caller write transaction commits that transaction
+with the event, preserving the previous Store behavior.
+
+The retention engine rechecks each run in a `BEGIN IMMEDIATE` transaction, using
+a 30-second SQLite busy timeout. Its selected run, events, database bundle, and
+database trace rows commit together. Eligibility requires terminal state
+(`completed`, `failed`, `cancelled`) wherever lifecycle state exists. Pending
+input/effects, inline approvals, journal/checkpoint disagreement, leases, unfinished
+steps, and unresolved approvals veto deletion. M3 approval dispatch claims use
+`claimed_by`/`claimed_at`; SDK approvals use their stored JSON envelopes and
+consumption records. Unconsumed approvals remain protected even after expiry.
+Protection extends through parent/child and fork dependencies to every data kind.
+An unknown approval identity or unsupported authority schema stops the pass.
+A nonempty Studio journal pointer requires a matching local journal authority;
+an absent journal table or identity vetoes deletion. Registered trace parents
+participate in the same dependency closure as database trace parents.
+
+Only the known Studio projection/event, failed-capture bundle, and SQLite
+observability tables are deletion targets. Journal, checkpoint, approval, and
+other tables remain untouched. All authoritative stores must be co-located in the
+supplied SQLite database; retention cannot validate remote or separate stores.
+Run age comes from terminal updates, with newer events preventing deletion. Bundle
+creation and trace event timestamps must also precede their respective cutoffs.
+Reports count journal rows preserved for separate compaction.
+
+### CLI usage
+
+Use the `nexura-runtime retention` subcommand:
+
+```bash
+# Preview what would be deleted for data older than 30 days (dry run)
+nexura-runtime retention --older-than-days 30 --db ./nexura_service.sqlite3
+
+# Target specific categories (runs, bundles, traces)
+nexura-runtime retention --older-than-days 14 --kinds runs,bundles --db ./nexura_service.sqlite3
+
+# Apply deletion explicitly; concurrent services must use the updated StudioStore
+nexura-runtime retention --older-than-days 30 --db ./nexura_service.sqlite3 --apply
+```
+
+### Python API
+
+```python
+from nexura_runtime.retention import RetentionError, RetentionPolicy, apply_retention
+
+# Define policy (max age in days per data kind)
+policy = RetentionPolicy(older_than_days=30, kinds=["runs", "bundles", "traces"])
+# Or with specific thresholds per category:
+# policy = RetentionPolicy(runs_days=30, bundles_days=14, traces_days=7)
+
+# An existing database in an operator-controlled directory is required.
+# Dry run is read-only; failures carry a report rather than implying success.
+try:
+    report = apply_retention(
+        policy, db_path="./nexura_service.sqlite3", data_dir="./.nexura",
+    )
+except RetentionError as exc:
+    print(exc.report.summary())
+else:
+    print(report.summary())
+    # Apply explicitly after inspecting the preview.
+    try:
+        applied_report = apply_retention(
+            policy, db_path="./nexura_service.sqlite3", dry_run=False,
+        )
+    except RetentionError as exc:
+        print(exc.report.summary())
+```
+
+Files are inspected read-only, with no-follow and identity checks. Modified,
+unrecognised, symlinked, hard-linked, protected, and newer files are retained and
+are not recommended for removal. Ownership is never inferred from a filename,
+directory, suffix, or mtime. When an old run is deleted, a small terminal lifecycle
+record (status, timestamps, dependency identities) is saved atomically in the
+database so a longer-lived export can be assessed on a later pass. Current live
+authorities and approvals always override this historical record.
+
+Read file eligibility from the report; the operator decides whether and when to
+remove each file. This example also reports a missing database in an empty workspace:
+
+```python
+from nexura_runtime.retention import RetentionError, RetentionPolicy, apply_retention
+
+try:
+    report = apply_retention(
+        RetentionPolicy(bundles_days=30, traces_days=30),
+        db_path="./nexura_service.sqlite3", data_dir="./exports",
+    )
+except RetentionError as exc:
+    report = exc.report
+    print(report.summary())
+for item in report.eligible_files:
+    print(item.path, item.run_id, item.age_days, item.size_bytes, item.reason)
+print("Files listed, not deleted")
+```
+
+Existing exporters create the files independently. The compatibility function
+`write_retention_artifact` now only registers an **existing** export: it never
+creates or writes a file. It verifies schema, run, parents, content hash and file
+identity before recording ownership in the database. Closed trace exports use
+`kind="traces"` and actual `EventRecord` JSON lines for one known run, each with an
+explicit timestamp. Empty registered traces use the terminal run timestamp.
+
+File registration and inventory require POSIX descriptor-relative/no-follow support;
+symlinks are refused at each directory component. Registrations predating persisted
+parent identities require an audit: missing or malformed dependencies stop the pass.
+Export retention attempts no quarantine, rename or unlink.
+
+Database opening requires Linux `/proc/self/fd` and `fdinfo`. Before any SQL,
+retention verifies actual writable descriptor identities against the pinned main
+database, then rechecks its named ancestor chain at transaction boundaries. Other
+open files or existing sidecars select a fresh worker before opening SQLite. A
+verified main-only connection also hands off before SQL.
+Each handoff passes the caller's original database and parent directory device/inode
+identities; a detected substitution or ambiguous connection stops with an error,
+never a retry that authorizes a replacement pathname. Per-run transactions still
+serialize with live Store connections in the caller's process.
+
+**Operator requirement:** the database's own directory must have no group/other
+write bits, even if it is root-owned and sticky. Use a private directory such as
+`/tmp/nexura-private` with mode 0700; never place the database directly in `/tmp`.
+Every ancestor through the filesystem root must also have no group/other write
+bits, with a root-owned sticky exception for **ancestors only**, such as `/tmp`
+above that private directory. The directory and its ancestors must be owned by the
+invoking user or root. Another user who
+owns an ancestor can change its permissions despite mode 0755. Retention checks
+this before opening the database or its
+sidecars and again with namespace checks. A refusal names the unsafe path and
+gives a `chmod` hint (for example `chmod go-w /srv/nexura`). Retention never changes
+permissions for you. Sticky mode does not prevent another user creating a free
+`-journal` or `-shm` name, so it never makes the database's own directory safe.
+Use one canonical database path; file-level bind mounts that
+give one database different sidecar names are unsupported. POSIX ACLs or mount
+policies must not grant another user write access beyond these mode bits.
+
+All SQL runs only in the worker. It validates existing sidecar formats and
+identities before opening SQLite. Missing SQLite transaction sidecars are created
+exclusively in apply mode before SQLite opens them; an appeared file is refused. After
+`BEGIN IMMEDIATE`, before deletion, and immediately before `COMMIT`, the worker
+checks its own main, WAL and SHM descriptors with `fstat` against those identities.
+Missing, mismatched or unprovable descriptors stop the database with an error.
+Without Linux `/proc/self/fd` and `fdinfo` (including macOS), retention refuses;
+there is no bypass for WAL databases. No extra ordinary database descriptor is
+opened or closed in the service process, preserving its other SQLite connections'
+locks. Hard-linked, redirected, unsupported or changed database paths/sidecars are
+refused.
+
+A `-journal` file present before BEGIN is ambiguity in either WAL or rollback
+mode and stops retention before SQLite can recover or delete it. Apply supports
+WAL and DELETE rollback-journal modes. In DELETE mode the worker exclusively
+reserves its own empty journal immediately before the first write inside the
+transaction, then proves the opened journal descriptor identity after writes and
+before COMMIT. Missing or unprovable descriptors stop without committing. Other
+journal modes are refused; retention never changes journal mode itself.
+
+Dry runs open the source read-only, without using `immutable=1` on a mutable
+source or bypassing SQLite's live-WAL consistency locks. A worker-only Linux Landlock policy denies filesystem
+write, creation, removal, rename and truncate operations before SQLite opens any
+file. Main database, WAL, SHM and rollback journal bytes and names are unchanged
+by retention. A hot journal, stale WAL index, or any read requiring a write fails
+instead. A cleanly closed Studio WAL database with no sidecars is previewed through
+a **private read-only in-memory snapshot**. The worker opens its main file with
+`O_RDONLY|O_NOFOLLOW` and holds a Linux read lease while copying. Existing writers
+prevent that lease; a new writer requests a break and invalidates capture. Main
+identity/content metadata and the absence of WAL/SHM/journal are checked before
+and after capture, then again during the private read. A changed source or sidecar
+appearance invalidates the preview. Only the private image's format bytes are
+adapted for SQLite deserialization; the production database's journal mode and
+bytes are never changed. The memory connection is query-only.
+
+The snapshot limit is 256 MiB and the filesystem must support read leases for the
+invoking user. If capture cannot be proved safe, retention explains that nothing
+changed and asks the operator to stop writers and retry, or run the preview with
+the service running and a valid existing WAL index. It never repairs sidecars or
+converts the production database to another journal mode. Landlock ABI 3 or later
+on Linux x86-64/aarch64 is required for previews; unavailable enforcement is an
+error, never a weaker fallback. Both worker commands use isolated Python (`-I`),
+constant entry code, cwd `/` and an empty environment; caller cwd and Python
+environment variables cannot steer imports. Paths and identity tokens travel as
+JSON over private pipes.
+
+SQLite must support `SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE`. Retention disables automatic
+checkpoints and checkpoint-on-close, so its WAL/SHM files can persist after a pass.
+On an identity failure the worker exits without SQLite rollback or close, because
+those operations could write to unverified sidecars. The current transaction has
+no commit marker; earlier acknowledged commits remain in the partial report.
+For apply mode, this avoids issuing rollback writes but is not a VFS-level write
+fence: a foreign file substituted into `-shm` after the final pre-open check can
+be truncated and overwritten with a WAL index even though retention then stops
+with an error and deletes no rows. The immediate read after connecting narrows
+this bootstrap window. The kernel can also flush already-dirty shared mappings
+after worker exit. The directory permission requirement prevents these renames
+by other users; a malicious process running as the service user is outside this
+threat model and can already alter the database. Round 6 also measured SHM damage
+in the former dry run; the enforced read-only dry run now denies those writes.
+An identity-enforcing SQLite VFS would be needed for stronger apply guarantees
+against the service user itself. Worker
+failure or timeout reports an unknown outcome for inspection. Export files remain
+read-only observations throughout.
+
+Dry-run row counts are eligible candidates; applied counts reflect committed SQL changes
+only. File listings never contribute to deleted row counts or freed bytes.
+Files have zero deletion counts in both modes. `candidates`, skip counts,
+and `errors` distinguish selection,
+retention, and failure. Trace records and filesystem file counts are separate;
+an empty trace export contains zero records. Bytes measure UTF-8 TEXT/BLOB payloads
+including all text fields in selected rows. Legacy `bytes_freed`
+and `bytes_reclaimed` aliases represent this logical total, not physical SQLite
+space reclaimed. The CLI exits nonzero on partial failure and prints its report.
+
 ## Package overview
 
 **A local web page to build, run and approve `nexura-runtime` workflows, and the

@@ -21,6 +21,46 @@ from nexura_runtime.studio.builtin_modules import get_default_registry
 from nexura_runtime.workflow import ModuleRegistry, WorkflowEngine, WorkflowSpec
 
 
+def retention_command(args: argparse.Namespace) -> int:
+    """Retention and cleanup for stored run data, bundles, and traces."""
+    from nexura_runtime.retention import (
+        SUPPORTED_KINDS,
+        RetentionError,
+        RetentionPolicy,
+        apply_retention,
+    )
+
+    raw_kinds = [k.strip().lower() for k in args.kinds.split(",") if k.strip()]
+    if not raw_kinds:
+        print("Error: --kinds cannot be empty.", file=sys.stderr)
+        return 1
+
+    for k in raw_kinds:
+        if k not in SUPPORTED_KINDS:
+            print(
+                f"Error: unsupported kind '{k}'. Supported kinds: {', '.join(SUPPORTED_KINDS)}.",
+                file=sys.stderr,
+            )
+            return 1
+
+    try:
+        policy = RetentionPolicy(args.older_than_days, kinds=raw_kinds)
+        report = apply_retention(
+            policy,
+            db_path=args.db,
+            data_dir=args.data_dir,
+            dry_run=not args.apply,
+        )
+    except RetentionError as exc:
+        print(exc.report.summary())
+        return 1
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    print(report.summary())
+    return 1 if report.errors else 0
+
+
 def repro_command(args: argparse.Namespace) -> int:
     """Export a stored complete recording, or replay a portable bundle offline."""
     from nexura_agents.repro import ReproBundle, export_repro_bundle, replay_repro_bundle
@@ -866,6 +906,55 @@ def build_parser() -> argparse.ArgumentParser:
     install.add_argument("--from-file", metavar="ZIP")
     install.add_argument("--runtime-dir", help="Absolute operator-owned destination directory")
     install.set_defaults(func=sandbox_install_runtime_command)
+
+    # retention subcommand
+    retention_p = subparsers.add_parser(
+        "retention",
+        help="Delete database rows only; files listed, not deleted",
+        description=(
+            "For 0.4, retention deletes only database rows for terminal, unprotected runs "
+            "and their events/bundle/trace rows. Export bundles and trace files are "
+            "reported as eligible (path, run id, age, size, reason) for manual removal. "
+            "Files listed, not deleted: retention never deletes, renames, or opens "
+            "export files for writing, even with --apply. Dry run is the default and "
+            "enforces read-only filesystem access using Linux Landlock. The database "
+            "directory must exclude all group/other writes, including in sticky directories. "
+            "Root-owned sticky exceptions apply to ancestors only. Directory owners must "
+            "be you or root. Closed WAL previews use a private read-only snapshot when "
+            "safe. Missing database paths and URI targets are errors."
+        ),
+    )
+    retention_p.add_argument(
+        "--older-than-days",
+        type=float,
+        required=True,
+        help="Maximum age in days; eligible older database rows may be deleted with --apply",
+    )
+    retention_p.add_argument(
+        "--kinds",
+        default="runs,bundles,traces",
+        help="Comma-separated data kinds to clean up (default: runs,bundles,traces)",
+    )
+    retention_p.add_argument(
+        "--apply",
+        action="store_true",
+        default=False,
+        help="Delete eligible database rows only; files listed, not deleted (default: dry run)",
+    )
+    retention_p.add_argument(
+        "--db",
+        default="./nexura_service.sqlite3",
+        help="SQLite database path (default: ./nexura_service.sqlite3)",
+    )
+    retention_p.add_argument(
+        "--data-dir",
+        default=None,
+        help=(
+            "Read-only inspection of export bundles/traces for manual removal; "
+            "files listed, not deleted"
+        ),
+    )
+    retention_p.set_defaults(func=retention_command)
 
     # workflow subcommand group
     repro = subparsers.add_parser("repro", help="Portable offline failure reproduction")

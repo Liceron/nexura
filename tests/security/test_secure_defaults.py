@@ -141,6 +141,9 @@ _ALLOWED_CALLS: set[tuple[str, str]] = set()
 _PROCESS_CALLS = {"system", "popen", "Popen", "create_subprocess_shell", "create_subprocess_exec"}
 # Reviewed process launches: sandbox worker (isolated), MCP stdio (allowlisted), diagnostics.
 _ALLOWED_PROCESS_FILES = {
+    # Fixed Python/-I workers, constant -c entries, empty env, cwd=/, JSON pipes,
+    # close_fds and timeouts; SQLite identity proof and read-only export inspection.
+    "src/nexura_runtime/retention.py",
     "src/nexura_runtime/integrations/sandbox/worker.py",
     # The gVisor launcher (moved out of worker.py into the nexura-sandbox package).
     "packages/nexura-sandbox/src/nexura_sandbox/gvisor_worker.py",

@@ -5,6 +5,46 @@ has been published.
 
 ## Unreleased (0.4.0)
 
+### Added (P38 C9 part A: retention and cleanup for stored run data)
+- Operator-run opt-in retention policy and CLI (`nexura-runtime retention`) for finished
+  run records, events, repro bundles, and observability traces older than a configured threshold.
+- Retention repairs validate ages, recheck lifecycle/approval/dependency protection inside
+  per-run SQLite transactions, preserve journals, and report committed counts and partial
+  failures. For 0.4, retention deletes database rows only. Export bundles and trace
+  files are reported eligible with path, run ID, age, size and reason for manual
+  removal: files listed, not deleted. Retention never deletes, renames or opens
+  export files for writing. A terminal lifecycle summary survives run-row expiry;
+  missing journal authorities veto
+  deletion, and registered trace parents protect dependencies. Database descriptors
+  are verified before SQL. Any opened-connection identity mismatch or ambiguity
+  stops the pass. Isolation for existing process handles/sidecars and SQL is
+  bound to the caller's original database and parent device/inode; workers never
+  re-authorize a replacement pathname. WAL workers also prove main/WAL/SHM
+  descriptor identities after BEGIN and before COMMIT. Unsupported Linux `/proc`
+  inspection refuses the pass. Identity failure abandons the worker without
+  SQLite rollback/close; checkpoints on close are disabled. The guide records
+  the remaining SHM bootstrap/mapping limitation in apply mode. Database opening
+  now requires the directory and every ancestor to exclude group/other write
+  access. Root-owned sticky exceptions apply to ancestors only; the database's
+  own directory must have no group/other write bits, even with the sticky bit,
+  and must be owned by the invoking user or root. Ancestor owners must also be trusted since
+  owners can change mode bits. Pre-existing rollback journals are refused;
+  DELETE-mode journal descriptors are proved after writes and before COMMIT.
+  Dry runs use read-only source access and worker-only Linux Landlock write denial.
+  Cleanly closed WAL databases without sidecars use a private query-only memory
+  snapshot, captured under a Linux read lease and rechecked for identity/content
+  metadata changes and sidecar appearance. Unsafe capture fails with preview
+  guidance; production journal mode and bytes remain unchanged. Both workers use
+  Python -I, constant entries, cwd=/ and empty environments. Missing database
+  paths and URI/non-filesystem targets now raise RetentionError and fail the CLI.
+  A test guard pins the two worker launches and rejects direct uses of other
+  process-launch APIs, aliases and unreviewed keywords (reflective forms are a
+  known gap in that test, not in the code).
+  Dry run remains the default; `--apply` is required.
+- StudioStore reads use one run/event snapshot, and appends check parent existence
+  under a write reservation shared with retention. Missing-parent appends log a
+  warning and create no orphan event; the public `None` return is preserved.
+
 ### Fixed (P38 C1 platforms, OpenTelemetry privacy, gVisor recovery)
 - `SkillLibrary.from_directory` works on macOS and Windows: a portable read-only loader
   rejects links, junctions and special files and re-checks each opened file's identity.

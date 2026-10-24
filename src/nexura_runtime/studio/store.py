@@ -12,13 +12,14 @@ import asyncio
 import contextlib
 import functools
 import json
+import logging
 import os
 import socket
 import sqlite3
 import threading
 import time
 import uuid
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +55,7 @@ from nexura_runtime.workflow import (
 # ---------------------------------------------------------------------------
 
 _PROC = Path("/proc")
+logger = logging.getLogger(__name__)
 
 
 def _host_id() -> str:
@@ -151,6 +153,19 @@ def owner_process_is_gone(owner: str | None) -> bool:
     journal row yet, or the journal moved on while the run row still says ``running``).
     """
     return _owner_is_gone(owner)
+
+
+@contextlib.contextmanager
+def _run_read_snapshot(conn: sqlite3.Connection) -> Iterator[None]:
+    """Keep run and event reads on one SQLite snapshot during retention."""
+    owns_transaction = not conn.in_transaction
+    if owns_transaction:
+        conn.execute("BEGIN")
+    try:
+        yield
+    finally:
+        if owns_transaction:
+            conn.rollback()
 
 
 class StudioStore:
@@ -566,6 +581,23 @@ class StudioStore:
             now = time.time()
             data_json = json.dumps(data or {}, ensure_ascii=False)
             with conn:
+                # Serialize the parent check and append with retention's DELETEs.
+                # Preserve legacy batching: commit the caller's existing write
+                # transaction with this append, as the original method did.
+                if not conn.in_transaction:
+                    conn.execute("BEGIN IMMEDIATE")
+                if (
+                    conn.execute(
+                        "SELECT 1 FROM nexura_studio_runs WHERE run_id = ?", (run_id,)
+                    ).fetchone()
+                    is None
+                ):
+                    logger.warning(
+                        "Run event %s was not recorded: parent run %s does not exist",
+                        event_type,
+                        run_id,
+                    )
+                    return
                 seq_cur = conn.execute(
                     "SELECT COALESCE(MAX(event_seq), 0) + 1 "
                     "FROM nexura_studio_run_events WHERE run_id = ?",
@@ -761,7 +793,7 @@ class StudioStore:
             return results
 
     def _get_run_sync(self, run_id: str) -> dict[str, Any] | None:
-        with self._lock:
+        with self._lock, _run_read_snapshot(self._ensure_open()):
             conn = self._ensure_open()
             cursor = conn.execute(
                 """
