@@ -1,0 +1,556 @@
+{
+  "_provenance": "Hand-written response bodies in each model's DOCUMENTED output format (P39 G5, 2026-10-24). They are not recordings of a live model run: there was no Ollama or vLLM server in the build environment. Output text follows the model cards: Llama Guard 3 ('safe' / 'unsafe' + comma-separated S-codes, Meta prompt-format page and the Ollama llama-guard3 page example 'unsafe\\nS2'), ShieldGemma ('Yes'/'No' first, Google model card), Granite Guardian 3.0 (single token 'Yes'/'No', HF card) and 4.1 ('<score> yes </score>', HF card parse_output), Nemotron Safety Guard v3 (JSON with 'User Safety', 'Response Safety', 'Safety Categories'; the categories string 'guns and illegal weapons' is the card's own example). Body envelopes follow the Ollama /api/generate (stream false) and OpenAI /v1/completions response shapes. Token counts are illustrative.",
+  "llama_guard": {
+    "safe": {
+      "model": "llama-guard3:1b",
+      "created_at": "2026-10-24T09:00:00.000000Z",
+      "response": "safe",
+      "done": true,
+      "done_reason": "stop",
+      "total_duration": 412000000,
+      "prompt_eval_count": 231,
+      "eval_count": 2
+    },
+    "unsafe": {
+      "model": "llama-guard3:1b",
+      "created_at": "2026-10-24T09:00:00.000000Z",
+      "response": "unsafe\nS1,S9",
+      "done": true,
+      "done_reason": "stop",
+      "total_duration": 412000000,
+      "prompt_eval_count": 231,
+      "eval_count": 6
+    },
+    "unsafe_spaced": {
+      "model": "llama-guard3:1b",
+      "created_at": "2026-10-24T09:00:00.000000Z",
+      "response": "\n\nunsafe\nS10, S11",
+      "done": true,
+      "done_reason": "stop",
+      "total_duration": 412000000,
+      "prompt_eval_count": 231,
+      "eval_count": 8
+    },
+    "unsafe_crime": {
+      "model": "llama-guard3:1b",
+      "created_at": "2026-10-24T09:00:00.000000Z",
+      "response": "unsafe\nS2",
+      "done": true,
+      "done_reason": "stop",
+      "total_duration": 412000000,
+      "prompt_eval_count": 231,
+      "eval_count": 4
+    },
+    "unsafe_openai": {
+      "id": "cmpl-fixture",
+      "object": "text_completion",
+      "created": 1792828800,
+      "model": "meta-llama/Llama-Guard-3-8B",
+      "choices": [
+        {
+          "index": 0,
+          "text": "unsafe\nS14",
+          "logprobs": null,
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 512,
+        "completion_tokens": 5,
+        "total_tokens": 517
+      }
+    },
+    "safe_logprobs": {
+      "model": "llama-guard3:1b",
+      "created_at": "2026-10-24T09:00:00.000000Z",
+      "response": "safe",
+      "done": true,
+      "done_reason": "stop",
+      "total_duration": 412000000,
+      "prompt_eval_count": 231,
+      "eval_count": 2,
+      "logprobs": [
+        {
+          "token": "safe",
+          "logprob": -0.0513,
+          "bytes": [
+            115,
+            97,
+            102,
+            101
+          ],
+          "top_logprobs": [
+            {
+              "token": "safe",
+              "logprob": -0.0513
+            },
+            {
+              "token": "unsafe",
+              "logprob": -2.9957
+            }
+          ]
+        }
+      ]
+    },
+    "unsafe_unknown_label": {
+      "model": "llama-guard3:1b",
+      "created_at": "2026-10-24T09:00:00.000000Z",
+      "response": "unsafe\nS99",
+      "done": true,
+      "done_reason": "stop",
+      "total_duration": 412000000,
+      "prompt_eval_count": 231,
+      "eval_count": 5
+    },
+    "unsafe_missing_labels": {
+      "model": "llama-guard3:1b",
+      "created_at": "2026-10-24T09:00:00.000000Z",
+      "response": "unsafe",
+      "done": true,
+      "done_reason": "stop",
+      "total_duration": 412000000,
+      "prompt_eval_count": 231,
+      "eval_count": 1
+    },
+    "malformed_prose": {
+      "model": "llama-guard3:1b",
+      "created_at": "2026-10-24T09:00:00.000000Z",
+      "response": "I'm sorry, I can't help with classifying that.",
+      "done": true,
+      "done_reason": "stop",
+      "total_duration": 412000000,
+      "prompt_eval_count": 231,
+      "eval_count": 12
+    },
+    "malformed_safe_extra": {
+      "model": "llama-guard3:1b",
+      "created_at": "2026-10-24T09:00:00.000000Z",
+      "response": "safe\nS1",
+      "done": true,
+      "done_reason": "stop",
+      "total_duration": 412000000,
+      "prompt_eval_count": 231,
+      "eval_count": 4
+    },
+    "malformed_empty": {
+      "model": "llama-guard3:1b",
+      "created_at": "2026-10-24T09:00:00.000000Z",
+      "response": "",
+      "done": true,
+      "done_reason": "stop",
+      "total_duration": 412000000,
+      "prompt_eval_count": 231,
+      "eval_count": 0
+    }
+  },
+  "shieldgemma": {
+    "no": {
+      "model": "shieldgemma:2b",
+      "created_at": "2026-10-24T09:00:00.000000Z",
+      "response": "No",
+      "done": true,
+      "done_reason": "length",
+      "total_duration": 412000000,
+      "prompt_eval_count": 231,
+      "eval_count": 1,
+      "logprobs": [
+        {
+          "token": "No",
+          "logprob": -0.0202,
+          "bytes": [
+            78,
+            111
+          ],
+          "top_logprobs": [
+            {
+              "token": "No",
+              "logprob": -0.0202
+            },
+            {
+              "token": "Yes",
+              "logprob": -3.912
+            }
+          ]
+        }
+      ]
+    },
+    "yes": {
+      "model": "shieldgemma:2b",
+      "created_at": "2026-10-24T09:00:00.000000Z",
+      "response": "Yes",
+      "done": true,
+      "done_reason": "length",
+      "total_duration": 412000000,
+      "prompt_eval_count": 231,
+      "eval_count": 1,
+      "logprobs": [
+        {
+          "token": "Yes",
+          "logprob": -0.1054,
+          "bytes": [
+            89,
+            101,
+            115
+          ],
+          "top_logprobs": [
+            {
+              "token": "Yes",
+              "logprob": -0.1054
+            },
+            {
+              "token": "No",
+              "logprob": -2.3026
+            }
+          ]
+        }
+      ]
+    },
+    "no_text_only": {
+      "model": "shieldgemma:2b",
+      "created_at": "2026-10-24T09:00:00.000000Z",
+      "response": "No, the human question does not",
+      "done": true,
+      "done_reason": "length",
+      "total_duration": 412000000,
+      "prompt_eval_count": 231,
+      "eval_count": 8
+    },
+    "yes_text_only": {
+      "model": "shieldgemma:2b",
+      "created_at": "2026-10-24T09:00:00.000000Z",
+      "response": "Yes, the prompt seeks",
+      "done": true,
+      "done_reason": "length",
+      "total_duration": 412000000,
+      "prompt_eval_count": 231,
+      "eval_count": 8
+    },
+    "malformed": {
+      "model": "shieldgemma:2b",
+      "created_at": "2026-10-24T09:00:00.000000Z",
+      "response": "The question is about",
+      "done": true,
+      "done_reason": "length",
+      "total_duration": 412000000,
+      "prompt_eval_count": 231,
+      "eval_count": 8
+    }
+  },
+  "granite_guardian_3_0": {
+    "no": {
+      "model": "granite3-guardian:2b",
+      "created_at": "2026-10-24T09:00:00.000000Z",
+      "response": "No",
+      "done": true,
+      "done_reason": "stop",
+      "total_duration": 412000000,
+      "prompt_eval_count": 231,
+      "eval_count": 1,
+      "logprobs": [
+        {
+          "token": "No",
+          "logprob": -0.0305,
+          "bytes": [
+            78,
+            111
+          ],
+          "top_logprobs": [
+            {
+              "token": "No",
+              "logprob": -0.0305
+            },
+            {
+              "token": "Yes",
+              "logprob": -3.5066
+            }
+          ]
+        }
+      ]
+    },
+    "yes": {
+      "model": "granite3-guardian:2b",
+      "created_at": "2026-10-24T09:00:00.000000Z",
+      "response": "Yes",
+      "done": true,
+      "done_reason": "stop",
+      "total_duration": 412000000,
+      "prompt_eval_count": 231,
+      "eval_count": 1,
+      "logprobs": [
+        {
+          "token": "Yes",
+          "logprob": -0.0294,
+          "bytes": [
+            89,
+            101,
+            115
+          ],
+          "top_logprobs": [
+            {
+              "token": "Yes",
+              "logprob": -0.0294
+            },
+            {
+              "token": "No",
+              "logprob": -3.5405
+            }
+          ]
+        }
+      ]
+    },
+    "yes_text_only": {
+      "model": "granite3-guardian:2b",
+      "created_at": "2026-10-24T09:00:00.000000Z",
+      "response": "Yes",
+      "done": true,
+      "done_reason": "stop",
+      "total_duration": 412000000,
+      "prompt_eval_count": 231,
+      "eval_count": 1
+    },
+    "malformed": {
+      "model": "granite3-guardian:2b",
+      "created_at": "2026-10-24T09:00:00.000000Z",
+      "response": "Maybe",
+      "done": true,
+      "done_reason": "stop",
+      "total_duration": 412000000,
+      "prompt_eval_count": 231,
+      "eval_count": 1
+    }
+  },
+  "granite_guardian_4_1": {
+    "no": {
+      "model": "granite4.1-guardian:8b",
+      "created_at": "2026-10-24T09:00:00.000000Z",
+      "response": "<score> no </score>",
+      "done": true,
+      "done_reason": "stop",
+      "total_duration": 412000000,
+      "prompt_eval_count": 231,
+      "eval_count": 7
+    },
+    "yes": {
+      "model": "granite4.1-guardian:8b",
+      "created_at": "2026-10-24T09:00:00.000000Z",
+      "response": "\n<score> yes </score>",
+      "done": true,
+      "done_reason": "stop",
+      "total_duration": 412000000,
+      "prompt_eval_count": 231,
+      "eval_count": 8
+    },
+    "malformed_bare": {
+      "model": "granite4.1-guardian:8b",
+      "created_at": "2026-10-24T09:00:00.000000Z",
+      "response": "yes",
+      "done": true,
+      "done_reason": "stop",
+      "total_duration": 412000000,
+      "prompt_eval_count": 231,
+      "eval_count": 1
+    },
+    "malformed_two_scores": {
+      "model": "granite4.1-guardian:8b",
+      "created_at": "2026-10-24T09:00:00.000000Z",
+      "response": "<score> no </score><score> yes </score>",
+      "done": true,
+      "done_reason": "stop",
+      "total_duration": 412000000,
+      "prompt_eval_count": 231,
+      "eval_count": 14
+    }
+  },
+  "nemotron": {
+    "safe": {
+      "id": "cmpl-fixture",
+      "object": "text_completion",
+      "created": 1792828800,
+      "model": "nvidia/Llama-3.1-Nemotron-Safety-Guard-8B-v3",
+      "choices": [
+        {
+          "index": 0,
+          "text": "{\"User Safety\": \"safe\"}",
+          "logprobs": null,
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 512,
+        "completion_tokens": 8,
+        "total_tokens": 520
+      }
+    },
+    "unsafe": {
+      "id": "cmpl-fixture",
+      "object": "text_completion",
+      "created": 1792828800,
+      "model": "nvidia/Llama-3.1-Nemotron-Safety-Guard-8B-v3",
+      "choices": [
+        {
+          "index": 0,
+          "text": "{\n   \"User Safety\": \"unsafe\",\n   \"Safety Categories\": \"guns and illegal weapons\"\n}",
+          "logprobs": null,
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 512,
+        "completion_tokens": 22,
+        "total_tokens": 534
+      }
+    },
+    "response_safe": {
+      "id": "cmpl-fixture",
+      "object": "text_completion",
+      "created": 1792828800,
+      "model": "nvidia/Llama-3.1-Nemotron-Safety-Guard-8B-v3",
+      "choices": [
+        {
+          "index": 0,
+          "text": "{\n   \"User Safety\": \"unsafe\",\n   \"Response Safety\": \"safe\",\n   \"Safety Categories\": \"guns and illegal weapons\"\n}",
+          "logprobs": null,
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 512,
+        "completion_tokens": 30,
+        "total_tokens": 542
+      }
+    },
+    "response_unsafe": {
+      "id": "cmpl-fixture",
+      "object": "text_completion",
+      "created": 1792828800,
+      "model": "nvidia/Llama-3.1-Nemotron-Safety-Guard-8B-v3",
+      "choices": [
+        {
+          "index": 0,
+          "text": "{\"User Safety\": \"unsafe\", \"Response Safety\": \"unsafe\", \"Safety Categories\": \"Violence, Threat\"}",
+          "logprobs": null,
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 512,
+        "completion_tokens": 24,
+        "total_tokens": 536
+      }
+    },
+    "unsafe_codes": {
+      "id": "cmpl-fixture",
+      "object": "text_completion",
+      "created": 1792828800,
+      "model": "nvidia/Llama-3.1-Nemotron-Safety-Guard-8B-v3",
+      "choices": [
+        {
+          "index": 0,
+          "text": "{\"User Safety\": \"unsafe\", \"Safety Categories\": \"S16, S9: PII/Privacy\"}",
+          "logprobs": null,
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 512,
+        "completion_tokens": 20,
+        "total_tokens": 532
+      }
+    },
+    "unsafe_unknown_label": {
+      "id": "cmpl-fixture",
+      "object": "text_completion",
+      "created": 1792828800,
+      "model": "nvidia/Llama-3.1-Nemotron-Safety-Guard-8B-v3",
+      "choices": [
+        {
+          "index": 0,
+          "text": "{\"User Safety\": \"unsafe\", \"Safety Categories\": \"space piracy\"}",
+          "logprobs": null,
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 512,
+        "completion_tokens": 16,
+        "total_tokens": 528
+      }
+    },
+    "malformed_prose": {
+      "id": "cmpl-fixture",
+      "object": "text_completion",
+      "created": 1792828800,
+      "model": "nvidia/Llama-3.1-Nemotron-Safety-Guard-8B-v3",
+      "choices": [
+        {
+          "index": 0,
+          "text": "The user message is safe.",
+          "logprobs": null,
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 512,
+        "completion_tokens": 7,
+        "total_tokens": 519
+      }
+    },
+    "malformed_value": {
+      "id": "cmpl-fixture",
+      "object": "text_completion",
+      "created": 1792828800,
+      "model": "nvidia/Llama-3.1-Nemotron-Safety-Guard-8B-v3",
+      "choices": [
+        {
+          "index": 0,
+          "text": "{\"User Safety\": \"probably fine\"}",
+          "logprobs": null,
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 512,
+        "completion_tokens": 9,
+        "total_tokens": 521
+      }
+    },
+    "malformed_extra_key": {
+      "id": "cmpl-fixture",
+      "object": "text_completion",
+      "created": 1792828800,
+      "model": "nvidia/Llama-3.1-Nemotron-Safety-Guard-8B-v3",
+      "choices": [
+        {
+          "index": 0,
+          "text": "{\"User Safety\": \"safe\", \"Reason\": \"ok\"}",
+          "logprobs": null,
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 512,
+        "completion_tokens": 10,
+        "total_tokens": 522
+      }
+    },
+    "malformed_safe_with_categories": {
+      "id": "cmpl-fixture",
+      "object": "text_completion",
+      "created": 1792828800,
+      "model": "nvidia/Llama-3.1-Nemotron-Safety-Guard-8B-v3",
+      "choices": [
+        {
+          "index": 0,
+          "text": "{\"User Safety\": \"safe\", \"Safety Categories\": \"Violence\"}",
+          "logprobs": null,
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 512,
+        "completion_tokens": 12,
+        "total_tokens": 524
+      }
+    }
+  }
+}

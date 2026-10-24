@@ -272,6 +272,7 @@ _SHIELDGEMMA = {
 }
 
 _GRANITE_GUARDIAN = {
+    "harm": ("other",),  # the general "harmful by common sense" risk (P39 G5)
     "violence": ("violence",),
     "unethical_behavior": ("crime",),
     "social_bias": ("hate",),

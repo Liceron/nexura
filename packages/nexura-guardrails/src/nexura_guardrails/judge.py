@@ -16,11 +16,13 @@ How the prompt resists injection:
    ``<content type="html">`` is left alone: a single ``<`` counts only when a marker-shaped
    tail (``-``, ``>>`` or a hex code) follows the word.
    For output checks the user's request is fenced the same way as context.
-   The fully built prompt is measured with a conservative token estimate
-   (``estimate_tokens``). If it does not fit the judge's context (``context_tokens`` minus
-   the reply and a template reserve) nothing is sent and the verdict is a *hard* ``error``
-   that no ``on_error`` setting can soften, so the content cannot push the policy out of a
-   small model's context window.
+   The fully built prompt is measured by a strict upper bound on its token count, its UTF-8
+   byte length (``token_upper_bound``: byte-level BPE and byte-fallback tokenizers never
+   produce more tokens than bytes). If it does not fit the judge's context
+   (``context_tokens`` minus the reply and a template reserve) nothing is sent and the
+   verdict is a *hard* ``error`` that no ``on_error`` setting can soften, so the content
+   cannot push the policy out of a small model's context window (Ollama silently drops the
+   middle of an over-long prompt).
 3. The verdict is one strict JSON object, validated locally: unknown or missing keys,
    unknown categories, a score outside 0..1, prose around the JSON, two objects, duplicate
    keys, a reason that quotes more than 40 characters of the content, a reply copied from a
@@ -79,6 +81,7 @@ __all__ = [
     "MalformedVerdictError",
     "estimate_tokens",
     "parse_verdict",
+    "token_upper_bound",
 ]
 
 PROMPT_VERSION = "nexura-judge-v2"
@@ -171,16 +174,29 @@ def _fold(text: str) -> tuple[str, list[int]]:
     return "".join(out), index
 
 
+def token_upper_bound(text: str) -> int:
+    """A strict upper bound on the number of tokens ``text`` can become: its UTF-8 length.
+
+    Byte-level BPE tokenizers (Llama 3, Qwen, Granite, GPT) emit at most one token per byte,
+    and SentencePiece tokenizers with byte fallback (Gemma, Llama 2) at most one per byte
+    plus a dummy-prefix piece, which the template reserve covers. Every prompt size cap in
+    this package (``JudgeCheck`` and the safety-model checks) uses this bound, so text that
+    passes the cap always fits the model's context and is never truncated.
+    """
+    return len(text.encode("utf-8", "surrogatepass"))
+
+
 def estimate_tokens(text: str) -> int:
-    """A conservative token estimate for sizing judge prompts.
+    """A rough token estimate (not an upper bound; caps use ``token_upper_bound``).
 
     ASCII letters and whitespace count one token per 3 characters (real tokenizers average
     about 4 for words). Every ASCII digit, punctuation mark or symbol counts 1 token (Qwen
     and Llama tokenizers split digits one by one), and every other character counts its
     full UTF-8 length: 2 tokens for Latin accents, Cyrillic and Greek, 3 for Devanagari,
     Tamil, Bengali and CJK, 4 for emoji and rare CJK. For byte-level BPE and byte-fallback
-    tokenizers everything except runs of ASCII letters is therefore an upper bound.
-    Over-estimating only makes the cap stricter.
+    tokenizers everything except runs of ASCII letters is therefore an upper bound, but
+    runs of ASCII letters and whitespace can tokenize at up to one token per character (for
+    example ``"x\\n"`` pairs), so this is an estimate only.
     """
     letters = 0
     total = 0
@@ -319,9 +335,10 @@ class JudgeCheck:
     ``cache_ttl`` seconds it is process-wide instead), False, or a shared ``VerdictCache``.
     ``context_tokens`` (default 4096, Ollama's default ``num_ctx``) is the judge model's
     context window. The fully built prompt (policy, instructions, fenced text and context)
-    must fit in ``context_tokens - max_output_tokens - 256`` estimated tokens (see
-    ``estimate_tokens``); otherwise nothing is sent and the verdict is ``error`` with
-    ``error_type="ContentTooLong"`` and ``evidence["hard"] = True``, which neither this
+    must fit in ``context_tokens - max_output_tokens - 256`` tokens, measured by the strict
+    upper bound ``token_upper_bound`` (its UTF-8 length); otherwise nothing is sent and the
+    verdict is ``error`` with ``error_type="ContentTooLong"`` and ``evidence["hard"] =
+    True``, which neither this
     check's ``on_error`` nor the adapters' ``on_error`` can soften. Set it to the model's
     real context size (and raise Ollama's ``num_ctx`` to match) to judge longer text.
     """
@@ -405,7 +422,7 @@ class JudgeCheck:
         else:
             raise TypeError("cache must be True, False or a VerdictCache.")
         empty = self.build_messages(CheckInput("input", ""), "0" * 16)
-        overhead = sum(estimate_tokens(m.content or "") for m in empty)
+        overhead = sum(token_upper_bound(m.content or "") for m in empty)
         if overhead >= self.max_prompt_tokens:
             raise ValueError(
                 f"The judge prompt alone is about {overhead} tokens, which leaves no room for "
@@ -559,7 +576,7 @@ class JudgeCheck:
             evidence={
                 "error_type": "ContentTooLong",
                 "hard": True,
-                "detail": f"about {size} tokens, limit {self.max_prompt_tokens}",
+                "detail": f"up to {size} tokens, limit {self.max_prompt_tokens}",
             },
         )
 
@@ -568,7 +585,7 @@ class JudgeCheck:
         started = time.perf_counter()
         # Cheap pre-check before folding very large text (neutralising can shrink the text
         # by at most a few times, so anything this large can never fit).
-        rough = estimate_tokens(item.text) + estimate_tokens(item.context or "")
+        rough = token_upper_bound(item.text) + token_upper_bound(item.context or "")
         if rough > 8 * self.max_prompt_tokens:
             return self._too_long(rough, started)
         key = None
@@ -588,7 +605,7 @@ class JudgeCheck:
         nonce = secrets.token_hex(8)
         messages = self.build_messages(item, nonce)
         # Measure what is actually sent: the built prompt, after neutralisation.
-        size = sum(estimate_tokens(m.content or "") for m in messages)
+        size = sum(token_upper_bound(m.content or "") for m in messages)
         if size > self.max_prompt_tokens:
             return self._too_long(size, started)
         try:

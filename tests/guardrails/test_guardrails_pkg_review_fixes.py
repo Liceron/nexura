@@ -30,7 +30,12 @@ from nexura_guardrails import (
     tiered,
     topics,
 )
-from nexura_guardrails.judge import DEFAULT_CONTEXT_TOKENS, _neutralise, estimate_tokens
+from nexura_guardrails.judge import (
+    DEFAULT_CONTEXT_TOKENS,
+    _neutralise,
+    estimate_tokens,
+    token_upper_bound,
+)
 from nexura_guardrails.verdict import STAGES, CheckInput
 
 CATS = ("prompt_injection", "fraud", "other")
@@ -45,17 +50,22 @@ def judge(model: Any, **kwargs: Any) -> JudgeCheck:
 
 
 def _limit_for(check: JudgeCheck) -> int:
-    """How many ASCII content characters fit (estimated) in the judge's prompt budget."""
+    """How many ASCII content characters fit in the judge's prompt budget.
+
+    P39 G5 review B1: the cap is a strict upper bound (one token per UTF-8 byte), so one
+    ASCII character costs one token (it was 1/3 with ``estimate_tokens``, which admitted
+    prompts far larger than the context window).
+    """
     overhead = sum(
-        estimate_tokens(m.content or "")
+        token_upper_bound(m.content or "")
         for m in check.build_messages(CheckInput("input", ""), "0" * 16)
     )
-    return (check.max_prompt_tokens - overhead) * 3
+    return check.max_prompt_tokens - overhead
 
 
 async def test_content_over_the_cap_is_never_sent_and_ignores_on_error_allow() -> None:
     model = FakeModel([ALLOW])
-    check = judge(model, context_tokens=1500, on_error="allow")
+    check = judge(model, context_tokens=3000, on_error="allow")
     fits = _limit_for(check) - 30  # a little slack for the per-call nonce and line breaks
     verdict = await evaluate(check, "x" * (fits + 400))
     assert verdict.decision == "error"
@@ -90,7 +100,7 @@ async def test_too_long_content_trips_an_agent_guardrail() -> None:
         name="a",
         instructions="",
         model=agent_model,
-        input_guardrails=[as_guardrail(judge(FakeModel([ALLOW]), context_tokens=1500))],
+        input_guardrails=[as_guardrail(judge(FakeModel([ALLOW]), context_tokens=3000))],
     )
     with pytest.raises(GuardrailTripwireTriggered) as info:
         await Runner().run_async(agent, "a long message " * 400)
@@ -113,7 +123,7 @@ def test_estimate_tokens_is_conservative_for_indic_and_emoji() -> None:
 async def test_hard_error_cannot_be_softened_by_either_adapter() -> None:
     from nexura_agents import GuardrailTripwireTriggered
 
-    check = judge(FakeModel([ALLOW]), context_tokens=1500, on_error="allow")
+    check = judge(FakeModel([ALLOW]), context_tokens=3000, on_error="allow")
     agent_model = FakeModel(["ran"])
     agent = Agent(
         name="a",
@@ -145,7 +155,7 @@ async def test_hard_error_cannot_be_softened_by_either_adapter() -> None:
 
 
 async def test_hard_error_survives_compositions() -> None:
-    check = judge(FakeModel([ALLOW]), context_tokens=1500)
+    check = judge(FakeModel([ALLOW]), context_tokens=3000)
     for composite in (tiered(pii(), check), parallel(check, pii())):
         verdict = await evaluate(composite, "z" * 20_000)
         assert verdict.decision == "error" and is_hard_error(verdict)

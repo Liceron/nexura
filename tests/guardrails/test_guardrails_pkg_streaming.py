@@ -107,14 +107,14 @@ async def test_judge_checks_each_window_and_shows_only_allowed_ones() -> None:
 
 
 async def test_judge_over_its_token_cap_fails_closed_and_shows_nothing() -> None:
-    long_reply = "word " * 2000  # far over context_tokens=1500 in one held reply
+    long_reply = "word " * 2000  # far over context_tokens=3000 in one held reply
     judge_model = FakeModel([ALLOW])
     agent = Agent(
         name="A",
         instructions="i",
         model=FakeModel([long_reply], stream=True, chunk_size=50),
         output_guardrails=[
-            as_guardrail(judge(judge_model, context_tokens=1500, on_error="allow"), stage="output")
+            as_guardrail(judge(judge_model, context_tokens=3000, on_error="allow"), stage="output")
         ],
     )
     events, error = await run(agent)
@@ -132,7 +132,7 @@ async def test_chunked_windows_fit_a_judge_cap_that_the_whole_reply_exceeds() ->
         name="A",
         instructions="i",
         model=FakeModel([long_reply], stream=True, chunk_size=50),
-        output_guardrails=[as_guardrail(judge(judge_model, context_tokens=1500), stage="output")],
+        output_guardrails=[as_guardrail(judge(judge_model, context_tokens=3000), stage="output")],
         stream_guard=StreamGuard(mode="chunked", chunk_chars=400, overlap_chars=40),
     )
     events, error = await run(agent)

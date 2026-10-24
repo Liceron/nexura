@@ -860,16 +860,20 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+ollama = [
+    { name = "httpx" },
+]
 yaml = [
     { name = "pyyaml" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "httpx", marker = "extra == 'ollama'", specifier = ">=0.27.0,<1.0.0" },
     { name = "nexura-agents", editable = "packages/nexura-agents" },
     { name = "pyyaml", marker = "extra == 'yaml'", specifier = ">=6" },
 ]
-provides-extras = ["judge", "yaml"]
+provides-extras = ["judge", "ollama", "yaml"]
 
 [[package]]
 name = "nexura-postgres"

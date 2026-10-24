@@ -2,7 +2,9 @@
 
 Guardrails for Nexura agents: one verdict type, a category taxonomy, fast regex
 pre-filters, an LLM judge that resists prompt
-injection and fails closed, and tiered or parallel composition. Every check turns into a
+injection and fails closed, local safety models (Llama Guard 3, ShieldGemma, Granite
+Guardian, Nemotron Safety Guard) over Ollama or an OpenAI-compatible server, one-line
+presets, and tiered or parallel composition. Every check turns into a
 plain guardrail function for `Agent(input_guardrails=..., output_guardrails=...)` and
 `@tool(input_guardrails=..., output_guardrails=...)`.
 
@@ -15,8 +17,15 @@ the structural controls.
 ```bash
 pip install nexura-guardrails            # depends on nexura-agents only
 pip install "nexura-guardrails[judge]"   # the same; [judge] is an empty marker extra
+pip install "nexura-guardrails[ollama]"  # the same; local safety models need no extra package
 pip install "nexura-guardrails[yaml]"    # adds PyYAML for policy files (later releases)
 ```
+
+Local safety models: `ollama pull llama-guard3:1b`, then
+`from nexura_guardrails.presets import safety_local` and
+`agent = safety_local().apply(agent)`. Nexura never downloads or redistributes model
+weights; each model has its own license (Llama, Gemma, Apache-2.0, NVIDIA Open Model
+License), listed in the guide.
 
 Alpha and unpublished: install from the [source checkout](https://github.com/Liceron/nexura)
 or local wheels until publication. See

@@ -14,7 +14,7 @@
       },
       {
         "name": "nexura:lock-sha256",
-        "value": "9130d3fe69caf4eb498f3869a58558dfcd244d4eaa46b7492f6812adf747da9b"
+        "value": "7790172a117eddd9149d2018045576cf05be3f20a8d3aa82d0f870785343aaf0"
       },
       {
         "name": "nexura:generator",
@@ -948,6 +948,7 @@
     {
       "ref": "pkg:pypi/nexura-guardrails@0.4.0",
       "dependsOn": [
+        "pkg:pypi/httpx@0.28.1",
         "pkg:pypi/nexura-agents@0.4.0",
         "pkg:pypi/pyyaml@6.0.3"
       ]

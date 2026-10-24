@@ -5,6 +5,70 @@ has been published.
 
 ## Unreleased (0.4.0)
 
+### Added (P39 G5: local safety models and presets)
+- `nexura-guardrails` safety-model checks `LlamaGuard` (Llama Guard 3 1B/8B), `ShieldGemma`,
+  `GraniteGuardian` (3.0 and 4.1) and `NemotronGuard` (Nemotron Safety Guard 8B v3). Each
+  sends the model's documented prompt raw to Ollama (`/api/generate`) or an OpenAI-compatible
+  server (`/v1/completions`), parses its documented output strictly and maps labels to the
+  taxonomy through `LABEL_MAPS`. Prompt formats are pinned to the model cards and Ollama
+  templates (revisions and digests in each module). HTTP uses `httpx`, declared by the new
+  `[ollama]` extra with the range `nexura-agents` already requires.
+- Fail closed: timeouts, connection and HTTP errors, malformed bodies or replies and budget
+  refusals are `error` verdicts (`on_error` must be explicit); an *unsafe* answer with
+  missing or unknown labels is a `block` with category `other`, never an error. The judge's
+  token cap applies (hard `ContentTooLong`), each call is admitted by the run budget, and the
+  server's token counts are reported on `Verdict.usage`. Checked text is defused (special
+  tokens, control tags and turn-like lines) before it goes into the prompt.
+- `nexura_guardrails.presets`: `pii_block`, `pii_redact`, `injection_fast`, `safety_local`
+  (injection pre-filter, then Llama Guard 3 1B via Ollama; refuses a non-local server unless
+  `allow_remote=True`), `strict_tools` (allowlist, approval for side-effecting MCP/OpenAPI
+  tools, result scanning) and `judge`; `Preset.apply`, `Preset.hooks`, `combine`, `PRESETS`.
+- `SAFETY_MODELS`: each supported model's source, pinned revision and license (Llama 3.1 /
+  3.2 Community License, Gemma Terms, Apache-2.0, NVIDIA Open Model License). Nexura never
+  downloads or redistributes weights. Docs: "Local safety models" and "Presets" in
+  `docs/guardrails-package.md`. Tests use documented-format response fixtures and an
+  `httpx.MockTransport`; one live test runs only with `NEXURA_TEST_OLLAMA_URL` set.
+- `LABEL_MAPS["granite_guardian"]` gains `harm` (Granite Guardian's general risk) -> `other`.
+
+### Fixed (P39 G5 review)
+- **Token caps are now a strict upper bound** (`token_upper_bound`: the prompt's UTF-8 length)
+  in the safety-model checks and in `JudgeCheck` (G3). The old 3-characters-per-token
+  estimate could be beaten threefold (`"x\n"` padding), and Ollama silently drops the middle
+  of an over-long prompt, so a harmful request hidden in padding reached the guard as padding
+  only. Over-long prompts are now a hard `ContentTooLong`. Safety-model defaults are raised to
+  `context_tokens=16384` (Llama Guard 3, Granite Guardian 4.1, Nemotron) and 8192
+  (ShieldGemma, Granite Guardian 3.0), sent as `num_ctx`; Ollama requests also carry
+  `"truncate": false, "shift": false`, and a truncation flag in a reply is an error. The
+  judge keeps its 4096 default (Ollama's OpenAI-compatible endpoint takes no per-request
+  context), so it now admits about 1,250 to 1,950 bytes of content: raise
+  `OLLAMA_CONTEXT_LENGTH` and `context_tokens` together for more.
+- Guard model calls have their own budget ids (`guard-local:<api>:<model>` for a local server
+  with the default transport, else `guard:<api>:<model>`), never an agent-model id.
+  `safety_local` registers a zero price only for the exact guard model it names on a local
+  server (`zero_price`, never replacing an existing price), so it works under a cost cap with
+  `deny_unknown_pricing`; `Preset.pricing()` lists the entries.
+- `strict_tools` requires approval for every MCP/OpenAPI tool that is not `pure` (including
+  `idempotent` and `reconcilable` ones such as a declared idempotent `PUT`/`DELETE`); bare
+  allowlist names match local tools only, never an MCP, OpenAPI, A2A or module tool of the
+  same name.
+- `safety_local(..., allow_remote=True)` on a non-local server reports `network="model"`;
+  licenses resolve Ollama tag variants (`llama-guard3`, `:latest`, `:8b-q4_K_M`) to the right
+  model or to none, never to a wrong one (`safety_model_for`; ShieldGemma 9B added).
+- ShieldGemma and Granite Guardian 3.0 fail closed when the text answer and the log
+  probabilities disagree (a "Yes" never becomes an allow), and the answer position skips
+  generated whitespace. `defuse` NFKC-normalises and handles Unicode indentation, fullwidth
+  colons, marker variants and dash separators. A reply naming another model is an error
+  (`ModelMismatch`); compressed replies are refused (`Accept-Encoding: identity`).
+- The `[ollama]` extra declares `httpx` (the range nexura-agents already requires).
+  `Preset.runner_kwargs()` and loud docs: `apply()` alone does not check tool stages.
+- Not changed: the Nemotron prompt ends `Output JSON:` without the template's trailing
+  space, because the model's pinned chat template applies `| trim` to the message.
+- Follow-ups: the automatic zero price applies only to Ollama's native API on this machine,
+  never to an OpenAI-compatible URL (even on localhost, it may proxy a paid provider);
+  ShieldGemma documents that a threshold above 0.5 cannot loosen a "Yes" reply; the `judge`
+  preset and guide warn that the default capacity is about 1.2 to 1.9 KB at
+  `context_tokens=4096` and show how to raise it (native Ollama API for judges planned, G6).
+
 ### Added (P39 G4: streaming and output guardrails)
 - `Agent(stream_guard=...)` and `StreamGuard(mode, chunk_chars=400, overlap_chars=120)`:
   with `stream_text=True`, an agent with output guardrails never streams its reply

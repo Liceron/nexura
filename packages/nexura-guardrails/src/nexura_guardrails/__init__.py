@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Liceron
-"""Nexura guardrails: verdicts, a category taxonomy, fast pre-filters, an LLM judge and
-tiered or parallel composition, for ``nexura_agents`` agents and tools.
+"""Nexura guardrails: verdicts, a category taxonomy, fast pre-filters, an LLM judge, local
+safety models (Llama Guard 3, ShieldGemma, Granite Guardian, Nemotron Safety Guard), presets
+(``nexura_guardrails.presets``) and tiered or parallel composition, for ``nexura_agents``
+agents and tools.
 
 Distributed as ``nexura-guardrails`` (depends on ``nexura-agents`` only). Every check
 converts to a plain guardrail function, so it works with today's
@@ -47,6 +49,7 @@ _EXPORTS: dict[str, str] = {
     "is_hard_error": "nexura_guardrails.checks",
     "check_identity": "nexura_guardrails.compose",
     "estimate_tokens": "nexura_guardrails.judge",
+    "token_upper_bound": "nexura_guardrails.judge",
     # Pre-filters
     "Prefilter": "nexura_guardrails.prefilters",
     "pii": "nexura_guardrails.prefilters",
@@ -58,6 +61,13 @@ _EXPORTS: dict[str, str] = {
     "JudgeCheck": "nexura_guardrails.judge",
     "MalformedVerdictError": "nexura_guardrails.judge",
     "parse_verdict": "nexura_guardrails.judge",
+    # Local safety models ([ollama] extra: no extra dependency)
+    "LlamaGuard": "nexura_guardrails.classifiers",
+    "ShieldGemma": "nexura_guardrails.classifiers",
+    "GraniteGuardian": "nexura_guardrails.classifiers",
+    "NemotronGuard": "nexura_guardrails.classifiers",
+    "SafetyModelCheck": "nexura_guardrails.classifiers",
+    "SAFETY_MODELS": "nexura_guardrails.classifiers",
     # Composition
     "tiered": "nexura_guardrails.compose",
     "parallel": "nexura_guardrails.compose",
@@ -80,11 +90,17 @@ __all__ = [
     "CheckInput",
     "DEFAULT_JUDGE_CATEGORIES",
     "Decision",
+    "GraniteGuardian",
     "JudgeCheck",
     "LABEL_MAPS",
+    "LlamaGuard",
     "MalformedVerdictError",
+    "NemotronGuard",
     "Parallel",
     "Prefilter",
+    "SAFETY_MODELS",
+    "SafetyModelCheck",
+    "ShieldGemma",
     "Stage",
     "Tiered",
     "Verdict",
@@ -110,6 +126,7 @@ __all__ = [
     "run_benchmark_sync",
     "run_check",
     "tiered",
+    "token_upper_bound",
     "topics",
     "validate_categories",
 ]
@@ -142,6 +159,14 @@ if TYPE_CHECKING:
         rejection_message,
         run_check,
     )
+    from nexura_guardrails.classifiers import (
+        SAFETY_MODELS,
+        GraniteGuardian,
+        LlamaGuard,
+        NemotronGuard,
+        SafetyModelCheck,
+        ShieldGemma,
+    )
     from nexura_guardrails.compose import (
         Cached,
         Parallel,
@@ -158,6 +183,7 @@ if TYPE_CHECKING:
         MalformedVerdictError,
         estimate_tokens,
         parse_verdict,
+        token_upper_bound,
     )
     from nexura_guardrails.prefilters import (
         Prefilter,

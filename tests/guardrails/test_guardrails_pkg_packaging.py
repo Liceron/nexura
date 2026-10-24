@@ -34,7 +34,11 @@ def test_metadata_matches_the_other_agent_only_packages() -> None:
     assert isinstance(extras, dict)
     assert extras["judge"] == []
     assert extras["yaml"] == ["pyyaml>=6"]
-    assert set(extras) == {"judge", "yaml"}
+    # P39 G5 (review minor 9): the local safety-model extra declares httpx, with exactly the
+    # range nexura-agents already requires, so it adds no new package to an install.
+    agents_httpx = [d for d in agents["dependencies"] if str(d).startswith("httpx")]  # type: ignore[attr-defined]
+    assert extras["ollama"] == agents_httpx and len(agents_httpx) == 1
+    assert set(extras) == {"judge", "ollama", "yaml"}
     for name in ("LICENSE", "README.md", "src/nexura_guardrails/py.typed"):
         assert (PKG / name).is_file(), name
 
@@ -47,19 +51,24 @@ def test_registered_in_the_workspace() -> None:
 
 def test_imports_only_the_agent_sdk_and_the_stdlib() -> None:
     allowed_roots = {"nexura_agents", "nexura_guardrails"} | set(sys.stdlib_module_names)
+    # P39 G5: httpx is allowed only in the HTTP layer of the safety-model adapters, and only
+    # because nexura-agents itself depends on it (so it adds no dependency to this package).
+    agents_deps = _project(ROOT / "packages/nexura-agents/pyproject.toml")["dependencies"]
+    assert isinstance(agents_deps, list)
+    assert any(str(d).startswith("httpx") for d in agents_deps)
+    httpx_allowed = {SRC / "classifiers" / "_base.py"}
     offenders = []
     for path in SRC.rglob("*.py"):
         text = path.read_text(encoding="utf-8")
         assert text.startswith("# SPDX-License-Identifier: MIT\n# Copyright (c) 2026 Liceron\n")
+        roots = allowed_roots | ({"httpx"} if path in httpx_allowed else set())
         for node in ast.walk(ast.parse(text)):
             names: list[str] = []
             if isinstance(node, ast.ImportFrom) and node.level == 0:
                 names = [node.module or ""]
             elif isinstance(node, ast.Import):
                 names = [a.name for a in node.names]
-            offenders += [
-                f"{path.name}: {n}" for n in names if n.split(".")[0] not in allowed_roots
-            ]
+            offenders += [f"{path.name}: {n}" for n in names if n.split(".")[0] not in roots]
     assert offenders == []
 
 

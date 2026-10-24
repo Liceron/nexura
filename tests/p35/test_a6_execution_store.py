@@ -548,7 +548,10 @@ def _spawn_worker(path: str, mode: str, owner: str, output: str, gate: str, toke
                     result = {"stale": "refused"}
                 else:
                     result = {"stale": "accepted"}
-            Path(output).write_text(json.dumps(result))
+            # Write then rename, so the parent never reads a half-written file.
+            partial = Path(output + ".partial")
+            partial.write_text(json.dumps(result))
+            partial.replace(output)
         finally:
             await store.close()
 
