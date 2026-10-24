@@ -184,7 +184,15 @@ The SDK does not record that an interruption was already resumed. If a stored in
 
 ## Bind approval to the exact arguments
 
-A reviewer approves a specific action, not just a call ID. `pending_digests()` returns `{call_id: sha256}` where the digest covers the tool name and the canonical JSON of its arguments. Show the arguments to the reviewer, keep the digest, and pass it back as `approve={call_id: digest}`.
+A reviewer approves a specific action and approval occurrence. `pending_digests()` returns
+`{call_id: sha256}` where the digest covers the tool name, canonical JSON arguments,
+any trusted tool scope, run id and SDK-generated interruption id. Show the arguments
+to the reviewer, keep the digest, and pass it back as `approve={call_id: digest}`.
+A later pause needs its own decision even for identical arguments and a reused model
+call id. Recovery retains the interruption id of the same pause and accepts that
+occurrence's original reviewed decision. This applies to ordinary approval tools as
+well as scoped harness tools. The journal's stable effect hash is separate from the
+reviewed decision hash; `RunInterruption.action_digest()` is not an approval grant.
 
 ```python
 from nexura_agents import Agent, ApprovalDecisionError, FakeModel, Runner, ToolCall, tool

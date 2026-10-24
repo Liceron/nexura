@@ -33,8 +33,9 @@ class ApproveWith:
     ``Runner.resume(..., approve={call_id: ApproveWith(arguments={...}, digest=d)})``. The
     edit is checked against the tool's schema, and the call in the transcript is rewritten,
     so the history shows what actually ran. ``digest`` (from
-    ``interruption.pending_digests()``) binds the approval to the original action the
-    reviewer saw. Omitting it requires a verified signed or server-stored interruption.
+    ``interruption.pending_digests()``) binds the approval to the original action and
+    approval occurrence the reviewer saw. Omitting it requires a verified signed or
+    server-stored interruption.
     """
 
     arguments: dict[str, Any]
@@ -319,6 +320,10 @@ class RunInterruption:
     expires_at: float = field(default_factory=lambda: time.time() + 3600.0)
     signature: str | None = None
     action_digests: dict[str, str] = field(default_factory=dict)
+    # Trusted effect targets for scoped tools, included in approved action digests.
+    tool_scopes: dict[str, str] = field(default_factory=dict)
+    # Completed auxiliary summaries: config/transcript digest -> labelled text.
+    compaction_summaries: dict[str, str] = field(default_factory=dict)
 
     @property
     def _approval_snapshot(self) -> str | None:
@@ -333,18 +338,46 @@ class RunInterruption:
         self.__dict__["_trusted_approval_payload"] = value
 
     @staticmethod
-    def action_digest(call: ToolCall) -> str:
-        """SHA-256 of the exact action (tool name + canonical arguments)."""
+    def action_digest(call: ToolCall, scope: str | None = None) -> str:
+        """Stable effect hash of tool name, canonical arguments and optional target scope.
+
+        Used for journal intents, not as a reviewed approval decision. See
+        ``decision_digest`` for the occurrence-bound hash returned to reviewers.
+        """
         from nexura_agents.contracts.canonical import canonical_digest
 
         try:
-            return canonical_digest({"tool": call.name, "arguments": call.arguments})
+            return canonical_digest(
+                {
+                    "tool": call.name,
+                    "arguments": call.arguments,
+                    **({"scope": scope} if scope is not None else {}),
+                }
+            )
         except UnicodeError as exc:
             from nexura_agents.errors import ApprovalDecisionError
 
             raise ApprovalDecisionError(
                 "Tool arguments are not valid UTF-8 approval data."
             ) from exc
+
+    def decision_digest(self, call: ToolCall) -> str:
+        """Bind a reviewed action to this run and SDK-issued approval occurrence.
+
+        The interruption id is persisted across recovery of the same pause. A later
+        pause gets a fresh id, even for identical arguments or a reused model call id.
+        The runner verifies the envelope before accepting a decision; a public hash
+        alone does not authenticate caller-supplied state.
+        """
+        from nexura_agents.contracts.canonical import canonical_digest
+
+        return canonical_digest(
+            {
+                "run_id": self.run_id,
+                "approval_id": self.interruption_id,
+                "action_digest": self.action_digest(call, self.tool_scopes.get(call.id)),
+            }
+        )
 
     @property
     def questions(self) -> list[dict[str, str]]:
@@ -367,8 +400,12 @@ class RunInterruption:
         return "effect_unknown" if self.reason == "outcome_unknown_after_crash" else "approval"
 
     def pending_digests(self) -> dict[str, str]:
-        """Show these to the reviewer; pass them back as ``approve={id: digest}``."""
-        return {call.id: self.action_digest(call) for call in self.pending}
+        """Review these occurrence-bound hashes; return ``approve={id: digest}``.
+
+        A decision for another run or approval occurrence is refused, even when its
+        tool and arguments match. Recovery of this same occurrence retains the hash.
+        """
+        return {call.id: self.decision_digest(call) for call in self.pending}
 
     def to_json(self) -> str:
         """Serialize the paused run (transcript, pending calls, usage, session state) to JSON."""
@@ -383,6 +420,12 @@ class RunInterruption:
                 "expires_at": self.expires_at,
                 "signature": self.signature,
                 "action_digests": dict(self.action_digests),
+                **({"tool_scopes": dict(self.tool_scopes)} if self.tool_scopes else {}),
+                **(
+                    {"compaction_summaries": dict(self.compaction_summaries)}
+                    if self.compaction_summaries
+                    else {}
+                ),
                 "run_id": self.run_id,
                 "agent_name": self.agent_name,
                 "transcript": serialize_session(self.run_id, 0, self.messages),
@@ -444,6 +487,8 @@ class RunInterruption:
             expires_at=raw.get("expires_at", 0.0),
             signature=raw.get("signature"),
             action_digests=raw.get("action_digests", {}),
+            tool_scopes=dict(raw.get("tool_scopes") or {}),
+            compaction_summaries=dict(raw.get("compaction_summaries") or {}),
             agent_name=raw["agent_name"],
             messages=messages,
             pending=[

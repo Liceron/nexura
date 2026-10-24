@@ -104,7 +104,7 @@ when ``nexura_runtime`` is installed and imported.
 
 ### `Agent`
 
-class `Agent(name: 'str', instructions: 'Instructions', model: 'ModelProtocol | str', *, tools: 'Sequence[Tool] | None' = None, max_turns: 'int' = 10, max_tool_calls: 'int' = 20, timeout: 'float | None' = None, output_type: 'type[BaseModel] | dict[str, Any] | None' = None, output_retries: 'int' = 1, input_guardrails: 'Sequence[GuardrailFn]' = (), output_guardrails: 'Sequence[GuardrailFn]' = (), parallel_tool_calls: 'bool' = False, description: 'str' = '', memory: 'Memory | None' = None, handoffs: 'Sequence[Agent | Handoff]' = (), max_handoffs: 'int' = 10, history_processors: 'Sequence[HistoryProcessor]' = (), prepare_tools: 'PrepareTools | None' = None, model_settings: 'ModelSettings | None' = None, tool_use_behavior: 'ToolUseBehavior' = 'run_llm_again', output_validators: 'Sequence[OutputValidator]' = (), reset_tool_choice: 'bool' = True, ask_user: 'bool' = False, stream_guard: 'StreamGuardMode | StreamGuard' = 'auto') -> 'None'`
+class `Agent(name: 'str', instructions: 'Instructions', model: 'ModelProtocol | str', *, tools: 'Sequence[Tool] | None' = None, max_turns: 'int' = 10, max_tool_calls: 'int' = 20, timeout: 'float | None' = None, output_type: 'type[BaseModel] | dict[str, Any] | None' = None, output_retries: 'int' = 1, input_guardrails: 'Sequence[GuardrailFn]' = (), output_guardrails: 'Sequence[GuardrailFn]' = (), parallel_tool_calls: 'bool' = False, description: 'str' = '', memory: 'Memory | None' = None, handoffs: 'Sequence[Agent | Handoff]' = (), max_handoffs: 'int' = 10, history_processors: 'Sequence[HistoryProcessor]' = (), prepare_tools: 'PrepareTools | None' = None, model_settings: 'ModelSettings | None' = None, tool_use_behavior: 'ToolUseBehavior' = 'run_llm_again', output_validators: 'Sequence[OutputValidator]' = (), reset_tool_choice: 'bool' = True, ask_user: 'bool' = False, stream_guard: 'StreamGuardMode | StreamGuard' = 'auto', harness: 'Harness | None' = None) -> 'None'`
 
 ~~~text
 Stateless configuration defining an agent.
@@ -387,7 +387,7 @@ Represents a typed, executable tool for an agent.
 
 ### `RunContext`
 
-class `RunContext(deps: 'DepsT', run_id: 'str', agent_name: 'str', turn: 'int' = 0, usage: 'Usage' = <factory>, messages: 'list[Message]' = <factory>, tool_call_id: 'str | None' = None, tool_name: 'str | None' = None, retry: 'int' = 0, metadata: 'dict[str, Any]' = <factory>, state: 'dict[str, Any]' = <factory>, tags: 'list[str]' = <factory>, tool_attachments: 'list[Any]' = <factory>, prompt: 'dict[str, Any] | None' = None, idempotency_key: 'str | None' = None, fencing_token: 'int | None' = None, tool: 'ToolInfo | None' = None, _nested_usage: 'list[Usage]' = <factory>, _events: '_EventChannel' = <factory>) -> None`
+class `RunContext(deps: 'DepsT', run_id: 'str', agent_name: 'str', turn: 'int' = 0, usage: 'Usage' = <factory>, messages: 'list[Message]' = <factory>, tool_call_id: 'str | None' = None, tool_name: 'str | None' = None, retry: 'int' = 0, metadata: 'dict[str, Any]' = <factory>, state: 'dict[str, Any]' = <factory>, tags: 'list[str]' = <factory>, tool_attachments: 'list[Any]' = <factory>, prompt: 'dict[str, Any] | None' = None, idempotency_key: 'str | None' = None, fencing_token: 'int | None' = None, tool: 'ToolInfo | None' = None, _nested_usage: 'list[Usage]' = <factory>, _events: '_EventChannel' = <factory>, _compaction_summaries: 'dict[str, str]' = <factory>, _save_compaction: 'Callable[[], Awaitable[None]] | None' = None) -> None`
 
 ~~~text
 What a tool or callback can see about the run it belongs to.
@@ -491,15 +491,15 @@ every store on the same directory in this process and adds an OS file lock
 
 ### `Skill`
 
-class `Skill(name: 'str', description: 'str', instructions: 'str', tools: 'tuple[str, ...]' = (), resources: 'Mapping[str, str]' = <factory>, metadata: 'Mapping[str, Any]' = <factory>) -> None`
+class `Skill(name: 'str', description: 'str', instructions: 'str', tools: 'tuple[str, ...]' = (), resources: 'Mapping[str, str]' = <factory>, metadata: 'Mapping[str, Any]' = <factory>, format: 'str' = 'nexura') -> None`
 
 ~~~text
 One skill version: text only, identified by name and the sha256 of its content.
 ~~~
 
-- `from_directory(cls, path: 'str | Path') -> 'Skill'`
+- `from_directory(cls, path: 'str | Path', *, format: 'str' = 'nexura') -> 'Skill'`
   Load ``path/SKILL.md`` plus text files beside it as resources (no scripts).
-- `from_markdown(cls, text: 'str', *, resources: 'Mapping[str, str] | None' = None, name: 'str | None' = None) -> 'Skill'`
+- `from_markdown(cls, text: 'str', *, resources: 'Mapping[str, str] | None' = None, name: 'str | None' = None, format: 'str' = 'nexura') -> 'Skill'`
   Parse a ``SKILL.md``: ``---`` front matter (name, description, tools) then the body.
 
 ### `SkillLibrary`
@@ -520,11 +520,13 @@ Versioned skills by name, with labels such as ``production`` (thread-safe).
   Start ``name``'s next version at ``next_version`` or later (never lower).
 - `export(self) -> 'dict[str, Any]'`
   All skills, versions and labels as a JSON-ready dict (text only), for persistence.
+- `from_directory(cls, path: 'str | Path') -> 'SkillLibrary'`
+  Load a bounded directory of Agent Skills, in sorted order, without execution.
 - `get(self, name: 'str', *, label: 'str' = 'latest', version: 'int | None' = None) -> 'Skill'`
   The skill at ``version``, or the one carrying ``label``.
 - `import_versions(self, data: 'Mapping[str, Any]', *, replace: 'bool' = False) -> 'list[str]'`
   Restore skills from :meth:`export` output, all or nothing; returns the names added.
-- `loader_tool(self, *, label: 'str' = 'latest', available_tools: 'Iterable[str]' = (), name: 'str' = 'load_skill') -> 'Tool'`
+- `loader_tool(self, *, label: 'str' = 'latest', available_tools: 'Iterable[str]' = (), name: 'str' = 'load_skill', progressive: 'bool' = False) -> 'Tool'`
   A read-only ``load_skill(name)`` tool returning a skill's text (never runs anything).
 - `names(self) -> 'list[str]'`
   Names of all stored skills.
@@ -534,12 +536,107 @@ Versioned skills by name, with labels such as ``production`` (thread-safe).
   The number the next new version of ``name`` gets (also after it was removed).
 - `remove(self, name: 'str', version: 'int | None' = None) -> 'int'`
   Delete every version of ``name``, or only ``version``; returns how many were removed.
-- `render(self, name: 'str', *, label: 'str' = 'latest', available_tools: 'Iterable[str]' = ()) -> 'str'`
+- `render(self, name: 'str', *, label: 'str' = 'latest', available_tools: 'Iterable[str]' = (), progressive: 'bool' = False) -> 'str'`
   The text ``load_skill`` returns: instructions, resources and tool availability.
+- `resource_tool(self, *, label: 'str' = 'latest') -> 'Tool'`
+  Read one snapshot resource on demand. No filesystem access or execution.
 - `set_label(self, name: 'str', label: 'str', version: 'int') -> 'None'`
   Point ``label`` at ``version``; other versions lose it.
 - `versions(self, name: 'str') -> 'list[SkillVersion]'`
   All versions of a skill, oldest first.
+
+### `Harness`
+
+class `Harness(skills: 'SkillLibrary | None' = None, compaction: 'HistoryProcessor | None' = None, todo: 'bool' = False, filesystem: 'ScopedFilesystem | None' = None, require_write_approval: 'bool' = False) -> None`
+
+~~~text
+``Agent(harness=Harness(...))``; every capability is separately opt-in.
+
+Share the same filesystem explicitly with child harnesses, then delegate with
+``child.as_tool()``. Existing G2 hooks and budget inheritance remain authoritative.
+No shell is installed. Skill ``allowed-tools`` metadata grants no permissions.
+~~~
+
+- `build_tools(self, available_tools: 'list[str]') -> 'list[Tool]'`
+  Build normal SDK tools for the enabled capabilities, with effect metadata.
+- `catalog(self) -> 'str'`
+  Only skill names/descriptions enter the system prompt.
+
+### `TodoItem`
+
+class `TodoItem(*, id: Annotated[str, MinLen(min_length=1), MaxLen(max_length=64)], text: Annotated[str, MinLen(min_length=1), MaxLen(max_length=1000)], status: Literal['pending', 'in_progress', 'completed'] = 'pending') -> None`
+
+~~~text
+One task, identified across plan replacements by its unique id.
+~~~
+
+
+### `todo_tools`
+
+function `todo_tools(*, requires_approval: 'bool' = False) -> 'list[Tool]'`
+
+~~~text
+Replace/read the run's plan. Replacement is idempotent by construction.
+
+State is checkpointed with the tool result; the normal effect journal admits replay
+after a crash before that checkpoint. Re-emitted progress events may repeat on replay.
+Notifications contain only a monotonic version, total count and fixed status counts;
+replay of a recorded call retains the current version and cannot revert newer state.
+Configure sequential tool calls when ordering multiple plan replacements matters.
+~~~
+
+### `ScopedFilesystem`
+
+class `ScopedFilesystem(root: 'str | Path | None' = None, *, max_file_bytes: 'int' = 65536, max_total_bytes: 'int' = 1048576, max_entries: 'int' = 256) -> 'None'`
+
+~~~text
+Share one instance explicitly between parent and child agents.
+
+Without ``root`` files live in memory. With an existing ``root``, Linux Landlock
+ABI >= 3 and no-follow traversal enforce a directory capability. A private worker
+restricts only its own thread; unsupported disk isolation is refused.
+Files must be regular, singly linked UTF-8 files. Writes replace atomically, never
+follow links, and are conservatively non-idempotent for durable recovery.
+
+Caps cover UTF-8 bytes and directory entries. Use one instance per root to serialize
+cap checks. Landlock checks ancestry at opens/creates/renames, including both ends
+of replacements, even when a host actor moves a traversed directory out of the root.
+~~~
+
+- `build_tools(self, *, require_write_approval: 'bool' = False) -> 'builtins.list[Tool]'`
+  Tools use the normal runner approval, hook and guardrail pipeline.
+- `close(self) -> 'None'`
+  Release the directory descriptor. Subsequent operations are refused.
+- `edit(self, path: 'str', old: 'str', new: 'str') -> 'str'`
+  Replace exactly one literal match. Refuse empty or ambiguous matches.
+- `list(self) -> 'list[str]'`
+  List file paths, sorted, relative to the workspace.
+- `read(self, path: 'str') -> 'str'`
+  Read one bounded UTF-8 file; never follow a symlink.
+- `write(self, path: 'str', content: 'str') -> 'str'`
+  Replace a file, creating parent directories within the configured caps.
+
+### `compact_context`
+
+function `compact_context(max_tokens: 'int', *, trigger_ratio: 'float' = 0.9, target_ratio: 'float' = 0.7, model: 'Any' = None, max_summary_chars: 'int' = 2000, estimator: 'TokenEstimator | None' = None, timeout: 'float | None' = None) -> 'Callable[[RunContext[Any], list[Message]], Awaitable[list[Message]]]'`
+
+~~~text
+Opt-in budget-triggered compaction, preserving complete tool exchanges.
+
+Old turns are removed as units. Exchanges spanning user boundaries are merged;
+all system messages, the latest user turn, and unanswered calls (including pending
+approvals) are pinned. If pinned content exceeds the target it stays intact and
+``nexura.context_compacted`` reports overflow. Estimates exclude attachments and
+tool schemas: reserve headroom in ``max_tokens``.
+
+With ``model`` use the normal model admission path and count summary usage in the
+run; without it trim deterministically. Errors, including budget refusal, propagate.
+Cached summaries are scoped by run id and content (64 entries per processor).
+With durable storage, completed summaries and their config/transcript digest are
+checkpointed before the main model request. Recovery reuses the saved summary and
+its already-accounted usage without calling the summary model again.
+Stored history, approval records and checkpoints are never rewritten.
+~~~
 
 ### `ModelRetry`
 
@@ -562,7 +659,7 @@ Final result of an agent run.
 
 ### `RunInterruption`
 
-class `RunInterruption(run_id: 'str', agent_name: 'str', messages: 'list[Message]', pending: 'list[ToolCall]', usage: 'Usage' = <factory>, turn: 'int' = 0, tool_calls_count: 'int' = 0, session_id: 'str | None' = None, expected_revision: 'int' = 0, requests: 'int' = 0, memory_block: 'str' = '', active_agent: 'str | None' = None, agent_path: 'list[str]' = <factory>, handoffs_count: 'int' = 0, root_system: 'Message | None' = None, reason: 'str | None' = None, pending_handoff: 'dict[str, str] | None' = None, state: 'dict[str, Any]' = <factory>, question_ids: 'list[str]' = <factory>, usage_by_agent: 'dict[str, Usage]' = <factory>, usage_by_model: 'dict[str, Usage]' = <factory>, tags: 'list[str]' = <factory>, metadata: 'dict[str, Any]' = <factory>, output_attempts: 'int' = 0, agent_started_at: 'int' = 0, interruption_id: 'str' = <factory>, expires_at: 'float' = <factory>, signature: 'str | None' = None, action_digests: 'dict[str, str]' = <factory>) -> None`
+class `RunInterruption(run_id: 'str', agent_name: 'str', messages: 'list[Message]', pending: 'list[ToolCall]', usage: 'Usage' = <factory>, turn: 'int' = 0, tool_calls_count: 'int' = 0, session_id: 'str | None' = None, expected_revision: 'int' = 0, requests: 'int' = 0, memory_block: 'str' = '', active_agent: 'str | None' = None, agent_path: 'list[str]' = <factory>, handoffs_count: 'int' = 0, root_system: 'Message | None' = None, reason: 'str | None' = None, pending_handoff: 'dict[str, str] | None' = None, state: 'dict[str, Any]' = <factory>, question_ids: 'list[str]' = <factory>, usage_by_agent: 'dict[str, Usage]' = <factory>, usage_by_model: 'dict[str, Usage]' = <factory>, tags: 'list[str]' = <factory>, metadata: 'dict[str, Any]' = <factory>, output_attempts: 'int' = 0, agent_started_at: 'int' = 0, interruption_id: 'str' = <factory>, expires_at: 'float' = <factory>, signature: 'str | None' = None, action_digests: 'dict[str, str]' = <factory>, tool_scopes: 'dict[str, str]' = <factory>, compaction_summaries: 'dict[str, str]' = <factory>) -> None`
 
 ~~~text
 A run paused before tool calls that need approval.
@@ -573,12 +670,14 @@ Unsigned JSON belongs in trusted server-side storage. Expiry is enforced by
 Runner; single use requires a configured approval/checkpoint store.
 ~~~
 
-- `action_digest(call: 'ToolCall') -> 'str'`
-  SHA-256 of the exact action (tool name + canonical arguments).
+- `action_digest(call: 'ToolCall', scope: 'str | None' = None) -> 'str'`
+  Stable effect hash of tool name, canonical arguments and optional target scope.
+- `decision_digest(self, call: 'ToolCall') -> 'str'`
+  Bind a reviewed action to this run and SDK-issued approval occurrence.
 - `from_json(cls, data: 'str') -> 'RunInterruption'`
   Rebuild an interruption from ``to_json`` output; reject unknown schema versions.
 - `pending_digests(self) -> 'dict[str, str]'`
-  Show these to the reviewer; pass them back as ``approve={id: digest}``.
+  Review these occurrence-bound hashes; return ``approve={id: digest}``.
 - `to_json(self) -> 'str'`
   Serialize the paused run (transcript, pending calls, usage, session state) to JSON.
 
@@ -2032,8 +2131,9 @@ Approve a pending tool call, but run it with ``arguments`` instead.
 ``Runner.resume(..., approve={call_id: ApproveWith(arguments={...}, digest=d)})``. The
 edit is checked against the tool's schema, and the call in the transcript is rewritten,
 so the history shows what actually ran. ``digest`` (from
-``interruption.pending_digests()``) binds the approval to the original action the
-reviewer saw. Omitting it requires a verified signed or server-stored interruption.
+``interruption.pending_digests()``) binds the approval to the original action and
+approval occurrence the reviewer saw. Omitting it requires a verified signed or
+server-stored interruption.
 ~~~
 
 
@@ -2549,15 +2649,15 @@ Constant: `65536`
 
 ### `Skill`
 
-class `Skill(name: 'str', description: 'str', instructions: 'str', tools: 'tuple[str, ...]' = (), resources: 'Mapping[str, str]' = <factory>, metadata: 'Mapping[str, Any]' = <factory>) -> None`
+class `Skill(name: 'str', description: 'str', instructions: 'str', tools: 'tuple[str, ...]' = (), resources: 'Mapping[str, str]' = <factory>, metadata: 'Mapping[str, Any]' = <factory>, format: 'str' = 'nexura') -> None`
 
 ~~~text
 One skill version: text only, identified by name and the sha256 of its content.
 ~~~
 
-- `from_directory(cls, path: 'str | Path') -> 'Skill'`
+- `from_directory(cls, path: 'str | Path', *, format: 'str' = 'nexura') -> 'Skill'`
   Load ``path/SKILL.md`` plus text files beside it as resources (no scripts).
-- `from_markdown(cls, text: 'str', *, resources: 'Mapping[str, str] | None' = None, name: 'str | None' = None) -> 'Skill'`
+- `from_markdown(cls, text: 'str', *, resources: 'Mapping[str, str] | None' = None, name: 'str | None' = None, format: 'str' = 'nexura') -> 'Skill'`
   Parse a ``SKILL.md``: ``---`` front matter (name, description, tools) then the body.
 
 ### `SkillError`
@@ -2587,11 +2687,13 @@ Versioned skills by name, with labels such as ``production`` (thread-safe).
   Start ``name``'s next version at ``next_version`` or later (never lower).
 - `export(self) -> 'dict[str, Any]'`
   All skills, versions and labels as a JSON-ready dict (text only), for persistence.
+- `from_directory(cls, path: 'str | Path') -> 'SkillLibrary'`
+  Load a bounded directory of Agent Skills, in sorted order, without execution.
 - `get(self, name: 'str', *, label: 'str' = 'latest', version: 'int | None' = None) -> 'Skill'`
   The skill at ``version``, or the one carrying ``label``.
 - `import_versions(self, data: 'Mapping[str, Any]', *, replace: 'bool' = False) -> 'list[str]'`
   Restore skills from :meth:`export` output, all or nothing; returns the names added.
-- `loader_tool(self, *, label: 'str' = 'latest', available_tools: 'Iterable[str]' = (), name: 'str' = 'load_skill') -> 'Tool'`
+- `loader_tool(self, *, label: 'str' = 'latest', available_tools: 'Iterable[str]' = (), name: 'str' = 'load_skill', progressive: 'bool' = False) -> 'Tool'`
   A read-only ``load_skill(name)`` tool returning a skill's text (never runs anything).
 - `names(self) -> 'list[str]'`
   Names of all stored skills.
@@ -2601,8 +2703,10 @@ Versioned skills by name, with labels such as ``production`` (thread-safe).
   The number the next new version of ``name`` gets (also after it was removed).
 - `remove(self, name: 'str', version: 'int | None' = None) -> 'int'`
   Delete every version of ``name``, or only ``version``; returns how many were removed.
-- `render(self, name: 'str', *, label: 'str' = 'latest', available_tools: 'Iterable[str]' = ()) -> 'str'`
+- `render(self, name: 'str', *, label: 'str' = 'latest', available_tools: 'Iterable[str]' = (), progressive: 'bool' = False) -> 'str'`
   The text ``load_skill`` returns: instructions, resources and tool availability.
+- `resource_tool(self, *, label: 'str' = 'latest') -> 'Tool'`
+  Read one snapshot resource on demand. No filesystem access or execution.
 - `set_label(self, name: 'str', label: 'str', version: 'int') -> 'None'`
   Point ``label`` at ``version``; other versions lose it.
 - `versions(self, name: 'str') -> 'list[SkillVersion]'`

@@ -45,13 +45,17 @@ from nexura_runtime.integrations.sandbox.errors import (
 )
 from nexura_runtime.integrations.sandbox.models import (
     DEFAULT_BACKEND_ORDER,
+    GVISOR_PRODUCTION_CEILINGS,
+    GVISOR_PRODUCTION_PROFILE,
     ExecutionRequest,
     ExecutionResult,
+    HardenedProfile,
     IsolationBackend,
     IsolationLevel,
     MinIsolation,
     SandboxConfig,
     SelectableBackend,
+    gvisor_production_violations,
 )
 from nexura_runtime.integrations.sandbox.module import (
     SandboxExecutionModule,
@@ -69,12 +73,15 @@ from nexura_runtime.modules.registry import default_registry
 
 __all__ = [
     "DEFAULT_BACKEND_ORDER",
+    "GVISOR_PRODUCTION_CEILINGS",
+    "GVISOR_PRODUCTION_PROFILE",
     "SHARED_SERVICE_MIN_ISOLATION",
     "BackendStatus",
     "CapabilityUnavailableError",
     "ExecutionRequest",
     "ExecutionResult",
     "ExecutionTimeoutError",
+    "HardenedProfile",
     "InputLimitExceededError",
     "IsolatedProcessWorker",
     "IsolationBackend",
@@ -97,6 +104,7 @@ __all__ = [
     "WorkerCrashError",
     "assert_sandbox_allowed_for_profile",
     "build_backend",
+    "gvisor_production_violations",
     "isolation_rank",
     "sandbox_config_from_env",
     "select_backend",
@@ -115,8 +123,11 @@ def _operator_module() -> SandboxExecutionModule:
             RuntimeWarning,
             stacklevel=2,
         )
-        config = SandboxConfig(backends=[])
-    module = SandboxExecutionModule(config=config)
+        module = SandboxExecutionModule(config=SandboxConfig(backends=[]))
+        module.settings_error = str(exc)
+        module.selection_error = f"invalid operator sandbox settings: {exc}"
+    else:
+        module = SandboxExecutionModule(config=config)
     default_registry.get_entry("nexura.tools.sandbox.execute").manifest = module.manifest
     return module
 

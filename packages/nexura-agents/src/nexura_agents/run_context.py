@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import copy
 import threading
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
@@ -124,6 +124,8 @@ class RunContext(Generic[DepsT]):  # noqa: UP046 - keeps Python 3.11 support
     _nested_usage: list[Usage] = field(default_factory=list, repr=False)
     # Where ctx.emit sends events; shared by every per-tool copy.
     _events: _EventChannel = field(default_factory=lambda: _EventChannel(), repr=False)
+    _compaction_summaries: dict[str, str] = field(default_factory=dict, repr=False)
+    _save_compaction: Callable[[], Awaitable[None]] | None = field(default=None, repr=False)
 
     def emit(self, name: str, **data: Any) -> None:
         """Send a custom progress event to whoever streams this run.

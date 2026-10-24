@@ -44,6 +44,8 @@ one owner's projects. They do not add accounts or tenant isolation.
 - [Versioned prompts](prompts.md): prompts outside code with versions, labels and promotion.
 - [Skills](skills.md): reusable, versioned instruction bundles an agent loads on demand;
   text only, never code.
+- [Harness](harness.md): opt-in SKILL.md directories, context compaction, durable task
+  lists and scoped filesystems shared with sub-agents.
 - [Structured output](structured-output.md): typed results validated with Pydantic,
   output validators, streaming partial output.
 - [Images, documents and audio](multimodal.md): attachments for each provider.
@@ -97,6 +99,7 @@ one owner's projects. They do not add accounts or tenant isolation.
 - [Extending the service and Studio](extensions.md): auth providers, service extensions and
   opt-in `nexura.extensions` entry points, credential backends, membership stores, and the
   Studio extension registry.
+- [Production gVisor profile](sandbox-production.md): the hardened gvisor_production code sandbox, the operator checklist (root, cgroups, pinned runsc, rootfs) and the host preflight `python -m nexura_sandbox.preflight`.
 - [Troubleshooting](troubleshooting.md): common errors and what they mean.
 
 ## Reference

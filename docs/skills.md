@@ -1,5 +1,10 @@
 # Skills
 
+For standard Agent Skills directory layouts and front matter, use the opt-in
+[Harness guide](harness.md). `SkillLibrary.from_directory(root)` loads those skills;
+`Agent(harness=Harness(skills=library))` adds their catalog and progressive read tools.
+The existing formats and manual wiring described below remain supported.
+
 A skill is a reusable bundle of instructions an agent reads only when it needs it: refund
 policy, a house style, the steps for a support process. The agent's instructions carry a short
 catalog (each skill's name and one-line description). The agent calls `load_skill(name)` to

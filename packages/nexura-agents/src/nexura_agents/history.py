@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import math
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
@@ -388,3 +389,163 @@ def summarize_older_turns(
         return [*head, note, *(m for turn in recent for m in turn)]
 
     return summarize_older_turns
+
+
+def compact_context(
+    max_tokens: int,
+    *,
+    trigger_ratio: float = 0.9,
+    target_ratio: float = 0.7,
+    model: Any = None,
+    max_summary_chars: int = 2000,
+    estimator: TokenEstimator | None = None,
+    timeout: float | None = None,
+) -> Callable[[RunContext[Any], list[Message]], Awaitable[list[Message]]]:
+    """Opt-in budget-triggered compaction, preserving complete tool exchanges.
+
+    Old turns are removed as units. Exchanges spanning user boundaries are merged;
+    all system messages, the latest user turn, and unanswered calls (including pending
+    approvals) are pinned. If pinned content exceeds the target it stays intact and
+    ``nexura.context_compacted`` reports overflow. Estimates exclude attachments and
+    tool schemas: reserve headroom in ``max_tokens``.
+
+    With ``model`` use the normal model admission path and count summary usage in the
+    run; without it trim deterministically. Errors, including budget refusal, propagate.
+    Cached summaries are scoped by run id and content (64 entries per processor).
+    With durable storage, completed summaries and their config/transcript digest are
+    checkpointed before the main model request. Recovery reuses the saved summary and
+    its already-accounted usage without calling the summary model again.
+    Stored history, approval records and checkpoints are never rewritten.
+    """
+    if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens < 1:
+        raise SDKValidationError("max_tokens must be a positive integer.")
+    if (
+        not all(
+            isinstance(r, (int, float)) and not isinstance(r, bool) and math.isfinite(r)
+            for r in (trigger_ratio, target_ratio)
+        )
+        or not 0 < target_ratio <= trigger_ratio <= 1
+    ):
+        raise SDKValidationError("Require 0 < target_ratio <= trigger_ratio <= 1.")
+    if (
+        isinstance(max_summary_chars, bool)
+        or not isinstance(max_summary_chars, int)
+        or max_summary_chars < 1
+    ):
+        raise SDKValidationError("max_summary_chars must be a positive integer.")
+    if model is not None and not callable(getattr(model, "generate", None)):
+        raise SDKValidationError("Compaction model must provide generate().")
+    est = estimator or default_token_estimator
+    cache: OrderedDict[tuple[str, str], Message] = OrderedDict()
+
+    async def compact(ctx: RunContext[Any], messages: list[Message]) -> list[Message]:
+        before = sum(message_tokens(m, est) for m in messages)
+        if before < max_tokens * trigger_ratio:
+            return messages
+        answered = {m.tool_call_id for m in messages if m.role == "tool"}
+        _check_tool_pairs(messages, "compact_context input", answered)
+        head, turns = _split(messages)
+        groups: list[list[Message]] = []
+        open_calls: set[str] = set()
+        for turn in turns:
+            if not open_calls:
+                groups.append([])
+            groups[-1].extend(turn)
+            for message in turn:
+                open_calls.update(c.id for c in message.tool_calls or ())
+                if message.role == "tool":
+                    open_calls.discard(message.tool_call_id or "")
+        target = max(1, int(max_tokens * target_ratio))
+        total = before
+        old: list[list[Message]] = []
+        kept: list[Message] = []
+        for index, group in enumerate(groups):
+            pinned = index == len(groups) - 1 or any(
+                m.role == "system" or any(c.id not in answered for c in m.tool_calls or ())
+                for m in group
+            )
+            if total > target and not pinned:
+                old.append(group)
+                total -= sum(message_tokens(m, est) for m in group)
+            else:
+                kept.extend(group)
+        if not old:
+            return messages
+        summary: list[Message] = []
+        if model is not None:
+            config = json.dumps(
+                {
+                    "version": 1,
+                    "max_tokens": max_tokens,
+                    "trigger_ratio": trigger_ratio,
+                    "target_ratio": target_ratio,
+                    "max_summary_chars": max_summary_chars,
+                    "instructions": _SUMMARY_INSTRUCTIONS,
+                    "agent": ctx.agent_name,
+                    "model": f"{type(model).__module__}.{type(model).__qualname__}",
+                    "model_id": getattr(model, "model_id", None),
+                    "model_name": getattr(model, "model_name", None),
+                },
+                sort_keys=True,
+            ).encode()
+            digest = hashlib.sha256(config + b"".join(_turn_digest(g) for g in old)).hexdigest()
+            key = (ctx.run_id, digest)
+            saved = ctx._compaction_summaries.get(digest)
+            if saved is not None and not isinstance(saved, str):
+                raise SDKValidationError("Invalid checkpointed compaction summary.")
+            note = Message(role="assistant", content=saved) if saved is not None else cache.get(key)
+            if note is None:
+                response = await admission.generate(
+                    model,
+                    [
+                        Message(
+                            role="system",
+                            content=_SUMMARY_INSTRUCTIONS
+                            + f"\nKeep the summary under {max_summary_chars} characters.",
+                        ),
+                        Message(
+                            role="user", content="<excerpt>\n" + _render_turns(old) + "\n</excerpt>"
+                        ),
+                    ],
+                    None,
+                    timeout=timeout,
+                )
+                ctx.add_usage(response.usage)
+                if response.message.tool_calls or not (response.message.content or "").strip():
+                    raise SDKValidationError(
+                        "Compaction requires a non-empty text summary, not tool calls."
+                    )
+                note = Message(
+                    role="assistant",
+                    content=SUMMARY_HEADER
+                    + "\n"
+                    + _quote(_cut_summary(response.message.content or "", max_summary_chars)),
+                )
+                cache[key] = note
+                while len(cache) > 64:
+                    cache.popitem(last=False)
+            else:
+                if key in cache:
+                    cache.move_to_end(key)
+            if saved is None:
+                ctx._compaction_summaries[digest] = note.content or ""
+                while len(ctx._compaction_summaries) > 64:
+                    del ctx._compaction_summaries[next(iter(ctx._compaction_summaries))]
+                if ctx._save_compaction is not None:
+                    await ctx._save_compaction()
+            # Summary is optional context; never displace the protected messages for it.
+            if total + message_tokens(note, est) <= target:
+                summary = [note]
+        out = [*head, *summary, *kept]
+        after = sum(message_tokens(m, est) for m in out)
+        ctx.emit(
+            "nexura.context_compacted",
+            before_tokens=before,
+            after_tokens=after,
+            dropped_messages=sum(len(g) for g in old),
+            summarized=bool(summary),
+            overflow=after > target,
+        )
+        return out
+
+    return compact

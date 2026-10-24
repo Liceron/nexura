@@ -402,8 +402,11 @@ async def test_fake_other_exit_paths(fake: FakeRunsc, config: SandboxConfig, mod
         with pytest.raises(ExecutionTimeoutError):
             await worker.execute(request, small)
     elif mode == "output":
+        # The fake writes past the cap at once; the wall budget is not under test here. A
+        # 0.1 s budget also covers the real crash-watchdog launch and timed out under xdist.
+        capped = small.model_copy(update={"timeout_seconds": 5.0})
         with pytest.raises(OutputLimitExceededError):
-            await worker.execute(request, small)
+            await worker.execute(request, capped)
     elif mode in ("denied", "unsupported_seccomp"):
         reason = "oci-seccomp" if mode == "unsupported_seccomp" else "cgroup"
         with pytest.raises(CapabilityUnavailableError, match=reason):

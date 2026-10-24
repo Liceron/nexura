@@ -138,10 +138,13 @@ from nexura_runtime.integrations.sandbox.errors import (
     SecurityViolationError,
 )
 from nexura_runtime.integrations.sandbox.models import (
+    GVISOR_PRODUCTION_PROFILE,
     ExecutionRequest,
     ExecutionResult,
     IsolationLevel,
     SandboxConfig,
+    gvisor_production_violations,
+    normalised_absolute_path,
 )
 from nexura_runtime.integrations.sandbox.worker import (
     _check_cancellation,
@@ -209,9 +212,137 @@ def discover_oci_infrastructure(
     return runsc_path, rootfs_path, cmd_prefix
 
 
+#: cgroup v2 mount point. Module-level so host-free tests can point it at a fake tree.
+CGROUP_ROOT = Path("/sys/fs/cgroup")
+
+#: Controllers the gVisor cgroup parent must offer: the OCI spec sets memory and pids limits.
+REQUIRED_CGROUP_CONTROLLERS = ("memory", "pids")
+
+#: SHA-512 of runsc keyed by (path, device, inode, size, mtime, ctime): hashed once per file.
+_RUNSC_DIGESTS: dict[tuple[str, int, int, int, int, int], str] = {}
+
+
+def cgroup_parent_problem(config: SandboxConfig) -> str | None:
+    """Why the host cannot give runsc the configured cgroup parent, or ``None`` when it can.
+
+    The parent must already exist under a cgroup v2 mount and offer and delegate the memory
+    and pids controllers (``cgroup.controllers`` and ``cgroup.subtree_control``). Nothing
+    here creates or changes a cgroup; the operator provisions the parent.
+    """
+    value = config.gvisor_cgroup_parent
+    if not normalised_absolute_path(value) or value == "/":
+        return (
+            "gvisor_cgroup_parent must be a normalised absolute cgroup path below the root "
+            f"(for example '/nexura'); got {value!r}"
+        )
+    if not (CGROUP_ROOT / "cgroup.controllers").is_file():
+        return f"no cgroup v2 hierarchy at {CGROUP_ROOT} (cgroup v1 hosts are not supported)"
+    parent = cgroup_parent_dir(config)
+    if not (parent / "cgroup.controllers").is_file():
+        return (
+            f"cgroup parent {parent} does not exist; the operator must create it and delegate "
+            "the memory and pids controllers"
+        )
+    try:
+        available = (parent / "cgroup.controllers").read_text().split()
+        delegated = (parent / "cgroup.subtree_control").read_text().split()
+    except OSError as exc:
+        return f"cannot read cgroup parent {parent}: {exc}"
+    missing = [name for name in REQUIRED_CGROUP_CONTROLLERS if name not in available]
+    if missing:
+        return f"cgroup parent {parent} lacks controllers {missing} in cgroup.controllers"
+    undelegated = [name for name in REQUIRED_CGROUP_CONTROLLERS if name not in delegated]
+    if undelegated:
+        return (
+            f"cgroup parent {parent} does not enable {undelegated} in cgroup.subtree_control "
+            "for its children"
+        )
+    return None
+
+
+def cgroup_parent_dir(config: SandboxConfig) -> Path:
+    """Host directory of the configured cgroup parent under ``CGROUP_ROOT`` (never raises)."""
+    return CGROUP_ROOT / config.gvisor_cgroup_parent.lstrip("/")
+
+
+def cgroup_leaf_path(config: SandboxConfig, container_id: str) -> Path:
+    """Host directory runsc creates for one run: ``<parent>/<container id>``."""
+    return cgroup_parent_dir(config) / container_id
+
+
+def runsc_sha512(path: Path) -> str:
+    """SHA-512 of ``path``, cached while the file's identity and timestamps are unchanged."""
+    import hashlib
+
+    st = path.stat()
+    key = (str(path), st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+    digest = _RUNSC_DIGESTS.get(key)
+    if digest is None:
+        hasher = hashlib.sha512()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                hasher.update(chunk)
+        digest = hasher.hexdigest()
+        _RUNSC_DIGESTS[key] = digest
+    return digest
+
+
+def query_runsc(
+    args: list[str], *, timeout: float = 10.0, max_output: int = 4 * 1024 * 1024
+) -> tuple[int, str]:
+    """Run a read-only runsc query (``--version``, ``features``, ``flags``) for the preflight.
+
+    No shell, no privilege prefix, an empty environment, ``/`` as working directory and no
+    inherited descriptors. stdout and stderr are merged (``runsc flags`` writes to stderr);
+    wall time and output are bounded, and the process group is killed on any failure.
+    """
+    with (
+        selectors.DefaultSelector() as selector,
+        subprocess.Popen(
+            args,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            env={},
+            cwd="/",
+            close_fds=True,
+        ) as proc,
+    ):
+        assert proc.stdout is not None
+        deadline = time.monotonic() + timeout
+        output = bytearray()
+        try:
+            selector.register(proc.stdout, selectors.EVENT_READ)
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not selector.select(remaining):
+                    raise subprocess.TimeoutExpired(args, timeout)
+                chunk = os.read(proc.stdout.fileno(), 65536)
+                if not chunk:
+                    break
+                output.extend(chunk)
+                if len(output) > max_output:
+                    raise OSError("runsc query output exceeded its bound")
+            code = proc.wait(timeout=max(0.01, deadline - time.monotonic()))
+        finally:
+            if proc.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(proc.pid, signal.SIGKILL)
+                proc.kill()
+                proc.wait(timeout=1)
+    return code, output.decode("utf-8", errors="replace")
+
+
 def cgroups_ignored(config: SandboxConfig) -> bool:
     """Only the explicitly enabled real-gVisor test profile may bypass host cgroups."""
     ignored = config.extra.get("allow_without_cgroups") is True
+    if ignored and config.hardened_profile == GVISOR_PRODUCTION_PROFILE:
+        raise CapabilityUnavailableError(
+            "the gvisor_production profile refuses allow_without_cgroups, regardless of "
+            "NEXURA_REAL_GVISOR",
+            backend="gvisor_oci",
+        )
     if ignored and os.environ.get("NEXURA_REAL_GVISOR") != "1":
         raise CapabilityUnavailableError(
             "allow_without_cgroups is test-only; production requires delegated cgroups "
@@ -376,8 +507,22 @@ class GVisorOCIWorker:
         return len(self._active_pids)
 
     def probe(self, config: SandboxConfig) -> BackendStatus:
-        """Validate explicit infrastructure, without claiming a live cgroup/runtime probe."""
+        """Validate explicit infrastructure, without claiming a live runtime probe.
+
+        With the ``gvisor_production`` profile it also re-checks every profile rule (a
+        ``model_copy`` skips validation) and that the host cgroup parent exists with the
+        memory and pids controllers delegated. A pinned ``gvisor_runsc_sha512`` is compared
+        with the binary. ``nexura_sandbox.preflight`` proves that the runtime starts.
+        """
         try:
+            if config.hardened_profile == GVISOR_PRODUCTION_PROFILE:
+                problems = gvisor_production_violations(config)
+                if problems:
+                    return BackendStatus(
+                        self.backend_name,
+                        False,
+                        "gvisor_production profile violated: " + "; ".join(problems),
+                    )
             runsc, rootfs, _ = discover_oci_infrastructure(config)
             if runsc is None or not runsc.is_file() or not os.access(runsc, os.X_OK):
                 return BackendStatus(
@@ -393,6 +538,22 @@ class GVisorOCIWorker:
                     "OCI rootfs directory requires absolute rootfs_path or NEXURA_OCI_ROOTFS_PATH",
                 )
             build_gvisor_oci_spec(config, rootfs, rootfs, "probe", "")
+            if config.hardened_profile == GVISOR_PRODUCTION_PROFILE:
+                problem = cgroup_parent_problem(config)
+                if problem:
+                    return BackendStatus(self.backend_name, False, problem)
+            if config.gvisor_runsc_sha512 is not None:
+                try:
+                    actual = runsc_sha512(runsc)
+                except OSError as exc:
+                    return BackendStatus(self.backend_name, False, f"cannot hash runsc: {exc}")
+                if actual != config.gvisor_runsc_sha512:
+                    return BackendStatus(
+                        self.backend_name,
+                        False,
+                        f"runsc at {runsc} does not match the pinned gvisor_runsc_sha512 "
+                        f"(actual {actual})",
+                    )
         except CapabilityUnavailableError as exc:
             return BackendStatus(self.backend_name, False, exc.reason)
         return BackendStatus(self.backend_name, True)
@@ -413,7 +574,7 @@ class GVisorOCIWorker:
         assert runsc_path and rootfs_path
         identity = service_identity(str(runsc_path), str(rootfs_path), cmd_prefix)
         if identity not in self._swept:
-            sweep_gvisor_tasks(str(runsc_path), cmd_prefix, identity)
+            sweep_gvisor_tasks(str(runsc_path), cmd_prefix, identity, cgroup_root=CGROUP_ROOT)
             self._swept.add(identity)
         if request.env:
             raise SecurityViolationError("env", "gVisor refuses caller environment variables")
@@ -451,6 +612,9 @@ class GVisorOCIWorker:
         buf: _OutputBuffer | None = None
         marker_bytes = b""
         guard: RunGuard | None = None
+        # This run's cgroup leaf (runsc creates it under the operator's parent). Only set
+        # when cgroups are enforced; teardown removes it if runsc's own delete left it.
+        cgroup_leaf: Path | None = None
 
         def kill_launcher(process: asyncio.subprocess.Process, *, supervised: bool = False) -> None:
             if process.returncode is not None:
@@ -481,6 +645,28 @@ class GVisorOCIWorker:
 
         async def runtime_cleanup_command(*args: str) -> int:
             return await host_cleanup_command([*runtime_cmd, *args])
+
+        async def remove_cgroup_leaf(leaf: Path) -> bool:
+            # A cancelled or killed run can stop runsc before it removes its cgroup, and
+            # `delete --force` may race the dying sandbox. rmdir only succeeds on an empty
+            # cgroup without children, so a live sandbox is never affected.
+            deadline = time.monotonic() + 3.0
+            while leaf.exists():
+                with contextlib.suppress(OSError):
+                    events = (leaf / "cgroup.events").read_text().split()
+                    if "populated" in events and events[events.index("populated") + 1] == "0":
+                        if cmd_prefix:
+                            await host_cleanup_command(
+                                [*cmd_prefix, "/usr/bin/rmdir", "--", str(leaf)]
+                            )
+                        else:
+                            leaf.rmdir()
+                if not leaf.exists():
+                    break
+                if time.monotonic() >= deadline:
+                    return False
+                await asyncio.sleep(0.05)
+            return True
 
         def task_mounts() -> list[str]:
             # mountinfo escapes whitespace and backslashes as octal sequences.
@@ -530,6 +716,12 @@ class GVisorOCIWorker:
                     await _reap_process(proc)
                 except Exception as exc:
                     errors.append(f"reap: {exc}")
+            if cgroup_leaf is not None and spawn_task is not None:
+                try:
+                    if not await remove_cgroup_leaf(cgroup_leaf):
+                        errors.append(f"cgroup leaf remains: {cgroup_leaf}")
+                except Exception as exc:
+                    errors.append(f"cgroup leaf: {exc}")
             # runsc --network=none pins this namespace in its state root, outside
             # the container lifecycle. Unmount only this run's known runtime mount.
             try:
@@ -570,9 +762,17 @@ class GVisorOCIWorker:
             return errors
 
         try:
-            mark_gvisor_task(temp_dir, identity, container_id)
+            if not limits_advisory:
+                cgroup_leaf = cgroup_leaf_path(config, container_id)
+            # The leaf is recorded so that the crash watchdog and a later startup sweep can
+            # also remove it if this service dies before normal teardown.
+            mark_gvisor_task(temp_dir, identity, container_id, cgroup_leaf=cgroup_leaf)
             guard = RunGuard(
-                task=temp_dir, runtime=runtime_cmd, prefix=cmd_prefix, container=container_id
+                task=temp_dir,
+                runtime=runtime_cmd,
+                prefix=cmd_prefix,
+                container=container_id,
+                cgroup_leaf=cgroup_leaf,
             )
             bundle_dir = temp_dir / "bundle"
             bundle_dir.mkdir()
@@ -708,6 +908,7 @@ class GVisorOCIWorker:
                     "host_pids_limit": config.max_processes + config.gvisor_runtime_pids,
                     "tmpfs_bytes": config.gvisor_tmpfs_bytes,
                     "single_process_seccomp": config.max_processes == 1,
+                    "hardened_profile": config.hardened_profile,
                 },
             )
         finally:

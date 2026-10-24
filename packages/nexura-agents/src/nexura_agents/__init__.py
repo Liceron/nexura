@@ -39,6 +39,11 @@ _EXPORTS: dict[str, str] = {
     "FilePromptStore": "nexura_agents.prompts",
     "Skill": "nexura_agents.skills",
     "SkillLibrary": "nexura_agents.skills",
+    "Harness": "nexura_agents.harness",
+    "TodoItem": "nexura_agents.harness",
+    "todo_tools": "nexura_agents.harness",
+    "ScopedFilesystem": "nexura_agents.filesystem",
+    "compact_context": "nexura_agents.history",
     "ModelRetry": "nexura_agents.errors",
     "RunResult": "nexura_agents.types",
     "RunInterruption": "nexura_agents.types",
@@ -176,6 +181,11 @@ __all__ = [
     "FilePromptStore",
     "Skill",
     "SkillLibrary",
+    "Harness",
+    "TodoItem",
+    "todo_tools",
+    "ScopedFilesystem",
+    "compact_context",
     "ModelRetry",
     "RunResult",
     "RunInterruption",
@@ -339,6 +349,7 @@ if TYPE_CHECKING:
         evaluate_async,
     )
     from nexura_agents.events import RunEvent, RunEventType
+    from nexura_agents.filesystem import ScopedFilesystem
     from nexura_agents.guardrails import GuardrailResult
     from nexura_agents.guardrails_builtin import (
         allowed_topics,
@@ -350,7 +361,13 @@ if TYPE_CHECKING:
         redact_output_pii,
         redact_pii,
     )
-    from nexura_agents.history import fit_token_budget, keep_last_turns, summarize_older_turns
+    from nexura_agents.harness import Harness, TodoItem, todo_tools
+    from nexura_agents.history import (
+        compact_context,
+        fit_token_budget,
+        keep_last_turns,
+        summarize_older_turns,
+    )
     from nexura_agents.hooks import AgentHooks, ComposedHooks
     from nexura_agents.limits import ModelSettings, UsageLimits
     from nexura_agents.mcp.serve import AgentMCPServer

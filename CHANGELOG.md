@@ -5,6 +5,59 @@ has been published.
 
 ## Unreleased (0.4.0)
 
+### Added (P38 C8: production gVisor profile)
+- Sandbox: `SandboxConfig.gvisor_production(...)`, a hardened gVisor profile for servers.
+  It enforces only `gvisor_oci` at `min_isolation="gvisor"`, no network, a read-only root,
+  explicit normalised absolute paths, host memory/pids cgroups (the test-only cgroup bypass
+  is refused even with `NEXURA_REAL_GVISOR=1`), no command prefix other than the test-only
+  `sudo -n`, and ceilings of 60 s, 1024 MB, 16 processes, 256 runtime tasks, 128 MiB
+  scratch and 4 MiB output (`GVISOR_PRODUCTION_CEILINGS`). A config that breaks any rule
+  fails validation, and the backend re-checks the rules and the delegated cgroup parent
+  before it reports itself available. Limits default lower (10 s, 256 MB, one process with
+  fork/clone denied). Also available as `NEXURA_SANDBOX_PROFILE=gvisor_production`.
+- Sandbox: optional runsc SHA-512 pin (`gvisor_runsc_sha512` /
+  `NEXURA_SANDBOX_RUNSC_SHA512`), checked by the service user when the module is built and
+  before each execution. It is a drift check, not an exec-time integrity check, and does not
+  cover the `gvisor-bin/` sidecars. The pin and `NEXURA_SANDBOX_GVISOR_CGROUP_PARENT` are
+  never ignored: an invalid value, or either one set without an enabled sandbox, is an error.
+- nexura-sandbox: operator preflight `python -m nexura_sandbox.preflight` and
+  `nexura_sandbox.gvisor_preflight(config)`.
+  - It fails when runsc, its `gvisor-bin/` sidecars, the rootfs or any directory above them
+    is writable by group or others, or owned by anyone other than root or the service user.
+  - It also checks the pin, the runsc version and OCI seccomp support, rootfs Python access
+    for UID 65534, and the cgroup delegation.
+  - Then it runs one tiny guest and requires its cgroup `memory.max`/`pids.max`, observed from
+    the host, to match, and nothing to be left behind.
+  - It never executes a runsc binary that failed a check, and reports errors as failed checks
+    rather than tracebacks.
+- Docs: "Production gVisor profile" (`docs/sandbox-production.md`) with the operator
+  checklist, what the profile enforces and what it only defaults, and its limits.
+- Verified with enforced cgroups on one Linux host (cgroup v2, runsc release-20260928.0,
+  runsc as root via a test-only sudo prefix). Not externally audited.
+
+### Changed (P38 C8)
+- The authenticated shared service now refuses to start when the operator sandbox settings
+  are invalid or a registered sandbox module cannot be built.
+
+### Fixed (P38 C8)
+- gVisor teardown, the per-run crash watchdog and the startup sweep remove a run's empty
+  cgroup leaf that runsc left behind (only `<parent>/nex_<id>`, only when unpopulated), and
+  teardown reports a leaf it cannot remove.
+
+### Added (P38 C1: opt-in agent harness)
+- Review fixes: disk operations run in a private Landlock worker and recheck moved parents;
+  todo notifications omit task text; scoped approvals bind canonical arguments and workspace
+  identity; completed compaction summaries and usage replay from execution checkpoints.
+- `Agent(harness=Harness(...))` composes progressive Agent Skills directories, budget-triggered
+  history compaction, journaled task lists and shared scoped filesystem tools.
+- `SkillLibrary.from_directory` and explicit `format="agent-skills"` support pinned SKILL.md
+  front matter with bounded text resources; scripts never execute and metadata grants no tools.
+- `compact_context` preserves system messages, the latest turn, pending calls and tool pairs;
+  optional model summaries use existing budget admission and reported usage accounting.
+- `write_todos`/`read_todos` store plans in run state and emit custom events. `ScopedFilesystem`
+  provides capped memory or POSIX directory workspaces, rejects traversal and links, and shares
+  through explicit parent/child configuration under inherited policies and budgets.
+
 ### Added (P39 G5: local safety models and presets)
 - `nexura-guardrails` safety-model checks `LlamaGuard` (Llama Guard 3 1B/8B), `ShieldGemma`,
   `GraniteGuardian` (3.0 and 4.1) and `NemotronGuard` (Nemotron Safety Guard 8B v3). Each

@@ -134,6 +134,9 @@ class SandboxExecutionModule(BaseModule):
         self.enabled = worker is None and self.config.backends is not None
         #: Why no enabled backend qualified, or ``None``.
         self.selection_error: str | None = None
+        #: Invalid operator settings this module was built in place of (set by the registry
+        #: factory that reads the environment). The shared-service startup check refuses it.
+        self.settings_error: str | None = None
         # The operator minimum always applies to selected backends. To an explicit worker it
         # applies when the operator set ``min_isolation`` or enabled ``backends`` (unless
         # ``allow_unisolated``); older callers that pass trusted workers set neither.
@@ -529,9 +532,16 @@ def sandbox_modules_in(*registries: Any) -> list[SandboxExecutionModule]:
         candidates: list[Any] = []
         has = getattr(registry, "has", None)
         if callable(has) and hasattr(registry, "get_entry"):
-            with contextlib.suppress(Exception):
+            # A registered sandbox that cannot be built must not be skipped silently: the
+            # shared-service check would then pass without seeing it.
+            try:
                 if has(MODULE_ID):
                     candidates.append(registry.get(MODULE_ID))
+            except Exception as exc:
+                raise SandboxError(
+                    f"The sandbox module '{MODULE_ID}' is registered but could not be built "
+                    f"({type(exc).__name__}: {exc}); fix the operator sandbox settings.",
+                ) from exc
             # Sandbox instances registered under another module id.
             for entry in dict(getattr(registry, "_modules", {}) or {}).values():
                 candidates.append(getattr(entry, "_instance", None))
@@ -560,6 +570,11 @@ def assert_sandbox_allowed_for_profile(profile: str, *registries: Any) -> None:
         return
     floor = isolation_rank(SHARED_SERVICE_MIN_ISOLATION)
     for module in sandbox_modules_in(*registries):
+        if module.settings_error is not None:
+            raise SandboxError(
+                "The authenticated-shared-service profile refuses to start with invalid "
+                f"operator sandbox settings: {module.settings_error}"
+            )
         if module.config.extra.get("allow_without_cgroups") or module.config.extra.get(
             "runsc_command_prefix"
         ):

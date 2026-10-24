@@ -415,6 +415,16 @@ def _apply_edits(
     return edited
 
 
+def _tool_scope(tool: Tool | None, run_id: str) -> str | None:
+    if tool is None or tool.approval_scope is None:
+        return None
+    return (
+        f"{tool.approval_scope}/run:{run_id}"
+        if tool.approval_scope_per_run
+        else tool.approval_scope
+    )
+
+
 def _check_answers(answers: dict[str, Any], questions: set[str], decisions: _Decisions) -> None:
     """``answers`` must answer pending ask_user questions only, with text, once each."""
     unknown = sorted(set(answers) - questions)
@@ -1944,6 +1954,7 @@ class Runner:
         # happens to be named "ask_user" is approved or rejected like any other.
         active = _resolve_active_agent(agent, interruption)
         envelope, authenticated = await self._verify_approval(interruption)
+        self._check_tool_scopes(active, interruption)
         if interruption.action_digests and (
             interruption.action_digests != interruption.pending_digests()
         ):
@@ -2038,13 +2049,22 @@ class Runner:
                 raise ApprovalDecisionError("Interruption transcript has no unanswered tool calls.")
             self._restore_handoff(state, all_calls, interruption)
         # The calls that will execute must be exactly the ones that were reviewed.
-        batch = {c.id: RunInterruption.action_digest(c) for c in batch_calls}
+        batch = {c.id: interruption.decision_digest(c) for c in batch_calls}
         for call_id, digest in interruption.pending_digests().items():
             if batch.get(call_id) != digest:
                 raise ApprovalDecisionError(
                     f"Pending call '{call_id}' differs from the transcript; refusing to resume."
                 )
         if edits:
+            for call in batch_calls:
+                if call.id in edits and call.id in interruption.tool_scopes:
+                    changed = dataclasses.replace(call, arguments=edits[call.id].arguments)
+                    if RunInterruption.action_digest(changed) != RunInterruption.action_digest(
+                        call
+                    ):
+                        raise ApprovalDecisionError(
+                            "Scoped harness actions require fresh approval for changed arguments."
+                        )
             batch_calls = _apply_edits(agent, state.messages, batch_calls, edits)
         if decisions.approved and not isinstance(approve, Mapping) and not authenticated:
             raise ApprovalDecisionError(
@@ -2833,7 +2853,18 @@ class Runner:
         if agent.history_processors:
             from nexura_agents.history import apply_processors
 
-            snapshot = await apply_processors(agent.history_processors, state.ctx, snapshot)
+            async def save_compaction() -> None:
+                # The summary usage and result commit together before the main call.
+                _drain_nested_usage(state)
+                await self._checkpoint(state, "model_next")
+
+            state.ctx._save_compaction = (
+                save_compaction if self.checkpoint_store is not None else None
+            )
+            try:
+                snapshot = await apply_processors(agent.history_processors, state.ctx, snapshot)
+            finally:
+                state.ctx._save_compaction = None
         if state.memory_block:
             _add_memory_block(snapshot, state.memory_block)
 
@@ -4085,7 +4116,7 @@ class Runner:
         key = step_key if step_key is not None else self._dispatch_key(state, tc)
         intent = StepIntent(
             step_key=key,
-            payload_digest=RunInterruption.action_digest(tc),
+            payload_digest=RunInterruption.action_digest(tc, _tool_scope(tool, state.run_id)),
             idempotency_key=tool_ctx.idempotency_key or self._idempotency_key(state, key),
             effect_class=effect,
             approval_id=approval_id,
@@ -4114,6 +4145,7 @@ class Runner:
             state=copy.deepcopy(interruption.state),
             tags=list(interruption.tags),
             metadata=copy.deepcopy(interruption.metadata),
+            _compaction_summaries=copy.deepcopy(interruption.compaction_summaries),
         )
         return _RunState(
             output_attempts=interruption.output_attempts,
@@ -4207,11 +4239,29 @@ class Runner:
             ),
             interruption_id=state.checkpoint_interruption_id,
             expires_at=state.checkpoint_expires_at or 0.0,
+            tool_scopes={
+                call.id: scope
+                for call in pending
+                if (scope := _tool_scope(agent.tools_by_name.get(call.name), state.run_id))
+                is not None
+            },
+            compaction_summaries=copy.deepcopy(state.ctx._compaction_summaries),
         )
         interruption.action_digests = interruption.pending_digests()
         if self._approval_secret is not None:
             interruption.signature = _approval_signature(interruption, self._approval_secret)
         return interruption
+
+    @staticmethod
+    def _check_tool_scopes(agent: Agent, interruption: RunInterruption) -> None:
+        """A stored grant/checkpoint cannot dispatch a different filesystem/state target."""
+        for call in interruption.pending:
+            chosen = agent.tools_by_name.get(call.name)
+            current = _tool_scope(chosen, interruption.run_id)
+            if current != interruption.tool_scopes.get(call.id):
+                raise ApprovalDecisionError(
+                    f"Tool '{call.name}' target scope changed; a fresh approval/run is required."
+                )
 
     def _check_approval_store(self) -> None:
         if not all(
@@ -4684,6 +4734,7 @@ class Runner:
             )
         try:
             active = _resolve_active_agent(agent, interruption)
+            self._check_tool_scopes(active, interruption)
         except ApprovalDecisionError as exc:
             raise RunRecoveryError(str(exc), original_error=exc) from exc
         state = self._state_from_interruption(interruption, agent, active, deps, timeout, _span)
@@ -5131,7 +5182,7 @@ class Runner:
             key = self._dispatch_key(state, call)
             intent = StepIntent(
                 step_key=key,
-                payload_digest=RunInterruption.action_digest(call),
+                payload_digest=RunInterruption.action_digest(call, _tool_scope(tool, state.run_id)),
                 idempotency_key=self._idempotency_key(state, key),
                 effect_class=effect,
             )

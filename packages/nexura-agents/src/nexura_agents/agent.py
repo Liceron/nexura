@@ -33,6 +33,7 @@ PrepareTools = Callable[[RunContext[Any], list[Tool]], list[Tool] | Awaitable[li
 
 if TYPE_CHECKING:
     from nexura_agents.handoffs import Handoff
+    from nexura_agents.harness import Harness
     from nexura_agents.memory import Memory
     from nexura_agents.runner import Prompt, Runner
     from nexura_agents.types import RunResult
@@ -101,6 +102,7 @@ class Agent(Generic[OutputT]):  # noqa: UP046 (a TypeVar default needs typing_ex
         reset_tool_choice: bool = True,
         ask_user: bool = False,
         stream_guard: StreamGuardMode | StreamGuard = "auto",
+        harness: Harness | None = None,
     ) -> None: ...
 
     @overload
@@ -131,6 +133,7 @@ class Agent(Generic[OutputT]):  # noqa: UP046 (a TypeVar default needs typing_ex
         reset_tool_choice: bool = True,
         ask_user: bool = False,
         stream_guard: StreamGuardMode | StreamGuard = "auto",
+        harness: Harness | None = None,
     ) -> None: ...
 
     @overload
@@ -161,6 +164,7 @@ class Agent(Generic[OutputT]):  # noqa: UP046 (a TypeVar default needs typing_ex
         reset_tool_choice: bool = True,
         ask_user: bool = False,
         stream_guard: StreamGuardMode | StreamGuard = "auto",
+        harness: Harness | None = None,
     ) -> None: ...
 
     def __init__(
@@ -190,6 +194,7 @@ class Agent(Generic[OutputT]):  # noqa: UP046 (a TypeVar default needs typing_ex
         reset_tool_choice: bool = True,
         ask_user: bool = False,
         stream_guard: StreamGuardMode | StreamGuard = "auto",
+        harness: Harness | None = None,
     ) -> None:
         # The constructor arguments, so clone() can rebuild the agent with overrides.
         self._init_kwargs: dict[str, Any] = {
@@ -226,6 +231,14 @@ class Agent(Generic[OutputT]):  # noqa: UP046 (a TypeVar default needs typing_ex
         self.parallel_tool_calls = parallel_tool_calls
         # Shape the per-call copy of the conversation (trimming, redaction); see history.py
         self.history_processors = check_processors(history_processors)
+        if harness is not None:
+            from nexura_agents.harness import Harness
+
+            if not isinstance(harness, Harness):
+                raise SDKValidationError("harness must be a Harness instance.")
+        self.harness = harness
+        if harness is not None and harness.compaction is not None:
+            self.history_processors = (*self.history_processors, harness.compaction)
         # (ctx, tools) -> tools: choose or adjust the tools offered before each model call
         if prepare_tools is not None and not callable(prepare_tools):
             raise SDKValidationError("prepare_tools must be a function (ctx, tools) -> tools.")
@@ -278,6 +291,8 @@ class Agent(Generic[OutputT]):  # noqa: UP046 (a TypeVar default needs typing_ex
         if ask_user:
             # The model can pause the run with a question; resume with answers={id: text}.
             tool_seq.append(_ask_user_tool())
+        if harness is not None:
+            tool_seq.extend(harness.build_tools([t.name for t in tool_seq]))
 
         # Validate tools and check for duplicate tool names eagerly
         seen_tool_names: set[str] = set()
@@ -461,6 +476,10 @@ class Agent(Generic[OutputT]):  # noqa: UP046 (a TypeVar default needs typing_ex
         return raw
 
     def _with_output_schema(self, text: str) -> str:
+        if self.harness is not None:
+            catalog = self.harness.catalog()
+            if catalog:
+                text = f"{text}\n\n{catalog}".strip()
         schema = self.output_schema
         if schema is not None:
             noun = "JSON object" if schema.get("type") == "object" else "JSON value"

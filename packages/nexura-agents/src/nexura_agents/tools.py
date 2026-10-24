@@ -350,6 +350,9 @@ class Tool:
     retry: ToolRetry | None = None
     cache: bool = False
     asks_user: bool = False  # only the built-in Agent(ask_user=True) tool sets this
+    # Additional effect target identity, bound with canonical arguments at approval.
+    approval_scope: str | None = None
+    approval_scope_per_run: bool = False
     # Where the tool comes from and labels for policies (see ToolInfo). Metadata only:
     # neither changes how the tool runs.
     origin: str | None = None

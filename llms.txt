@@ -16,6 +16,7 @@ Every Python example in the docs runs offline with `FakeModel`, a scripted model
 
 ## Build agents
 
+- [Harness](https://github.com/Liceron/nexura/blob/main/docs/harness.md): opt-in SKILL.md directories, context compaction, durable todo state and scoped filesystems for parent/child agents.
 - [Tools](https://github.com/Liceron/nexura/blob/main/docs/tools.md): function tools, typed dependencies, retries, timeouts, caching, hiding tools per run.
 - [Structured output](https://github.com/Liceron/nexura/blob/main/docs/structured-output.md): Pydantic output types, output validators, streaming partial output.
 - [Human approval](https://github.com/Liceron/nexura/blob/main/docs/approvals.md): pause before a tool runs, save the pause as JSON, approve, reject or edit, bind approval to the exact arguments.
@@ -50,6 +51,7 @@ Every Python example in the docs runs offline with `FakeModel`, a scripted model
 - [Credentials and local secrets](https://github.com/Liceron/nexura/blob/main/docs/local-secrets.md): credential references and the local encrypted secrets file.
 - [Extending the service and Studio](https://github.com/Liceron/nexura/blob/main/docs/extensions.md): auth providers, service extensions, entry points.
 - [Importing Langflow flows](https://github.com/Liceron/nexura/blob/main/docs/langflow-import.md): run saved Langflow flows on the SDK.
+- [Production gVisor profile](https://github.com/Liceron/nexura/blob/main/docs/sandbox-production.md): the hardened gvisor_production code sandbox, the operator checklist and the host preflight.
 - [Troubleshooting](https://github.com/Liceron/nexura/blob/main/docs/troubleshooting.md): common errors and what they mean.
 
 ## Migrating

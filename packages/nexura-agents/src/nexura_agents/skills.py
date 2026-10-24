@@ -115,17 +115,28 @@ class Skill:
     tools: tuple[str, ...] = ()
     resources: Mapping[str, str] = field(default_factory=dict)
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    format: str = "nexura"
 
     def __post_init__(self) -> None:
         _check_name(self.name)
+        if self.format not in ("nexura", "agent-skills"):
+            raise SkillError("Skill format must be 'nexura' or 'agent-skills'.")
+        standard = self.format == "agent-skills"
+        if standard and (
+            not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", self.name) or len(self.name) > 64
+        ):
+            raise SkillError(
+                "Agent Skills names must use lowercase alphanumerics and single hyphens."
+            )
         if not isinstance(self.description, str) or not self.description.strip():
             raise SkillError(f"Skill {self.name!r} needs a one-line description.")
-        if len(self.description) > MAX_DESCRIPTION_CHARS or any(
+        description_limit = 1024 if standard else MAX_DESCRIPTION_CHARS
+        if len(self.description) > description_limit or any(
             ch in _LINE_BREAKS for ch in self.description
         ):
             raise SkillError(
                 f"Skill {self.name!r}: the description must be one line of at most "
-                f"{MAX_DESCRIPTION_CHARS} characters."
+                f"{description_limit} characters."
             )
         if not isinstance(self.instructions, str) or not self.instructions.strip():
             raise SkillError(f"Skill {self.name!r} has no instructions.")
@@ -141,7 +152,13 @@ class Skill:
                 raise SkillError(f"Skill {self.name!r} lists an empty tool name.")
         resources = dict(self.resources)
         for key, value in resources.items():
-            if not isinstance(key, str) or not _RESOURCE_RE.fullmatch(key):
+            if (
+                not isinstance(key, str)
+                or not all(
+                    _RESOURCE_RE.fullmatch(part) for part in (key.split("/") if standard else [key])
+                )
+                or any(part in (".", "..") for part in key.split("/"))
+            ):
                 raise SkillError(f"Skill {self.name!r}: invalid resource name {key!r}.")
             if key.lower() == "skill.md":
                 raise SkillError(
@@ -187,6 +204,7 @@ class Skill:
                 "tools": list(self.tools),
                 "resources": dict(sorted(self.resources.items())),
                 "metadata": _thaw(self.metadata),
+                **({"format": self.format} if self.format != "nexura" else {}),
             },
             sort_keys=True,
             ensure_ascii=False,
@@ -200,7 +218,12 @@ class Skill:
 
     @classmethod
     def from_markdown(
-        cls, text: str, *, resources: Mapping[str, str] | None = None, name: str | None = None
+        cls,
+        text: str,
+        *,
+        resources: Mapping[str, str] | None = None,
+        name: str | None = None,
+        format: str = "nexura",
     ) -> Skill:
         """Parse a ``SKILL.md``: ``---`` front matter (name, description, tools) then the body.
 
@@ -213,6 +236,26 @@ class Skill:
             raise SkillError("SKILL.md content must be text.")
         if len(text.encode("utf-8")) > MAX_SKILL_BYTES:
             raise SkillError(f"SKILL.md is larger than {MAX_SKILL_BYTES} bytes.")
+        if format == "agent-skills":
+            from nexura_agents._skill_frontmatter import parse_frontmatter
+
+            try:
+                fields, instructions = parse_frontmatter(text)
+            except ValueError as exc:
+                raise SkillError(f"Invalid Agent Skills front matter: {exc}") from exc
+            compatibility = fields.get("compatibility")
+            if compatibility is not None and not 1 <= len(compatibility) <= 500:
+                raise SkillError("compatibility must contain 1-500 characters.")
+            return cls(
+                name=name or fields.get("name", ""),
+                description=" ".join(fields.get("description", "").splitlines()),
+                instructions=instructions,
+                resources=resources or {},
+                metadata={k: v for k, v in fields.items() if k not in ("name", "description")},
+                format=format,
+            )
+        if format != "nexura":
+            raise SkillError("Skill format must be 'nexura' or 'agent-skills'.")
         front: dict[str, str | tuple[str, ...]] = {}
         body = text
         lines = text.lstrip("\ufeff").splitlines()
@@ -274,13 +317,37 @@ class Skill:
         )
 
     @classmethod
-    def from_directory(cls, path: str | Path) -> Skill:
+    def from_directory(cls, path: str | Path, *, format: str = "nexura") -> Skill:
         """Load ``path/SKILL.md`` plus text files beside it as resources (no scripts).
 
         Files with a script suffix are refused, not skipped, so a copied skill that ships
         code is noticed. Subdirectories and files over the size limit are refused too.
         """
         root = Path(path)
+        if format == "agent-skills":
+            from nexura_agents.filesystem import ScopedFilesystem
+
+            # Snapshot bounded text only. Scripts/binary assets remain inaccessible;
+            # no metadata value can install a tool or grant execution permission.
+            try:
+                with ScopedFilesystem(root, max_total_bytes=MAX_SKILL_BYTES * 4) as files:
+                    standard_resources = {
+                        p: files.read(p)
+                        for p in files.list()
+                        if p != "SKILL.md"
+                        and not p.startswith("scripts/")
+                        and p.lower().endswith(TEXT_SUFFIXES)
+                    }
+                    skill = cls.from_markdown(
+                        files.read("SKILL.md"), resources=standard_resources, format=format
+                    )
+            except (OSError, UnicodeError, SDKValidationError) as exc:
+                raise SkillError(f"Cannot load skill directory: {exc}") from exc
+            if skill.name != root.name:
+                raise SkillError("Agent Skills name must match its directory name.")
+            return skill
+        if format != "nexura":
+            raise SkillError("Skill format must be 'nexura' or 'agent-skills'.")
         skill_md = root / "SKILL.md"
         if skill_md.is_symlink() or not skill_md.is_file():
             raise SkillError(f"{root} has no SKILL.md (a symlinked SKILL.md is refused).")
@@ -324,6 +391,29 @@ class SkillLibrary:
         self._lock = threading.RLock()
         for skill in skills:
             self.add(skill)
+
+    @classmethod
+    def from_directory(cls, path: str | Path) -> SkillLibrary:
+        """Load a bounded directory of Agent Skills, in sorted order, without execution.
+
+        Each immediate subdirectory contains SKILL.md. Unrelated files are ignored;
+        symlinks are refused. No home-directory discovery or network access occurs.
+        """
+        root = Path(path)
+        if root.is_symlink():
+            raise SkillError("A skill library root cannot be a symlink.")
+        entries: list[Path] = []
+        for entry in root.iterdir():
+            if len(entries) >= 256:
+                raise SkillError("A skill library may contain at most 256 entries.")
+            if entry.is_symlink():
+                raise SkillError("A skill library cannot contain symlinks.")
+            entries.append(entry)
+        return cls(
+            Skill.from_directory(entry, format="agent-skills")
+            for entry in sorted(entries)
+            if entry.is_dir() and (entry / "SKILL.md").exists()
+        )
 
     def add(self, skill: Skill, *, labels: Sequence[str] = ()) -> SkillVersion:
         """Store a new version (same content as the newest returns it); ``latest`` moves to it."""
@@ -436,6 +526,11 @@ class SkillLibrary:
                                     "tools": list(v.skill.tools),
                                     "resources": dict(v.skill.resources),
                                     "metadata": _thaw(v.skill.metadata),
+                                    **(
+                                        {"format": v.skill.format}
+                                        if v.skill.format != "nexura"
+                                        else {}
+                                    ),
                                 },
                             }
                             for v in versions
@@ -468,6 +563,7 @@ class SkillLibrary:
                         tools=spec.get("tools", ()),
                         resources=spec.get("resources", {}),
                         metadata=spec.get("metadata", {}),
+                        format=spec.get("format", "nexura"),
                     )
                     number = raw["version"]
                     labels = tuple(raw.get("labels", ()))
@@ -578,7 +674,12 @@ class SkillLibrary:
         return "\n".join(lines)
 
     def render(
-        self, name: str, *, label: str = "latest", available_tools: Iterable[str] = ()
+        self,
+        name: str,
+        *,
+        label: str = "latest",
+        available_tools: Iterable[str] = (),
+        progressive: bool = False,
     ) -> str:
         """The text ``load_skill`` returns: instructions, resources and tool availability."""
         skill = self.get(name, label=label)
@@ -594,7 +695,11 @@ class SkillLibrary:
                 )
             parts.append(line)
         for key, value in skill.resources.items():
-            parts.append(f"## Resource: {key}\n{value}")
+            parts.append(
+                f"Resource available via read_skill_resource: {key}"
+                if progressive
+                else f"## Resource: {key}\n{value}"
+            )
         return "\n\n".join(parts)
 
     def loader_tool(
@@ -603,19 +708,42 @@ class SkillLibrary:
         label: str = "latest",
         available_tools: Iterable[str] = (),
         name: str = "load_skill",
+        progressive: bool = False,
     ) -> Tool:
         """A read-only ``load_skill(name)`` tool returning a skill's text (never runs anything)."""
         have = tuple(available_tools)
 
-        @tool(name=name, description="Load the full instructions of a named skill.")
+        @tool(
+            name=name,
+            description="Load the full instructions of a named skill.",
+            effect="pure" if progressive else None,
+        )
         def load_skill(skill: str) -> str:
             try:
-                return self.render(skill, label=label, available_tools=have)
+                return self.render(
+                    skill, label=label, available_tools=have, progressive=progressive
+                )
             except SkillError:
                 known = ", ".join(self.names_with_label(label)) or "none"
                 return f"Unknown skill {skill!r}. Known skills: {known}."
 
+        if progressive:
+            load_skill.origin = "harness:skills"
         return load_skill
+
+    def resource_tool(self, *, label: str = "latest") -> Tool:
+        """Read one snapshot resource on demand. No filesystem access or execution."""
+
+        @tool(effect="pure")
+        def read_skill_resource(skill: str, path: str) -> str:
+            """Read a named text resource listed by load_skill."""
+            found = self.get(skill, label=label)
+            if path not in found.resources:
+                raise SkillError(f"Unknown skill resource {path!r}.")
+            return found.resources[path]
+
+        read_skill_resource.origin = "harness:skills"
+        return read_skill_resource
 
 
 def validate_skills(skills: Iterable[Skill]) -> list[Skill]:

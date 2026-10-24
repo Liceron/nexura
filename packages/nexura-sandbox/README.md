@@ -28,13 +28,40 @@ for name in ("wasi", "bubblewrap", "gvisor_oci"):
     print(f"{name:<11} isolation={backend.isolation:<12} available={status.available}")
 ```
 
+## Production gVisor profile
+
+For servers, build the config with `SandboxConfig.gvisor_production(...)`. It enforces:
+only `gvisor_oci`, `min_isolation="gvisor"`, no network, a read-only root, explicit
+normalised absolute paths, host memory/pids cgroups (no test bypass), no command prefix
+other than the test-only `sudo -n`, and ceilings of 60 s, 1024 MB, 16 processes, 256
+runtime tasks, 128 MiB scratch and 4 MiB output. A config that breaks any of these fails
+validation. Its limits default lower (10 s, 256 MB, one process with fork/clone denied,
+32 MiB scratch, 1 MiB output) and may be raised up to the ceilings. Then check the host. The
+preflight fails if any root-run file or its directories can be written by group or others,
+starts one tiny guest, and verifies its observed cgroup limits and cleanup:
+
+```bash
+python -m nexura_sandbox.preflight --runsc /usr/local/bin/runsc \
+  --rootfs /opt/nexura/gvisor-rootfs --cgroup-parent /nexura --runsc-sha512 <hex> --strict
+```
+
+From Python, call `nexura_sandbox.gvisor_preflight(config)`. The SHA-512 pin is a drift
+check, made by the service user when the module is built and before each execution, not at
+the moment root executes runsc; the `gvisor-bin/` sidecars are not pinned. Root-only
+directories, which the preflight requires, are the real protection. See
+[Production gVisor profile](https://github.com/Liceron/nexura/blob/main/docs/sandbox-production.md)
+for the operator checklist: root, the cgroup parent, a pinned runsc with its `gvisor-bin/`
+sidecars, and the rootfs.
+
 ## Status and limits
 
 > Status: **alpha** (0.4), Python 3.12, Linux only. Escape tests ran against real bubblewrap,
-> gVisor and WASI on one Ubuntu x86_64 host. Real gVisor
-> verification used only the explicit sudo test profile with host cgroups ignored; the
-> production profile with delegated memory/pids cgroups has not been exercised. runsc
-> requires root on the reviewed host. No external security review has been done.
+> gVisor and WASI on one Ubuntu x86_64 host. On that host (cgroup v2, runsc
+> `release-20260928.0`), the `gvisor_production` profile also ran with enforced memory and
+> pids cgroups. runsc ran as root through a test-only `sudo -n` prefix, and the cgroup parent
+> was under a systemd-delegated subtree. A root service with a top-level `/nexura` parent
+> was not exercised. runsc requires root on the reviewed host. No external security review
+> has been done.
 > WASI's complete listener-based escape profile still needs a host permitting local sockets;
 > the recorded shared escape run had one host-listener setup error (`socket()` denied).
 

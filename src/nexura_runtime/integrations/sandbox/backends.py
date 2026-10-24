@@ -38,6 +38,12 @@ ENV_TIMEOUT_SECONDS = "NEXURA_SANDBOX_TIMEOUT_SECONDS"
 ENV_MAX_MEMORY_MB = "NEXURA_SANDBOX_MAX_MEMORY_MB"
 ENV_MAX_OUTPUT_BYTES = "NEXURA_SANDBOX_MAX_OUTPUT_BYTES"
 ENV_MONTY_BIN = "NEXURA_SANDBOX_MONTY_BIN"
+#: ``gvisor_production`` selects ``SandboxConfig.gvisor_production`` (see that constructor).
+ENV_PROFILE = "NEXURA_SANDBOX_PROFILE"
+ENV_RUNSC_PATH = "NEXURA_RUNSC_PATH"
+ENV_ROOTFS_PATH = "NEXURA_OCI_ROOTFS_PATH"
+ENV_GVISOR_CGROUP_PARENT = "NEXURA_SANDBOX_GVISOR_CGROUP_PARENT"
+ENV_RUNSC_SHA512 = "NEXURA_SANDBOX_RUNSC_SHA512"
 
 
 @dataclass(frozen=True)
@@ -227,14 +233,34 @@ def sandbox_config_from_env(environ: Mapping[str, str] | None = None) -> Sandbox
     Bubblewrap additionally accepts ``NEXURA_SANDBOX_BWRAP_BIN``, ``_PYTHON``, ``_RUNTIME``
     and ``_SECCOMP_BPF`` absolute paths (the latter three share the same BWRAP prefix).
     ``NEXURA_SANDBOX_BWRAP_MAX_OPEN_FILES`` may lower the payload descriptor cap.
+
+    ``NEXURA_SANDBOX_GVISOR_CGROUP_PARENT`` and ``NEXURA_SANDBOX_RUNSC_SHA512`` set the gVisor
+    cgroup parent and the runsc SHA-512 pin, with or without a profile; neither is ever
+    ignored (an invalid value raises ``ValueError``).
+
+    ``NEXURA_SANDBOX_PROFILE=gvisor_production`` enables the sandbox on its own and builds
+    ``SandboxConfig.gvisor_production`` from ``NEXURA_RUNSC_PATH`` and
+    ``NEXURA_OCI_ROOTFS_PATH`` (both required), the cgroup parent (default ``/nexura``) and
+    the optional pin. The limit variables above still apply; a backend list, isolation
+    floor or limit that breaks the profile raises ``ValueError``.
     """
     env = os.environ if environ is None else environ
     raw = (env.get(ENV_BACKENDS) or "").strip()
-    if not raw:
+    profile = (env.get(ENV_PROFILE) or "").strip().lower()
+    if profile and profile != "gvisor_production":
+        raise ValueError(f"{ENV_PROFILE} must be 'gvisor_production' (got {profile!r})")
+    if not raw and not profile:
+        stray = [name for name in (ENV_GVISOR_CGROUP_PARENT, ENV_RUNSC_SHA512) if env.get(name)]
+        if stray:
+            # A pin or cgroup parent without an enabled sandbox would otherwise be dropped.
+            raise ValueError(
+                f"{', '.join(stray)} set, but the sandbox is not enabled: set "
+                f"{ENV_BACKENDS} or {ENV_PROFILE}=gvisor_production"
+            )
         return None
-    fields: dict[str, Any] = {
-        "backends": [part.strip().lower() for part in raw.split(",") if part.strip()]
-    }
+    fields: dict[str, Any] = {}
+    if raw:
+        fields["backends"] = [part.strip().lower() for part in raw.split(",") if part.strip()]
     if env.get(ENV_MIN_ISOLATION):
         fields["min_isolation"] = env[ENV_MIN_ISOLATION].strip().lower()
     if env.get(ENV_TIMEOUT_SECONDS):
@@ -257,5 +283,18 @@ def sandbox_config_from_env(environ: Mapping[str, str] | None = None) -> Sandbox
     ):
         if env.get(f"NEXURA_SANDBOX_BWRAP_{suffix}"):
             fields[field] = env[f"NEXURA_SANDBOX_BWRAP_{suffix}"].strip()
+    if env.get(ENV_GVISOR_CGROUP_PARENT):
+        fields["gvisor_cgroup_parent"] = env[ENV_GVISOR_CGROUP_PARENT].strip()
+    if env.get(ENV_RUNSC_SHA512):
+        # Set but blank after stripping still reaches validation, which refuses it.
+        fields["gvisor_runsc_sha512"] = env[ENV_RUNSC_SHA512].strip().lower()
     # pydantic's ValidationError is a ValueError.
+    if profile:
+        return SandboxConfig.gvisor_production(
+            runsc_path=(env.get(ENV_RUNSC_PATH) or "").strip(),
+            rootfs_path=(env.get(ENV_ROOTFS_PATH) or "").strip(),
+            cgroup_parent=fields.pop("gvisor_cgroup_parent", "/nexura"),
+            runsc_sha512=fields.pop("gvisor_runsc_sha512", None),
+            **fields,
+        )
     return SandboxConfig(**fields)

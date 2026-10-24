@@ -52,6 +52,8 @@ one owner's projects. They do not add accounts or tenant isolation.
 - [Versioned prompts](prompts.md): prompts outside code with versions, labels and promotion.
 - [Skills](skills.md): reusable, versioned instruction bundles an agent loads on demand;
   text only, never code.
+- [Harness](harness.md): opt-in SKILL.md directories, context compaction, durable task
+  lists and scoped filesystems shared with sub-agents.
 - [Structured output](structured-output.md): typed results validated with Pydantic,
   output validators, streaming partial output.
 - [Images, documents and audio](multimodal.md): attachments for each provider.
@@ -105,6 +107,7 @@ one owner's projects. They do not add accounts or tenant isolation.
 - [Extending the service and Studio](extensions.md): auth providers, service extensions and
   opt-in `nexura.extensions` entry points, credential backends, membership stores, and the
   Studio extension registry.
+- [Production gVisor profile](sandbox-production.md): the hardened gvisor_production code sandbox, the operator checklist (root, cgroups, pinned runsc, rootfs) and the host preflight `python -m nexura_sandbox.preflight`.
 - [Troubleshooting](troubleshooting.md): common errors and what they mean.
 
 ## Reference
@@ -147,7 +150,7 @@ with a local REST service, a TypeScript API client and a browser Studio.
 > (`pip install nexura-agents`): the standalone agent SDK, two dependencies, offline-testable.
 > This repository's `nexura-runtime` is the full platform built on top of it.
 
-> **Guides:** [docs/](README.md) has 43 guides (agents, teams, tools, MCP and OpenAPI,
+> **Guides:** [docs/](README.md) has 45 guides (agents, teams, tools, harness, MCP and OpenAPI,
 > A2A, memory, prompts, structured output, approvals, workflows, providers, tracing and
 > more) plus an index and a generated [API reference](api-reference.md). Every
 > offline example on those pages is run by the test suite; blocks needing a real model or
@@ -1726,6 +1729,7 @@ assert '(["refund (approval)"])' in diagram and "-.->|handoff|" in diagram
 
 ## See also
 
+- [Harness](harness.md): opt-in skills, context compaction, plans and scoped filesystems.
 - [Getting started](getting-started.md): install and first run.
 - [Structured output](structured-output.md): typed results from an agent.
 - [Tools](tools.md): function tools and dependencies in depth.
@@ -1831,7 +1835,7 @@ pip install "nexura-agents[otel]"    # + OpenTelemetry tracing
 > OpenAI, Anthropic, Gemini or Sarvam with your own key; the OpenAI, Anthropic and Sarvam checks have not run.
 > LiteLLM is checked offline only, against the real library's mock mode.
 >
-> Full guides live in the repository's `docs/` folder: 43 guides (getting started,
+> Full guides live in the repository's `docs/` folder: 45 guides (getting started,
 > agents, teams, tools, MCP and OpenAPI, A2A, memory, prompts, structured output,
 > approvals, guardrails, multimodal, providers, tracing, testing and more) plus a
 > generated API reference.
@@ -3113,6 +3117,10 @@ A hosted multi-tenant deployment must use `gvisor` isolation or stronger (`NEXUR
 
 ### gVisor OCI
 
+For servers, use the hardened profile `SandboxConfig.gvisor_production(...)` and its
+host preflight `python -m nexura_sandbox.preflight`: see
+[Production gVisor profile](sandbox-production.md) for the operator checklist and limits.
+
 Enable `gvisor_oci` in the operator's backend list and supply **absolute** paths through `SandboxConfig.runsc_path` / `rootfs_path` or `NEXURA_RUNSC_PATH` / `NEXURA_OCI_ROOTFS_PATH`. Neither `PATH` nor a file in the current directory discovers the runtime. The rootfs must contain Python and libraries readable/executable by UID/GID 65534.
 
 For example, construct `SandboxConfig(backends=["gvisor_oci"], min_isolation="gvisor", runsc_path="/opt/gvisor/runsc", rootfs_path="/opt/gvisor/rootfs", gvisor_cgroup_parent="/nexura")` and pass it to `SandboxExecutionModule(config=...)`. runsc requires root on the reviewed host; the operator must supply those privileges and provision a writable/delegated cgroup hierarchy with memory and pids controllers at that parent; runsc creates a separate child per execution. No cgroup is provisioned by the SDK. A missing delegation fails closed, without automatically adding `--ignore-cgroups` or falling back to host execution. The availability probe checks paths/configuration; it does not prove the runtime can start on this host.
@@ -3129,7 +3137,7 @@ Timeout, output overflow and cancellation stop the launcher process group, attem
 
 The legacy test profile requires **`NEXURA_REAL_GVISOR=1`**. Only that profile permits a non-empty `extra["runsc_command_prefix"]` (such as `sudo -n`) and `extra["allow_without_cgroups"]=True`. The latter adds `--ignore-cgroups` and reports `limits_advisory: true` / `cgroups: ignored_test_profile`: host memory/pids cgroups are then absent; guest NPROC, single-process seccomp and scratch/output/wall limits still apply. The authenticated shared-service startup guard refuses either bypass regardless of the environment variable. CWD discovery remains disabled even in the test profile. This profile is for isolated host tests.
 
-The final audit records real gVisor host verification, including R1–R8 (45 passed with gVisor), using the explicit sudo test profile with host cgroups ignored. This does not verify the production profile's delegated memory/pids cgroups. Local S5/final-fix verification uses fake process transports and harmless fixed scripts; the new crash-cleanup changes still require the lead's host rerun.
+The final audit records real gVisor host verification, including R1–R8 (45 passed with gVisor), using the explicit sudo test profile with host cgroups ignored. That audit did not verify delegated memory/pids cgroups. P38 C8 later ran the `gvisor_production` profile with enforced memory/pids cgroups on the same host (runsc still through the test-only `sudo -n` prefix); see [Production gVisor profile](sandbox-production.md). Local S5/final-fix verification uses fake process transports and harmless fixed scripts; the new crash-cleanup changes still require the lead's host rerun.
 
 Each run has a separate watchdog monitoring the service through a pidfd. Abrupt service death triggers bounded `runsc delete --force`, null-netns unmount and checked task-directory removal. Normal teardown stops and reaps the watchdog. On a worker's first execution, a bounded startup sweep also checks marked `/tmp/nexura_gvisor_*` directories owned by the same service identity (UID, installed backend path, service cgroup and configured runtime/rootfs/prefix). It only deletes stale task state after a successful `runsc list` proves the container absent; it never touches a live container or active worker. Unmarked older directories and uncertain/failed cleanup remain for operator inspection. Watchdog failure, host shutdown or insufficient cleanup privileges can still leave state. Use a supervisor with systemd `KillMode=control-group` or a container to stop all service descendants on exit; this remains necessary if the watchdog itself is killed.
 
@@ -4638,6 +4646,11 @@ Source: https://github.com/Liceron/nexura/blob/main/docs/skills.md
 
 # Skills
 
+For standard Agent Skills directory layouts and front matter, use the opt-in
+[Harness guide](harness.md). `SkillLibrary.from_directory(root)` loads those skills;
+`Agent(harness=Harness(skills=library))` adds their catalog and progressive read tools.
+The existing formats and manual wiring described below remain supported.
+
 A skill is a reusable bundle of instructions an agent reads only when it needs it: refund
 policy, a house style, the steps for a support process. The agent's instructions carry a short
 catalog (each skill's name and one-line description). The agent calls `load_skill(name)` to
@@ -4810,6 +4823,239 @@ fields. Studio shows text only; skills have no file upload.
   skills for you (see below); keeping the `SKILL.md` files in your repository also works.
 - **Not a trust boundary:** a skill's text can still steer the model, so treat skills from
   other people like any other prompt you did not write.
+
+---
+
+Source: https://github.com/Liceron/nexura/blob/main/docs/harness.md
+
+# Harness
+
+`Agent(harness=Harness(...))` adds skills, context compaction, a task list and a scoped
+filesystem. Each capability is opt-in. An empty harness adds no tools, instructions or
+history processors. The SDK uses its existing runner, approvals, guardrails, budget
+admission and durable execution journal.
+
+## Skills from SKILL.md
+
+The format is pinned to the [Agent Skills specification at
+217be548739f21d6008915c29aefe320ea1a90af](https://github.com/agentskills/agentskills/blob/217be548739f21d6008915c29aefe320ea1a90af/docs/specification.mdx),
+checked against the [public specification](https://agentskills.io/specification) on
+2026-10-24. A skill directory contains YAML front matter (`name`, `description`) followed
+by Markdown in `SKILL.md`; supporting files may live below that directory.
+
+`SkillLibrary.from_directory(root)` scans immediate skill subdirectories in sorted order.
+`Skill.from_directory(path, format="agent-skills")` loads just one. The existing default
+`Skill.from_directory(path)` and `Skill.from_markdown(text)` retain their stricter Nexura
+format. Both formats use the same versioned `SkillLibrary`, labels and export/import API.
+
+The dependency-free front matter reader supports plain or quoted strings, comments,
+folded/literal blocks and a one-level `metadata` string mapping. It rejects duplicate
+keys, tags, anchors, aliases, flow collections and unsupported nesting. This is a safe
+subset of YAML, not a general YAML parser. Standard names use 1–64 lowercase ASCII
+letters/digits separated by single hyphens and match the directory; descriptions allow
+up to 1024 characters, normalized to one line. Optional compatibility text is limited
+to 500 characters. Optional fields are retained as metadata; `allowed-tools` grants
+neither approval nor tools.
+
+Only names/descriptions enter the system prompt. `load_skill(skill)` returns instructions
+and resource names; `read_skill_resource(skill, path)` loads one text resource. Resources
+are bounded snapshots taken during discovery, so file changes need an explicit reload.
+The library admits at most 256 directory entries, and each skill workspace at most 256
+entries/256 KiB with a 64 KiB file cap; the final skill's canonical text is capped at
+64 KiB. Symlinks, hard links and special files are refused. Scripts under `scripts/` and
+binary assets are not exposed as resource text. Text uses the suffix allowlist in
+[skills.py](../packages/nexura-agents/src/nexura_agents/skills.py).
+
+This example runs with an explicitly local fake model:
+
+```python
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from nexura_agents import Agent, FakeModel, Harness, Message, SkillLibrary, ToolCall
+
+with TemporaryDirectory() as temporary:
+    root = Path(temporary) / "review"
+    root.mkdir()
+    (root / "SKILL.md").write_text(
+        "---\nname: review\ndescription: Review a proposed change.\n---\n"
+        "Check the requirements before proposing a fix.\n", encoding="utf-8"
+    )
+    library = SkillLibrary.from_directory(temporary)
+    model = FakeModel(responses=[
+        Message("assistant", tool_calls=[ToolCall("s1", "load_skill", {"skill": "review"})]),
+        "Requirements checked.",
+    ])
+    agent = Agent("Reviewer", "Help review changes.", model, harness=Harness(skills=library))
+    result = agent.run("Review this change")
+    assert result.output == "Requirements checked."
+    assert "Check the requirements" not in model.calls[0]["messages"][0].content
+```
+
+Skills never execute scripts, import code or install tools. If an application needs script
+execution, it must separately provide an explicit tool backed by a configured sandbox
+(for the platform, see [sandbox backends](packages.md)), declare its effects,
+and apply approvals and guardrails there. This harness supplies no execution tool or
+automatic script-to-tool binding. Skill text remains untrusted prompt content.
+
+## Context compaction
+
+`compact_context(max_tokens, trigger_ratio=0.9, target_ratio=0.7)` is an async history
+processor. At the trigger it removes oldest complete turns toward the target. Exchanges
+that cross user-message boundaries are grouped together. Every system message, the
+latest user turn and unanswered calls (including pending approvals) stay intact. A tool
+call and its result are retained together or both removed. The stored conversation,
+approval records and checkpoints remain complete.
+
+Without `model`, compaction trims deterministically. With `model`, it summarizes removed
+turns through the existing model abstraction and budget admission, adds reported usage
+to the run, and caches by run id and removed content (64 entries). Budget refusals and
+summary failures propagate. Summaries are bounded by `max_summary_chars` (default 2000),
+labelled as automatic background, and included only when they fit alongside retained
+content. A summary model is not called below the trigger.
+
+```python
+from nexura_agents import Agent, FakeModel, Harness, Message, Usage, compact_context
+
+reported = Usage(prompt_tokens=7, completion_tokens=3, total_tokens=10)
+summary_model = FakeModel(responses=["Earlier questions were discussed."], default_usage=reported)
+agent = Agent(
+    "Assistant", "Be helpful.", FakeModel(responses=["Ready."], default_usage=reported),
+    harness=Harness(compaction=compact_context(600, model=summary_model)),
+)
+old = [m for i in range(6) for m in (
+    Message("user", f"Question {i}: " + "x" * 1000), Message("assistant", "Answered.")
+)]
+result = agent.run("Latest question", history=old)
+assert result.output == "Ready." and result.usage.total_tokens == 20
+assert len(summary_model.calls) == 1
+assert any(e.data.get("name") == "nexura.context_compacted" for e in result.events)
+```
+
+The custom event reports estimated before/after tokens, dropped message count, whether
+a summary was included, and overflow. Protected content may exceed the target; it is
+never cut to satisfy an estimate. Token estimates exclude attachments, recalled memory
+and tool schemas; leave room for them and output. This is context selection, not a
+provider context-window guarantee. You can also put this processor directly in
+`Agent(history_processors=[...])`; see [history processors](agents.md#trimming-long-conversations-history-processors).
+
+With a durable runner, completed summaries and a digest of their transcript and
+configuration are saved in the execution checkpoint before the main model request.
+Recovery rebuilds the compacted request from that saved summary, with its usage already
+accounted, and inserts it once. The stored conversation stays complete. If the process
+dies during summary generation or before its checkpoint commits, that unfinished step
+can repeat; a completed summary is not regenerated when the main model call is retried.
+
+## Plans and durable task lists
+
+`Harness(todo=True)` installs `write_todos(items)` and `read_todos()`. Each item has a
+unique `id` (1–64 characters), `text` (1–1000 characters), and `status`: `pending`,
+`in_progress`, or `completed`. A plan holds at most 100 tasks. `write_todos` replaces the
+whole list, so updates keep existing ids and change their status/text; `[]` clears it.
+Applications may instead attach `todo_tools()` explicitly.
+
+The plan lives in `RunContext.state["nexura.todos"]`, returned in `RunResult.state` and
+saved with sessions, interruptions and checkpoints. Every replacement emits the custom
+event `nexura.todos_updated`. Its `data` contains only an increasing integer `version`,
+the total `count`, and `status_counts` with the fixed keys `pending`, `in_progress`,
+and `completed`. Task ids, text, provider call ids and agent names are omitted; no
+model- or user-controlled strings enter this notification, even with content capture
+enabled. Live custom events precede tool/final-output checks. The full plan remains
+authoritative run state; tool results use the ordinary
+guardrail pipeline. With a checkpoint store configured
+on the runner, a committed plan survives process recovery; if the process dies before
+the result checkpoint, the effect journal safely replays the idempotent replacement.
+Versions and per-run call receipts are saved in `nexura.todos.revision` alongside the
+plan. A fresh replacement increases the version; replay of the same recorded call
+keeps the current version and cannot revert a later plan. Progress events may repeat
+after replay, with the same current version. Use sequential tool calls when ordering
+multiple plan replacements matters. Without durable storage the plan lives only in the
+run; no disk state is created automatically. See [durable runs](durable-runs.md).
+
+## Sub-agents and a scoped filesystem
+
+Pass the same `ScopedFilesystem` instance to parent and child harnesses, then delegate
+with `child.as_tool()`. Each agent must opt in. A child gets the parent's policy hooks
+and budget scopes through the existing G2 inheritance path. As with other sub-agent
+tools, a child needing approval stops before the action and raises to the caller;
+approval cannot be completed inside that tool call. Gate the delegation itself if a
+reviewed subtask must be approved before it starts.
+
+```python
+from nexura_agents import Agent, FakeModel, Harness, Message, Runner, ScopedFilesystem, ToolCall
+
+def call(identifier, name, **arguments):
+    return Message("assistant", tool_calls=[ToolCall(identifier, name, arguments)])
+
+with ScopedFilesystem() as files:  # explicitly in-memory; no host filesystem access
+    child = Agent(
+        "Reader", "Read the shared note.",
+        FakeModel(responses=[call("r", "fs_read", path="notes/task.txt"), "Read it."]),
+        harness=Harness(filesystem=files),
+    )
+    parent = Agent(
+        "Planner", "Plan and delegate.",
+        FakeModel(responses=[
+            call("p", "write_todos", items=[{"id": "read", "text": "Read note"}]),
+            call("w", "fs_write", path="notes/task.txt", content="Review requirements."),
+            call("c", "reader", request="Read notes/task.txt"),
+            call("u", "write_todos", items=[
+                {"id": "read", "text": "Read note", "status": "completed"}
+            ]), "Done.",
+        ]),
+        tools=[child.as_tool()], harness=Harness(todo=True, filesystem=files),
+    )
+    result = Runner().run(parent, "Start")
+    assert result.state["nexura.todos"][0]["status"] == "completed"
+    assert files.list() == ["notes/task.txt"]
+```
+
+The filesystem tools are `fs_read(path)`, `fs_list()`, `fs_write(path, content)` and
+`fs_edit(path, old, new)`; edit requires exactly one non-empty literal match. Read/list
+and skill/resource reads are `pure`; filesystem writes/edits are conservatively
+`non_idempotent`. Todo replacement is `idempotent` by construction, and todo read is
+`pure`. Tools have `harness:filesystem`, `harness:todo` or `harness:skills` origins for
+policy inspection. `Harness(require_write_approval=True, ...)` gates todo and filesystem
+writes. Hook approval votes and tool guardrails use the ordinary runner pipeline;
+output policy and streaming checks continue through G1–G4.
+
+For disk storage, supply an existing explicit directory: `ScopedFilesystem(root=path)`.
+This backend requires Linux on x86-64 or AArch64, Landlock ABI 3 or later, POSIX `dir_fd`
+and `O_NOFOLLOW`. It fails closed if isolation is unavailable; memory mode remains
+available. A dedicated worker thread installs its own Landlock filesystem rules before
+any disk operation. The caller's permissions and global process settings are unchanged.
+Relative paths cannot
+contain absolute prefixes, `..`, `.`, empty components, backslashes or colons, and have
+at most 16 components/1024 characters. Descriptor traversal refuses symlinks throughout
+the root path and workspace, special files and hard links. Disk writes replace files
+atomically. Parent identity is re-resolved without symlinks before opens and replacements;
+Landlock additionally checks containment in the kernel at each operation, including
+both source and destination of replacements. Moving a traversed directory out of the
+root cannot redirect those operations outside the directory capability. Close the
+object or use a `with` block to stop the worker and release the root descriptor.
+
+Defaults are 64 KiB per UTF-8 file, 1 MiB total and 256 entries including directories;
+configure `max_file_bytes`, `max_total_bytes` and `max_entries` explicitly to adjust them.
+Inventory/list/write enforce workspace caps; read enforces the individual file cap.
+Use one filesystem instance per root so cap checks are serialized. External processes
+are not coordinated for quota enforcement and can still change or delete files they
+own. Isolation governs operations by this capability, not arbitrary host processes.
+In-memory files are not checkpointed; reconstruct the same explicit
+disk workspace after restart if shared artifacts must persist. An uncertain filesystem
+write pauses on durable recovery under the normal effect contract.
+
+Filesystem and todo decision digests bind the run, SDK-issued approval occurrence,
+canonical arguments and the tool's effect scope. A disk scope identifies the normalized
+root plus device/inode; a memory
+scope identifies its instance. A reviewed mapping from one run cannot authorize an
+identical pending write/edit in another run or a later approval occurrence within the
+same run, even if the model repeats its call id. The interruption id is retained across
+recovery of the same pause, so that occurrence still accepts its own reviewed decision.
+The journal's stable effect hash is separate from this occurrence-bound decision.
+Resuming
+or recovering with a different scope fails before dispatch, even when tool names and
+schemas match. Reconstructing the same disk root preserves its scope; recreating the
+directory or memory instance does not. Scoped harness actions cannot use `ApproveWith`
+to change reviewed arguments: start a fresh action for the changed path/task list.
 
 ---
 
@@ -7397,7 +7643,15 @@ The SDK does not record that an interruption was already resumed. If a stored in
 
 ## Bind approval to the exact arguments
 
-A reviewer approves a specific action, not just a call ID. `pending_digests()` returns `{call_id: sha256}` where the digest covers the tool name and the canonical JSON of its arguments. Show the arguments to the reviewer, keep the digest, and pass it back as `approve={call_id: digest}`.
+A reviewer approves a specific action and approval occurrence. `pending_digests()` returns
+`{call_id: sha256}` where the digest covers the tool name, canonical JSON arguments,
+any trusted tool scope, run id and SDK-generated interruption id. Show the arguments
+to the reviewer, keep the digest, and pass it back as `approve={call_id: digest}`.
+A later pause needs its own decision even for identical arguments and a reused model
+call id. Recovery retains the interruption id of the same pause and accepts that
+occurrence's original reviewed decision. This applies to ordinary approval tools as
+well as scoped harness tools. The journal's stable effect hash is separate from the
+reviewed decision hash; `RunInterruption.action_digest()` is not an approval grant.
 
 ```python
 from nexura_agents import Agent, ApprovalDecisionError, FakeModel, Runner, ToolCall, tool
@@ -17511,6 +17765,306 @@ None of this requires Studio.
 
 ---
 
+Source: https://github.com/Liceron/nexura/blob/main/docs/sandbox-production.md
+
+# Production gVisor profile
+
+This page is for operators who run model-written code on a server and want the strongest
+isolation the SDK offers: the `gvisor_oci` backend of the `nexura-sandbox` package, run as
+the hardened `gvisor_production` profile. It covers the profile, a host checklist, the
+preflight check and its limits. The backend itself, its OCI policy and cleanup are described
+in [Tools: gVisor OCI](tools.md#gvisor-oci).
+
+> **Status.** Verified on one Linux host only: Ubuntu x86_64, kernel 7.0, cgroup v2,
+> runsc `release-20260928.0`, with runsc run as root through `sudo -n` (a test-only command
+> prefix) and the cgroup parent placed under a systemd-delegated subtree (Ubuntu 26.04.1,
+> kernel 7.0.0-1014-gcp). A service running
+> directly as root with a top-level `/nexura` cgroup was **not** exercised. The profile has
+> **not** been externally audited. macOS and Windows are not supported; gVisor needs Linux.
+
+## The profile
+
+```python
+import os
+
+from nexura_runtime.integrations.sandbox import SandboxConfig, SandboxExecutionModule
+
+config = SandboxConfig.gvisor_production(
+    runsc_path="/usr/local/bin/runsc",
+    rootfs_path="/opt/nexura/gvisor-rootfs",
+    cgroup_parent="/nexura",
+    # The output of `sha512sum /usr/local/bin/runsc` (128 hex digits); None skips the pin.
+    runsc_sha512=os.environ.get("NEXURA_SANDBOX_RUNSC_SHA512"),
+)
+module = SandboxExecutionModule(config=config)
+# On a host without runsc or the cgroup parent, nothing qualifies: the module stays hidden,
+# refuses every call with CAPABILITY_UNAVAILABLE and names what is missing.
+print(module.selection_error or "gvisor_oci selected")
+```
+
+Or from the operator environment, before the service starts:
+
+```text
+NEXURA_SANDBOX_PROFILE=gvisor_production
+NEXURA_RUNSC_PATH=/usr/local/bin/runsc
+NEXURA_OCI_ROOTFS_PATH=/opt/nexura/gvisor-rootfs
+NEXURA_SANDBOX_GVISOR_CGROUP_PARENT=/nexura          # default /nexura
+NEXURA_SANDBOX_RUNSC_SHA512=<128 hex digits>         # optional, recommended
+```
+
+`NEXURA_SANDBOX_PROFILE` enables the sandbox by itself; `NEXURA_SANDBOX_BACKENDS` is not
+needed. The limit variables (`NEXURA_SANDBOX_TIMEOUT_SECONDS`, `_MAX_MEMORY_MB`,
+`_MAX_OUTPUT_BYTES`) still apply.
+
+What the profile **enforces**: `SandboxConfig` validation fails, and the backend refuses to
+run, if any of these does not hold.
+
+| Setting | Rule |
+| --- | --- |
+| Backends | exactly `["gvisor_oci"]`, nothing to fall back to |
+| `min_isolation` | `gvisor` |
+| Network | none (`--network=none`; the guest sees only `lo`) |
+| Root filesystem | read-only |
+| Host cgroups | required: memory and pids limits per execution; `allow_without_cgroups` is refused even with `NEXURA_REAL_GVISOR=1` |
+| Command prefix | none, or exactly the test-only `["sudo", "-n"]` (which also needs `NEXURA_REAL_GVISOR=1` and is refused by the shared service); anything else is refused |
+| Paths | `runsc_path`, `rootfs_path` and the cgroup parent explicit, absolute and normalised: one leading `/`, no `..`, `.`, `//` or trailing `/`; no `PATH` or environment fallback inside the constructor |
+| Cgroup parent | below the cgroup root, must already exist |
+| Ceilings | `timeout_seconds` ≤ 60, `max_memory_mb` ≤ 1024, `max_processes` ≤ 16, `gvisor_runtime_pids` ≤ 256, `gvisor_tmpfs_bytes` ≤ 128 MiB, `max_output_bytes` ≤ 4 MiB (`GVISOR_PRODUCTION_CEILINGS`) |
+
+What the profile only **defaults** (you may change these within the ceilings):
+
+| Setting | Default |
+| --- | --- |
+| Guest processes | 1: fork, vfork, clone and clone3 are denied by OCI seccomp, so threads too. With `max_processes` above 1 that filter is omitted; guest NPROC and the pids cgroup still apply |
+| Limits | 10 s wall time, 256 MB memory, 1 MiB output, 32 MiB scratch tmpfs, 128 sentry/gofer task allowance |
+
+Pass other fields as keyword arguments, for example a lower `timeout_seconds`, or
+`max_processes=4` if the code needs subprocesses. Anything that breaks a rule above raises
+`ValueError`. The gVisor backend re-checks the rules at every probe and execution, because
+`SandboxConfig.model_copy(update=...)` skips validation. (A `model_copy` that also removes
+`hardened_profile` drops the rules with it; no SDK code path does that with untrusted input.)
+
+On top of the configuration checks every backend does, the profile's availability probe
+checks that the cgroup parent exists under a cgroup v2 mount and lists `memory` and `pids`
+in both `cgroup.controllers` and `cgroup.subtree_control`. When the probe fails, the module
+selects no backend, stays hidden and returns `CAPABILITY_UNAVAILABLE` naming the problem;
+nothing falls back to a weaker sandbox.
+
+**The SHA-512 pin is a drift check, not an exec-time integrity check.** If
+`runsc_sha512` (`gvisor_runsc_sha512`, `NEXURA_SANDBOX_RUNSC_SHA512`) is set, the service
+user hashes the bytes at `runsc_path` (following symlinks) when the module is built and at
+the start of every execution, and refuses on a mismatch. The hash is cached per file
+identity, size and timestamps, so a replaced or rewritten binary is hashed again. root then
+opens and executes the path separately, later; the crash watchdog and teardown run runsc
+without re-checking the pin. The `gvisor-bin/` sidecars, which also run as root, are not
+pinned at all. What actually protects these files is a directory chain only root can write,
+which the preflight requires (see below). The pin catches upgrades and drift. It works with
+or without the profile, and setting the variable never fails open: an invalid value is an
+error, and setting it (or `NEXURA_SANDBOX_GVISOR_CGROUP_PARENT`) without enabling the sandbox
+is an error too.
+
+The `authenticated-shared-service` profile of `create_api_app` accepts this profile. It
+still refuses the test-only `runsc_command_prefix` and cgroup bypass, and it refuses to start
+when the operator's sandbox settings are invalid or a registered sandbox module cannot be
+built.
+
+## Operator checklist
+
+1. **Run the service as root on a dedicated host or VM.** runsc needs root to create its
+   sandbox (namespaces, cgroups, its gofer). A non-root runsc failed on the reviewed host while
+   writing `/sys/fs/cgroup/cgroup.subtree_control`. Rootless runsc was not evaluated. The
+   `sudo -n` command prefix used by the SDK's own live tests is test-only and is refused by
+   the shared service.
+
+2. **Install and pin runsc.** Follow the
+   [gVisor install guide](https://gvisor.dev/docs/user_guide/install/), but use a dated
+   release URL (`release/<yyyymmdd>` or `release/<yyyymmdd>.<rc>`) instead of `latest`:
+
+   ```bash
+   ARCH=$(uname -m)
+   URL=https://storage.googleapis.com/gvisor/releases/release/20260928.0/${ARCH}
+   wget ${URL}/gvisor.tar.zstd ${URL}/gvisor.tar.zstd.sha512   # or gvisor.tar.bz2 without zstd
+   sha512sum -c gvisor.tar.zstd.sha512
+   sudo tar --zstd -xf gvisor.tar.zstd -C /usr/local/bin      # runsc and gvisor-bin/
+   sudo chown -R root:root /usr/local/bin/runsc /usr/local/bin/gvisor-bin
+   sudo chmod -R go-w /usr/local/bin/runsc /usr/local/bin/gvisor-bin
+   sha512sum /usr/local/bin/runsc   # use this value as runsc_sha512
+   ```
+
+   Extract the whole archive, not only `runsc`. `release-20260928.0` starts sidecar
+   binaries (`gvisor_sentry`, `gvisor-sentry-prewarmer` and others) from a `gvisor-bin/`
+   directory next to runsc and refuses to start without them: on the reviewed host a
+   copied `runsc` alone failed with `sidecar "gvisor_sentry" not usable ... and
+   --sidecar-usage-policy is set to STRICT`. The sidecars run with runsc's privileges.
+
+   Keep runsc and `gvisor-bin/` root-owned, not writable by group or others, in a
+   directory only root can write. The pin
+   is the hash of the installed `runsc` binary, not of the release archive (the archive's
+   `.sha512` file only proves the download). Upgrade by installing the new release,
+   updating the pin and rerunning the preflight. The pin covers `runsc` only; the
+   sidecars are protected by their file permissions (checked by the preflight, which also
+   reports their hashes). runsc's own `--sidecar-release-enforcement-policy` (default
+   `IF_RELEASE_BUILD`) says it checks that spawned sidecars match its release; the SDK does
+   not rely on or verify that mechanism. The reviewed host used the
+   `gvisor.tar.bz2` archive of `release-20260928.0`; the archive layout shown above is
+   from the install guide and was not re-downloaded for this page.
+
+3. **Build the rootfs.** Any OCI image's unpacked filesystem with Python 3 in
+   `/usr/local/bin`, `/usr/bin` or `/bin` works. The reviewed host used a Debian-based
+   CPython 3.12 image exported to a tar file:
+
+   ```bash
+   # On a build machine (needs an image tool; Docker shown):
+   docker create --name nexura-rootfs python:3.12-slim
+   docker export nexura-rootfs -o python-rootfs.tar && docker rm nexura-rootfs
+   # On the sandbox host, as root:
+   mkdir -p /opt/nexura/gvisor-rootfs
+   tar -xf python-rootfs.tar -C /opt/nexura/gvisor-rootfs
+   chown -R root:root /opt/nexura/gvisor-rootfs
+   chmod -R go-w /opt/nexura/gvisor-rootfs
+   ```
+
+   The guest runs as UID/GID 65534 (`nobody`), so the interpreter and standard library
+   must be readable (and the interpreter executable) by others. Install any packages the
+   code may import into the image before export; the guest has no network to install them.
+   Pin the image by digest so rebuilds are reproducible.
+
+4. **Provide the cgroup parent.** The parent must exist before the service starts, with
+   the memory and pids controllers enabled for its children. runsc creates one child per
+   execution, named after the container, and the backend removes it in teardown.
+
+   - Root service, top-level parent (not exercised on the reviewed host):
+
+     ```bash
+     mkdir /sys/fs/cgroup/nexura
+     echo '+memory +pids' > /sys/fs/cgroup/nexura/cgroup.subtree_control
+     ```
+
+     Recreate it at boot, for example with a systemd `ExecStartPre=` or a tmpfiles
+     rule. The cgroup root must already enable `memory` and `pids` in its own
+     `cgroup.subtree_control`; systemd does this on current distributions.
+   - Under a delegated systemd subtree (the layout the live tests used): with
+     `Delegate=yes`, systemd hands the unit's cgroup to the service. cgroup v2 forbids
+     processes in a cgroup that delegates controllers to children, so the service's own
+     processes must live in a leaf child, and the sandbox parent is a sibling of that
+     leaf. Pass the parent's path relative to the cgroup mount, for example
+     `/system.slice/nexura.service/sandboxes`.
+
+5. **Run the preflight** (next section) after every install, upgrade, rootfs rebuild or
+   host change, and before serving.
+
+6. **Keep the service in its own cgroup and supervise it.** Use systemd with
+   `KillMode=control-group` (or a container) so a service crash also stops its runsc
+   processes. Each execution also has a crash watchdog, but that cannot help if the
+   watchdog itself is killed.
+
+7. **Set `TMPDIR` to a root-only directory** (for example `/var/lib/nexura/tmp`, mode
+   0700). Task directories (`nexura_gvisor_*`) are created in the service's temporary
+   directory and hold the payload, the OCI bundle and runsc state.
+
+## The preflight
+
+The availability probe checks configuration. The preflight also checks the files and the
+host, then starts one tiny guest:
+
+```bash
+python -m nexura_sandbox.preflight \
+  --runsc /usr/local/bin/runsc --rootfs /opt/nexura/gvisor-rootfs \
+  --cgroup-parent /nexura --runsc-sha512 <hex> --expect-version release-20260928.0
+# or build the config from the operator environment:
+python -m nexura_sandbox.preflight --from-env --strict
+```
+
+From Python: `nexura_sandbox.gvisor_preflight(config)` (or `await gvisor_preflight_async(config)`
+inside an event loop) returns a `PreflightReport`; it never raises for a bad configuration or
+host state, which becomes a failed check instead. Each `PreflightCheck` has a name, a status
+(`pass`, `warn`, `fail`, `skip`), what was found and a fix. `--json` prints the report as JSON.
+The exit code is 0 when the preflight passed, 1 when it failed and 2 for an invalid
+configuration.
+
+Every path that root executes or uses must be safe, and **an unsafe one fails the default
+preflight**: runsc, the `gvisor-bin/` sidecars, the rootfs and every directory above them
+must be owned by root or the service user and not writable by group or others. A
+group-writable ancestor fails even when the group has no other members today. Warnings remain
+only for things that are not a replacement path: runsc owned by the service user rather than
+root, no pin, the test-only command prefix or a non-root service, a missing `gvisor-bin/`
+(older releases embed the sidecars), and a root-owned sticky directory such as `/tmp` above
+the install (others cannot replace entries they do not own, but production paths should not
+pass through it). `--strict` fails on those warnings too; use it in deployment pipelines.
+
+| Check | What it verifies |
+| --- | --- |
+| `profile` | the config is `gvisor_production` and still satisfies every rule |
+| `runsc_path`, `runsc_permissions` | absolute, existing, executable; the binary and every directory above it (as configured and resolved) are owned by root or the service user and not writable by group or others (fail); runsc not owned by root warns |
+| `runsc_sidecars` | `gvisor-bin/` next to the resolved runsc holds only regular files, none writable by group or others; its parent directories are those checked by `runsc_permissions`; their SHA-512 hashes are in the report facts (missing directory: warning) |
+| `runsc_sha512` | the binary matches the pin (no pin: warning with the current hash) |
+| `runsc_version`, `runsc_features` | `runsc --version` parses, optionally equals `--expect-version`; `runsc features` reports seccomp enabled with the `ERRNO` and `ALLOW` actions, and `runsc flags` lists `-oci-seccomp` |
+| `rootfs_path`, `rootfs_permissions` | absolute directory; the rootfs, its entries (up to 200,000) and every directory above it are owned by root or the service user and not writable by group or others |
+| `rootfs_python` | `python3` on the guest `PATH` and the standard library are readable/executable by UID 65534, including every directory on the way |
+| `cgroup_v2`, `cgroup_parent` | cgroup v2 is mounted; the parent path is normalised, exists, delegates memory and pids, and is owned by root or the service user and not writable by group or others |
+| `runsc_privilege` | the service is root (a test prefix or a non-root service warns) |
+| `guest_run` | a guest prints a random token |
+| `guest_cgroup_limits` | while the guest runs, the preflight reads its cgroup leaf's `memory.max` and `pids.max` from the host and they equal the configured limits; a leaf that is never observed, or other values, **fail** (a configuration label is not evidence) |
+| `cleanup` | afterwards no task directory, runsc state, mount, runsc process or cgroup child of that execution remains |
+| `preflight_error` | present only when the preflight hit an unexpected error; always a failure |
+
+The preflight never executes a runsc binary that failed its path, ownership, mode, sidecar
+or pin check. If any check fails, the guest run is skipped. It does not change any file, mode or
+cgroup.
+
+On the reviewed host the install lives under a project directory that is
+group-writable, so the honest preflight result there is **FAILED**, naming that directory in
+`runsc_permissions` and `rootfs_permissions`. A hard-linked copy of the same runsc,
+`gvisor-bin/` and rootfs in a directory chain only the service user can write passes every
+check (see the live tests).
+
+## Monitoring and cleanup
+
+- **Per execution:** results carry `details.cgroups == "enforced"`,
+  `limits_advisory == false` and `hardened_profile == "gvisor_production"`. An exit code of
+  137 with no output past a point usually means the memory cgroup's OOM killer stopped the
+  sandbox. The parent's `memory.events` (`oom_kill`) and `pids.events` (`max`) count limit
+  hits.
+- **Leftovers:** after the service stops, none of these should remain. Check for task
+  directories with `ls -d "$TMPDIR"/nexura_gvisor_*`, null-netns mounts with
+  `findmnt -rn | grep nexura_gvisor_`, cgroup children with `ls /sys/fs/cgroup/nexura`, and
+  runsc processes with `pgrep -af runsc`.
+- **Startup sweep:** on its first execution a worker removes stale task directories it
+  can attribute to the same service identity, after `runsc list` proves the container
+  absent, together with that run's recorded cgroup child once it is empty. Unmarked or
+  ambiguous state is left for the operator.
+- **Manual cleanup**, as root, only after confirming the service is stopped: for a task
+  directory `T`, `runsc --root=T/state delete --force <container>`, then
+  `umount T/state/null-netns` if it is mounted, then `rm -rf --one-file-system T`. Remove
+  an empty cgroup child with `rmdir`; a cgroup that still has processes cannot be removed,
+  so stop the processes first.
+- **Teardown removes the cgroup child.** A cancelled execution can stop runsc before it
+  deletes its own cgroup. Normal teardown, the per-run crash watchdog and the startup sweep
+  therefore remove the run's child `<parent>/nex_<32 hex>` once it is empty (through the
+  same privilege as runsc). A populated child is never touched; teardown and the watchdog
+  report it if it remains after 3 seconds. If the watchdog itself is killed, an empty child
+  can remain until the next startup sweep or manual `rmdir`.
+
+## Limits
+
+- Verified on one host only (see the status note above). Other kernels, distributions,
+  cgroup layouts, architectures and runsc releases are untested. arm64 is untested.
+- The live tests ran runsc as root through `sudo -n`, a test-only prefix. They did not run
+  a root service with a top-level `/nexura` parent.
+- gVisor is a user-space kernel. It reduces, but does not remove, exposure to host kernel
+  bugs and to bugs in gVisor itself. Keep runsc up to date.
+- The SHA-512 pin covers the `runsc` binary, not the `gvisor-bin/` sidecars or the rootfs,
+  and it is checked by the service user before execution, not at the moment root executes
+  runsc. Root-only directories, which the preflight requires, are the real protection.
+- The memory cgroup bounds the whole sandbox (sentry, gofer and guest). Scratch files on
+  the `/sandbox` tmpfs count against it. `RLIMIT_AS` additionally caps a single guest
+  allocation.
+- CPU time is bounded only by the wall-clock timeout; there is no CPU quota (`cpu.max`).
+- Not externally audited. No production-readiness or certification claim is made.
+- macOS and Windows: unsupported.
+
+---
+
 Source: https://github.com/Liceron/nexura/blob/main/docs/troubleshooting.md
 
 # Troubleshooting
@@ -17960,7 +18514,7 @@ when ``nexura_runtime`` is installed and imported.
 
 ### `Agent`
 
-class `Agent(name: 'str', instructions: 'Instructions', model: 'ModelProtocol | str', *, tools: 'Sequence[Tool] | None' = None, max_turns: 'int' = 10, max_tool_calls: 'int' = 20, timeout: 'float | None' = None, output_type: 'type[BaseModel] | dict[str, Any] | None' = None, output_retries: 'int' = 1, input_guardrails: 'Sequence[GuardrailFn]' = (), output_guardrails: 'Sequence[GuardrailFn]' = (), parallel_tool_calls: 'bool' = False, description: 'str' = '', memory: 'Memory | None' = None, handoffs: 'Sequence[Agent | Handoff]' = (), max_handoffs: 'int' = 10, history_processors: 'Sequence[HistoryProcessor]' = (), prepare_tools: 'PrepareTools | None' = None, model_settings: 'ModelSettings | None' = None, tool_use_behavior: 'ToolUseBehavior' = 'run_llm_again', output_validators: 'Sequence[OutputValidator]' = (), reset_tool_choice: 'bool' = True, ask_user: 'bool' = False, stream_guard: 'StreamGuardMode | StreamGuard' = 'auto') -> 'None'`
+class `Agent(name: 'str', instructions: 'Instructions', model: 'ModelProtocol | str', *, tools: 'Sequence[Tool] | None' = None, max_turns: 'int' = 10, max_tool_calls: 'int' = 20, timeout: 'float | None' = None, output_type: 'type[BaseModel] | dict[str, Any] | None' = None, output_retries: 'int' = 1, input_guardrails: 'Sequence[GuardrailFn]' = (), output_guardrails: 'Sequence[GuardrailFn]' = (), parallel_tool_calls: 'bool' = False, description: 'str' = '', memory: 'Memory | None' = None, handoffs: 'Sequence[Agent | Handoff]' = (), max_handoffs: 'int' = 10, history_processors: 'Sequence[HistoryProcessor]' = (), prepare_tools: 'PrepareTools | None' = None, model_settings: 'ModelSettings | None' = None, tool_use_behavior: 'ToolUseBehavior' = 'run_llm_again', output_validators: 'Sequence[OutputValidator]' = (), reset_tool_choice: 'bool' = True, ask_user: 'bool' = False, stream_guard: 'StreamGuardMode | StreamGuard' = 'auto', harness: 'Harness | None' = None) -> 'None'`
 
 ~~~text
 Stateless configuration defining an agent.
@@ -18243,7 +18797,7 @@ Represents a typed, executable tool for an agent.
 
 ### `RunContext`
 
-class `RunContext(deps: 'DepsT', run_id: 'str', agent_name: 'str', turn: 'int' = 0, usage: 'Usage' = <factory>, messages: 'list[Message]' = <factory>, tool_call_id: 'str | None' = None, tool_name: 'str | None' = None, retry: 'int' = 0, metadata: 'dict[str, Any]' = <factory>, state: 'dict[str, Any]' = <factory>, tags: 'list[str]' = <factory>, tool_attachments: 'list[Any]' = <factory>, prompt: 'dict[str, Any] | None' = None, idempotency_key: 'str | None' = None, fencing_token: 'int | None' = None, tool: 'ToolInfo | None' = None, _nested_usage: 'list[Usage]' = <factory>, _events: '_EventChannel' = <factory>) -> None`
+class `RunContext(deps: 'DepsT', run_id: 'str', agent_name: 'str', turn: 'int' = 0, usage: 'Usage' = <factory>, messages: 'list[Message]' = <factory>, tool_call_id: 'str | None' = None, tool_name: 'str | None' = None, retry: 'int' = 0, metadata: 'dict[str, Any]' = <factory>, state: 'dict[str, Any]' = <factory>, tags: 'list[str]' = <factory>, tool_attachments: 'list[Any]' = <factory>, prompt: 'dict[str, Any] | None' = None, idempotency_key: 'str | None' = None, fencing_token: 'int | None' = None, tool: 'ToolInfo | None' = None, _nested_usage: 'list[Usage]' = <factory>, _events: '_EventChannel' = <factory>, _compaction_summaries: 'dict[str, str]' = <factory>, _save_compaction: 'Callable[[], Awaitable[None]] | None' = None) -> None`
 
 ~~~text
 What a tool or callback can see about the run it belongs to.
@@ -18347,15 +18901,15 @@ every store on the same directory in this process and adds an OS file lock
 
 ### `Skill`
 
-class `Skill(name: 'str', description: 'str', instructions: 'str', tools: 'tuple[str, ...]' = (), resources: 'Mapping[str, str]' = <factory>, metadata: 'Mapping[str, Any]' = <factory>) -> None`
+class `Skill(name: 'str', description: 'str', instructions: 'str', tools: 'tuple[str, ...]' = (), resources: 'Mapping[str, str]' = <factory>, metadata: 'Mapping[str, Any]' = <factory>, format: 'str' = 'nexura') -> None`
 
 ~~~text
 One skill version: text only, identified by name and the sha256 of its content.
 ~~~
 
-- `from_directory(cls, path: 'str | Path') -> 'Skill'`
+- `from_directory(cls, path: 'str | Path', *, format: 'str' = 'nexura') -> 'Skill'`
   Load ``path/SKILL.md`` plus text files beside it as resources (no scripts).
-- `from_markdown(cls, text: 'str', *, resources: 'Mapping[str, str] | None' = None, name: 'str | None' = None) -> 'Skill'`
+- `from_markdown(cls, text: 'str', *, resources: 'Mapping[str, str] | None' = None, name: 'str | None' = None, format: 'str' = 'nexura') -> 'Skill'`
   Parse a ``SKILL.md``: ``---`` front matter (name, description, tools) then the body.
 
 ### `SkillLibrary`
@@ -18376,11 +18930,13 @@ Versioned skills by name, with labels such as ``production`` (thread-safe).
   Start ``name``'s next version at ``next_version`` or later (never lower).
 - `export(self) -> 'dict[str, Any]'`
   All skills, versions and labels as a JSON-ready dict (text only), for persistence.
+- `from_directory(cls, path: 'str | Path') -> 'SkillLibrary'`
+  Load a bounded directory of Agent Skills, in sorted order, without execution.
 - `get(self, name: 'str', *, label: 'str' = 'latest', version: 'int | None' = None) -> 'Skill'`
   The skill at ``version``, or the one carrying ``label``.
 - `import_versions(self, data: 'Mapping[str, Any]', *, replace: 'bool' = False) -> 'list[str]'`
   Restore skills from :meth:`export` output, all or nothing; returns the names added.
-- `loader_tool(self, *, label: 'str' = 'latest', available_tools: 'Iterable[str]' = (), name: 'str' = 'load_skill') -> 'Tool'`
+- `loader_tool(self, *, label: 'str' = 'latest', available_tools: 'Iterable[str]' = (), name: 'str' = 'load_skill', progressive: 'bool' = False) -> 'Tool'`
   A read-only ``load_skill(name)`` tool returning a skill's text (never runs anything).
 - `names(self) -> 'list[str]'`
   Names of all stored skills.
@@ -18390,12 +18946,107 @@ Versioned skills by name, with labels such as ``production`` (thread-safe).
   The number the next new version of ``name`` gets (also after it was removed).
 - `remove(self, name: 'str', version: 'int | None' = None) -> 'int'`
   Delete every version of ``name``, or only ``version``; returns how many were removed.
-- `render(self, name: 'str', *, label: 'str' = 'latest', available_tools: 'Iterable[str]' = ()) -> 'str'`
+- `render(self, name: 'str', *, label: 'str' = 'latest', available_tools: 'Iterable[str]' = (), progressive: 'bool' = False) -> 'str'`
   The text ``load_skill`` returns: instructions, resources and tool availability.
+- `resource_tool(self, *, label: 'str' = 'latest') -> 'Tool'`
+  Read one snapshot resource on demand. No filesystem access or execution.
 - `set_label(self, name: 'str', label: 'str', version: 'int') -> 'None'`
   Point ``label`` at ``version``; other versions lose it.
 - `versions(self, name: 'str') -> 'list[SkillVersion]'`
   All versions of a skill, oldest first.
+
+### `Harness`
+
+class `Harness(skills: 'SkillLibrary | None' = None, compaction: 'HistoryProcessor | None' = None, todo: 'bool' = False, filesystem: 'ScopedFilesystem | None' = None, require_write_approval: 'bool' = False) -> None`
+
+~~~text
+``Agent(harness=Harness(...))``; every capability is separately opt-in.
+
+Share the same filesystem explicitly with child harnesses, then delegate with
+``child.as_tool()``. Existing G2 hooks and budget inheritance remain authoritative.
+No shell is installed. Skill ``allowed-tools`` metadata grants no permissions.
+~~~
+
+- `build_tools(self, available_tools: 'list[str]') -> 'list[Tool]'`
+  Build normal SDK tools for the enabled capabilities, with effect metadata.
+- `catalog(self) -> 'str'`
+  Only skill names/descriptions enter the system prompt.
+
+### `TodoItem`
+
+class `TodoItem(*, id: Annotated[str, MinLen(min_length=1), MaxLen(max_length=64)], text: Annotated[str, MinLen(min_length=1), MaxLen(max_length=1000)], status: Literal['pending', 'in_progress', 'completed'] = 'pending') -> None`
+
+~~~text
+One task, identified across plan replacements by its unique id.
+~~~
+
+
+### `todo_tools`
+
+function `todo_tools(*, requires_approval: 'bool' = False) -> 'list[Tool]'`
+
+~~~text
+Replace/read the run's plan. Replacement is idempotent by construction.
+
+State is checkpointed with the tool result; the normal effect journal admits replay
+after a crash before that checkpoint. Re-emitted progress events may repeat on replay.
+Notifications contain only a monotonic version, total count and fixed status counts;
+replay of a recorded call retains the current version and cannot revert newer state.
+Configure sequential tool calls when ordering multiple plan replacements matters.
+~~~
+
+### `ScopedFilesystem`
+
+class `ScopedFilesystem(root: 'str | Path | None' = None, *, max_file_bytes: 'int' = 65536, max_total_bytes: 'int' = 1048576, max_entries: 'int' = 256) -> 'None'`
+
+~~~text
+Share one instance explicitly between parent and child agents.
+
+Without ``root`` files live in memory. With an existing ``root``, Linux Landlock
+ABI >= 3 and no-follow traversal enforce a directory capability. A private worker
+restricts only its own thread; unsupported disk isolation is refused.
+Files must be regular, singly linked UTF-8 files. Writes replace atomically, never
+follow links, and are conservatively non-idempotent for durable recovery.
+
+Caps cover UTF-8 bytes and directory entries. Use one instance per root to serialize
+cap checks. Landlock checks ancestry at opens/creates/renames, including both ends
+of replacements, even when a host actor moves a traversed directory out of the root.
+~~~
+
+- `build_tools(self, *, require_write_approval: 'bool' = False) -> 'builtins.list[Tool]'`
+  Tools use the normal runner approval, hook and guardrail pipeline.
+- `close(self) -> 'None'`
+  Release the directory descriptor. Subsequent operations are refused.
+- `edit(self, path: 'str', old: 'str', new: 'str') -> 'str'`
+  Replace exactly one literal match. Refuse empty or ambiguous matches.
+- `list(self) -> 'list[str]'`
+  List file paths, sorted, relative to the workspace.
+- `read(self, path: 'str') -> 'str'`
+  Read one bounded UTF-8 file; never follow a symlink.
+- `write(self, path: 'str', content: 'str') -> 'str'`
+  Replace a file, creating parent directories within the configured caps.
+
+### `compact_context`
+
+function `compact_context(max_tokens: 'int', *, trigger_ratio: 'float' = 0.9, target_ratio: 'float' = 0.7, model: 'Any' = None, max_summary_chars: 'int' = 2000, estimator: 'TokenEstimator | None' = None, timeout: 'float | None' = None) -> 'Callable[[RunContext[Any], list[Message]], Awaitable[list[Message]]]'`
+
+~~~text
+Opt-in budget-triggered compaction, preserving complete tool exchanges.
+
+Old turns are removed as units. Exchanges spanning user boundaries are merged;
+all system messages, the latest user turn, and unanswered calls (including pending
+approvals) are pinned. If pinned content exceeds the target it stays intact and
+``nexura.context_compacted`` reports overflow. Estimates exclude attachments and
+tool schemas: reserve headroom in ``max_tokens``.
+
+With ``model`` use the normal model admission path and count summary usage in the
+run; without it trim deterministically. Errors, including budget refusal, propagate.
+Cached summaries are scoped by run id and content (64 entries per processor).
+With durable storage, completed summaries and their config/transcript digest are
+checkpointed before the main model request. Recovery reuses the saved summary and
+its already-accounted usage without calling the summary model again.
+Stored history, approval records and checkpoints are never rewritten.
+~~~
 
 ### `ModelRetry`
 
@@ -18418,7 +19069,7 @@ Final result of an agent run.
 
 ### `RunInterruption`
 
-class `RunInterruption(run_id: 'str', agent_name: 'str', messages: 'list[Message]', pending: 'list[ToolCall]', usage: 'Usage' = <factory>, turn: 'int' = 0, tool_calls_count: 'int' = 0, session_id: 'str | None' = None, expected_revision: 'int' = 0, requests: 'int' = 0, memory_block: 'str' = '', active_agent: 'str | None' = None, agent_path: 'list[str]' = <factory>, handoffs_count: 'int' = 0, root_system: 'Message | None' = None, reason: 'str | None' = None, pending_handoff: 'dict[str, str] | None' = None, state: 'dict[str, Any]' = <factory>, question_ids: 'list[str]' = <factory>, usage_by_agent: 'dict[str, Usage]' = <factory>, usage_by_model: 'dict[str, Usage]' = <factory>, tags: 'list[str]' = <factory>, metadata: 'dict[str, Any]' = <factory>, output_attempts: 'int' = 0, agent_started_at: 'int' = 0, interruption_id: 'str' = <factory>, expires_at: 'float' = <factory>, signature: 'str | None' = None, action_digests: 'dict[str, str]' = <factory>) -> None`
+class `RunInterruption(run_id: 'str', agent_name: 'str', messages: 'list[Message]', pending: 'list[ToolCall]', usage: 'Usage' = <factory>, turn: 'int' = 0, tool_calls_count: 'int' = 0, session_id: 'str | None' = None, expected_revision: 'int' = 0, requests: 'int' = 0, memory_block: 'str' = '', active_agent: 'str | None' = None, agent_path: 'list[str]' = <factory>, handoffs_count: 'int' = 0, root_system: 'Message | None' = None, reason: 'str | None' = None, pending_handoff: 'dict[str, str] | None' = None, state: 'dict[str, Any]' = <factory>, question_ids: 'list[str]' = <factory>, usage_by_agent: 'dict[str, Usage]' = <factory>, usage_by_model: 'dict[str, Usage]' = <factory>, tags: 'list[str]' = <factory>, metadata: 'dict[str, Any]' = <factory>, output_attempts: 'int' = 0, agent_started_at: 'int' = 0, interruption_id: 'str' = <factory>, expires_at: 'float' = <factory>, signature: 'str | None' = None, action_digests: 'dict[str, str]' = <factory>, tool_scopes: 'dict[str, str]' = <factory>, compaction_summaries: 'dict[str, str]' = <factory>) -> None`
 
 ~~~text
 A run paused before tool calls that need approval.
@@ -18429,12 +19080,14 @@ Unsigned JSON belongs in trusted server-side storage. Expiry is enforced by
 Runner; single use requires a configured approval/checkpoint store.
 ~~~
 
-- `action_digest(call: 'ToolCall') -> 'str'`
-  SHA-256 of the exact action (tool name + canonical arguments).
+- `action_digest(call: 'ToolCall', scope: 'str | None' = None) -> 'str'`
+  Stable effect hash of tool name, canonical arguments and optional target scope.
+- `decision_digest(self, call: 'ToolCall') -> 'str'`
+  Bind a reviewed action to this run and SDK-issued approval occurrence.
 - `from_json(cls, data: 'str') -> 'RunInterruption'`
   Rebuild an interruption from ``to_json`` output; reject unknown schema versions.
 - `pending_digests(self) -> 'dict[str, str]'`
-  Show these to the reviewer; pass them back as ``approve={id: digest}``.
+  Review these occurrence-bound hashes; return ``approve={id: digest}``.
 - `to_json(self) -> 'str'`
   Serialize the paused run (transcript, pending calls, usage, session state) to JSON.
 
@@ -19888,8 +20541,9 @@ Approve a pending tool call, but run it with ``arguments`` instead.
 ``Runner.resume(..., approve={call_id: ApproveWith(arguments={...}, digest=d)})``. The
 edit is checked against the tool's schema, and the call in the transcript is rewritten,
 so the history shows what actually ran. ``digest`` (from
-``interruption.pending_digests()``) binds the approval to the original action the
-reviewer saw. Omitting it requires a verified signed or server-stored interruption.
+``interruption.pending_digests()``) binds the approval to the original action and
+approval occurrence the reviewer saw. Omitting it requires a verified signed or
+server-stored interruption.
 ~~~
 
 
@@ -20405,15 +21059,15 @@ Constant: `65536`
 
 ### `Skill`
 
-class `Skill(name: 'str', description: 'str', instructions: 'str', tools: 'tuple[str, ...]' = (), resources: 'Mapping[str, str]' = <factory>, metadata: 'Mapping[str, Any]' = <factory>) -> None`
+class `Skill(name: 'str', description: 'str', instructions: 'str', tools: 'tuple[str, ...]' = (), resources: 'Mapping[str, str]' = <factory>, metadata: 'Mapping[str, Any]' = <factory>, format: 'str' = 'nexura') -> None`
 
 ~~~text
 One skill version: text only, identified by name and the sha256 of its content.
 ~~~
 
-- `from_directory(cls, path: 'str | Path') -> 'Skill'`
+- `from_directory(cls, path: 'str | Path', *, format: 'str' = 'nexura') -> 'Skill'`
   Load ``path/SKILL.md`` plus text files beside it as resources (no scripts).
-- `from_markdown(cls, text: 'str', *, resources: 'Mapping[str, str] | None' = None, name: 'str | None' = None) -> 'Skill'`
+- `from_markdown(cls, text: 'str', *, resources: 'Mapping[str, str] | None' = None, name: 'str | None' = None, format: 'str' = 'nexura') -> 'Skill'`
   Parse a ``SKILL.md``: ``---`` front matter (name, description, tools) then the body.
 
 ### `SkillError`
@@ -20443,11 +21097,13 @@ Versioned skills by name, with labels such as ``production`` (thread-safe).
   Start ``name``'s next version at ``next_version`` or later (never lower).
 - `export(self) -> 'dict[str, Any]'`
   All skills, versions and labels as a JSON-ready dict (text only), for persistence.
+- `from_directory(cls, path: 'str | Path') -> 'SkillLibrary'`
+  Load a bounded directory of Agent Skills, in sorted order, without execution.
 - `get(self, name: 'str', *, label: 'str' = 'latest', version: 'int | None' = None) -> 'Skill'`
   The skill at ``version``, or the one carrying ``label``.
 - `import_versions(self, data: 'Mapping[str, Any]', *, replace: 'bool' = False) -> 'list[str]'`
   Restore skills from :meth:`export` output, all or nothing; returns the names added.
-- `loader_tool(self, *, label: 'str' = 'latest', available_tools: 'Iterable[str]' = (), name: 'str' = 'load_skill') -> 'Tool'`
+- `loader_tool(self, *, label: 'str' = 'latest', available_tools: 'Iterable[str]' = (), name: 'str' = 'load_skill', progressive: 'bool' = False) -> 'Tool'`
   A read-only ``load_skill(name)`` tool returning a skill's text (never runs anything).
 - `names(self) -> 'list[str]'`
   Names of all stored skills.
@@ -20457,8 +21113,10 @@ Versioned skills by name, with labels such as ``production`` (thread-safe).
   The number the next new version of ``name`` gets (also after it was removed).
 - `remove(self, name: 'str', version: 'int | None' = None) -> 'int'`
   Delete every version of ``name``, or only ``version``; returns how many were removed.
-- `render(self, name: 'str', *, label: 'str' = 'latest', available_tools: 'Iterable[str]' = ()) -> 'str'`
+- `render(self, name: 'str', *, label: 'str' = 'latest', available_tools: 'Iterable[str]' = (), progressive: 'bool' = False) -> 'str'`
   The text ``load_skill`` returns: instructions, resources and tool availability.
+- `resource_tool(self, *, label: 'str' = 'latest') -> 'Tool'`
+  Read one snapshot resource on demand. No filesystem access or execution.
 - `set_label(self, name: 'str', label: 'str', version: 'int') -> 'None'`
   Point ``label`` at ``version``; other versions lose it.
 - `versions(self, name: 'str') -> 'list[SkillVersion]'`

@@ -4,10 +4,11 @@
 
 from __future__ import annotations
 
+import re
 import uuid
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 IsolationBackend = Literal[
     "gvisor_oci",
@@ -45,6 +46,93 @@ SelectableBackend = Literal["monty", "wasi", "bubblewrap", "gvisor_oci"]
 #: Order used when the operator enables the sandbox without naming backends: Monty (the
 #: default, every OS, no root) first, then gVisor for operators that require it.
 DEFAULT_BACKEND_ORDER: tuple[SelectableBackend, ...] = ("monty", "gvisor_oci")
+
+#: Hardened operator profiles. ``gvisor_production`` is built by
+#: ``SandboxConfig.gvisor_production``; see ``gvisor_production_violations`` for its rules.
+HardenedProfile = Literal["gvisor_production"]
+GVISOR_PRODUCTION_PROFILE: HardenedProfile = "gvisor_production"
+
+_SHA512_HEX = re.compile(r"[0-9a-f]{128}")
+
+
+#: Upper bounds the ``gvisor_production`` profile enforces (inclusive). The general
+#: ``SandboxConfig`` maxima are higher; a profile config above any of these fails validation.
+#: Defaults are lower still (10 s, 256 MB, 1 process, 128 runtime tasks, 32 MiB, 1 MiB).
+GVISOR_PRODUCTION_CEILINGS: dict[str, float] = {
+    "timeout_seconds": 60.0,
+    "max_memory_mb": 1024,
+    "max_processes": 16,
+    "gvisor_runtime_pids": 256,
+    "gvisor_tmpfs_bytes": 134_217_728,  # 128 MiB
+    "max_output_bytes": 4_194_304,  # 4 MiB
+}
+
+#: The only command prefixes the profile accepts: none, or the test-only ``sudo -n`` (which
+#: the backend still allows only with ``NEXURA_REAL_GVISOR=1``, and the shared service refuses).
+GVISOR_PRODUCTION_PREFIXES: tuple[list[str], ...] = ([], ["sudo", "-n"])
+
+
+def gvisor_production_violations(config: SandboxConfig) -> list[str]:
+    """Every way ``config`` breaks the ``gvisor_production`` profile (empty when it holds).
+
+    The profile runs only ``gvisor_oci`` at ``gvisor`` isolation, with explicit, normalised
+    absolute runsc/rootfs/cgroup-parent paths, no network, a read-only root, host cgroups
+    enforced and the limits capped by ``GVISOR_PRODUCTION_CEILINGS``. The test-only
+    ``allow_without_cgroups`` bypass is refused even when ``NEXURA_REAL_GVISOR=1``; a
+    ``runsc_command_prefix`` other than ``[]`` or ``["sudo", "-n"]`` is refused too. Checked
+    when the config is validated and again by the gVisor backend, because
+    ``model_copy(update=...)`` skips validation.
+    """
+    problems: list[str] = []
+    if config.backends != ["gvisor_oci"]:
+        problems.append("backends must be exactly ['gvisor_oci']")
+    if config.min_isolation != "gvisor":
+        problems.append("min_isolation must be 'gvisor'")
+    if config.backend != "gvisor_oci":
+        problems.append("backend must be 'gvisor_oci'")
+    if config.allow_network:
+        problems.append("allow_network must be False (the profile has no network)")
+    if not config.readonly_root:
+        problems.append("readonly_root must be True")
+    if config.allow_unisolated:
+        problems.append("allow_unisolated must be False")
+    if config.extra.get("allow_without_cgroups") not in (None, False):
+        problems.append("extra['allow_without_cgroups'] is refused: host cgroups are required")
+    prefix = config.extra.get("runsc_command_prefix", [])
+    if not isinstance(prefix, (list, tuple)) or list(prefix) not in GVISOR_PRODUCTION_PREFIXES:
+        problems.append(
+            "extra['runsc_command_prefix'] must be absent, [] or the test-only "
+            "['sudo', '-n'] (got " + repr(prefix) + ")"
+        )
+    for label, value in (("runsc_path", config.runsc_path), ("rootfs_path", config.rootfs_path)):
+        if not value:
+            problems.append(f"{label} must be set explicitly (no environment or PATH lookup)")
+        elif not normalised_absolute_path(value):
+            problems.append(
+                f"{label} must be a normalised absolute path (one leading '/', no '..', '.', "
+                f"'//' or trailing '/'); got {value!r}"
+            )
+    parent = config.gvisor_cgroup_parent
+    if not normalised_absolute_path(parent) or parent == "/":
+        problems.append(
+            "gvisor_cgroup_parent must be a normalised absolute cgroup path below the root "
+            f"(for example '/nexura'; no '..', '.', '//' or trailing '/'); got {parent!r}"
+        )
+    for name, ceiling in GVISOR_PRODUCTION_CEILINGS.items():
+        value = getattr(config, name)
+        if value > ceiling:
+            problems.append(f"{name}={value} exceeds the profile ceiling {ceiling:g}")
+    return problems
+
+
+def normalised_absolute_path(value: str) -> bool:
+    """True for ``/a/b`` paths: one leading slash; no ``..``, ``.``, ``//`` or trailing slash."""
+    if not value.startswith("/") or value.startswith("//"):
+        return False
+    if value != "/" and value.endswith("/"):
+        return False
+    parts = value.split("/")[1:]
+    return value == "/" or all(part not in ("", ".", "..") for part in parts)
 
 
 class SandboxConfig(BaseModel):
@@ -124,6 +212,74 @@ class SandboxConfig(BaseModel):
         ]
     )
     extra: dict[str, Any] = Field(default_factory=dict)
+    #: Operator-pinned SHA-512 (128 hex digits, stored lowercase) of the runsc binary. When set,
+    #: the gVisor backend hashes ``runsc_path`` and refuses to run on a mismatch.
+    gvisor_runsc_sha512: str | None = None
+    #: A named hardened profile. ``gvisor_production`` (see ``SandboxConfig.gvisor_production``)
+    #: makes the config fail validation unless every profile rule holds, and makes the gVisor
+    #: backend check the host cgroup parent before it reports itself available.
+    hardened_profile: HardenedProfile | None = None
+
+    @field_validator("gvisor_runsc_sha512", mode="before")
+    @classmethod
+    def _normalise_sha512(cls, value: Any) -> Any:
+        return value.strip().lower() if isinstance(value, str) else value
+
+    @model_validator(mode="after")
+    def _check_hardened_profile(self) -> Self:
+        if self.gvisor_runsc_sha512 is not None and not _SHA512_HEX.fullmatch(
+            self.gvisor_runsc_sha512
+        ):
+            raise ValueError("gvisor_runsc_sha512 must be 128 hexadecimal digits")
+        if self.hardened_profile == GVISOR_PRODUCTION_PROFILE:
+            problems = gvisor_production_violations(self)
+            if problems:
+                raise ValueError("gvisor_production profile: " + "; ".join(problems))
+        return self
+
+    @classmethod
+    def gvisor_production(
+        cls,
+        *,
+        runsc_path: str,
+        rootfs_path: str,
+        cgroup_parent: str = "/nexura",
+        runsc_sha512: str | None = None,
+        **overrides: Any,
+    ) -> SandboxConfig:
+        """The hardened gVisor profile for operators: fail closed on anything missing.
+
+        Enforced (validation fails otherwise, see ``gvisor_production_violations``): only
+        ``gvisor_oci`` with ``min_isolation="gvisor"``; explicit normalised absolute
+        ``runsc_path`` / ``rootfs_path`` / ``cgroup_parent``; no network; read-only root; host
+        cgroups (no ``allow_without_cgroups``); no command prefix other than the test-only
+        ``sudo -n``; limits at or below ``GVISOR_PRODUCTION_CEILINGS`` (60 s, 1024 MB, 16
+        processes, 256 runtime tasks, 128 MiB scratch, 4 MiB output).
+
+        Defaults only (``overrides`` may change them within the ceilings): 10 s wall time,
+        256 MB memory, one guest process (fork/clone denied by OCI seccomp; above one process
+        that filter is omitted), 1 MiB output, 32 MiB scratch tmpfs, 128 runtime tasks.
+
+        The cgroup parent must already exist with the memory and pids controllers; nothing
+        provisions it. Pin the binary with ``runsc_sha512``. Run
+        ``python -m nexura_sandbox.preflight`` on the host before serving.
+        """
+        fields: dict[str, Any] = {
+            "backend": "gvisor_oci",
+            "backends": ["gvisor_oci"],
+            "min_isolation": "gvisor",
+            "allow_network": False,
+            "readonly_root": True,
+            "allow_unisolated": False,
+            "max_processes": 1,
+            "runsc_path": runsc_path,
+            "rootfs_path": rootfs_path,
+            "gvisor_cgroup_parent": cgroup_parent,
+            "gvisor_runsc_sha512": runsc_sha512,
+        }
+        fields.update(overrides)
+        fields["hardened_profile"] = GVISOR_PRODUCTION_PROFILE
+        return cls(**fields)
 
 
 class ExecutionRequest(BaseModel):

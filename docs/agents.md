@@ -787,6 +787,7 @@ assert '(["refund (approval)"])' in diagram and "-.->|handoff|" in diagram
 
 ## See also
 
+- [Harness](harness.md): opt-in skills, context compaction, plans and scoped filesystems.
 - [Getting started](getting-started.md): install and first run.
 - [Structured output](structured-output.md): typed results from an agent.
 - [Tools](tools.md): function tools and dependencies in depth.
@@ -892,7 +893,7 @@ pip install "nexura-agents[otel]"    # + OpenTelemetry tracing
 > OpenAI, Anthropic, Gemini or Sarvam with your own key; the OpenAI, Anthropic and Sarvam checks have not run.
 > LiteLLM is checked offline only, against the real library's mock mode.
 >
-> Full guides live in the repository's `docs/` folder: 43 guides (getting started,
+> Full guides live in the repository's `docs/` folder: 45 guides (getting started,
 > agents, teams, tools, MCP and OpenAPI, A2A, memory, prompts, structured output,
 > approvals, guardrails, multimodal, providers, tracing, testing and more) plus a
 > generated API reference.

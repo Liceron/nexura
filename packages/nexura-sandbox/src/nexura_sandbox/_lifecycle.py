@@ -167,6 +167,42 @@ def remove_gvisor_task(
         raise OSError("gVisor task removal failed")
 
 
+_RUN_LEAF = re.compile(r"nex_[a-f0-9]{32}")
+
+
+def remove_empty_cgroup_leaf(
+    leaf: Path,
+    prefix: list[str],
+    *,
+    runner: Callable[..., tuple[int, bytes]] | None = None,
+    timeout: float = 3.0,
+) -> bool:
+    """Remove one gVisor run's cgroup leaf once it is unpopulated; True when it is gone.
+
+    Only ``.../nex_<32 hex>`` paths are accepted. ``rmdir`` (through the runsc command
+    prefix when there is one) cannot remove a cgroup that still has processes or children,
+    and a populated leaf is never touched, so a live sandbox is unaffected.
+    """
+    if not leaf.is_absolute() or ".." in leaf.parts or not _RUN_LEAF.fullmatch(leaf.name):
+        raise ValueError(f"not a gVisor run cgroup leaf: {leaf}")
+    run = runner or command
+    deadline = time.monotonic() + timeout
+    while leaf.exists():
+        with contextlib.suppress(OSError, ValueError, subprocess.SubprocessError):
+            events = (leaf / "cgroup.events").read_text().split()
+            if "populated" in events and events[events.index("populated") + 1] == "0":
+                if prefix:
+                    run([*prefix, "/usr/bin/rmdir", "--", str(leaf)])
+                else:
+                    leaf.rmdir()
+        if not leaf.exists():
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+    return True
+
+
 def service_identity(runsc: str, rootfs: str, prefix: list[str]) -> str:
     """Stable across service restarts; separate installations/cgroups are different owners."""
     value = [
@@ -185,27 +221,35 @@ def process_start(pid: int) -> str:
     return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
 
 
-def mark_gvisor_task(task: Path, identity: str, container: str) -> None:
-    (task / "owner.json").write_text(
-        json.dumps(
-            {
-                "identity": identity,
-                "container": container,
-                "pid": os.getpid(),
-                "start": process_start(os.getpid()),
-                "boot": Path("/proc/sys/kernel/random/boot_id").read_text(),
-            }
-        )
-    )
+def mark_gvisor_task(
+    task: Path, identity: str, container: str, *, cgroup_leaf: Path | None = None
+) -> None:
+    owner: dict[str, Any] = {
+        "identity": identity,
+        "container": container,
+        "pid": os.getpid(),
+        "start": process_start(os.getpid()),
+        "boot": Path("/proc/sys/kernel/random/boot_id").read_text(),
+    }
+    if cgroup_leaf is not None:
+        owner["cgroup_leaf"] = str(cgroup_leaf)
+    (task / "owner.json").write_text(json.dumps(owner))
 
 
 def sweep_gvisor_tasks(
-    runsc: str, prefix: list[str], identity: str, root: Path | None = None
+    runsc: str,
+    prefix: list[str],
+    identity: str,
+    root: Path | None = None,
+    *,
+    cgroup_root: Path | None = None,
 ) -> None:
     """Conservative bounded startup sweep: unknown, live or ambiguous state is untouched.
 
     Old unmarked directories cannot be attributed safely and need operator cleanup.
     A successful runsc list is required before deciding a container no longer exists.
+    With ``cgroup_root``, a recorded cgroup leaf of that absent container (named after it,
+    under ``cgroup_root``) is removed too, but only once it is empty.
     """
     root = root or Path(tempfile.gettempdir())
     deadline = time.monotonic() + 5
@@ -257,6 +301,15 @@ def sweep_gvisor_tasks(
                 if any(item["id"] == container for item in containers):
                     continue  # Never delete or unmount a live/stopped-but-existing container.
                 command([*runtime, "delete", "--force", container], timeout=1)
+                leaf = owner.get("cgroup_leaf")
+                if cgroup_root is not None and isinstance(leaf, str):
+                    leaf_path = Path(leaf)
+                    if leaf_path.name == container and leaf_path.is_relative_to(cgroup_root):
+                        remove_empty_cgroup_leaf(
+                            leaf_path,
+                            prefix,
+                            timeout=max(0.01, min(1, deadline - time.monotonic())),
+                        )
                 remove_gvisor_task(task, prefix)
             except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
                 continue  # Failure is not proof of stale state; leave it for the operator.
@@ -274,6 +327,7 @@ class RunGuard:
         runtime: list[str] | None = None,
         prefix: list[str] | None = None,
         container: str | None = None,
+        cgroup_leaf: Path | None = None,
     ) -> None:
         from nexura_sandbox.gvisor_worker import _start_crash_guard
 
@@ -296,6 +350,7 @@ class RunGuard:
                 "runtime": runtime,
                 "prefix": prefix or [],
                 "container": container,
+                "cgroup_leaf": str(cgroup_leaf) if cgroup_leaf else None,
             }
             self.proc = _start_crash_guard(
                 data,
@@ -383,7 +438,14 @@ def _watch(data: dict[str, Any], runner: Callable[..., tuple[int, bytes]]) -> No
                     )
                 ):
                     raise OSError("cannot prove crashed gVisor container was deleted")
+            leaf_left = False
+            if data.get("cgroup_leaf"):
+                leaf_left = not remove_empty_cgroup_leaf(
+                    Path(data["cgroup_leaf"]), data["prefix"], runner=runner
+                )
             remove_gvisor_task(Path(data["task"]), data["prefix"], runner=runner)
+            if leaf_left:
+                raise OSError("crashed gVisor run's cgroup leaf remains: " + data["cgroup_leaf"])
     finally:
         selector.close()
         if namespace is not None:
