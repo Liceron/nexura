@@ -794,7 +794,7 @@ def init_command(args: argparse.Namespace) -> int:
     print(
         "\nNext steps (see README.md):\n"
         f"  cd {args.directory}\n"
-        '  pip install -e ".[dev]"    # until Nexura is on PyPI, add --find-links to its wheels\n'
+        '  pip install -e ".[dev]"\n'
         "  pytest                     # offline tests\n"
         "  nexura-runtime dev         # local service and Studio with this project registered"
     )

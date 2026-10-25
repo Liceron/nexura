@@ -5,10 +5,8 @@ description = "{{description}}"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-    # nexura-runtime {{nexura_version}} is not on PyPI yet. Until it is, build the wheels in a
-    # checkout of https://github.com/Liceron/nexura (`uv build --all-packages`) and install
-    # this project with `pip install --find-links /path/to/nexura/dist -e ".[dev]"`
-    # (see README.md). Once it is published, `pip install -e ".[dev]"` is enough.
+    # Installed from PyPI. To try unreleased Nexura changes, add
+    # `--find-links /path/to/nexura/dist` (wheels built with `uv build --all-packages`).
     "nexura-agents>={{nexura_version}},<0.5",
     "nexura-runtime[studio]>={{nexura_version}},<0.5",
     "nexura-studio>={{nexura_version}},<0.5",

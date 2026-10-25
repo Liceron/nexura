@@ -89,7 +89,8 @@ def test_template_project_runs_its_own_offline_tests(
     pyproject = tomllib.loads(text)
     deps = pyproject["project"]["dependencies"]
     assert any(d.startswith("nexura-runtime") for d in deps)
-    assert "not on PyPI yet" in text and "--find-links" in text
+    # PyPI first; local wheels stay optional.
+    assert "not on PyPI yet" not in text and "--find-links" in text
     assert pyproject["tool"]["nexura"] == {
         "template": template,
         "handlers": [f"{package}.studio:registry"],
@@ -439,9 +440,10 @@ def test_deploy_docker_writes_files_with_the_security_caveats(
         "never add",
         "--insecure-allow-unauthenticated-network",
         "external security review",
-        "not on PyPI",
+        "PIP_FIND_LINKS",
     ):
         assert needle in deploy_md, needle
+    assert "not on PyPI" not in deploy_md
 
     ignore = (project / ".dockerignore").read_text(encoding="utf-8").splitlines()
     assert {".env", ".env.*", ".nexura/", ".venv/", ".git/"} <= set(ignore)

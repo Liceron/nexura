@@ -7,17 +7,15 @@ Everything runs offline until you configure a model and an embedder.
 
 ## Install
 
-Nexura {{nexura_version}} is not on PyPI yet. Until it is, build its wheels from a checkout and
-install this project against them (Python 3.12):
+Python 3.12:
 
 ```bash
-git clone https://github.com/Liceron/nexura /path/to/nexura
-(cd /path/to/nexura && uv build --all-packages)
 python -m venv .venv && . .venv/bin/activate
-pip install --find-links /path/to/nexura/dist -e ".[dev]"
+pip install -e ".[dev]"
 ```
 
-Once Nexura is published, `pip install -e ".[dev]"` is enough.
+To try unreleased Nexura changes, build its wheels from a checkout
+(`uv build --all-packages`) and add `--find-links /path/to/nexura/dist`.
 
 ## The embedder
 
