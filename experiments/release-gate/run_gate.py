@@ -70,8 +70,9 @@ def command_receipt(
     cwd: Path = ROOT,
     env: dict[str, str] | None = None,
     extra: Callable[[str], tuple[list[Invariant], dict[str, Any]]] | None = None,
+    timeout: int = 1800,
 ) -> Receipt:
-    proc, duration = sh(cmd, cwd=cwd, env=env)
+    proc, duration = sh(cmd, cwd=cwd, env=env, timeout=timeout)
     output = proc.stdout + proc.stderr
     invariants = [Invariant("exit code zero", proc.returncode == 0, f"exit {proc.returncode}")]
     measurements: dict[str, Any] = {}
@@ -166,9 +167,15 @@ def check_python_tests() -> Receipt:
                 "no:cacheprovider",
                 "-o",
                 "addopts=",
+                # Parallel like CI (one file per worker); the serial suite outgrew 30 minutes.
+                "-n",
+                "4",
+                "--dist",
+                "loadfile",
             ],
             env=env,
             extra=extra,
+            timeout=3600,
         )
 
 

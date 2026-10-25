@@ -314,16 +314,16 @@ async def test_reconciled_result_continuation_keeps_the_deadline() -> None:
 
     async def pay(state: Any) -> Any:
         calls.append("pay")
-        await asyncio.sleep(0.02)
+        await asyncio.sleep(0.2)
         raise ConnectionError("local fake response lost")
 
     async def probe(state: Any, intent: Any) -> Any:
-        await asyncio.sleep(0.02)
+        await asyncio.sleep(0.2)
         return Applied({"paid": True})
 
     async def next_action(state: Any) -> Any:
         calls.append("next")
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(3)
 
     registry = ModuleRegistry()
     registry.register("pay", pay, effect="reconcilable", reconcile=probe)
@@ -332,8 +332,9 @@ async def test_reconciled_result_continuation_keeps_the_deadline() -> None:
     spec.nodes["pay"].default_transition = "next"
     spec.nodes["next"] = WorkflowNode(id="next", handler="next")
     started = time.monotonic()
-    paused = await WorkflowEngine(spec, registry, store=MemoryWorkflowStore(), timeout=0.06).run({})
-    assert 0.045 <= time.monotonic() - started < 0.15
+    paused = await WorkflowEngine(spec, registry, store=MemoryWorkflowStore(), timeout=0.6).run({})
+    # Timings are scaled 10x so the shared deadline is not eaten by test-runner overhead.
+    assert 0.45 <= time.monotonic() - started < 1.5
     assert paused.pause_reason == "effect_unknown" and paused.state["paid"] is True
     assert paused.pending_effect["node_id"] == "next" and calls == ["pay", "next"]
 
