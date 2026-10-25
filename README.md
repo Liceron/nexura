@@ -16,31 +16,29 @@ Agents and workflow steps can share a budget that reserves estimated cost before
 
 ## Install
 
-**Alpha (0.4), not published:** nothing is on PyPI or npm yet. Start from a source checkout with Python 3.12:
+**Alpha (0.4).** `nexura-runtime` and its add-ons need Python 3.12; `nexura-agents`, `nexura-guardrails` and `nexura-vertex` run on Python 3.11-3.13. Install from PyPI and npm:
 
 ```bash
-git clone https://github.com/Liceron/nexura
-cd nexura
-uv sync
-uv build --all-packages
+pip install "nexura-runtime[studio]"   # platform + REST service and Studio
+pip install nexura-agents                # or only the standalone agent SDK
 ```
 
-Install locally built wheels with the commands below, from the checkout. Each Python package is independent; the runtime does not require every add-on. The TypeScript package is an HTTP client, with no runtime of its own.
+Each Python package is independent; the runtime does not require every add-on. The TypeScript package is an HTTP client, with no runtime of its own.
 
-| Package | Purpose | Install from local artifacts |
+| Package | Purpose | Install |
 |---|---|---|
-| `nexura-agents` | Standalone agents, tools, teams, providers | `pip install --no-index --find-links dist nexura-agents` |
-| `nexura-runtime` | Durable workflows, RAG, evaluations | `pip install --no-index --find-links dist nexura-runtime` |
-| `nexura-connectors` | 15 SaaS/database/mail workflow connectors | `pip install --no-index --find-links dist nexura-connectors` |
-| `nexura-postgres` | PostgreSQL storage and pgvector | `pip install --no-index --find-links dist nexura-postgres` |
-| `nexura-qdrant` | Qdrant vector store | `pip install --no-index --find-links dist nexura-qdrant` |
-| `nexura-sandbox` | WASI, bubblewrap and gVisor backends | `pip install --no-index --find-links dist nexura-sandbox` |
-| `nexura-vertex` | Google Vertex AI provider | `pip install --no-index --find-links dist nexura-vertex` |
-| `nexura-guardrails` | LLM judge, pre-filters, tiered checks | `pip install --no-index --find-links dist nexura-guardrails` |
-| `nexura-studio` | Older built-in Studio and launcher | `pip install --no-index --find-links dist nexura-studio` |
-| `@liceron/nexura-sdk` | TypeScript REST API client | `npm install ./clients/typescript/liceron-nexura-sdk-0.4.0.tgz` |
+| `nexura-agents` | Standalone agents, tools, teams, providers | `pip install nexura-agents` |
+| `nexura-runtime` | Durable workflows, RAG, evaluations | `pip install nexura-runtime` |
+| `nexura-connectors` | 15 SaaS/database/mail workflow connectors | `pip install nexura-connectors` |
+| `nexura-postgres` | PostgreSQL storage and pgvector | `pip install nexura-postgres` |
+| `nexura-qdrant` | Qdrant vector store | `pip install nexura-qdrant` |
+| `nexura-sandbox` | WASI, bubblewrap and gVisor backends | `pip install nexura-sandbox` |
+| `nexura-vertex` | Google Vertex AI provider | `pip install nexura-vertex` |
+| `nexura-guardrails` | LLM judge, pre-filters, tiered checks | `pip install nexura-guardrails` |
+| `nexura-studio` | Older built-in Studio and launcher | `pip install nexura-studio` |
+| `@liceron/nexura-sdk` | TypeScript REST API client | `npm install @liceron/nexura-sdk` |
 
-The wheel commands assume dependencies are already installed or available in `dist/`; `uv build` does not collect dependency wheels. For the TypeScript artifact, first run `npm ci && npm run build && npm pack` in `clients/typescript`. See [Packages and installation](https://github.com/Liceron/nexura/blob/main/docs/packages.md) for dependencies, source installs and backend requirements.
+To work from a source checkout instead, run `git clone https://github.com/Liceron/nexura && cd nexura && uv sync`. See [Packages and installation](https://github.com/Liceron/nexura/blob/main/docs/packages.md) for dependencies, source installs and backend requirements.
 
 Core runtime dependencies are `httpx`, `pydantic`, `packaging` and `cryptography`. Optional extras:
 
@@ -172,7 +170,7 @@ Workflow JSON never contains code: only trusted registered handlers run. Approva
 
 Historical fake-model measurements establish neither real-model quality, provider bills/cache savings, production scale, customer demand nor superiority over other frameworks. The older gate that skipped a required browser check remains documented separately. The approximately 135 ms SDK import on 2026-10-09 (Python 3.12, warm cache, lazy provider loading) is a single local measurement, not a benchmark. See the [verification record](https://github.com/Liceron/nexura/blob/main/docs/testing.md#verification-record) for the complete chronology and limitations.
 
-Nothing has been published. Final package names still need registration and npm scope ownership needs confirmation; the [historical naming check](https://github.com/Liceron/nexura/blob/main/docs/testing.md#publication-and-naming) establishes no current availability. Copyright holder and security contact are set: Liceron, info@liceron.in.
+Version 0.4.0 was published to PyPI and npm on 2026-10-25. Copyright holder and security contact: Liceron, info@liceron.in.
 
 ## Documentation map
 

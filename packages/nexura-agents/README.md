@@ -8,7 +8,7 @@ Build typed Python agents with tools, estimated-cost admission control, exact-ac
 pip install nexura-agents
 ```
 
-Alpha and unpublished: use `pip install -e packages/nexura-agents` from the [source checkout](https://github.com/Liceron/nexura), or a locally built wheel. Core dependencies are only `httpx` and `pydantic`; `nexura-vertex`, `[litellm]` and `[otel]` add Vertex AI, LiteLLM and tracing.
+Alpha (0.4): `pip install nexura-agents` (or `pip install -e packages/nexura-agents` from the [source checkout](https://github.com/Liceron/nexura)). Core dependencies are only `httpx` and `pydantic`; `nexura-vertex`, `[litellm]` and `[otel]` add Vertex AI, LiteLLM and tracing.
 
 ## Minimal examples
 
@@ -119,7 +119,7 @@ print(shop.refunds)  # ['A1:250.0']
 
 ## Status and limits
 
-**Alpha (0.4), unpublished.** Python 3.11–3.13 declared; GitHub Actions runs the wheel's test suite on 3.11, 3.12 and 3.13 (Linux) and on 3.12 for macOS and Windows, all passing since 2026-10-21. On 2026-10-09, 295 SDK tests passed from wheels on 3.11 and 3.13, excluding 4 platform-importing files. `nexura-runtime` requires Python 3.12. Providers are mock-verified except owner-run Vertex AI (2026-10-08: reply/tool/stream) and Gemini API (2026-10-20: reply/tool/stream/structured output); OpenAI, Anthropic and Sarvam live checks have not run. LiteLLM is checked only with the real library's offline mock mode.
+**Alpha (0.4).** Python 3.11–3.13 declared; GitHub Actions runs the wheel's test suite on 3.11, 3.12 and 3.13 (Linux) and on 3.12 for macOS and Windows, all passing since 2026-10-21. On 2026-10-09, 295 SDK tests passed from wheels on 3.11 and 3.13, excluding 4 platform-importing files. `nexura-runtime` requires Python 3.12. Providers are mock-verified except owner-run Vertex AI (2026-10-08: reply/tool/stream) and Gemini API (2026-10-20: reply/tool/stream/structured output); OpenAI, Anthropic and Sarvam live checks have not run. LiteLLM is checked only with the real library's offline mock mode.
 
 MIT edition: **single user, this machine only; for a team or a public endpoint use the hosted or enterprise edition**. Agent teams compose code, not human accounts. No external security review; no real-world users yet. Budgets reserve estimates, not an invoice ceiling; unknown usage fails closed under token limits. Only marked tools pause for approval; canonical digests refuse non-string mapping keys. MCP serving is checked with this SDK's in-process client only, not external apps. A2A has no push notifications, ListTasks/Subscribe, HTTP+JSON/gRPC, signed cards or OAuth; no live third-party-agent checks. There are no hosted web-search/code/file tools or tracing UI. See [all SDK details](https://github.com/Liceron/nexura/blob/main/docs/agents.md), [approvals](https://github.com/Liceron/nexura/blob/main/docs/approvals.md), [budget limits](https://github.com/Liceron/nexura/blob/main/docs/budgets-and-usage.md), [verification history](https://github.com/Liceron/nexura/blob/main/docs/testing.md#verification-record) and the [historical comparison caveats](https://github.com/Liceron/nexura/blob/main/docs/comparisons.md).
 

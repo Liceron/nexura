@@ -8,7 +8,7 @@ Google Vertex AI models for Nexura agents, using Google Application Default Cred
 pip install nexura-vertex
 ```
 
-Alpha and unpublished: install from the [source checkout](https://github.com/Liceron/nexura) or local wheels until publication. See [package installation](https://github.com/Liceron/nexura/blob/main/docs/packages.md).
+Alpha (0.4): `pip install nexura-vertex`. See [package installation](https://github.com/Liceron/nexura/blob/main/docs/packages.md).
 
 ## Minimal example
 

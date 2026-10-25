@@ -9,7 +9,7 @@ pip install nexura-sandbox
 pip install "nexura-sandbox[wasi]"  # WASI extra
 ```
 
-Alpha and unpublished: install from the [source checkout](https://github.com/Liceron/nexura) or local wheels until publication. See [package installation](https://github.com/Liceron/nexura/blob/main/docs/packages.md).
+Alpha (0.4): `pip install nexura-sandbox`. See [package installation](https://github.com/Liceron/nexura/blob/main/docs/packages.md).
 
 ## Minimal example
 

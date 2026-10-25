@@ -1,9 +1,8 @@
 # Changelog
 
-All notable changes to this project. Versions are unreleased local builds; nothing
-has been published.
+All notable changes to this project.
 
-## Unreleased (0.4.0)
+## 0.4.0 (2026-10-25)
 
 ### Removed (P35 A6 S12: legacy durable-execution paths)
 - `DurableExecutionEngine` and its `DurableWorkflowSpec`, `DurableNodeSpec`, `DurableRunState`,

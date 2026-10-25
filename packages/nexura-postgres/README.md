@@ -8,7 +8,7 @@ PostgreSQL run/session storage and a pgvector vector store for nexura-runtime.
 pip install nexura-postgres
 ```
 
-Alpha and unpublished: install from the [source checkout](https://github.com/Liceron/nexura) or local wheels until publication. See [package installation](https://github.com/Liceron/nexura/blob/main/docs/packages.md).
+Alpha (0.4): `pip install nexura-postgres`. See [package installation](https://github.com/Liceron/nexura/blob/main/docs/packages.md).
 
 ## Minimal example
 

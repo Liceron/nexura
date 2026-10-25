@@ -140,15 +140,15 @@ Source: https://github.com/Liceron/nexura/blob/main/docs/packages.md
 
 # Packages and installation
 
-The package inventory, source/wheel installation commands and backend requirements for the MIT edition. All packages are alpha and unpublished; bare package names below describe the intended install interface. Until publication, build local wheels as described in the [front page](../README.md#install). See the [documentation index](README.md) for the subject guides.
+The package inventory, source/wheel installation commands and backend requirements for the MIT edition. All packages are alpha (0.4) and published on PyPI and npm. See the [documentation index](README.md) for the subject guides.
 
 ## Package overview
 
 A typed Python SDK for building operational agents and approval-gated workflows,
 with a local REST service, a TypeScript API client and a browser Studio.
 
-> **Status: alpha, not published.** Nothing here is on PyPI or npm yet. Install from
-> a source checkout or a locally built wheel. See [Publication status](testing.md#publication-and-naming).
+> **Status: alpha (0.4), published 2026-10-25.** Install with `pip` or `npm` as below, or from a
+> source checkout.
 
 > **Just want to build agents?** Start with **[Nexura Agents](../packages/nexura-agents/README.md)**
 > (`pip install nexura-agents`): the standalone agent SDK, two dependencies, offline-testable.
@@ -223,8 +223,8 @@ pip install "dist/nexura_runtime-0.4.0-py3-none-any.whl[studio]"
 ```
 
 The repository builds one package per feature group (`uv build --all-packages` writes every
-wheel to `dist/`; nothing is on PyPI yet, so install those wheels with
-`pip install --find-links dist <name>`). Each package depends on `nexura-runtime` (or, for
+wheel to `dist/`; install those local wheels with `pip install --find-links dist <name>`, or install the
+published packages by name). Each package depends on `nexura-runtime` (or, for
 Vertex AI, on `nexura-agents` only), and the runtime works without any of them:
 
 ```bash

@@ -5,10 +5,8 @@ JavaScript environment with `fetch` (for example Node.js 18 or later).
 
 ## Install
 
-Not yet published to npm. Build from the repository's `clients/typescript` directory:
-
 ```sh
-npm install && npm run build
+npm install @liceron/nexura-sdk
 ```
 
 ## Minimal example
@@ -28,7 +26,7 @@ console.log(workflows);
 
 ## Status and limits
 
-Alpha (0.4), unpublished. Node 24 is the tested version; other fetch-capable environments
+Alpha (0.4). Node 24 is the tested version; other fetch-capable environments
 are not covered by that verification. This is an API client, with no standalone agent runtime.
 The MIT service is single user, this machine only. Its session token stops other web pages,
 not local programs that can read it; it adds no shared-service authentication.
