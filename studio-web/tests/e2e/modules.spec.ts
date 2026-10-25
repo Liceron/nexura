@@ -82,9 +82,9 @@ test.describe('Schema-Driven Module Configuration & Inspector (F05)', () => {
     const palette = page.getByRole('dialog', { name: 'Available modules drawer' });
     await expect(palette).toBeVisible();
 
-    // Filter by prompt
+    // Filter by the exact module id (other modules mention prompts too, e.g. guardrails.check)
     const searchInput = palette.getByPlaceholder(/Search modules/i);
-    await searchInput.fill('prompt');
+    await searchInput.fill('nexura.prompt.template');
 
     const addPromptCard = palette.getByText('+ Add Node').first();
     await addPromptCard.click();
@@ -113,7 +113,7 @@ test.describe('Schema-Driven Module Configuration & Inspector (F05)', () => {
     await addStepBtn.click();
     await page.getByRole('button', { name: 'Standard', exact: true }).click();
     await expect(palette).toBeVisible();
-    await searchInput.fill('prompt');
+    await searchInput.fill('nexura.prompt.template');
     await palette.getByText('+ Add Node').first().click();
     await expect(palette).not.toBeVisible();
 
