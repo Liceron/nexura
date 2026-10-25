@@ -334,8 +334,14 @@ class JudgeCheck:
     ``"review"``. ``cache``: True (a per-run LRU of ``cache_size`` entries; with
     ``cache_ttl`` seconds it is process-wide instead), False, or a shared ``VerdictCache``.
     ``context_tokens`` (default 4096, Ollama's default ``num_ctx``) is the judge model's
-    context window. The fully built prompt (policy, instructions, fenced text and context)
-    must fit in ``context_tokens - max_output_tokens - 256`` tokens, measured by the strict
+    context window. An ``"ollama:<tag>"`` model uses Ollama's native ``/api/chat``
+    (``api="auto"``, P39 G6) and sends ``context_tokens`` as ``num_ctx``, so raising it is
+    enough to judge longer text (the server needs the memory); ``base_url`` (default
+    ``http://localhost:11434``), ``keep_alive`` and an ``httpx`` ``transport`` apply to that
+    route only. ``api="openai"`` keeps the OpenAI-compatible endpoint, whose context is the
+    server's own (match ``context_tokens`` to it). The fully built prompt (policy,
+    instructions, fenced text and context) must fit in
+    ``context_tokens - max_output_tokens - 256`` tokens, measured by the strict
     upper bound ``token_upper_bound`` (its UTF-8 length); otherwise nothing is sent and the
     verdict is ``error`` with ``error_type="ContentTooLong"`` and ``evidence["hard"] =
     True``, which neither this
@@ -362,8 +368,38 @@ class JudgeCheck:
         cache_ttl: float | None = None,
         structured_output: bool = True,
         context_tokens: int = DEFAULT_CONTEXT_TOKENS,
+        api: Literal["auto", "ollama", "openai"] = "auto",
+        base_url: str | None = None,
+        keep_alive: str | int | None = None,
+        transport: Any = None,
     ) -> None:
-        if isinstance(model, str):
+        if api not in ("auto", "ollama", "openai"):
+            raise ValueError("api must be 'auto', 'ollama' or 'openai'.")
+        if isinstance(context_tokens, bool) or not isinstance(context_tokens, int):
+            raise ValueError("context_tokens must be an integer.")
+        native = isinstance(model, str) and (
+            api == "ollama" or (api == "auto" and model.startswith("ollama:"))
+        )
+        if (base_url is not None or transport is not None or keep_alive is not None) and not native:
+            raise ValueError(
+                "base_url, keep_alive and transport apply to Ollama's native API only "
+                "(an 'ollama:' model with api='auto' or 'ollama')."
+            )
+        if native:
+            # P39 G6: Ollama's native /api/chat takes num_ctx per request, so the prompt cap
+            # below is the context the server really uses.
+            from nexura_guardrails.ollama_chat import OllamaChatModel
+
+            self.model = OllamaChatModel(
+                model,
+                base_url=base_url,
+                context_tokens=context_tokens,
+                timeout=timeout if isinstance(timeout, (int, float)) else 10.0,
+                keep_alive=keep_alive,
+                transport=transport,
+            )
+            self.model_id = self.model.model_id
+        elif isinstance(model, str):
             from nexura_agents.models.infer import infer_model
 
             self.model_id = model
@@ -617,7 +653,10 @@ class JudgeCheck:
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # provider errors, budget refusals: fail closed
-            return self._failure(type(exc).__name__, "judge call failed", started, None)
+            error_type = getattr(exc, "error_type", None)
+            if not isinstance(error_type, str) or not error_type.isidentifier():
+                error_type = type(exc).__name__
+            return self._failure(error_type, "judge call failed", started, None)
         usage = response.usage
         raw = response.message.content if response.message is not None else None
         try:

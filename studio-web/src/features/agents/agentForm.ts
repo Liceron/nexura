@@ -1,7 +1,15 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Liceron
 import { NexuraApiError } from '@liceron/nexura-sdk';
-import type { AgentFieldError, AgentRecord, AgentServerLimits, AgentSpec } from '@liceron/nexura-sdk';
+import type {
+  AgentFieldError,
+  AgentGuardrailsSpec,
+  AgentRecord,
+  AgentServerLimits,
+  AgentSpec,
+  GuardrailPresetName,
+  GuardrailPresetRef,
+} from '@liceron/nexura-sdk';
 
 /** Palette module that runs a saved agent in a workflow. */
 export const AGENT_NODE_MODULE_ID = 'nexura.agents.agent';
@@ -16,6 +24,14 @@ const LABEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 const CONTROL_CHARS = /[\u0000-\u0008\u000b-\u001f\u007f]/;
 export const MAX_DESCRIPTION_CHARS = 500;
 export const MAX_OUTPUT_SCHEMA_CHARS = 16_000;
+/** Presets a new agent starts with (zero cost, no network; P39 G6 design section 10). */
+export const DEFAULT_GUARDRAIL_PRESETS: GuardrailPresetName[] = ['pii_redact', 'injection_fast'];
+export const GUARDRAIL_PRESET_NAMES: GuardrailPresetName[] = ['pii_block', 'pii_redact', 'injection_fast', 'safety_local', 'judge'];
+export const STREAM_GUARDS = ['auto', 'hold', 'chunked', 'passthrough'] as const;
+/** Presets that check the answer: its streamed text cannot be passed through unchecked. */
+export const OUTPUT_PRESETS: GuardrailPresetName[] = ['pii_redact', 'safety_local', 'judge'];
+export type StreamGuardChoice = (typeof STREAM_GUARDS)[number];
+export const MAX_JUDGE_POLICY_CHARS = 4_000;
 
 /** Server bounds used until `GET /agents/options` answers (the server's defaults). */
 export const DEFAULT_SERVER_LIMITS: AgentServerLimits = {
@@ -44,13 +60,28 @@ export interface AgentDraft {
   max_turns: string;
   max_tool_calls: string;
   timeout_seconds: string;
+  /** Guardrail presets switched on, in the order they were chosen. */
+  guardrail_presets: GuardrailPresetName[];
+  /** True while the saved agent has no guardrails field and nothing was switched on. */
+  guardrails_unset: boolean;
+  judge_policy: string;
+  /** A chat model name for the judge; '' uses the agent's own model. */
+  judge_model: string;
+  /** An Ollama guard tag for safety_local; '' uses the server's default. */
+  safety_model: string;
+  stream_guard: StreamGuardChoice;
+  /** Options of saved presets the form does not edit (kinds, threshold), kept as they are. */
+  guardrail_extras: Partial<Record<GuardrailPresetName, GuardrailPresetRef>>;
 }
 
 /** Editor fields a field error can point at. */
-export type DraftField = keyof AgentDraft | 'form';
+export type DraftField = keyof AgentDraft | 'guardrails' | 'form';
 export type DraftErrors = Partial<Record<DraftField, string>>;
 
-export function emptyDraft(model: string = OFFLINE_MODEL): AgentDraft {
+export function emptyDraft(
+  model: string = OFFLINE_MODEL,
+  guardrails: GuardrailPresetName[] = DEFAULT_GUARDRAIL_PRESETS,
+): AgentDraft {
   return {
     name: '',
     description: '',
@@ -64,7 +95,47 @@ export function emptyDraft(model: string = OFFLINE_MODEL): AgentDraft {
     max_turns: '6',
     max_tool_calls: '10',
     timeout_seconds: '60',
+    guardrail_presets: [...guardrails],
+    guardrails_unset: false,
+    judge_policy: '',
+    judge_model: '',
+    safety_model: '',
+    stream_guard: 'auto',
+    guardrail_extras: {},
   };
+}
+
+function guardrailFields(spec: AgentGuardrailsSpec | null | undefined) {
+  const refs = spec?.presets ?? [];
+  const judge = refs.find((r) => r.preset === 'judge');
+  const safety = refs.find((r) => r.preset === 'safety_local');
+  const extras: Partial<Record<GuardrailPresetName, GuardrailPresetRef>> = {};
+  for (const ref of refs) if (ref.preset !== 'judge' && ref.preset !== 'safety_local') extras[ref.preset] = { ...ref };
+  const mode = spec?.stream_guard ?? 'auto';
+  return {
+    guardrail_presets: refs.map((r) => r.preset),
+    guardrails_unset: spec == null,
+    judge_policy: judge?.policy ?? '',
+    judge_model: judge?.model ?? '',
+    safety_model: safety?.model ?? '',
+    stream_guard: (STREAM_GUARDS as readonly string[]).includes(mode) ? (mode as StreamGuardChoice) : 'auto',
+    guardrail_extras: extras,
+  };
+}
+
+/** The spec's `guardrails` value for a draft: `null` for an agent that never had any. */
+export function guardrailsOfDraft(draft: AgentDraft): AgentGuardrailsSpec | null {
+  if (draft.guardrails_unset && draft.guardrail_presets.length === 0 && draft.stream_guard === 'auto') return null;
+  const presets: GuardrailPresetRef[] = draft.guardrail_presets.map((preset) => {
+    if (preset === 'judge') {
+      const ref: GuardrailPresetRef = { preset, policy: draft.judge_policy.trim() };
+      if (draft.judge_model) ref.model = draft.judge_model;
+      return ref;
+    }
+    if (preset === 'safety_local') return draft.safety_model ? { preset, model: draft.safety_model } : { preset };
+    return draft.guardrail_extras[preset] ? { ...draft.guardrail_extras[preset], preset } : { preset };
+  });
+  return { presets, stream_guard: draft.stream_guard };
 }
 
 export function draftFromRecord(record: AgentRecord): AgentDraft {
@@ -82,6 +153,7 @@ export function draftFromRecord(record: AgentRecord): AgentDraft {
     max_turns: String(s.limits?.max_turns ?? 6),
     max_tool_calls: String(s.limits?.max_tool_calls ?? 10),
     timeout_seconds: String(s.limits?.timeout_seconds ?? 60),
+    ...guardrailFields(s.guardrails),
   };
 }
 
@@ -174,6 +246,15 @@ export function validateDraft(
   if (calls.error) errors.max_tool_calls = calls.error;
   const timeout = boundedNumber(draft.timeout_seconds, 1, limits.max_timeout_seconds, false);
   if (timeout.error) errors.timeout_seconds = timeout.error;
+  if (draft.stream_guard === 'passthrough' && draft.guardrail_presets.some((p) => OUTPUT_PRESETS.includes(p))) {
+    errors.guardrails = 'Answers that a guardrail checks cannot stream unchecked: choose another stream mode.';
+  }
+  if (draft.guardrail_presets.includes('judge')) {
+    if (!draft.judge_policy.trim()) errors.guardrails = 'The judge needs policy text: what to block and what to allow.';
+    else if (charCount(draft.judge_policy) > MAX_JUDGE_POLICY_CHARS) {
+      errors.guardrails = `The judge policy is at most ${MAX_JUDGE_POLICY_CHARS} characters.`;
+    }
+  }
 
   if (Object.keys(errors).length > 0) return { spec: null, errors };
   const spec: AgentSpec = {
@@ -191,6 +272,7 @@ export function validateDraft(
       max_tool_calls: calls.value as number,
       timeout_seconds: timeout.value as number,
     },
+    guardrails: guardrailsOfDraft(draft),
   };
   if (pythonJsonLength(spec) > limits.max_spec_chars) {
     return { spec: null, errors: { form: `The whole agent is over ${limits.max_spec_chars} JSON characters.` } };
@@ -215,6 +297,7 @@ export function draftFieldOf(path: string): DraftField {
     'skills',
     'skills_label',
     'output_schema',
+    'guardrails',
   ];
   return known.includes(parts[0] as DraftField) ? (parts[0] as DraftField) : 'form';
 }

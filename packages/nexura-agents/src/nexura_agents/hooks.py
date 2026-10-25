@@ -91,6 +91,17 @@ class AgentHooks:
         """
         return None
 
+    def input_guardrails(self, ctx: RunContext[Any], agent: Agent) -> Sequence[Any]:
+        """Sync. Input guardrails these hooks add to ``agent``'s own (P39 G6).
+
+        They run once per run, after the agent's own input guardrails and before any model
+        call, on the user's latest message, exactly like ``Agent(input_guardrails=...)``
+        (same timeout, cancellation, ``GUARDRAIL_DECISION`` events and tripwire). A policy
+        installed with ``set_default_hooks`` uses this to check every run's input. They do
+        not run again on resume or recovery. Default: none.
+        """
+        return ()
+
     def output_guardrails(self, ctx: RunContext[Any], agent: Agent) -> Sequence[Any]:
         """Sync. Output guardrails these hooks add to ``agent``'s own (P39 G4).
 
@@ -140,6 +151,7 @@ HOOK_NAMES = (
     "on_agent_start",
     "on_agent_end",
     "on_handoff",
+    "input_guardrails",
     "output_guardrails",
 )
 
@@ -319,6 +331,13 @@ class ComposedHooks(AgentHooks):
                 return True
         return None
 
+    def input_guardrails(self, ctx: RunContext[Any], agent: Agent) -> Sequence[Any]:
+        """Every member's input guardrails, in list order."""
+        found: list[Any] = []
+        for member in self._members:
+            found.extend(hook_input_guardrails(member, ctx, agent))
+        return tuple(found)
+
     def output_guardrails(self, ctx: RunContext[Any], agent: Agent) -> Sequence[Any]:
         """Every member's output guardrails, in list order."""
         found: list[Any] = []
@@ -327,18 +346,27 @@ class ComposedHooks(AgentHooks):
         return tuple(found)
 
 
+def hook_input_guardrails(hooks: Any, ctx: RunContext[Any], agent: Agent) -> tuple[Any, ...]:
+    """``hooks.input_guardrails(ctx, agent)`` checked like :func:`hook_output_guardrails`."""
+    return _hook_guardrails(hooks, ctx, agent, "input_guardrails")
+
+
 def hook_output_guardrails(hooks: Any, ctx: RunContext[Any], agent: Agent) -> tuple[Any, ...]:
     """``hooks.output_guardrails(ctx, agent)`` checked: a sync method returning a list of
     guardrail functions; a missing method contributes nothing."""
-    method = getattr(hooks, "output_guardrails", None)
+    return _hook_guardrails(hooks, ctx, agent, "output_guardrails")
+
+
+def _hook_guardrails(hooks: Any, ctx: RunContext[Any], agent: Agent, name: str) -> tuple[Any, ...]:
+    method = getattr(hooks, name, None)
     if method is None:
         return ()
     if not callable(method):
         # A list assigned as a class attribute (``output_guardrails = [check]``) would
         # otherwise add no guardrail and no hold: fail closed instead.
         raise SDKValidationError(
-            f"AgentHooks.output_guardrails of {_member_name(hooks)} must be a method "
-            "(def output_guardrails(self, ctx, agent): return [...]), not "
+            f"AgentHooks.{name} of {_member_name(hooks)} must be a method "
+            f"(def {name}(self, ctx, agent): return [...]), not "
             f"{type(method).__name__}."
         )
     value = method(ctx, agent)
@@ -346,20 +374,19 @@ def hook_output_guardrails(hooks: Any, ctx: RunContext[Any], agent: Agent) -> tu
         if inspect.iscoroutine(value):
             value.close()  # never awaited: avoid the "never awaited" warning
         raise SDKValidationError(
-            f"AgentHooks.output_guardrails of {_member_name(hooks)} must be a regular (sync) "
+            f"AgentHooks.{name} of {_member_name(hooks)} must be a regular (sync) "
             "method; it returned an awaitable."
         )
     if value is None:
         return ()
     if isinstance(value, (str, bytes, Mapping)) or not isinstance(value, Sequence):
         raise SDKValidationError(
-            f"AgentHooks.output_guardrails of {_member_name(hooks)} must return a list of "
+            f"AgentHooks.{name} of {_member_name(hooks)} must return a list of "
             f"guardrail functions, not {type(value).__name__}."
         )
     if not all(callable(fn) for fn in value):
         raise SDKValidationError(
-            f"AgentHooks.output_guardrails of {_member_name(hooks)} returned a value that is "
-            "not a function."
+            f"AgentHooks.{name} of {_member_name(hooks)} returned a value that is not a function."
         )
     return tuple(value)
 

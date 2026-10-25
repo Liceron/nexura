@@ -1458,7 +1458,10 @@ def guardrail_decision(on: Any, decision: dict[str, Any], *, run_id: str) -> Non
         "tool_call_id": TOOL_CALL_ID,
         "error_type": ERROR_TYPE,
     }
-    attributes: dict[str, Any] = {GUARDRAIL_SOURCE: "live"}
+    source = decision.get("source")
+    attributes: dict[str, Any] = {
+        GUARDRAIL_SOURCE: source if source in ("live", "cache", "journal") else "live"
+    }
     for key, name in mapping.items():
         value = decision.get(key)
         if value is not None:

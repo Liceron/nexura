@@ -33,8 +33,13 @@ judge = []
 # already depends on it with the same range; it is declared here so the extra stays correct
 # on its own. No model weights are downloaded or shipped.
 ollama = ["httpx>=0.27.0,<1.0.0"]
-# YAML policy files (JSON works without it); used by the policy loader of a later phase.
+# YAML policy files (JSON works without it): GuardrailPolicy.from_file / load_policy.
 yaml = ["pyyaml>=6"]
+
+# The guardrails.check workflow node; nexura-runtime also registers it when this package is
+# installed. BaseModule lives in nexura_agents.contracts, so no runtime dependency is needed.
+[project.entry-points."nexura.modules"]
+guardrails = "nexura_guardrails.runtime.module:GuardrailCheckModule"
 
 [project.urls]
 Homepage = "https://github.com/Liceron/nexura"

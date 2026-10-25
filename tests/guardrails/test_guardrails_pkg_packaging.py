@@ -57,11 +57,15 @@ def test_imports_only_the_agent_sdk_and_the_stdlib() -> None:
     assert isinstance(agents_deps, list)
     assert any(str(d).startswith("httpx") for d in agents_deps)
     httpx_allowed = {SRC / "classifiers" / "_base.py"}
+    # P39 G6: PyYAML (the [yaml] extra) only in the policy loader, imported inside the YAML
+    # function so JSON policies and every other module work without it.
+    yaml_allowed = {SRC / "policy" / "loader.py"}
     offenders = []
     for path in SRC.rglob("*.py"):
         text = path.read_text(encoding="utf-8")
         assert text.startswith("# SPDX-License-Identifier: MIT\n# Copyright (c) 2026 Liceron\n")
         roots = allowed_roots | ({"httpx"} if path in httpx_allowed else set())
+        roots |= {"yaml"} if path in yaml_allowed else set()
         for node in ast.walk(ast.parse(text)):
             names: list[str] = []
             if isinstance(node, ast.ImportFrom) and node.level == 0:
@@ -70,6 +74,14 @@ def test_imports_only_the_agent_sdk_and_the_stdlib() -> None:
                 names = [a.name for a in node.names]
             offenders += [f"{path.name}: {n}" for n in names if n.split(".")[0] not in roots]
     assert offenders == []
+    loader = (SRC / "policy" / "loader.py").read_text(encoding="utf-8")
+    top_level = [
+        node
+        for node in ast.parse(loader).body
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+        and any((getattr(node, "module", None) or a.name).startswith("yaml") for a in node.names)
+    ]
+    assert top_level == []  # yaml is imported lazily, inside policy_from_yaml
 
 
 def test_import_is_lazy_and_every_export_resolves() -> None:

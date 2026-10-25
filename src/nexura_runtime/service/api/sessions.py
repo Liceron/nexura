@@ -959,6 +959,12 @@ def _saved_agent(
     return built.agent, spec.model, configured
 
 
+def _policy_hooks(policy: Any) -> list[Any] | None:
+    """The operator's guardrail policy as the chat runner's own hooks (P39 G6). It is also
+    the locked process default; passing it here too is deduplicated by identity."""
+    return [policy] if policy is not None else None
+
+
 def _refusals(interruption: Any) -> dict[str, str]:
     return {call.id: PLAYGROUND_APPROVAL_REFUSAL for call in interruption.pending}
 
@@ -981,7 +987,11 @@ async def chat_in_session(
     session_store: SQLiteSessionStore = request.app.state.session_store
     await _ensure_session(request, session_id, session_store)
 
-    runner = Runner(session_store=session_store, usage_limits=_usage_limits(request))
+    runner = Runner(
+        session_store=session_store,
+        usage_limits=_usage_limits(request),
+        hooks=_policy_hooks(getattr(request.app.state, "guardrail_policy", None)),
+    )
     t0 = time.perf_counter()
     refused: list[dict[str, Any]] = []
     try:
@@ -1123,6 +1133,7 @@ async def _chat_event_stream(
     has_documents: bool = False,
     agent: Agent | None = None,
     model_name: str | None = None,
+    guardrail_policy: Any = None,
 ) -> AsyncGenerator[str, None]:
     """Ordered run events, then the same body the non-streaming endpoint returns.
 
@@ -1133,7 +1144,9 @@ async def _chat_event_stream(
     """
     registry = registry if registry is not None else ChatModelRegistry()
     runner = Runner(
-        session_store=session_store, usage_limits=usage_limits or DEFAULT_CHAT_USAGE_LIMITS
+        session_store=session_store,
+        usage_limits=usage_limits or DEFAULT_CHAT_USAGE_LIMITS,
+        hooks=_policy_hooks(guardrail_policy),
     )
     events: list[RunEvent] = []
     saw_deltas = False
@@ -1247,6 +1260,7 @@ async def stream_chat_in_session(
             _workspace_has_documents(request, _get_caller_context(request)[0]),
             agent=agent,
             model_name=model_name,
+            guardrail_policy=getattr(request.app.state, "guardrail_policy", None),
         ),
         stream_format,
         thread_id=session_id,

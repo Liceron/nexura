@@ -920,7 +920,56 @@
     "back": "Back to agents",
     "sectionIdentity": "Identity",
     "sectionModel": "Model and limits",
-    "sectionOutput": "Output"
+    "sectionOutput": "Output",
+    "guardrails": "Guardrails",
+    "guardrailsHelp": "Checks on this agent's input, answers and tool results. They reduce risk and leave an audit trail, but they are not a security boundary: the real controls are approval for tools that write, a short tool list and a sandbox for code.",
+    "guardrailsEnforced": "Enforced by the server",
+    "guardrailsPolicy": "Operator policy {name} (digest {digest}) is enforced by the server for agent runs and cannot be turned off here.",
+    "guardrailsUnavailable": "Guardrail presets need nexura-guardrails on the server ({hint}).",
+    "guardrailsPreset": {
+      "pii_block": "Block personal data",
+      "pii_redact": "Redact personal data",
+      "injection_fast": "Prompt-injection filter",
+      "safety_local": "Local safety model",
+      "judge": "LLM judge"
+    },
+    "guardrailsPresetHelp": {
+      "pii_block": "Refuses the user's message and tool arguments that contain card numbers, Aadhaar, PAN, emails, phone numbers or keys (pattern matching).",
+      "pii_redact": "Masks personal data and secrets in answers (also while streaming) and in tool results (pattern matching).",
+      "injection_fast": "A fast pattern filter for prompt injection in the user's message and tool results. It misses reworded attacks.",
+      "safety_local": "The injection filter, then a safety model run by Ollama on the server's machine. Needs the model pulled there.",
+      "judge": "A chat model applies your policy text to the user's message and the answer. Each check is one model call."
+    },
+    "guardrailsCost": {
+      "none": "No model, no cost",
+      "local": "Local model",
+      "model": "Model call (billed)"
+    },
+    "guardrailsSafetyModel": "Safety model",
+    "guardrailsDefaultModel": "Server default ({model})",
+    "guardrailsSafetyHelp": "Only models this server knows, served by Ollama on its own machine.",
+    "guardrailsJudgePolicy": "Judge policy",
+    "guardrailsJudgePolicyHelp": "In plain words: what to block and what to allow.",
+    "guardrailsJudgeModel": "Judge model",
+    "guardrailsJudgeOwnModel": "The agent's own model",
+    "guardrailsJudgeCapacity": "At the default context the judge checks about 1.2 to 1.9 KB of text per call; longer text is blocked. The offline fake model cannot judge.",
+    "guardrailsStreamGuard": "Streamed replies",
+    "guardrailsStream": {
+      "auto": "Automatic: hold, or check in windows",
+      "hold": "Hold until checked",
+      "chunked": "Check in windows before showing",
+      "passthrough": "Show at once, check at the end"
+    },
+    "effectTitle": "Effect class: what a repeat of this call after a crash would do",
+    "effect": {
+      "pure": "No side effects",
+      "idempotent": "Safe to repeat",
+      "non_idempotent": "Not safe to repeat"
+    },
+    "guardrailsPolicyUnnamed": "(unnamed)",
+    "guardrailsPolicyRules": "{rules} rules.",
+    "guardrailsPolicyExceptions": "Not covered yet: workflow module nodes (other than agent and guardrail-check nodes). Coordinator agents are refused while the policy checks model input or output.",
+    "guardrailsStreamChecked": "Show at once is not available: this agent's answers are checked before they are shown."
   },
   "ui": {
     "http1270018765OrApi": "http://127.0.0.1:8765 or /api",

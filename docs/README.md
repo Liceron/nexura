@@ -65,6 +65,10 @@ one owner's projects. They do not add accounts or tenant isolation.
   guardrails, lifecycle hooks, usage caps.
 - [Guardrails package](guardrails-package.md): `nexura-guardrails`, an LLM judge that
   fails closed, fast pre-filters, tiered and parallel checks, a category taxonomy.
+- [Guardrail policy](guardrail-policy.md): one declarative policy (Python, JSON or YAML) for
+  every run: rules by stage, tool, origin, effect class and arguments, allowlist mode, approval
+  gates, journaled model verdicts, audit, and the service's `--guardrail-policy`. Starts with
+  why guardrail checks are not a security boundary.
 - [Serving agents over MCP](serving-over-mcp.md): make your agents usable from Claude
   Desktop, Cursor and other MCP clients.
 - [Agent2Agent (A2A)](a2a.md): serve agents to other frameworks and call remote A2A agents

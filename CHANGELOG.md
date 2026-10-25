@@ -5,6 +5,66 @@ has been published.
 
 ## Unreleased (0.4.0)
 
+### Added (P39 G6: guardrail policy middleware and enforcement)
+
+- `nexura_guardrails.GuardrailPolicy`: one declarative policy for every stage of every run
+  (`input`, `model_input`, `model_output`, `tool_input`, `tool_output`, `output`), with `When`
+  matching by tool name, origin, toolset, effect class, agent and arguments, actions `allow`,
+  `block`, `scrub`, `require_approval` and `fail` (most severe wins), allowlist mode
+  (`default_tool_action: block`), per-check and per-stage timeouts, `on_error` fail-closed by
+  default, and `install(locked=True)`. Load it from JSON, or YAML with `nexura-guardrails[yaml]`
+  (`GuardrailPolicy.from_file`, `load_policy`); unknown keys and duplicate keys are refused.
+- Journaled guardrail verdicts: model-based verdicts are committed to a durable run's journal
+  before they are acted on and replayed on resume and recovery instead of asking the model
+  again (`nexura_agents.verdict_journal`).
+- Audit: `GUARDRAIL_DECISION` run events and `nexura.guardrail.decision` trace events for policy
+  decisions (with `rule`, `policy_digest`, `source`), and `JsonlAuditSink`,
+  `CallbackAuditSink`, `MemoryAuditSink` (`audit_required` fails closed).
+- `AgentHooks.input_guardrails(ctx, agent)`: hooks can add input guardrails to every agent, like
+  `output_guardrails`.
+- Service: `create_api_app(guardrail_policy=...)`, `nexura-runtime serve|worker
+  --guardrail-policy FILE` and `NEXURA_GUARDRAIL_POLICY`. The policy is loaded first and locked
+  as the process default; a missing or invalid policy, or a policy without `nexura-guardrails`,
+  stops the start. `GET /api/v1/guardrails/policy` and `GET /api/v1/guardrails/presets`.
+- Saved agents: `AgentSpec.guardrails` presets (`pii_block`, `pii_redact`, `injection_fast`,
+  `safety_local`, `judge`) and `stream_guard`; Studio's agent editor has a Guardrails section
+  (new agents start with `pii_redact` and `injection_fast`) and shows each tool's effect class;
+  the node inspector shows a module's effect class. `/agents/options` lists presets, the
+  enforced policy and each tool's `effect_policy`/`effect_class`.
+- The `guardrails.check` workflow module (branches `allow`, `block`, `review`, `error`,
+  `rewrite`), registered when `nexura-guardrails` is installed (`nexura.modules` entry point).
+
+### Changed (P39 G6)
+
+- Guardrail policy argument comparisons (`gt`, `gte`, `lt`, `lte`) compare `int`, `float` and
+  `Decimal` exactly on the arguments a tool receives (typed values keep their type); a value
+  that is not a finite number counts as a match for block, fail, scrub and require_approval
+  rules and never satisfies an allow rule.
+- `JudgeCheck("ollama:<tag>")` uses Ollama's native `/api/chat` and sends `context_tokens` as
+  `num_ctx` (with `truncate`/`shift` off), so raising `context_tokens` is enough to judge longer
+  text; `api="openai"` keeps the OpenAI-compatible endpoint. New `base_url`, `keep_alive` and
+  `transport` options for the native route.
+- `decision_record` keeps `policy_digest` and `source`; the trace event's
+  `nexura.guardrail.source` reflects it.
+
+- Argument rules match the raw arguments and the ones the tool receives after validation (the
+  stricter wins); journaled verdicts are bound to agent, tool, origin, occurrence, stage and a
+  content hash; `model_output`/`output` rules hold streamed text and tool-call deltas, and
+  `stream_guard="passthrough"` is refused while such rules apply.
+- A model reply with duplicate tool-call ids fails the run (`ProviderResponseError`).
+- `AgentCoordinator` runs are refused while the effective policy has input, model or output
+  rules. `AgentDefinition` subagents are refused at their first tool call; their own input,
+  model and output stages are not checked yet (a follow-up closes this before release).
+- Policy files (and a judge's `policy_file`) refuse YAML anchors/aliases, deep nesting and
+  oversized files; a symlink is resolved once and must reach a regular file.
+  `GET /guardrails/policy` shows full detail to admins only.
+- Tool arguments: before hooks and guardrail policies see a call, the Runner builds the
+  arguments the tool will receive (validated and coerced; a plain `@tool` still drops argument
+  names it does not declare, so a stray key never fails a call; MCP/OpenAPI tools keep their
+  JSON Schema rules). Policies match both the raw and these arguments, the stricter result
+  winning. Migration: none for tools; a hook that inspected only `call.arguments` still sees
+  the raw arguments, and `Tool.dispatch_arguments(...)` gives the dispatched ones.
+
 ### Added (P38 C9 part A: retention and cleanup for stored run data)
 - Operator-run opt-in retention policy and CLI (`nexura-runtime retention`) for finished
   run records, events, repro bundles, and observability traces older than a configured threshold.

@@ -104,7 +104,10 @@ _KEY_SHAPED = re.compile(
     r"(?i)(?:^|[^a-z0-9])(?:sk|pk|rk|ghp|gho|ghu|ghs|ghr|github_pat|xox[abpr]|akia|asia)[-_]?"
     r"[a-z0-9]{8,}"
 )
-_TOKEN_KEYS = ("backend", "rule", "check", "error_type")
+_TOKEN_KEYS = ("backend", "rule", "check", "error_type", "source")
+# A policy digest (prefix) is hex: checked on its own, so the digit-run filter for tokens
+# (which keeps detected values out) never drops it (P39 G6 round 2, L1).
+_DIGEST = re.compile(r"[0-9a-f]{16,64}")
 # ``decision`` is copied only from this vocabulary (the nexura-guardrails verdicts).
 _DECISIONS = frozenset({"allow", "block", "review", "error", "rewrite"})
 _MAX_CATEGORIES = 32
@@ -155,7 +158,8 @@ def decision_record(
     from ``info`` (a mapping) only plain classification fields: ``categories`` (tokens),
     ``score`` (a finite number), ``cached``/``review`` (booleans), ``decision`` (one of
     ``allow``, ``block``, ``review``, ``error``, ``rewrite``) and ``backend``, ``rule``,
-    ``check`` and ``error_type`` (tokens; ``info["error"]`` counts as ``error_type``).
+    ``check``, ``error_type``, ``policy_digest`` (a short digest prefix) and ``source``
+    (``live``, ``cache`` or ``journal``) (tokens; ``info["error"]`` counts as ``error_type``).
     A token is an identifier: letters, digits and ``_ . : / + -``, at most 128
     characters, with no ``@``, no run of 6 or more digits, no 9 or more digits joined only
     by ``-``, ``.`` or spaces, no unbroken run of 33 or more
@@ -183,6 +187,9 @@ def decision_record(
                 record[key] = value
         if info.get("decision") in _DECISIONS:
             record["decision"] = info["decision"]
+        digest = info.get("policy_digest")
+        if isinstance(digest, str) and _DIGEST.fullmatch(digest):
+            record["policy_digest"] = digest
         if "error_type" not in record and (error := _token(info.get("error"))) is not None:
             record["error_type"] = error
         categories = info.get("categories")

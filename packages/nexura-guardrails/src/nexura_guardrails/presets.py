@@ -377,12 +377,18 @@ def pii_redact(kinds: Iterable[str] | None = None, *, mask: str = "[REDACTED:{ki
     """Redact personal data and secrets in agent output and tool results (regex, no network).
 
     The output guardrail also covers streamed replies: they are held until it passed, or
-    checked window by window with ``Agent(stream_guard="chunked")``.
+    checked window by window with ``Agent(stream_guard="chunked")``. An agent with
+    ``stream_guard="passthrough"`` fails at its first model turn instead of streaming raw text.
     """
     from nexura_guardrails.prefilters import pii
 
     check = pii(kinds, action="redact", mask=mask, name="pii_redact")
-    return _build("pii_redact", "none", output=check, tool_output=check)
+    preset = _build("pii_redact", "none", output=check, tool_output=check)
+    for guard in preset.output_guardrails:
+        # Streamed replies are checked before they are shown: an agent with
+        # stream_guard="passthrough" is refused instead of streaming raw text (P39 G6).
+        guard.nexura_no_passthrough = True  # type: ignore[attr-defined]
+    return preset
 
 
 def injection_fast(threshold: float = 0.5) -> Preset:
@@ -568,11 +574,12 @@ def judge(
     about 1.2 to 1.9 KB of checked text (the content plus, for an answer, the user's
     request): the prompt is measured by a strict byte bound and the policy and instructions
     take about 1.7 to 2.4 KB. Anything longer is a hard ``ContentTooLong`` error, so the
-    guardrail blocks it. To check longer text, raise the judge server's context and pass the
-    same number, for example ``OLLAMA_CONTEXT_LENGTH=16384`` and
-    ``judge(..., context_tokens=16384)``; never set ``context_tokens`` above the server's
-    real context. (Ollama judges go through its OpenAI-compatible endpoint, which takes no
-    per-request context size; moving them to Ollama's native API is planned for G6.)
+    guardrail blocks it. To check longer text, pass a larger context, for example
+    ``judge(..., context_tokens=16384)``. An ``"ollama:<tag>"`` judge uses Ollama's native
+    API (P39 G6), which sends ``context_tokens`` as ``num_ctx`` with every call, so that is
+    all it takes (the server needs the memory). With ``api="openai"`` (an OpenAI-compatible
+    endpoint, including Ollama's ``/v1``) the server's own context applies: raise it too, for
+    example ``OLLAMA_CONTEXT_LENGTH=16384``, and never set ``context_tokens`` above it.
     """
     from nexura_guardrails.judge import JudgeCheck
 

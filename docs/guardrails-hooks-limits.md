@@ -712,8 +712,9 @@ remember to pass it. `set_default_hooks(policy)` installs hooks that every `Runn
   locked=True)` makes it binding for the rest of the process: `default_hooks=False`,
   `set_default_hooks(None)` and installing another default raise `SDKValidationError`, and
   a runner built with `default_hooks=False` before the lock still gets the default.
-  Installing the same object again is allowed. The service will install its policy this
-  way (P39 G6). Without the lock the default protects against misconfiguration (a
+  Installing the same object again is allowed. The service installs its operator policy
+  this way (`nexura-runtime serve --guardrail-policy FILE`, see
+  [Guardrail policy](guardrail-policy.md)). Without the lock the default protects against misconfiguration (a
   developer's `hooks=` cannot replace it), not against code in the same process that opts
   out on purpose.
 - No hooks are loaded from environment variables or files by the core: the operator's
@@ -730,6 +731,11 @@ remember to pass it. `set_default_hooks(policy)` installs hooks that every `Runn
   `stream_guard="passthrough"` cannot stream past them. Return the same guardrails for the
   same agent every time; a non-list, a non-function or an `async def` method fails the run
   with `SDKValidationError`.
+- **A policy checks every run's input with `input_guardrails(ctx, agent)`** (P39 G6), the same
+  kind of sync hook: its guardrails run once per run after the agent's own input guardrails,
+  before any model call, with the same timeout, cancellation, `GUARDRAIL_DECISION` events and
+  tripwire. They do not run again on resume or recovery. `GuardrailPolicy` uses both hooks for
+  its `input` and `output` stages.
 
 ```python
 from nexura_agents import Agent, AgentHooks, FakeModel, Runner, redact_output_pii, set_default_hooks

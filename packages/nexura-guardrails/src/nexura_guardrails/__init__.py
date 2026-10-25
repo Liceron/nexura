@@ -2,8 +2,9 @@
 # Copyright (c) 2026 Liceron
 """Nexura guardrails: verdicts, a category taxonomy, fast pre-filters, an LLM judge, local
 safety models (Llama Guard 3, ShieldGemma, Granite Guardian, Nemotron Safety Guard), presets
-(``nexura_guardrails.presets``) and tiered or parallel composition, for ``nexura_agents``
-agents and tools.
+(``nexura_guardrails.presets``), tiered or parallel composition and ``GuardrailPolicy`` (one
+declarative policy for every run, ``nexura_guardrails.policy``), for ``nexura_agents`` agents
+and tools.
 
 Distributed as ``nexura-guardrails`` (depends on ``nexura-agents`` only). Every check
 converts to a plain guardrail function, so it works with today's
@@ -77,6 +78,17 @@ _EXPORTS: dict[str, str] = {
     "Cached": "nexura_guardrails.compose",
     "VerdictCache": "nexura_guardrails.compose",
     "is_fallback": "nexura_guardrails.compose",
+    # Policy (P39 G6)
+    "GuardrailPolicy": "nexura_guardrails.policy",
+    "Rule": "nexura_guardrails.policy",
+    "When": "nexura_guardrails.policy",
+    "ArgCondition": "nexura_guardrails.policy",
+    "PolicyError": "nexura_guardrails.policy",
+    "AuditRecord": "nexura_guardrails.policy",
+    "JsonlAuditSink": "nexura_guardrails.policy",
+    "CallbackAuditSink": "nexura_guardrails.policy",
+    "MemoryAuditSink": "nexura_guardrails.policy",
+    "load_policy": "nexura_guardrails.policy",
     # Benchmark
     "run_benchmark": "nexura_guardrails.bench",
     "run_benchmark_sync": "nexura_guardrails.bench",
@@ -84,6 +96,16 @@ _EXPORTS: dict[str, str] = {
 
 __all__ = [
     "CATEGORIES",
+    "ArgCondition",
+    "AuditRecord",
+    "CallbackAuditSink",
+    "GuardrailPolicy",
+    "JsonlAuditSink",
+    "MemoryAuditSink",
+    "PolicyError",
+    "Rule",
+    "When",
+    "load_policy",
     "Cached",
     "Category",
     "Check",
@@ -184,6 +206,18 @@ if TYPE_CHECKING:
         estimate_tokens,
         parse_verdict,
         token_upper_bound,
+    )
+    from nexura_guardrails.policy import (
+        ArgCondition,
+        AuditRecord,
+        CallbackAuditSink,
+        GuardrailPolicy,
+        JsonlAuditSink,
+        MemoryAuditSink,
+        PolicyError,
+        Rule,
+        When,
+        load_policy,
     )
     from nexura_guardrails.prefilters import (
         Prefilter,

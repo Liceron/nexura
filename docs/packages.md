@@ -14,7 +14,7 @@ with a local REST service, a TypeScript API client and a browser Studio.
 > (`pip install nexura-agents`): the standalone agent SDK, two dependencies, offline-testable.
 > This repository's `nexura-runtime` is the full platform built on top of it.
 
-> **Guides:** [docs/](README.md) has 45 guides (agents, teams, tools, harness, MCP and OpenAPI,
+> **Guides:** [docs/](README.md) has 46 guides (agents, teams, tools, harness, MCP and OpenAPI,
 > A2A, memory, prompts, structured output, approvals, workflows, providers, tracing and
 > more) plus an index and a generated [API reference](api-reference.md). Every
 > offline example on those pages is run by the test suite; blocks needing a real model or

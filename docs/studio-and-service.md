@@ -312,6 +312,56 @@ nexura-runtime serve --chat-model gpt=openai:gpt-4o-mini --chat-model gem=gemini
 - Live use calls a paid provider: it is not covered by the test suite, which uses injected fake
   models only. Try it manually from a shell with your own key.
 
+## Guardrail policy
+
+The operator can enforce one [guardrail policy](guardrail-policy.md) on the agent runs of the
+service: the chat playground, saved agents, workflow agent nodes, templates, evaluations and
+any other in-process `Runner`. Not covered: workflow module nodes other than agent and
+`guardrails.check` nodes (not yet), and coordinator runs, which are refused while the policy has
+input, model or output rules.
+
+```bash
+pip install "nexura-guardrails[yaml]"
+nexura-runtime serve --guardrail-policy /etc/nexura/guardrails.yaml
+# or: NEXURA_GUARDRAIL_POLICY=/etc/nexura/guardrails.yaml nexura-runtime serve
+# the trigger worker takes the same flag: nexura-runtime worker --guardrail-policy ...
+```
+
+- The file is loaded before anything else. If it is missing or invalid, or `nexura-guardrails`
+  is not installed, the service **refuses to start** (exit code 2, the reason on stderr); there
+  is no "start without the policy" fallback. `create_api_app(guardrail_policy=...)` takes a
+  path or a `GuardrailPolicy` and raises `GuardrailPolicyConfigError` (a `ValueError`) the same
+  way.
+- It is installed with `set_default_hooks(policy, locked=True)`: every `Runner` in the process
+  uses it before its own hooks, and no code in the process can remove or replace it
+  (`Runner(default_hooks=False)` raises). One process enforces one policy; a second
+  `create_api_app` with a different policy in the same process is refused.
+- It is operator-owned like `approval_required_handlers`: never settable through the API, a
+  workflow document or a saved agent. A saved agent's own [presets](agents-in-studio.md#guardrails)
+  add to it; they cannot turn it off.
+- A judge's `model` in the policy file may name one of the server's chat models
+  (`--chat-model`), whose key then comes from the server environment, or a Nexura model string
+  (`ollama:qwen3:8b`). The file holds no keys.
+- `GET /api/v1/guardrails/policy` returns `{configured, enforced, detail, policy, exceptions}`.
+  Everyone gets the digest and the policy file's base name; workspace **admins** also get the
+  name, the full source path, the rules and the check types (never a judge's policy text or a
+  key). `exceptions` lists what is not covered. Studio shows it read-only in the agent editor,
+  with the "Enforced by the server" badge only when `enforced` is true.
+- `AgentCoordinator` runs (the `nexura.agents.coordinator` module) are refused while the policy
+  has input, model or output rules: they call models without the hooks that apply those stages.
+  AgentDefinition subagents: their own model calls are not checked by model_input/model_output
+  rules, and their own input and output stages are not checked either, until a follow-up lands.
+  The parent's stages still check what reaches the user. Agents saved in Studio run on a `Runner` and are
+  covered. An agent whose answers the policy checks cannot use `stream_guard: passthrough`
+  (refused when it is saved, and at run start). `GET /api/v1/guardrails/presets` lists
+  the presets saved agents may use and what each needs and costs.
+- Decisions appear as `GUARDRAIL_DECISION` run events and `nexura.guardrail.decision` trace
+  events; with `audit: {sink: jsonl, path: ...}` they are also appended to a JSON-lines file
+  next to the policy (relative paths resolve against the policy file's directory).
+- Policy rules for workflow module nodes (`WorkflowEngine(guardrail_policy=...)`) are not part
+  of this release: agent nodes and the `guardrails.check` node are covered, other module nodes
+  are not.
+
 ## Describe a workflow
 
 In Studio, **New Workflow** has a **Describe it** button. Type what you want, for example "a support agent that looks up orders and asks a manager before refunds over 100", and press **Draft**. You get an explanation, a list of things to review and a read-only drawing of the draft graph. The draft is marked unsaved: nothing has been saved or run. Press **Create from draft** to save it through the normal validate-then-create path and open it on the canvas, where you edit it like any other workflow, or **Discard draft** to throw it away.

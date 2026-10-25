@@ -13,9 +13,10 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import Any, Literal
 
 from nexura_agents.errors import SDKValidationError
+from nexura_agents.guardrails_builtin import PII_KINDS as PII_KINDS_BUILTIN
 from nexura_agents.json_schema import check_schema
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
@@ -36,6 +37,16 @@ MAX_SPEC_CHARS = 64_000
 MAX_TURNS_CAP = 20
 MAX_TOOL_CALLS_CAP = 50
 MAX_TIMEOUT_SECONDS = 300.0
+#: Guardrail presets a saved agent may name (P39 G6); built by ``nexura-guardrails``.
+GUARDRAIL_PRESETS = ("pii_block", "pii_redact", "injection_fast", "safety_local", "judge")
+#: Presets that check the agent's answer (so its streamed text too).
+OUTPUT_PRESETS = ("pii_redact", "safety_local", "judge")
+#: Presets of a new agent in Studio: zero cost, no network.
+DEFAULT_GUARDRAIL_PRESETS = ("pii_redact", "injection_fast")
+MAX_GUARDRAIL_PRESETS = len(GUARDRAIL_PRESETS)
+MAX_JUDGE_POLICY_CHARS = 4_000
+#: ``kinds`` a PII preset may name (``nexura_agents.guardrails_builtin.PII_KINDS``).
+PII_KINDS = PII_KINDS_BUILTIN
 
 _TOOL_ID = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.@-]{0,127}$")
 _SKILL_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
@@ -82,6 +93,91 @@ def _unique(values: list[str], what: str) -> list[str]:
     return values
 
 
+_GUARD_MODEL = re.compile(r"^[a-z0-9][a-z0-9._:-]{0,63}$")
+
+
+class GuardrailPresetRef(BaseModel):
+    """One guardrail preset of a saved agent, with the options that preset takes.
+
+    ``kinds`` (``pii_block``, ``pii_redact``): PII kinds, default all. ``threshold``
+    (``injection_fast``): the injection score that blocks (0.05 to 5, default 0.5).
+    ``model``: for ``safety_local`` a local guard model tag served by Ollama on the server's
+    machine (default ``llama-guard3:1b``); for ``judge`` a name from the server's chat-model
+    allowlist (default: the agent's own model). ``policy`` (``judge``, required): the
+    policy text the judge applies. No URLs, files or code: the server builds the checks.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    preset: Literal["pii_block", "pii_redact", "injection_fast", "safety_local", "judge"]
+    kinds: list[str] | None = Field(default=None, max_length=len(PII_KINDS))
+    threshold: float | None = Field(default=None, ge=0.05, le=5.0)
+    model: str | None = Field(default=None, min_length=1, max_length=128)
+    policy: str | None = Field(default=None, max_length=MAX_JUDGE_POLICY_CHARS)
+
+    @model_validator(mode="after")
+    def _options_fit(self) -> GuardrailPresetRef:
+        takes = {
+            "pii_block": {"kinds"},
+            "pii_redact": {"kinds"},
+            "injection_fast": {"threshold"},
+            "safety_local": {"model"},
+            "judge": {"model", "policy"},
+        }[self.preset]
+        given = {
+            k for k in ("kinds", "threshold", "model", "policy") if getattr(self, k) is not None
+        }
+        extra = sorted(given - takes)
+        if extra:
+            raise ValueError(f"preset {self.preset} does not take {', '.join(extra)}.")
+        if self.kinds is not None:
+            unknown = sorted(set(self.kinds) - set(PII_KINDS))
+            if unknown:
+                raise ValueError(f"unknown PII kinds {unknown}; use {list(PII_KINDS)}.")
+            _unique(self.kinds, "PII kind")
+        if (
+            self.preset == "safety_local"
+            and self.model is not None
+            and not _GUARD_MODEL.fullmatch(self.model)
+        ):
+            raise ValueError("model must be an Ollama model tag such as llama-guard3:1b.")
+        if self.model is not None and _CONTROL.search(self.model):
+            raise ValueError("model must not contain control characters.")
+        if self.preset == "judge" and not (self.policy or "").strip():
+            raise ValueError("the judge preset needs policy text.")
+        return self
+
+
+class AgentGuardrails(BaseModel):
+    """Guardrail presets of a saved agent and how its streamed replies are checked.
+
+    The operator's service policy (if any) applies on top and cannot be turned off here.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    presets: list[GuardrailPresetRef] = Field(
+        default_factory=list, max_length=MAX_GUARDRAIL_PRESETS
+    )
+    stream_guard: Literal["auto", "hold", "chunked", "passthrough"] = "auto"
+
+    @field_validator("presets")
+    @classmethod
+    def _one_each(cls, value: list[GuardrailPresetRef]) -> list[GuardrailPresetRef]:
+        _unique([ref.preset for ref in value], "Guardrail preset")
+        return value
+
+    @model_validator(mode="after")
+    def _no_passthrough_past_output_checks(self) -> AgentGuardrails:
+        checked = [r.preset for r in self.presets if r.preset in OUTPUT_PRESETS]
+        if self.stream_guard == "passthrough" and checked:
+            raise ValueError(
+                f"stream_guard 'passthrough' would stream answers before {checked[0]} checks "
+                "them; use auto, hold or chunked."
+            )
+        return self
+
+
 class AgentSpec(BaseModel):
     """A saved agent: references and text only (see the module docstring)."""
 
@@ -102,6 +198,8 @@ class AgentSpec(BaseModel):
     #: Optional JSON schema the final answer must match (the supported subset only).
     output_schema: dict[str, Any] | None = None
     limits: AgentLimits = Field(default_factory=AgentLimits)
+    #: Guardrail presets (P39 G6); ``None``: the agent adds none of its own.
+    guardrails: AgentGuardrails | None = None
 
     @field_validator("description")
     @classmethod
@@ -283,8 +381,14 @@ __all__ = [
     "MAX_TOOLS",
     "MAX_TOOL_CALLS_CAP",
     "MAX_TURNS_CAP",
+    "DEFAULT_GUARDRAIL_PRESETS",
+    "GUARDRAIL_PRESETS",
+    "MAX_JUDGE_POLICY_CHARS",
+    "PII_KINDS",
+    "AgentGuardrails",
     "AgentLimits",
     "AgentSpec",
+    "GuardrailPresetRef",
     "AgentSpecError",
     "parse_agent_spec",
     "schema_example",

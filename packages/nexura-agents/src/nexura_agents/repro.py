@@ -850,6 +850,12 @@ def _replay_agents(
             )
             stub.is_async = item.get("is_async", True)
             stub.execute = execute  # type: ignore[method-assign]
+
+            def recorded_arguments(arguments: Any) -> None:
+                """A fixture stub replays recorded outcomes: the recorded run validated the
+                real arguments, and redacted values in a bundle no longer fit the schema."""
+
+            stub.validate_arguments = recorded_arguments  # type: ignore[method-assign]
             tools.append(stub)
         behavior = spec.get("tool_use_behavior", "run_llm_again")
         if isinstance(behavior, dict):

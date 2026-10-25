@@ -176,6 +176,8 @@ describe('agent form helpers', () => {
       skills_label: 'production',
       output_schema: { type: 'object' },
       limits: { max_turns: 3, max_tool_calls: 10, timeout_seconds: 60 },
+      // P39 G6 (deliberate): new agents start with the zero-cost presets.
+      guardrails: { presets: [{ preset: 'pii_redact' }, { preset: 'injection_fast' }], stream_guard: 'auto' },
     });
   });
 
@@ -259,6 +261,8 @@ describe('Agents page', () => {
       skills_label: 'production',
       output_schema: null,
       limits: { max_turns: 4, max_tool_calls: 10, timeout_seconds: 60 },
+      // P39 G6 (deliberate): new agents start with the zero-cost presets.
+      guardrails: { presets: [{ preset: 'pii_redact' }, { preset: 'injection_fast' }], stream_guard: 'auto' },
     });
     expect((await screen.findByTestId('agents-notice')).textContent).toContain('filer');
   });

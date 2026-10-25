@@ -10,10 +10,11 @@ tools are never automatically retried.
 
 from __future__ import annotations
 
+import copy
 import inspect
 import json
 import math
-from collections.abc import Awaitable, Callable, Iterable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, get_origin, get_type_hints, overload
 
@@ -495,6 +496,35 @@ class Tool:
             return await self.fn(**fn_kwargs)
         return await asyncio.to_thread(self.fn, **fn_kwargs)
 
+    def dispatch_arguments(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
+        """The arguments exactly as :meth:`execute` gives them to the function: validated
+        and coerced by the tool's schema (``"5000"`` becomes ``5000`` for an ``int``
+        parameter), unknown names dropped (as before: a stray key never fails a call), with
+        typed values kept in their Python type (a ``Decimal`` stays a ``Decimal``, nested
+        models become dicts). Raises ``ToolValidationError`` when they do not validate.
+
+        Policies and hooks check these together with the raw arguments (P39 G6).
+        """
+        known = {k: v for k, v in arguments.items() if k in self.args_schema.model_fields}
+        try:
+            validated = self.args_schema.model_validate(known)
+            dumped: dict[str, Any] = validated.model_dump(mode="python")
+        except Exception as exc:
+            raise ToolValidationError(
+                tool_name=self.name,
+                message=str(exc),
+                arguments=dict(arguments),
+                original_error=exc,
+            ) from exc
+        return dumped
+
+    def coerced_arguments(self, arguments: Mapping[str, Any]) -> dict[str, Any] | None:
+        """:meth:`dispatch_arguments`, or ``None`` when they do not validate."""
+        try:
+            return self.dispatch_arguments(arguments)
+        except ToolValidationError:
+            return None
+
     def validate_arguments(self, arguments: dict[str, Any]) -> None:
         """Raise ``ToolValidationError`` if ``arguments`` do not fit this tool's schema.
 
@@ -671,6 +701,14 @@ class SchemaTool(Tool):
                 "parameters": self.parameters,
             },
         }
+
+    def dispatch_arguments(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
+        """The arguments the handler receives: JSON Schema validation does not coerce or
+        drop names (extra keys pass unless ``additionalProperties`` is false), so a copy of
+        the raw arguments. Raises ``ToolValidationError`` when they do not validate."""
+        copied = copy.deepcopy(dict(arguments))
+        self.validate_arguments(copied)
+        return copied
 
     def validate_arguments(self, arguments: dict[str, Any]) -> None:
         """Raise ``ToolValidationError`` if ``arguments`` do not fit the JSON Schema."""

@@ -55,6 +55,7 @@ from nexura_runtime.agents_store import (
 from nexura_runtime.runtime.agents.saved import AGENT_NODE_MODULE_ID, BuiltAgent
 from nexura_runtime.service.api.chat_models import ChatModelRegistry, ChatModelUnavailableError
 from nexura_runtime.service.api.credentials import _enforce_perm, _get_caller_context
+from nexura_runtime.service.api.guardrails import caller_is_admin, policy_view, preset_catalog
 from nexura_runtime.service.api.knowledge import _workspace_collections
 from nexura_runtime.service.api.sessions import (
     _knowledge_reply,
@@ -238,6 +239,8 @@ class AgentRuntime:
                     "description": manifest.description,
                     "kind": manifest.kind,
                     "requires_approval": self.requires_approval(module),
+                    "effect_policy": manifest.effect_policy,
+                    "effect_class": _effect_class(manifest.effect_policy),
                 }
             )
         return out
@@ -287,6 +290,18 @@ class AgentRuntime:
                     errors.append(
                         {"field": f"skills.{index}", "message": f"Unknown skill '{skill}'."}
                     )
+        # P39 G6: presets this server can build (judge models from the allowlist).
+        from nexura_runtime.service.api.guardrails import check_agent_guardrails
+
+        errors.extend(
+            check_agent_guardrails(
+                spec.guardrails,
+                models,
+                spec.model,
+                policy=getattr(self._state, "guardrail_policy", None),
+                agent_name=spec.name,
+            )
+        )
         if errors:
             shown = "; ".join(e["message"] for e in errors[:5])
             code = (
@@ -358,6 +373,9 @@ class AgentRuntime:
         if spec.knowledge:
             tools.append(knowledge_search_tool(self._holder, workspace_id, spec.knowledge))
         instructions = spec.instructions or f"You are the '{spec.name}' agent."
+        from nexura_runtime.service.api.guardrails import build_agent_guardrails
+
+        guards = build_agent_guardrails(spec.guardrails, self._models(), spec.model)
         if spec.skills:
             skills = getattr(self._state, "skills_store", None)
             if skills is None:
@@ -372,6 +390,12 @@ class AgentRuntime:
                     label=spec.skills_label, available_tools=[t.name for t in tools]
                 )
             )
+        if guards.tool_input or guards.tool_output:
+            # Preset tool checks go on every tool of this agent (built here, never shared), so
+            # they also apply when the agent runs in a workflow node.
+            for item in tools:
+                item.input_guardrails = (*item.input_guardrails, *guards.tool_input)
+                item.output_guardrails = (*item.output_guardrails, *guards.tool_output)
         agent: Agent[Any] = Agent(
             name=spec.name,
             instructions=instructions,
@@ -382,6 +406,9 @@ class AgentRuntime:
             timeout=spec.limits.timeout_seconds,
             output_type=copy.deepcopy(spec.output_schema),
             description=spec.description,
+            input_guardrails=list(guards.input),
+            output_guardrails=list(guards.output),
+            stream_guard=guards.stream_guard,
         )
         return BuiltAgent(
             agent=agent,
@@ -391,6 +418,17 @@ class AgentRuntime:
             approval_tools=tuple(gated),
             timeout=spec.limits.timeout_seconds,
         )
+
+
+def _effect_class(policy: str | None) -> str | None:
+    """The durable effect class of a module's effect policy (``pure``, ``idempotent``,
+    ``non_idempotent``), or None for an unknown spelling."""
+    from nexura_agents.contracts.execution import effect_class_from_policy
+
+    try:
+        return str(effect_class_from_policy(policy).value)
+    except ValueError:
+        return None
 
 
 # ------------------------------------------------------------------ routes
@@ -460,6 +498,14 @@ async def agent_options(request: Request) -> dict[str, Any]:
         "skills": sorted(skills or ()),
         "node_module_id": AGENT_NODE_MODULE_ID,
         "limits": _limits(),
+        # P39 G6: presets a spec may name, and the operator's enforced policy (read-only).
+        "guardrails": {
+            **preset_catalog(),
+            "policy": policy_view(
+                getattr(request.app.state, "guardrail_policy", None),
+                admin=caller_is_admin(request),
+            ),
+        },
     }
 
 

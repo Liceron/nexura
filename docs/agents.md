@@ -895,7 +895,7 @@ pip install "nexura-agents[otel]"    # + OpenTelemetry tracing
 > OpenAI, Anthropic, Gemini or Sarvam with your own key; the OpenAI, Anthropic and Sarvam checks have not run.
 > LiteLLM is checked offline only, against the real library's mock mode.
 >
-> Full guides live in the repository's `docs/` folder: 45 guides (getting started,
+> Full guides live in the repository's `docs/` folder: 46 guides (getting started,
 > agents, teams, tools, MCP and OpenAPI, A2A, memory, prompts, structured output,
 > approvals, guardrails, multimodal, providers, tracing, testing and more) plus a
 > generated API reference.

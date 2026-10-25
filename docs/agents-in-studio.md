@@ -24,6 +24,7 @@ provider strings or keys.
 | `skills` | Workspace skill names, read at `skills_label` (default `production`) when the agent runs | 20 |
 | `output_schema` | Optional JSON schema for the final answer (the subset `nexura_agents` supports for dict `output_type`) | 16,000 characters; `minLength` at most 2,000 and `minItems` at most 50 |
 | `limits` | `max_turns` (1-20, default 6), `max_tool_calls` (0-50, default 10), `timeout_seconds` (1-300, default 60) | |
+| `guardrails` | Optional: guardrail presets and the stream mode, see [Guardrails](#guardrails); `null` (the default) adds none | 5 presets, one of each |
 
 Unknown fields are refused. The whole spec is also capped at 64,000 JSON characters.
 
@@ -43,6 +44,38 @@ Any tool whose module can write is forced to `requires_approval=True`: a module 
 `write_operations` or `always_write`, one the server gates (`approval_required_handlers`),
 or any `effect_policy` other than `pure` or `read`. Its calls never run without the
 approval flow.
+
+## Guardrails
+
+`guardrails` names presets from `nexura-guardrails` (the server builds them; nothing in the spec
+is code, a URL or a file):
+
+```json
+{"guardrails": {"presets": [{"preset": "pii_redact"}, {"preset": "injection_fast"},
+  {"preset": "judge", "policy": "Block loan guarantees and investment advice.", "model": "gpt"}],
+  "stream_guard": "auto"}}
+```
+
+| Preset | Checks | Options | Cost |
+| --- | --- | --- | --- |
+| `pii_block` | blocks personal data and secrets in the user's message and tool arguments (regex) | `kinds` | none |
+| `pii_redact` | redacts them in answers (also streamed) and tool results (regex) | `kinds` | none |
+| `injection_fast` | prompt-injection pre-filter on the user's message and tool results (regex) | `threshold` (0.05-5) | none |
+| `safety_local` | the injection pre-filter, then a local safety model through Ollama on the server's machine (`http://localhost:11434`) | `model`: a guard tag the server knows (default `llama-guard3:1b`) | local model |
+| `judge` | an LLM judge applies `policy` to the user's message and the answer | `policy` (required, 4,000 characters), `model`: a chat model name (default: the agent's own) | one billed model call per check |
+
+Tool-stage checks are added to every tool of the agent, so they apply in the Playground and in
+workflow agent nodes alike. `stream_guard` is `auto` (default), `hold`, `chunked` or
+`passthrough` (see the [guardrails package guide](guardrails-package.md)); `passthrough` is
+refused with `pii_redact`, `safety_local` or `judge`, whose checks must see the answer before it
+is shown, and when the operator's policy checks this agent's answers. When the agent is
+saved the server refuses a judge on the offline fake model or on a name outside the chat-model
+allowlist, a `safety_local` model it cannot identify, options a preset does not take, and presets
+when `nexura-guardrails` is not installed (`field_errors` under `guardrails.presets.<n>`). Studio
+starts new agents with `pii_redact` and `injection_fast` (no model, no cost); existing agents
+keep `guardrails: null` until someone switches a preset on. The operator's
+[service policy](studio-and-service.md#guardrail-policy) applies on top of the presets and
+cannot be turned off from a spec.
 
 ## Routes
 
@@ -269,7 +302,11 @@ description, instruction and argument is shown as plain text.
   revision and a "need approval" badge when any tool needs approval. The editor has name,
   description, instructions, a model select (the names from `GET /agents/options`), a tool
   checklist with a "needs approval" badge per tool, knowledge collections, skills and the
-  skills label, an optional output schema as JSON text and the three limits. It checks the form
+  skills label, a **Guardrails** section (a toggle per preset with its cost, the judge's policy
+  text and model, the safety model, the stream mode, and above them the operator's enforced
+  policy, read-only, with its badge only when the server reports it enforced, and what it does
+not cover), an optional output schema as JSON text and the three limits. Each tool
+  shows its effect class (no side effects, safe to repeat, not safe to repeat). It checks the form
   against the server's bounds (`limits` from the options) before saving; refused fields from
   `field_errors` are shown next to the field. Saving sends `expected_revision`; a
   `REVISION_CONFLICT` shows a "Reload agent" button that loads the current revision and

@@ -18,6 +18,7 @@ import { SkillsLabelSelect, SkillsPicker, acceptsSkills } from '../skills/Skills
 import { hasNoOwnHandler, isComposite, useBuilderT } from './composite';
 import { AgentNodeConfig } from '../agents/AgentNodeConfig';
 import { AGENT_NODE_MODULE_ID } from '../agents/agentForm';
+import { EffectClassBadge, effectClassOf } from '../agents/AgentGuardrails';
 
 interface NodeInspectorProps {
   selectedNode: BuilderNode | null;
@@ -286,7 +287,12 @@ function NodeInspectorFields({ selectedNode, allNodes, allEdges, entryNode, onUp
                 </Badge>
               </div>
               <div style={{ color: 'var(--text-muted)' }}>
-                {t('ui.policy') + " "}<code>{descriptor.effect_policy}</code> {t('ui.kind') + " "}<code>{descriptor.kind}</code>
+                {t('ui.policy') + " "}<code>{descriptor.effect_policy}</code>{' '}
+                <EffectClassBadge
+                  effectClass={effectClassOf(descriptor.effect_policy)}
+                  testId="node-inspector-effect-class"
+                />{' '}
+                {t('ui.kind') + " "}<code>{descriptor.kind}</code>
               </div>
             </div>
           )}

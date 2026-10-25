@@ -198,7 +198,12 @@ class AgentMCPServer:
     def _hooks(self) -> Any:
         """The hooks for plain tool calls: those a run of ``self.runner`` would use."""
         effective = getattr(self.runner, "effective_hooks", None)
-        return effective() if callable(effective) else policy.effective_hooks()
+        # Plain tools make no model calls of their own: only the tool stages apply here.
+        return (
+            effective()
+            if callable(effective)
+            else policy.effective_hooks(applies_model_stages=True)
+        )
 
     def _register_tool(self, tool: Tool) -> None:
         if tool.enabled is False:

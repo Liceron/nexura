@@ -73,6 +73,10 @@ one owner's projects. They do not add accounts or tenant isolation.
   guardrails, lifecycle hooks, usage caps.
 - [Guardrails package](guardrails-package.md): `nexura-guardrails`, an LLM judge that
   fails closed, fast pre-filters, tiered and parallel checks, a category taxonomy.
+- [Guardrail policy](guardrail-policy.md): one declarative policy (Python, JSON or YAML) for
+  every run: rules by stage, tool, origin, effect class and arguments, allowlist mode, approval
+  gates, journaled model verdicts, audit, and the service's `--guardrail-policy`. Starts with
+  why guardrail checks are not a security boundary.
 - [Serving agents over MCP](serving-over-mcp.md): make your agents usable from Claude
   Desktop, Cursor and other MCP clients.
 - [Agent2Agent (A2A)](a2a.md): serve agents to other frameworks and call remote A2A agents
@@ -150,7 +154,7 @@ with a local REST service, a TypeScript API client and a browser Studio.
 > (`pip install nexura-agents`): the standalone agent SDK, two dependencies, offline-testable.
 > This repository's `nexura-runtime` is the full platform built on top of it.
 
-> **Guides:** [docs/](README.md) has 45 guides (agents, teams, tools, harness, MCP and OpenAPI,
+> **Guides:** [docs/](README.md) has 46 guides (agents, teams, tools, harness, MCP and OpenAPI,
 > A2A, memory, prompts, structured output, approvals, workflows, providers, tracing and
 > more) plus an index and a generated [API reference](api-reference.md). Every
 > offline example on those pages is run by the test suite; blocks needing a real model or
@@ -1837,7 +1841,7 @@ pip install "nexura-agents[otel]"    # + OpenTelemetry tracing
 > OpenAI, Anthropic, Gemini or Sarvam with your own key; the OpenAI, Anthropic and Sarvam checks have not run.
 > LiteLLM is checked offline only, against the real library's mock mode.
 >
-> Full guides live in the repository's `docs/` folder: 45 guides (getting started,
+> Full guides live in the repository's `docs/` folder: 46 guides (getting started,
 > agents, teams, tools, MCP and OpenAPI, A2A, memory, prompts, structured output,
 > approvals, guardrails, multimodal, providers, tracing, testing and more) plus a
 > generated API reference.
@@ -10657,8 +10661,9 @@ remember to pass it. `set_default_hooks(policy)` installs hooks that every `Runn
   locked=True)` makes it binding for the rest of the process: `default_hooks=False`,
   `set_default_hooks(None)` and installing another default raise `SDKValidationError`, and
   a runner built with `default_hooks=False` before the lock still gets the default.
-  Installing the same object again is allowed. The service will install its policy this
-  way (P39 G6). Without the lock the default protects against misconfiguration (a
+  Installing the same object again is allowed. The service installs its operator policy
+  this way (`nexura-runtime serve --guardrail-policy FILE`, see
+  [Guardrail policy](guardrail-policy.md)). Without the lock the default protects against misconfiguration (a
   developer's `hooks=` cannot replace it), not against code in the same process that opts
   out on purpose.
 - No hooks are loaded from environment variables or files by the core: the operator's
@@ -10675,6 +10680,11 @@ remember to pass it. `set_default_hooks(policy)` installs hooks that every `Runn
   `stream_guard="passthrough"` cannot stream past them. Return the same guardrails for the
   same agent every time; a non-list, a non-function or an `async def` method fails the run
   with `SDKValidationError`.
+- **A policy checks every run's input with `input_guardrails(ctx, agent)`** (P39 G6), the same
+  kind of sync hook: its guardrails run once per run after the agent's own input guardrails,
+  before any model call, with the same timeout, cancellation, `GUARDRAIL_DECISION` events and
+  tripwire. They do not run again on resume or recovery. `GuardrailPolicy` uses both hooks for
+  its `input` and `output` stages.
 
 ```python
 from nexura_agents import Agent, AgentHooks, FakeModel, Runner, redact_output_pii, set_default_hooks
@@ -10961,7 +10971,7 @@ Options: `policy` text, or `policy_file="policies/bank.md"`, or only `categories
 
 `context_tokens` is the judge model's context window in tokens, 4096 by default (Ollama's default context length). Before each call the fully built prompt (the policy and instructions, the fenced text, the context and the tool name, after marker neutralisation) is measured by a **strict upper bound** on its token count: its UTF-8 length in bytes (`token_upper_bound`). Byte-level BPE tokenizers (Llama 3, Qwen, Granite, GPT) never produce more tokens than bytes, and byte-fallback SentencePiece tokenizers (Gemma) at most one more, which the reserve covers. If the prompt is over `context_tokens - max_output_tokens - 256` (3,640 with the defaults), nothing is sent: the verdict is `error` with `error_type="ContentTooLong"` and `evidence["hard"] = True`. A hard error cannot be softened by any `on_error` setting, neither the judge's nor the one on `as_guardrail` or `as_tool_guardrail`, and inside `parallel` it wins over every other member's outcome (whatever the order or the deadline), so the guardrail always blocks. With the defaults the prompt alone is about 1,700 bytes (a short policy and two categories) to 2,400 bytes (the default 13 categories), which leaves room for about 1,250 to 1,950 bytes of content and context together: that many ASCII characters, about a third as many Devanagari characters. `JudgeCheck` refuses at construction a policy that leaves no room at all.
 
-The reason: a model with a short context window silently drops part of an over-long prompt (Ollama keeps the start and the end and drops the middle), so the policy, the opening fence or the harmful part of the content may never reach the judge. An earlier version measured the prompt with the rough `estimate_tokens` (3 ASCII characters per token), which some text, such as `"x\n"` padding, beats by a factor of three, so an over-long prompt could pass the cap; the byte bound cannot be beaten. To judge longer text, raise the server's context and set `context_tokens` to the same number: for Ollama, `OLLAMA_CONTEXT_LENGTH=16384` (the judge talks to Ollama's OpenAI-compatible endpoint, which takes no per-request `num_ctx`), then `JudgeCheck(..., context_tokens=16384)`. Never set `context_tokens` above the server's real context. Judging long content in overlapping windows, each with the full instructions, is planned for a later release; until then, check long tool results with the pre-filters, or split them yourself. For a streamed reply, `Agent(stream_guard="chunked")` already checks it in windows of `chunk_chars` characters (see [Streaming replies](#streaming-replies)); the final check still sends the whole answer, so a reply over the cap fails closed after the shown windows.
+The reason: a model with a short context window silently drops part of an over-long prompt (Ollama keeps the start and the end and drops the middle), so the policy, the opening fence or the harmful part of the content may never reach the judge. An earlier version measured the prompt with the rough `estimate_tokens` (3 ASCII characters per token), which some text, such as `"x\n"` padding, beats by a factor of three, so an over-long prompt could pass the cap; the byte bound cannot be beaten. To judge longer text, set a larger `context_tokens`. An `"ollama:<tag>"` judge talks to Ollama's native `/api/chat` and sends `context_tokens` as `num_ctx` with every call (with `truncate` and `shift` off, so an over-long prompt fails instead of losing its middle), so `JudgeCheck("ollama:qwen3:8b", ..., context_tokens=16384)` is enough, as long as the server has the memory. Through an OpenAI-compatible endpoint (`api="openai"`, including Ollama's `/v1`), the server's own context applies: raise it too (for Ollama, `OLLAMA_CONTEXT_LENGTH=16384`) and never set `context_tokens` above it. Judging long content in overlapping windows, each with the full instructions, is planned for a later release; until then, check long tool results with the pre-filters, or split them yourself. For a streamed reply, `Agent(stream_guard="chunked")` already checks it in windows of `chunk_chars` characters (see [Streaming replies](#streaming-replies)); the final check still sends the whole answer, so a reply over the cap fails closed after the shown windows.
 
 ### How the prompt resists injection
 
@@ -11123,7 +11133,7 @@ assert tool_message.content.startswith("Tool call blocked by guardrail 'pii':")
 
 The checked text for a tool input is the arguments as sorted JSON; for a tool output it is the result text.
 
-Tool guardrails go with the tool, so they also apply where a tool runs outside an agent's `Runner`: tools served by `AgentMCPServer`, tools run by the runtime's `AgentCoordinator` and by `AgentDefinition.as_tool()` subagents. To apply checks to every tool of every run instead of tagging tools one by one, put them in hooks and install the hooks as the process default with `set_default_hooks`: every runner, nested run, sub-agent and coordinator then uses them before the developer's own hooks, which cannot remove them (see [Policies](guardrails-hooks-limits.md#policies-default-hooks-for-every-run)). The `GuardrailPolicy` middleware that does this from a rule file arrives in a later release.
+Tool guardrails go with the tool, so they also apply where a tool runs outside an agent's `Runner`: tools served by `AgentMCPServer`, tools run by the runtime's `AgentCoordinator` and by `AgentDefinition.as_tool()` subagents. To apply checks to every tool of every run instead of tagging tools one by one, put them in hooks and install the hooks as the process default with `set_default_hooks`: every runner, nested run, sub-agent and coordinator then uses them before the developer's own hooks, which cannot remove them (see [Policies](guardrails-hooks-limits.md#policies-default-hooks-for-every-run)). `GuardrailPolicy` does this from one declarative policy, in Python or as a JSON or YAML file: rules by stage, tool name, origin, toolset, effect class and arguments, allowlist mode, approval gates, journaled model verdicts and audit sinks (see [Guardrail policy](guardrail-policy.md)).
 
 The rejection the agent model reads is a fixed notice built from the check name and the taxonomy category ids, for example `Tool call blocked by guardrail 'judge': blocked by guardrail check 'judge' (categories: prompt_injection)`, or `... could not decide (TimeoutError); blocked` for an error. The judge's free-text `reason` is never part of it: the judged content can influence that text, and a tool result is exactly where indirect injection arrives. The reason stays in the guardrail's `info` for logs and audits.
 
@@ -11248,7 +11258,7 @@ The same data, with the pinned revisions, is in `nexura_guardrails.SAFETY_MODELS
 | Preset | What it checks | Network |
 | --- | --- | --- |
 | `pii_block(kinds=None)` | blocks personal data and secrets in agent input and tool arguments | none |
-| `pii_redact(kinds=None, mask="[REDACTED:{kind}]")` | redacts them in the agent's answer (also streamed replies) and in tool results | none |
+| `pii_redact(kinds=None, mask="[REDACTED:{kind}]")` | redacts them in the agent's answer (also streamed replies; an agent with `stream_guard="passthrough"` is refused) and in tool results | none |
 | `injection_fast(threshold=0.5)` | the injection pre-filter on agent input and tool results | none |
 | `safety_local(model="llama-guard3:1b", base_url="http://localhost:11434")` | input: `tiered(injection pre-filter, safety model)`; answer: the safety model; tool results: the injection pre-filter | the local server |
 | `strict_tools(allow=[...])` | only allowed tools run; allowed MCP and OpenAPI tools whose effect is anything but `pure` (`idempotent`, `reconcilable` and `non_idempotent`: a declared idempotent `PUT` or `DELETE` still changes something) pause for human approval; every tool result is scanned by the injection pre-filter (or `result_check=`) | none, or the model you add |
@@ -11260,7 +11270,7 @@ A preset holds guardrail functions per stage and, when it has tool stages, `hook
 
 `preset.tool_kwargs()` fits `@tool(...)` for a single tool. `combine(a, b, ...)` joins presets. `preset.pricing()` lists the zero prices its local guard models register. `PRESETS` lists them all with their default network needs; a preset's own `network` is `"model"` when `safety_local` points at a server that is not on this machine (`allow_remote=True`).
 
-> **`judge` capacity.** With the default `context_tokens=4096` the judge accepts only about **1.2 to 1.9 KB** of checked text (the content plus, for an answer, the user's request), because the prompt is measured by a strict byte bound (see [Content size](#content-size)) and the policy and instructions take about 1.7 to 2.4 KB. Longer text is refused with a hard `ContentTooLong` error, so the guardrail blocks it. To check longer text, raise the judge server's context and pass the same number: for Ollama, start it with `OLLAMA_CONTEXT_LENGTH=16384` and use `judge(policy, model, context_tokens=16384)`. Never set `context_tokens` above the server's real context. Ollama judges currently go through its OpenAI-compatible endpoint, which takes no per-request context size; moving them to Ollama's native API, which does, is planned for a later release.
+> **`judge` capacity.** With the default `context_tokens=4096` the judge accepts only about **1.2 to 1.9 KB** of checked text (the content plus, for an answer, the user's request), because the prompt is measured by a strict byte bound (see [Content size](#content-size)) and the policy and instructions take about 1.7 to 2.4 KB. Longer text is refused with a hard `ContentTooLong` error, so the guardrail blocks it. To check longer text, pass a larger context: `judge(policy, "ollama:qwen3:8b", context_tokens=16384)`. Ollama judges use Ollama's native API, which takes the context size per request (`num_ctx`), so nothing else is needed besides the server's memory. For a judge behind an OpenAI-compatible endpoint (`api="openai"`), raise the server's context as well (for Ollama, `OLLAMA_CONTEXT_LENGTH=16384`) and never set `context_tokens` above it.
 
 `strict_tools` patterns: one with a `:` matches the tool's origin (`"mcp:docs:*"`, `"openapi:GET:/items*"`); a bare one (`"lookup"`, `"get_*"`) matches the names of local tools only (`@tool` functions, the SDK's own tools and `Agent.as_tool` sub-agents), never an MCP, OpenAPI, A2A or module tool that shares the name. Allow those by origin.
 
@@ -11398,6 +11408,445 @@ Always check dataset licenses before use. Datasets with non-commercial or restri
 - [Guardrails, hooks and limits](guardrails-hooks-limits.md): the guardrail mechanism, pre-filters, hooks and `UsageLimits`.
 - [Budgets and usage](budgets-and-usage.md): how model calls are admitted and settled.
 - [Packages](packages.md): what each package contains and how to install it.
+
+---
+
+Source: https://github.com/Liceron/nexura/blob/main/docs/guardrail-policy.md
+
+# Guardrail policy
+
+A `GuardrailPolicy` (in `nexura-guardrails`) is one declarative policy that applies guardrail
+rules to every stage of every agent run: the user's input, every model request and reply, every
+tool call's arguments and result, and the final answer. You write it once, in Python or as a
+JSON or YAML file, and install it for the process or for a service; you do not tag tools one by
+one. **Guardrail checks reduce risk and give an audit trail. They are not a security
+boundary**: the real protection is structural (a tool allowlist, human approval for side
+effects, a sandbox for code, least-privilege credentials), as the [security notes](#security-notes)
+below explain.
+
+```bash
+pip install "nexura-guardrails[yaml]"   # [yaml] only for YAML files; JSON needs nothing extra
+```
+
+## A first policy
+
+```python
+import asyncio
+
+from nexura_agents import Agent, FakeModel, Runner, ToolCall, tool
+from nexura_guardrails import GuardrailPolicy, Rule, When, pii
+
+
+@tool
+def lookup(q: str) -> str:
+    """Look up a customer."""
+    return f"{q}: write to bob@example.com"
+
+
+@tool
+def shell(command: str) -> str:
+    """Run a shell command."""
+    raise AssertionError("never runs: the policy blocks it")
+
+
+policy = GuardrailPolicy(
+    name="acme-default",
+    checks={"redact": pii(action="redact")},
+    rules=[
+        Rule("no-shell", When(stage="tool_input", tools="shell*"), action="block"),
+        Rule("scrub-results", When(stage=["tool_output", "output"]), check="redact", action="scrub"),
+    ],
+)
+
+agent = Agent(
+    name="support",
+    instructions="Help the customer.",
+    model=FakeModel(
+        responses=[
+            [
+                ToolCall(id="c1", name="lookup", arguments={"q": "Asha"}),
+                ToolCall(id="c2", name="shell", arguments={"command": "ls"}),
+            ],
+            "Done: mail asha@example.com",
+        ]
+    ),
+    tools=[lookup, shell],
+)
+result = asyncio.run(Runner(hooks=[policy]).run_async(agent, "Find Asha"))
+tool_results = [m.content for m in result.messages if m.role == "tool"]
+assert tool_results[0] == "Asha: write to [REDACTED:email]"
+assert tool_results[1].startswith("Tool call blocked by policy rule 'no-shell'")
+assert result.output == "Done: mail [REDACTED:email]"
+```
+
+`Runner(hooks=[policy])` applies it to one runner. `policy.install()` makes it the process
+default for every `Runner` (including the runs that agents-as-tools, teams, MCP and A2A servers,
+templates and workflow agent nodes start); `policy.install(locked=True)` also stops code in the
+same process from removing it (`set_default_hooks(..., locked=True)`, see
+[Guardrails, hooks and limits](guardrails-hooks-limits.md)).
+
+Two runtime paths call models without a `Runner`: `AgentCoordinator` (and the
+`nexura.agents.coordinator` workflow module) and `AgentDefinition` subagents. They cannot apply
+the `input`, `model_input`, `model_output` and `output` stages, so a coordinator run is
+**refused** with `SDKValidationError` when it starts whenever the hooks it would use include a
+policy with rules for any of those stages, whatever their source: `AgentCoordinator(hooks=policy)`,
+`policy.install()` with or without the lock, or an enclosing run's hooks. A policy with only tool
+rules does not refuse it: its tool calls go through the policy as in a `Runner`.
+
+**AgentDefinition subagents: their own model calls are not checked by model_input/model_output
+rules, and their own input and output stages are not checked either, until a follow-up lands.
+The parent's stages still check what reaches the user.** (A
+subagent that calls a tool is refused at that call under such a policy.) Workflow module nodes
+other than agent nodes and `guardrails.check` are not covered yet.
+
+## Stages and actions
+
+| Stage | When | `block` | `scrub` | `require_approval` | `fail` |
+| --- | --- | --- | --- | --- | --- |
+| `input` | the user's latest message, once per run, before any model call | the run trips (`GuardrailTripwireTriggered`) | not allowed | not allowed | the run trips |
+| `model_input` | every model request (the new messages since the last reply) | a refusal reply, the model is not called | not allowed | not allowed | the run fails |
+| `model_output` | every model reply, including its tool calls | the reply and its tool calls become a refusal | the reply text is redacted | not allowed | the run fails |
+| `tool_input` | every tool call's arguments | the tool does not run; the model is told the rule | not allowed (arguments are never rewritten) | a person approves the call first | the run fails |
+| `tool_output` | every tool result | the result is withheld; the model is told the rule | the result is redacted | not allowed | the run fails |
+| `output` | the final answer | the run trips | the answer is redacted | not allowed | the run trips |
+
+**Streaming.** When a `model_output` or `output` rule (`scrub`, `block` or `fail`) applies to an
+agent, its streamed text (`stream_text=True`, the chat SSE, Studio) goes through the same holding
+path as output guardrails: with `stream_guard="auto"` the reply is **held** until every rule has
+run, or, when every such rule is a `scrub` by regex pre-filters, checked in **windows** before
+each part is shown (`"chunked"`). Text a model writes before its tool calls is checked the same
+way, and so are the reply's streamed tool calls: `TOOL_CALL_DELTA` events are held with the
+text and sent only when the reply's tool calls come through `model_output` unchanged (a blocked
+reply sends none). An agent with `stream_guard="passthrough"` is **refused** with `SDKValidationError` at the
+start of its run (and at a handoff to it) while such a rule applies: it would show text before
+the rules see it.
+
+`allow` is an allowlist entry: it never cancels another rule. For each stage the **most severe
+matching action wins**: `fail` > `block` > `require_approval` > `scrub` > `allow`. Rules without
+checks act on every item they match; rules with checks act when their checks do not allow the
+text (a block, a review, a rewrite or, with `on_error: block`, an error). Unconditional rules are
+applied first and checks are run most severe first, so a cheap finding never hides a `fail`.
+
+What the model is told when a tool call or result is blocked is built from fixed words, the rule
+id, the check name and taxonomy category ids, never from a judge's free-text reason.
+
+## Matching
+
+`When` fields must all match; within a field any pattern may match. Patterns are `fnmatch`
+globs, case-sensitive.
+
+- `stage`: one or more stages (default: all).
+- `tools`: tool names. `origin`: `ToolInfo.origin`, for example `mcp:<server>:<tool>`,
+  `openapi:<METHOD>:<path>`, `python:<module>.<function>`, `agent:<name>`,
+  `knowledge:<collection>`. `toolset`: the names in `toolset:<name>` tags (MCP servers, OpenAPI
+  toolsets). `effect`: effect classes `pure` (`read` is an alias), `idempotent`,
+  `non_idempotent`, `reconcilable`. These filter tool calls, so a rule that uses them may only
+  name `tool_input` and `tool_output`.
+- `agents`: agent names.
+- `args`: argument conditions, `{"$.amount": {"gt": 100}}`, with `eq`, `ne`, `gt`, `gte`, `lt`,
+  `lte`, `in`, `not_in`, `contains`, `matches` (a regular expression) and `exists`. A missing
+  argument fails every operator except `exists: false`. `gt`, `gte`, `lt` and `lte` compare
+  finite numbers (`int`, `float` and `Decimal`, exactly, never rounded through `float`); a value
+  that is present but is not a finite number (text, `NaN`, an infinity, `true`, `null`) cannot be
+  compared, so the condition counts as **met** for a `block`, `fail`, `scrub` or
+  `require_approval` rule (fail closed) and as unmet for an `allow` rule. `true` is not `1` for
+  `eq`. Argument rules are matched twice: on the arguments as the model sent them
+  and on the arguments the tool will receive after its schema validation (`"5000"` becomes
+  `5000` for an `int` parameter, `"true"` becomes `true`). A `block`, `fail`, `scrub` or
+  `require_approval` rule applies when either matches; an `allow` rule only when both do, so
+  the most severe reading wins. Before any hook or policy sees a call, the `Runner` builds the
+  exact arguments the tool will receive: a plain `@tool` drops names it does not declare (as it
+  always has; a stray key never fails a call) and coerces values; an MCP or OpenAPI tool keeps
+  its JSON Schema rules (extra keys pass unless `additionalProperties` is false). The policy
+  checks those dispatched arguments together with the raw ones, so a `block` rule on a key that
+  is dropped before dispatch still fires. Arguments that do not validate are refused
+  (`ToolValidationError`, told to the model when the tool allows retries); such a call is never
+  sent for approval.
+  Where the arguments cannot be validated (a call outside a `Runner`), an argument condition
+  counts as met for a restricting rule and as unmet for an `allow` rule.
+  Because an `allow` rule needs both readings to match, allowlist mode is strict about types:
+  `allow when $.amount <= 100` does not admit `{"amount": "50"}` even though the tool would
+  receive `50`. Send numbers as JSON numbers, or add a separate rule for the string form.
+
+A model reply with two tool calls sharing one id (two empty ids included) is refused with
+`ProviderResponseError` before any check, approval gate, journal entry or dispatch: approvals and
+rejections are bound to call ids, so such calls could not be decided one by one.
+
+An `allow` rule that names `tools` without `origin` admits only local tools (no origin,
+`python:`, `builtin:`, `agent:`): an allowlist entry `lookup` never admits an MCP or OpenAPI tool
+that happens to be called `lookup`. Name those by `origin`. A `block` rule by name catches every
+origin.
+
+## Allowlist mode and approval
+
+`default_tool_action="block"` turns the policy into an allowlist: a tool call that no `allow`
+rule matches is refused ("it is not on the tool allowlist") whatever its arguments.
+`require_approval` rules pause the run for a person before the call (the standard approval
+contract: the decision is bound to the exact call, and the gate is evaluated again on resume and
+recovery). They take no checks: an approval gate must be deterministic, so it may only match
+tool facts and arguments.
+
+```python
+import asyncio
+
+from nexura_agents import Agent, FakeModel, Runner, ToolCall, tool
+from nexura_guardrails import GuardrailPolicy, Rule, When
+
+ran = []
+
+
+@tool
+def read_file(path: str) -> str:
+    """Read a file."""
+    return "contents"
+
+
+@tool
+def shell(command: str) -> str:
+    """Run a shell command."""
+    ran.append(command)
+    return "done"
+
+
+policy = GuardrailPolicy(
+    default_tool_action="block",
+    rules=[
+        Rule("reads", When(stage="tool_input", tools=["read_file", "shell"]), action="allow"),
+        Rule("approve-shell", When(stage="tool_input", tools="shell"), action="require_approval"),
+    ],
+)
+agent = Agent(
+    name="ops",
+    instructions="Help.",
+    model=FakeModel(
+        responses=[[ToolCall(id="c1", name="shell", arguments={"command": "rm -fr /"})], "ok"]
+    ),
+    tools=[read_file, shell],
+)
+runner = Runner(hooks=[policy])
+paused = asyncio.run(runner.run_async(agent, "clean up"))
+assert paused.status == "paused" and ran == []  # a person sees the exact command first
+done = asyncio.run(runner.resume_async(agent, paused.interruption, reject={"c1": "no"}))
+assert done.status == "completed" and ran == []
+```
+
+## Policy files
+
+The same policy as data (`version: 1`). Unknown keys, duplicate keys, unknown check types,
+rules that name unknown checks and actions a stage cannot take are refused with the path of the
+offending field, and so are YAML anchors and aliases and documents nested deeper than 32
+levels. The path is resolved once (symbolic links are followed, so a Kubernetes ConfigMap mount
+such as `policy.yaml -> ..data/policy.yaml` works); the resolved target must be a regular file
+(not a device, pipe or directory) of at most 1 MB, and relative paths in it resolve against the
+resolved file's directory. A judge's `policy_file` is read the same way.
+A policy file never names code and never holds credentials. Relative paths
+(a judge's `policy_file`, the audit `path`) resolve against the file's directory, and the policy
+digest covers the document and the contents of every `policy_file`.
+
+```yaml
+version: 1
+name: acme-default
+on_error: block
+default_tool_action: allow
+timeouts: {check_seconds: 5, stage_seconds: 8}
+checks:
+  pii: {type: pii, kinds: [card, aadhaar, pan, secret, upi]}
+  redact: {type: pii, action: redact}
+  inject_fast: {type: injection, threshold: 0.5}
+  safety: {type: llama_guard, model: "llama-guard3:1b"}
+  bank_judge: {type: judge, model: "ollama:qwen3:8b", policy_file: policies/bank.md}
+rules:
+  - id: gate-writes
+    when: {stage: tool_input, effect: [non_idempotent], origin: ["mcp:*", "openapi:*"]}
+    action: require_approval
+  - id: no-secrets-to-tools
+    when: {stage: tool_input}
+    check: pii
+    action: block
+  - id: scan-tool-results
+    when: {stage: tool_output, origin: ["mcp:*", "openapi:*", "knowledge:*", "builtin:web"]}
+    checks: [inject_fast, safety]
+    mode: tiered
+    action: block
+  - id: scrub-output
+    when: {stage: [model_output, output]}
+    checks: [redact]
+    action: scrub
+  - id: input-safety
+    when: {stage: input}
+    checks: [inject_fast, bank_judge]
+    action: fail
+audit: {sink: jsonl, path: audit/guardrails.jsonl}
+```
+
+Check types: `pii` (`kinds`, `action: block | redact`, `mask`), `injection` (`threshold`,
+`extra_patterns`), `length` (`chars`, `tokens`), `topics` (`keywords`, `deny`), `json_only`,
+`judge` (`model`, `policy` or `policy_file`, `categories`, `timeout`, `context_tokens`,
+`max_output_tokens`, `on_error`, `api`, `base_url`), and the local safety models `llama_guard`,
+`shieldgemma`, `granite_guardian` and `nemotron` (see the
+[guardrails package guide](guardrails-package.md)). A rule with several checks runs them in
+order (`mode: tiered`, stopping at the first finding) or together (`mode: parallel`).
+
+```python
+from nexura_guardrails import GuardrailPolicy
+
+policy = GuardrailPolicy.from_yaml(
+    """
+version: 1
+default_tool_action: block
+checks:
+  redact: {type: pii, action: redact}
+rules:
+  - {id: allow-lookup, when: {stage: tool_input, tools: [lookup]}, action: allow}
+  - {id: scrub, when: {stage: [tool_output, output]}, check: redact, action: scrub}
+"""
+)
+assert [rule.id for rule in policy.rules] == ["allow-lookup", "scrub"]
+assert len(policy.digest) == 64
+# From a file: GuardrailPolicy.from_file("policy.yaml") or nexura_guardrails.load_policy(path)
+```
+
+## Errors, timeouts and journaled verdicts
+
+Any check error, timeout or malformed verdict follows `on_error` (policy-wide, or per rule):
+`block` (the default) fails closed, `allow` lets the item through (never for a hard error such
+as a judge's `ContentTooLong`). `timeouts.check_seconds` bounds each check and
+`timeouts.stage_seconds` a whole stage. A stage timeout follows `on_error` like any error:
+with `block` the item is blocked, with `allow` it goes through.
+
+Model-based verdicts (a judge, a safety model) are not deterministic: asked again after a
+crash, a judge could allow a call it blocked before, and it costs money again. So the policy
+records every model-based verdict under a key made of the policy digest, the rule, the check, the
+stage, the agent, the tool's name and origin, the step (`turn:<n>/call:<id>` with the call's
+position among calls sharing its id, `turn:<n>/model`, `input` or `final`) and a digest of the
+exact text judged. The record keeps all of those parts, and a stored verdict is reused only when
+every one matches exactly; otherwise the check runs again. In a durable run (a `checkpoint_store` with an execution journal: the built-in
+memory, SQLite and Postgres stores) the verdict is **committed to the run's journal before it is
+acted on**, as a fenced write like every other journal write. A resumed or recovered run finds
+it and does not call the model again (the decision event says `source: journal`); a changed
+text is a different key and is checked afresh. Deterministic checks are not recorded: running
+them again gives the same answer. Without a durable store the verdicts live in the run only.
+
+## Audit
+
+Every decision other than `allow` (all of them with `audit_allows=True`) produces:
+
+- a `GUARDRAIL_DECISION` run event and a `nexura.guardrail.decision` trace event with the stage,
+  rule, check, backend, action, categories, score, latency, source (`live`, `cache` or
+  `journal`) and the first 16 characters of the policy digest; on tool stages also the tool
+  name and call id;
+- an `AuditRecord` for each audit sink: `JsonlAuditSink(path)` (one JSON line per decision,
+  file mode `0600`, `fsync` for `block` and `fail`), `CallbackAuditSink(fn)` or
+  `MemoryAuditSink()`.
+
+Records never hold the checked text, tool arguments or results. A failing sink is logged and
+counted (`policy.audit_errors`); with `audit_required=True` (`audit: {required: true}`) it fails
+the run instead.
+
+## In a workflow
+
+The `guardrails.check` module checks a text and branches on the verdict: `allow`, `block`,
+`review`, `error` or `rewrite`. Its outputs are `decision`, `categories`, `score`, `reason`,
+`replacement` and `text` (the redacted text after a rewrite, the original when allowed, empty
+otherwise). A workflow document may configure only the deterministic pre-filters, without
+custom regular expressions (`extra_patterns` is refused: an editor's pattern could backtrack for
+minutes; topic keywords are matched literally); model checks and custom patterns are given by the
+operator in Python (`GuardrailCheckModule(checks={...})`) and named with `use`. `nexura-runtime` registers the module when `nexura-guardrails` is installed.
+
+```python
+import asyncio
+
+from nexura_guardrails.runtime import GuardrailCheckModule
+from nexura_runtime.workflow import ModuleRegistry, WorkflowEngine, WorkflowNode, WorkflowSpec
+
+
+def answer(state):
+    return {"reply": f"Handled: {state['safe_text']}"}
+
+
+def refuse(state):
+    return {"reply": "Sorry, I cannot help with that."}
+
+
+registry = ModuleRegistry()
+registry.register("guard", GuardrailCheckModule())
+registry.register("answer", answer)
+registry.register("refuse", refuse)
+spec = WorkflowSpec(
+    name="guarded",
+    entry_node="guard",
+    nodes={
+        "guard": WorkflowNode(
+            id="guard",
+            handler="guard",
+            config={"checks": {"pii": {"type": "pii", "action": "redact"}, "inject": {"type": "injection"}}},
+            input_mapping={"text": "message"},
+            output_mapping={"text": "safe_text"},
+            transitions={"allow": "answer", "rewrite": "answer", "block": "refuse", "error": "refuse"},
+        ),
+        "answer": WorkflowNode(id="answer", handler="answer"),
+        "refuse": WorkflowNode(id="refuse", handler="refuse"),
+    },
+    terminal_nodes=["answer", "refuse"],
+)
+result = asyncio.run(WorkflowEngine(spec, registry).run({"message": "mail me at bob@example.com"}))
+assert result.state["reply"] == "Handled: mail me at [REDACTED:email]"
+```
+
+Policy rules for module nodes themselves (`WorkflowEngine(guardrail_policy=...)`) are not part of
+this release; agent nodes are covered, since their runs use the process default.
+
+## In the service
+
+`nexura-runtime serve --guardrail-policy policy.yaml` (or `NEXURA_GUARDRAIL_POLICY`, or
+`create_api_app(guardrail_policy=...)`) enforces a policy file on the agent runs of the service
+(see the exceptions above).
+See [Service and Studio](studio-and-service.md#guardrail-policy) for what the operator gets.
+
+## Security notes
+
+- Substring and regex blocklists for commands are a **first filter only**. `"rm -rf"` is
+  bypassed by `rm -fr`, `rm -r -f`, `rm --recursive --force`, `find / -delete`,
+  `python -c "import shutil; shutil.rmtree('/')"`, `$(echo cm0gLXJmIC8= | base64 -d)`, variable
+  splitting (`r=rm; $r -rf`), a script file written by one tool call and run by another, or a
+  different tool altogether. A denied keyword list for topics fails the same way.
+- Model-based checks are probabilistic: published recall for the best guards is 70% to 97%
+  depending on the dataset, worse in Hindi, and unknown in Tamil, Bengali or
+  Hinglish. Adaptive attackers target them.
+- **Real protection is structural**: (1) a **tool allowlist** (offer the model only the tools
+  it needs; `default_tool_action: block` in the policy); (2) **human approval for
+  `non_idempotent` effects** (the A6 effect classes plus the approval contract); (3)
+  **`nexura-sandbox`** (WASI, bubblewrap with seccomp, gVisor) for any code or shell execution,
+  with no network by default; (4) least-privilege credentials per tool; (5) treating every tool
+  result and document as untrusted data. Guardrail checks reduce risk and give an audit trail.
+  They are not a security boundary.
+
+The measurements behind these notes are in [Guardrails, hooks and limits](guardrails-hooks-limits.md)
+(the built-in pre-filters) and the [guardrails package guide](guardrails-package.md) (published
+guard-model results). The test suite keeps the first note honest: it runs 7 of the 9 bypasses
+above, the seven command strings, against a `contains: "rm -rf"` blocklist rule and asserts that
+each gets through and that an allowlist or an approval gate stops every one; the other two (a
+script written by one call and run by another, a different tool) are not single commands.
+
+## Limits
+
+- The `input` stage runs once per run, not on resume or recovery (as agent input guardrails).
+  Handoff targets do not run their own input guardrails; use `model_input` to cover them.
+- `model_input` checks only the new messages of each request, not the whole conversation.
+- `scrub` on `model_output` redacts the reply text only; tool-call arguments are checked on
+  `tool_input`, where they can only be blocked.
+- `require_approval` matches tool facts and arguments only (no checks), and needs a run that can
+  pause (a `Runner`; refused over MCP, as other approval gates).
+- One policy per process for the service. Per-workspace policies are not supported yet.
+- `AgentCoordinator` runs are refused (not covered) under a policy with input, model or output
+  rules. AgentDefinition subagents: their own model calls are not checked by
+  model_input/model_output rules, and their own input and output stages are not checked either,
+  until a follow-up lands; the parent's stages still check what reaches the user. Workflow module nodes are not covered yet.
+- A `require_approval` rule is skipped when a check-less `block` or `fail` rule (or allowlist
+  mode) refuses the call anyway: a person is never asked to approve a refused call. Block rules
+  with checks run after approval, in `before_tool`.
+- `capture_content` (a redacted excerpt in audit records) is not supported: audit records never
+  hold content.
 
 ---
 
@@ -16231,6 +16680,56 @@ nexura-runtime serve --chat-model gpt=openai:gpt-4o-mini --chat-model gem=gemini
 - Live use calls a paid provider: it is not covered by the test suite, which uses injected fake
   models only. Try it manually from a shell with your own key.
 
+## Guardrail policy
+
+The operator can enforce one [guardrail policy](guardrail-policy.md) on the agent runs of the
+service: the chat playground, saved agents, workflow agent nodes, templates, evaluations and
+any other in-process `Runner`. Not covered: workflow module nodes other than agent and
+`guardrails.check` nodes (not yet), and coordinator runs, which are refused while the policy has
+input, model or output rules.
+
+```bash
+pip install "nexura-guardrails[yaml]"
+nexura-runtime serve --guardrail-policy /etc/nexura/guardrails.yaml
+# or: NEXURA_GUARDRAIL_POLICY=/etc/nexura/guardrails.yaml nexura-runtime serve
+# the trigger worker takes the same flag: nexura-runtime worker --guardrail-policy ...
+```
+
+- The file is loaded before anything else. If it is missing or invalid, or `nexura-guardrails`
+  is not installed, the service **refuses to start** (exit code 2, the reason on stderr); there
+  is no "start without the policy" fallback. `create_api_app(guardrail_policy=...)` takes a
+  path or a `GuardrailPolicy` and raises `GuardrailPolicyConfigError` (a `ValueError`) the same
+  way.
+- It is installed with `set_default_hooks(policy, locked=True)`: every `Runner` in the process
+  uses it before its own hooks, and no code in the process can remove or replace it
+  (`Runner(default_hooks=False)` raises). One process enforces one policy; a second
+  `create_api_app` with a different policy in the same process is refused.
+- It is operator-owned like `approval_required_handlers`: never settable through the API, a
+  workflow document or a saved agent. A saved agent's own [presets](agents-in-studio.md#guardrails)
+  add to it; they cannot turn it off.
+- A judge's `model` in the policy file may name one of the server's chat models
+  (`--chat-model`), whose key then comes from the server environment, or a Nexura model string
+  (`ollama:qwen3:8b`). The file holds no keys.
+- `GET /api/v1/guardrails/policy` returns `{configured, enforced, detail, policy, exceptions}`.
+  Everyone gets the digest and the policy file's base name; workspace **admins** also get the
+  name, the full source path, the rules and the check types (never a judge's policy text or a
+  key). `exceptions` lists what is not covered. Studio shows it read-only in the agent editor,
+  with the "Enforced by the server" badge only when `enforced` is true.
+- `AgentCoordinator` runs (the `nexura.agents.coordinator` module) are refused while the policy
+  has input, model or output rules: they call models without the hooks that apply those stages.
+  AgentDefinition subagents: their own model calls are not checked by model_input/model_output
+  rules, and their own input and output stages are not checked either, until a follow-up lands.
+  The parent's stages still check what reaches the user. Agents saved in Studio run on a `Runner` and are
+  covered. An agent whose answers the policy checks cannot use `stream_guard: passthrough`
+  (refused when it is saved, and at run start). `GET /api/v1/guardrails/presets` lists
+  the presets saved agents may use and what each needs and costs.
+- Decisions appear as `GUARDRAIL_DECISION` run events and `nexura.guardrail.decision` trace
+  events; with `audit: {sink: jsonl, path: ...}` they are also appended to a JSON-lines file
+  next to the policy (relative paths resolve against the policy file's directory).
+- Policy rules for workflow module nodes (`WorkflowEngine(guardrail_policy=...)`) are not part
+  of this release: agent nodes and the `guardrails.check` node are covered, other module nodes
+  are not.
+
 ## Describe a workflow
 
 In Studio, **New Workflow** has a **Describe it** button. Type what you want, for example "a support agent that looks up orders and asks a manager before refunds over 100", and press **Draft**. You get an explanation, a list of things to review and a read-only drawing of the draft graph. The draft is marked unsaved: nothing has been saved or run. Press **Create from draft** to save it through the normal validate-then-create path and open it on the canvas, where you edit it like any other workflow, or **Discard draft** to throw it away.
@@ -17304,6 +17803,7 @@ provider strings or keys.
 | `skills` | Workspace skill names, read at `skills_label` (default `production`) when the agent runs | 20 |
 | `output_schema` | Optional JSON schema for the final answer (the subset `nexura_agents` supports for dict `output_type`) | 16,000 characters; `minLength` at most 2,000 and `minItems` at most 50 |
 | `limits` | `max_turns` (1-20, default 6), `max_tool_calls` (0-50, default 10), `timeout_seconds` (1-300, default 60) | |
+| `guardrails` | Optional: guardrail presets and the stream mode, see [Guardrails](#guardrails); `null` (the default) adds none | 5 presets, one of each |
 
 Unknown fields are refused. The whole spec is also capped at 64,000 JSON characters.
 
@@ -17323,6 +17823,38 @@ Any tool whose module can write is forced to `requires_approval=True`: a module 
 `write_operations` or `always_write`, one the server gates (`approval_required_handlers`),
 or any `effect_policy` other than `pure` or `read`. Its calls never run without the
 approval flow.
+
+## Guardrails
+
+`guardrails` names presets from `nexura-guardrails` (the server builds them; nothing in the spec
+is code, a URL or a file):
+
+```json
+{"guardrails": {"presets": [{"preset": "pii_redact"}, {"preset": "injection_fast"},
+  {"preset": "judge", "policy": "Block loan guarantees and investment advice.", "model": "gpt"}],
+  "stream_guard": "auto"}}
+```
+
+| Preset | Checks | Options | Cost |
+| --- | --- | --- | --- |
+| `pii_block` | blocks personal data and secrets in the user's message and tool arguments (regex) | `kinds` | none |
+| `pii_redact` | redacts them in answers (also streamed) and tool results (regex) | `kinds` | none |
+| `injection_fast` | prompt-injection pre-filter on the user's message and tool results (regex) | `threshold` (0.05-5) | none |
+| `safety_local` | the injection pre-filter, then a local safety model through Ollama on the server's machine (`http://localhost:11434`) | `model`: a guard tag the server knows (default `llama-guard3:1b`) | local model |
+| `judge` | an LLM judge applies `policy` to the user's message and the answer | `policy` (required, 4,000 characters), `model`: a chat model name (default: the agent's own) | one billed model call per check |
+
+Tool-stage checks are added to every tool of the agent, so they apply in the Playground and in
+workflow agent nodes alike. `stream_guard` is `auto` (default), `hold`, `chunked` or
+`passthrough` (see the [guardrails package guide](guardrails-package.md)); `passthrough` is
+refused with `pii_redact`, `safety_local` or `judge`, whose checks must see the answer before it
+is shown, and when the operator's policy checks this agent's answers. When the agent is
+saved the server refuses a judge on the offline fake model or on a name outside the chat-model
+allowlist, a `safety_local` model it cannot identify, options a preset does not take, and presets
+when `nexura-guardrails` is not installed (`field_errors` under `guardrails.presets.<n>`). Studio
+starts new agents with `pii_redact` and `injection_fast` (no model, no cost); existing agents
+keep `guardrails: null` until someone switches a preset on. The operator's
+[service policy](studio-and-service.md#guardrail-policy) applies on top of the presets and
+cannot be turned off from a spec.
 
 ## Routes
 
@@ -17549,7 +18081,11 @@ description, instruction and argument is shown as plain text.
   revision and a "need approval" badge when any tool needs approval. The editor has name,
   description, instructions, a model select (the names from `GET /agents/options`), a tool
   checklist with a "needs approval" badge per tool, knowledge collections, skills and the
-  skills label, an optional output schema as JSON text and the three limits. It checks the form
+  skills label, a **Guardrails** section (a toggle per preset with its cost, the judge's policy
+  text and model, the safety model, the stream mode, and above them the operator's enforced
+  policy, read-only, with its badge only when the server reports it enforced, and what it does
+not cover), an optional output schema as JSON text and the three limits. Each tool
+  shows its effect class (no side effects, safe to repeat, not safe to repeat). It checks the form
   against the server's bounds (`limits` from the options) before saving; refused fields from
   `field_errors` are shown next to the field. Saving sends `expected_revision`; a
   `REVISION_CONFLICT` shows a "Reload agent" button that loads the current revision and
@@ -19054,6 +19590,10 @@ Represents a typed, executable tool for an agent.
 
 - `arun(self, **kwargs: 'Any') -> 'Any'`
   Asynchronously execute tool with given keyword arguments.
+- `coerced_arguments(self, arguments: 'Mapping[str, Any]') -> 'dict[str, Any] | None'`
+  :meth:`dispatch_arguments`, or ``None`` when they do not validate.
+- `dispatch_arguments(self, arguments: 'Mapping[str, Any]') -> 'dict[str, Any]'`
+  The arguments exactly as :meth:`execute` gives them to the function: validated
 - `effect_class(self) -> 'EffectClass'`
   The tool's effect class (``non_idempotent`` when a subclass never set one).
 - `execute(self, arguments: 'dict[str, Any]', ctx: 'RunContext[Any] | None' = None) -> 'str'`
@@ -19073,7 +19613,7 @@ Represents a typed, executable tool for an agent.
 
 ### `RunContext`
 
-class `RunContext(deps: 'DepsT', run_id: 'str', agent_name: 'str', turn: 'int' = 0, usage: 'Usage' = <factory>, messages: 'list[Message]' = <factory>, tool_call_id: 'str | None' = None, tool_name: 'str | None' = None, retry: 'int' = 0, metadata: 'dict[str, Any]' = <factory>, state: 'dict[str, Any]' = <factory>, tags: 'list[str]' = <factory>, tool_attachments: 'list[Any]' = <factory>, prompt: 'dict[str, Any] | None' = None, idempotency_key: 'str | None' = None, fencing_token: 'int | None' = None, tool: 'ToolInfo | None' = None, _nested_usage: 'list[Usage]' = <factory>, _events: '_EventChannel' = <factory>, _compaction_summaries: 'dict[str, str]' = <factory>, _save_compaction: 'Callable[[], Awaitable[None]] | None' = None) -> None`
+class `RunContext(deps: 'DepsT', run_id: 'str', agent_name: 'str', turn: 'int' = 0, usage: 'Usage' = <factory>, messages: 'list[Message]' = <factory>, tool_call_id: 'str | None' = None, tool_name: 'str | None' = None, retry: 'int' = 0, metadata: 'dict[str, Any]' = <factory>, state: 'dict[str, Any]' = <factory>, tags: 'list[str]' = <factory>, tool_attachments: 'list[Any]' = <factory>, prompt: 'dict[str, Any] | None' = None, idempotency_key: 'str | None' = None, fencing_token: 'int | None' = None, tool: 'ToolInfo | None' = None, _nested_usage: 'list[Usage]' = <factory>, _events: '_EventChannel' = <factory>, _compaction_summaries: 'dict[str, str]' = <factory>, _save_compaction: 'Callable[[], Awaitable[None]] | None' = None, _verdicts: 'Any' = None, _tool_object: 'Any' = None) -> None`
 
 ~~~text
 What a tool or callback can see about the run it belongs to.
@@ -19087,7 +19627,7 @@ annotated ``RunContext[YourDeps]``; that parameter is never shown to the model.
   Count usage from work done inside a tool (e.g. a sub-agent) toward this run.
 - `emit(self, name: 'str', **data: 'Any') -> 'None'`
   Send a custom progress event to whoever streams this run.
-- `for_tool(self, tool_call_id: 'str', tool_name: 'str', retry: 'int', *, idempotency_key: 'str | None' = None, fencing_token: 'int | None' = None, tool: 'ToolInfo | None' = None) -> 'RunContext[DepsT]'`
+- `for_tool(self, tool_call_id: 'str', tool_name: 'str', retry: 'int', *, idempotency_key: 'str | None' = None, fencing_token: 'int | None' = None, tool: 'ToolInfo | None' = None, tool_object: 'Any' = None) -> 'RunContext[DepsT]'`
   Copy scoped to one tool call (``tool``: its metadata, see ``ToolInfo``).
 - `take_nested_usage(self) -> 'list[Usage]'`
   Return the usage recorded by nested runs and clear the buffer.
@@ -19519,6 +20059,8 @@ call for human approval. It can add an approval gate, never remove one.
   Called before each model request with the outgoing messages.
 - `before_tool(self, ctx: 'RunContext[Any]', call: 'ToolCall') -> 'str | None'`
   Called before a tool runs; may raise to refuse the call.
+- `input_guardrails(self, ctx: 'RunContext[Any]', agent: 'Agent') -> 'Sequence[Any]'`
+  Sync. Input guardrails these hooks add to ``agent``'s own (P39 G6).
 - `on_agent_end(self, ctx: 'RunContext[Any]', agent: 'Agent', output: 'Any') -> 'None'`
   Called when an agent stops being active: with the final output when the run
 - `on_agent_start(self, ctx: 'RunContext[Any]', agent: 'Agent') -> 'None'`
@@ -19580,6 +20122,8 @@ passed as one member) raises ``SDKValidationError``.
   The first member's ``ModelResponse`` (list order); later members are skipped.
 - `before_tool(self, ctx: 'RunContext[Any]', call: 'ToolCall') -> 'str | None'`
   The first member's string answer (list order); later members are skipped.
+- `input_guardrails(self, ctx: 'RunContext[Any]', agent: 'Agent') -> 'Sequence[Any]'`
+  Every member's input guardrails, in list order.
 - `on_agent_end(self, ctx: 'RunContext[Any]', agent: 'Agent', output: 'Any') -> 'None'`
   Every member's ``on_agent_end``, in reverse list order.
 - `on_agent_start(self, ctx: 'RunContext[Any]', agent: 'Agent') -> 'None'`
@@ -20275,6 +20819,8 @@ The handler receives ``(ctx, arguments)`` after the arguments pass the schema.
 
 - `arun(self, **kwargs: 'Any') -> 'Any'`
   Async counterpart of ``run``; always raises because schema tools need a Runner.
+- `dispatch_arguments(self, arguments: 'Mapping[str, Any]') -> 'dict[str, Any]'`
+  The arguments the handler receives: JSON Schema validation does not coerce or
 - `execute(self, arguments: 'dict[str, Any]', ctx: 'RunContext[Any] | None' = None) -> 'str'`
   Validate arguments against the schema, run the handler and return its result.
 - `run(self, **kwargs: 'Any') -> 'Any'`

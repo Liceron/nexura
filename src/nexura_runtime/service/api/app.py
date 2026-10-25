@@ -45,6 +45,12 @@ from nexura_runtime.service.api.diagnostics import router as diagnostics_router
 from nexura_runtime.service.api.effects import router as effects_router
 from nexura_runtime.service.api.errors import register_validation_handler
 from nexura_runtime.service.api.evaluations import router as evaluations_router
+from nexura_runtime.service.api.guardrails import (
+    check_guardrail_lock,
+    install_guardrail_policy,
+    resolve_guardrail_policy,
+)
+from nexura_runtime.service.api.guardrails import router as guardrails_router
 from nexura_runtime.service.api.integrations import router as integrations_router
 from nexura_runtime.service.api.knowledge import router as knowledge_router
 from nexura_runtime.service.api.local_secrets import install_local_credential_store
@@ -221,6 +227,7 @@ def create_api_app(
     workflow_state_url: str | None = None,
     workflow_lease_ttl: float = 30.0,
     allow_plain_http: bool = False,
+    guardrail_policy: Any = None,
 ) -> FastAPI:
     """Create a configured FastAPI application exposing the Nexura REST API.
 
@@ -303,6 +310,17 @@ def create_api_app(
             Off by default; ``None`` reads ``NEXURA_CAPTURE_FAILED_RUNS`` (``1``/``true``).
             See ``docs/reproducing-failures.md``.
 
+    Guardrails (P39 G6, see ``docs/guardrail-policy.md``):
+        guardrail_policy: the operator's guardrail policy, a ``nexura_guardrails.GuardrailPolicy``
+            or the path of a policy file (``.json``, or ``.yaml`` with
+            ``nexura-guardrails[yaml]``). ``None`` reads ``NEXURA_GUARDRAIL_POLICY``. It is
+            loaded before anything else; a missing or invalid file, or a policy without
+            ``nexura-guardrails`` installed, raises ``GuardrailPolicyConfigError`` (a
+            ``ValueError``) and the service does not start. The policy is installed with
+            ``set_default_hooks(policy, locked=True)``, so every agent run in this process
+            uses it and no code can remove it; one process enforces one policy. It is never
+            settable through the API; ``GET /api/v1/guardrails/policy`` shows a summary.
+
     Durable execution:
         execution_store: the execution journal served by ``GET /api/v1/runs/{run_id}/effects``
             and ``POST .../effects/{effect_id}/resolve``. Default: a ``SQLiteExecutionStore``
@@ -327,6 +345,11 @@ def create_api_app(
             ``POST /api/v1/runs/{run_id}/recover`` (A6 S9); a run another live ``serve`` or
             ``worker`` executes is never shown interrupted.
     """
+    # P39 G6: the operator's guardrail policy is loaded first; a bad one stops the start.
+    app_chat_models = ChatModelRegistry(chat_models)
+    app_guardrail_policy = resolve_guardrail_policy(guardrail_policy, app_chat_models)
+    if app_guardrail_policy is not None:
+        check_guardrail_lock(app_guardrail_policy)
     requested_extensions = check_extensions(
         [*extensions, *load_entry_point_extensions(enabled_extensions)],
         taken=BUILTIN_EXTENSION_NAMES,
@@ -693,7 +716,10 @@ def create_api_app(
     # Run lease of the service's workflow engines (A6 S9).
     app.state.workflow_lease_ttl = float(workflow_lease_ttl)
     app.state.session_store = SQLiteSessionStore(effective_store.db_path)
-    app.state.chat_models = ChatModelRegistry(chat_models)
+    app.state.chat_models = app_chat_models
+    if app_guardrail_policy is not None:
+        install_guardrail_policy(app_guardrail_policy)
+    app.state.guardrail_policy = app_guardrail_policy
     app.state.repro_capture = (
         FailedRunCapture(effective_store.db_path)
         if capture_failed_runs_enabled(capture_failed_runs)
@@ -791,6 +817,7 @@ def create_api_app(
     api_v1.include_router(evaluations_router)
     api_v1.include_router(triggers_router)
     api_v1.include_router(builder_router)
+    api_v1.include_router(guardrails_router)
     api_v1.include_router(build_session_token_router(is_local=_local_profile))
     extension_host = ExtensionHost(
         app=app,

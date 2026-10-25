@@ -176,7 +176,7 @@ Nothing has been published. Final package names still need registration and npm 
 
 ## Documentation map
 
-[Documentation index](https://github.com/Liceron/nexura/blob/main/docs/README.md): **45 guides** plus the generated [API reference](https://github.com/Liceron/nexura/blob/main/docs/api-reference.md). Offline Python examples are executed by tests; blocks needing a real model or running service are marked and skipped.
+[Documentation index](https://github.com/Liceron/nexura/blob/main/docs/README.md): **46 guides** plus the generated [API reference](https://github.com/Liceron/nexura/blob/main/docs/api-reference.md). Offline Python examples are executed by tests; blocks needing a real model or running service are marked and skipped.
 
 | Start with | Continue to |
 |---|---|

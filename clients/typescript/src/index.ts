@@ -160,6 +160,12 @@ export type {
   AgentToolOption,
   AgentOptions,
   AgentFieldError,
+  AgentGuardrailsSpec,
+  AgentGuardrailOptions,
+  GuardrailPresetName,
+  GuardrailPresetRef,
+  GuardrailPresetInfo,
+  GuardrailPolicyView,
 } from "./types.js";
 
 

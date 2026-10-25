@@ -1112,6 +1112,78 @@ export interface AgentSpec {
   skills_label?: string;
   output_schema?: Record<string, any> | null;
   limits?: AgentLimits;
+  /** Guardrail presets of the agent (P39 G6); `null`: none of its own. */
+  guardrails?: AgentGuardrailsSpec | null;
+}
+
+/** A guardrail preset name a saved agent may use. */
+export type GuardrailPresetName = "pii_block" | "pii_redact" | "injection_fast" | "safety_local" | "judge";
+
+/**
+ * One preset of a saved agent with the options it takes: `kinds` (PII presets), `threshold`
+ * (`injection_fast`), `model` (`safety_local`: an Ollama guard tag; `judge`: a chat model name)
+ * and `policy` (`judge`, required).
+ */
+export interface GuardrailPresetRef {
+  preset: GuardrailPresetName;
+  kinds?: string[] | null;
+  threshold?: number | null;
+  model?: string | null;
+  policy?: string | null;
+}
+
+export interface AgentGuardrailsSpec {
+  presets: GuardrailPresetRef[];
+  stream_guard?: "auto" | "hold" | "chunked" | "passthrough";
+}
+
+/** One preset as `GET /guardrails/presets` describes it. */
+export interface GuardrailPresetInfo {
+  name: GuardrailPresetName;
+  description: string;
+  stages: string[];
+  /** "none" (regex), "local" (a model on the server's machine) or "model" (a chat model). */
+  network: "none" | "local" | "model";
+  /** What a check costs: "none", "local" (a local model, no provider bill) or "model" (billed). */
+  cost: "none" | "local" | "model";
+  options: string[];
+  requires?: string;
+  default_model?: string;
+  models?: string[];
+  max_policy_chars?: number;
+  capacity_note?: string;
+}
+
+/**
+ * The operator's guardrail policy (`GET /guardrails/policy`); read-only. Everyone gets the
+ * digest and the policy file's base name (`detail: "summary"`); admins also get the name, rules,
+ * checks and full path (`detail: "full"`). `exceptions` lists what the policy does not cover.
+ */
+export interface GuardrailPolicyView {
+  configured: boolean;
+  enforced: boolean;
+  detail?: "summary" | "full";
+  exceptions?: string[];
+  policy: {
+    digest: string;
+    file: string | null;
+    name?: string;
+    source?: string | null;
+    on_error?: string;
+    default_tool_action?: string;
+    rules?: { id: string; action: string; checks: string[]; when: Record<string, any> }[];
+    checks?: { name: string; type: string; backend: string; deterministic: boolean }[];
+    [key: string]: any;
+  } | null;
+}
+
+/** Guardrail presets a spec may name and the enforced operator policy (`GET /agents/options`). */
+export interface AgentGuardrailOptions {
+  available: boolean;
+  install_hint: string | null;
+  defaults: GuardrailPresetName[];
+  presets: GuardrailPresetInfo[];
+  policy: GuardrailPolicyView;
 }
 
 /** How one tool of a saved agent is exposed; writes always need approval. */
@@ -1126,7 +1198,11 @@ export interface AgentRecord {
   agent_id: string;
   workspace_id: string;
   revision: number;
-  spec: Required<Omit<AgentSpec, "limits">> & { limits: Required<AgentLimits> };
+  spec: Required<Omit<AgentSpec, "limits" | "guardrails">> & {
+    limits: Required<AgentLimits>;
+    /** Absent on servers older than P39 G6. */
+    guardrails?: AgentGuardrailsSpec | null;
+  };
   created_at: number;
   updated_at: number;
   created_by: string;
@@ -1174,6 +1250,10 @@ export interface AgentToolOption {
   description: string;
   kind: string;
   requires_approval: boolean;
+  /** The module's effect policy (`pure`, `read`, `idempotent_write`, `non_idempotent_write`). */
+  effect_policy?: string;
+  /** Its durable effect class (`pure`, `idempotent`, `non_idempotent`); null when unknown. */
+  effect_class?: string | null;
 }
 
 /** Everything a spec may name in this workspace (`GET /agents/options`). */
@@ -1184,6 +1264,8 @@ export interface AgentOptions {
   skills: string[];
   node_module_id: string;
   limits: AgentServerLimits;
+  /** P39 G6; absent on older servers. */
+  guardrails?: AgentGuardrailOptions;
 }
 
 /** One field problem of a refused spec (`NexuraApiError.details.field_errors`). */

@@ -67,6 +67,7 @@ from nexura_agents.errors import (
     NexuraError,
     OutputValidationError,
     ProviderError,
+    ProviderResponseError,
     RunRecoveryError,
     SDKValidationError,
     ToolError,
@@ -87,6 +88,7 @@ from nexura_agents.hooks import (
     AgentHooks,
     ComposedHooks,
     approval_vote,
+    hook_input_guardrails,
     hook_output_guardrails,
     is_hooks_object,
 )
@@ -748,14 +750,31 @@ def _output_checks(state: _RunState, agent: Agent) -> tuple[tuple[Any, ...], boo
     says whether hooks contributed any (they cannot be streamed past, P39 G4)."""
     hooks = state.hooks
     extra = hook_output_guardrails(hooks, state.ctx, agent) if hooks is not None else ()
-    return (*agent.output_guardrails, *extra), bool(extra)
+    checks = (*agent.output_guardrails, *extra)
+    guard = getattr(agent, "stream_guard", None)
+    if getattr(guard, "mode", None) == "passthrough":
+        refusing = [c for c in checks if getattr(c, "nexura_no_passthrough", False)]
+        if refusing:
+            # P39 G6: a guardrail that promises to check streamed text (pii_redact) is not
+            # streamed past; a clear error instead of a silent downgrade.
+            raise SDKValidationError(
+                f"Agent '{agent.name}' uses stream_guard='passthrough', but its output "
+                f"guardrail '{getattr(refusing[0], '__name__', 'guardrail')}' must check "
+                "streamed text before it is shown. Use stream_guard='auto', 'hold' or "
+                "'chunked'."
+            )
+    return checks, bool(extra)
 
 
 def _turn_mode(agent: Agent, checks: tuple[Any, ...], from_hooks: bool) -> str:
     """``hold``, ``chunked`` or ``passthrough`` for a streamed model turn of ``agent``."""
     guard = getattr(agent, "stream_guard", None) or _DEFAULT_STREAM_GUARD
     return resolve_mode(
-        guard, has_checks=bool(checks), from_hooks=from_hooks, typed=agent.output_type is not None
+        guard,
+        has_checks=bool(checks),
+        from_hooks=from_hooks,
+        typed=agent.output_type is not None,
+        chunk_safe=bool(checks) and all(getattr(c, "nexura_chunk_safe", False) for c in checks),
     )
 
 
@@ -798,7 +817,35 @@ def _tripped_event(state: _RunState, agent: Agent, name: str, phase: str) -> Run
     )
 
 
+def _arguments_valid(tool: Tool, call: ToolCall) -> bool:
+    """True when ``call``'s arguments pass the validation the tool will apply."""
+    try:
+        tool.dispatch_arguments(call.arguments)
+    except ToolValidationError:
+        return False
+    return True
+
+
+def _duplicate_call_id(response: ModelResponse) -> str | None:
+    """The first tool call id that appears more than once in ``response`` (two empty ids
+    count), else None. A single empty id is allowed (the SDK assigns ids where needed)."""
+    seen: set[str] = set()
+    for call in response.message.tool_calls or ():
+        if call.id in seen:
+            return call.id
+        seen.add(call.id)
+    return None
+
+
 def _custom_event(run_id: str, payload: dict[str, Any]) -> RunEvent:
+    from nexura_agents.verdict_journal import is_decision_payload
+
+    if is_decision_payload(payload):
+        # A policy hook's decision (verdict_journal.emit_decision): a GUARDRAIL_DECISION
+        # with the redacted record, not a CUSTOM event (P39 G6).
+        record = payload.get("record")
+        data = dict(record) if isinstance(record, Mapping) else {}
+        return RunEvent(type=RunEventType.GUARDRAIL_DECISION, run_id=run_id, data=data)
     return RunEvent(type=RunEventType.CUSTOM, run_id=run_id, data=payload)
 
 
@@ -1308,6 +1355,16 @@ class _RunState:
     # whether hooks contributed any; checked again at the final pass (P39 G4).
     turn_checks: tuple[Any, ...] = ()
     turn_from_hooks: bool = False
+    # TOOL_CALL_DELTA events held with the turn's text (hold/chunked): released only when the
+    # reply's tool calls survive after_model unchanged (P39 G6 round 3, R2-M2).
+    held_tool_deltas: list[RunEvent] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        # Model-based guardrail verdicts of this run, in memory and, once the run has a
+        # journal, committed to it (P39 G6, nexura_agents.verdict_journal).
+        from nexura_agents.verdict_journal import RunVerdicts
+
+        self.ctx._verdicts = RunVerdicts(lambda: self.journal)
 
     def remaining(self) -> float | None:
         if self.effective_timeout is None:
@@ -1421,7 +1478,9 @@ class Runner:
         run, the process default (``set_default_hooks``; left out with
         ``Runner(default_hooks=False)``), then this runner's own ``hooks``, each object
         once. ``hooks=`` adds to the default; it never replaces it."""
-        return policy.effective_hooks(self._hooks, use_default=self.use_default_hooks)
+        return policy.effective_hooks(
+            self._hooks, use_default=self.use_default_hooks, applies_model_stages=True
+        )
 
     def _scoped(self, stream: AsyncGenerator[RunEvent, None]) -> AsyncGenerator[RunEvent, None]:
         """The run's event stream with its hooks active (inherited by nested runs) and
@@ -1440,6 +1499,10 @@ class Runner:
         if tool.needs_approval(state.ctx, call.arguments):
             return True
         key = _gate_key(state.turn, call.id)
+        if key not in _recorded_gates(state) and not _arguments_valid(tool, call):
+            # Refused as invalid before anything runs (_invoke_tool_inner): no hook gate,
+            # so a person is never asked to approve a call that cannot run (G6 round 3).
+            return False
         if key in _recorded_gates(state):
             return True
         hooks = state.hooks
@@ -1797,7 +1860,9 @@ class Runner:
         # Input guardrails see the user's latest message before any model call. Each one is
         # bounded by the run's timeout and stops when the run is cancelled.
         user_text = next((m.content or "" for m in reversed(messages) if m.role == "user"), "")
-        for check in agent.input_guardrails:
+        # The agent's own input guardrails, then those its hooks add (a policy, P39 G6).
+        input_checks = (*agent.input_guardrails, *hook_input_guardrails(hooks, ctx, agent))
+        for check in input_checks:
             name = getattr(check, "__name__", "guardrail")
             started = time.monotonic()
             try:
@@ -2407,6 +2472,11 @@ class Runner:
             state.journal = journal
             journal.trace_span = state.span  # nexura.effect.* events go on the run span
             state.checkpoint_owner = journal.owner
+            # Verdicts recorded before the journal existed (input guardrails) are written
+            # with its next commit (P39 G6).
+            from nexura_agents.verdict_journal import attach
+
+            attach(journal, state.ctx._verdicts.pending())
         try:
             if journal is not None:
                 if not isinstance(state.cancel, _RunStopToken):
@@ -2524,6 +2594,7 @@ class Runner:
                 # P39 G4: does this turn's reply text stream as written, wait for the
                 # output guardrails ("hold") or go out in checked windows ("chunked")?
                 state.text_gate, state.text_shown, state.turn_stream = None, False, None
+                state.held_tool_deltas = []
                 started_data: dict[str, Any] = {"turn": state.turn, "messages_count": len(messages)}
                 try:
                     state.turn_checks, state.turn_from_hooks = _output_checks(state, agent)
@@ -2588,6 +2659,20 @@ class Runner:
                     if not holder:  # failed or abandoned before a response arrived
                         chat.end()
                 response = holder[0]
+                duplicate = _duplicate_call_id(response)
+                if duplicate is not None:
+                    # One approval, rejection or recorded gate is keyed by the call id: two
+                    # calls sharing one would be released (or refused) together. Fail closed
+                    # before after_model, any gate, hook, journal intent or dispatch (R2-H2).
+                    dup_err = ProviderResponseError(
+                        f"Model reply has more than one tool call with id {duplicate!r}; "
+                        "tool call ids must be unique within a reply."
+                    )
+                    chat.fail(dup_err)
+                    chat.end()
+                    yield _failed(run_id, dup_err)
+                    raise dup_err
+                offered_calls = response.message.tool_calls
                 # Content capture records reply text only after the output guardrails
                 # passed it (P39 G4): the run span gets the checked answer later.
                 tracing.record_response(
@@ -2656,6 +2741,10 @@ class Runner:
                                 response.message, content=checked_text[0] or None
                             ),
                         )
+                held_calls, state.held_tool_deltas = state.held_tool_deltas, []
+                if held_calls and response.message.tool_calls == offered_calls:
+                    for held_call in held_calls:  # the reply's calls were not changed
+                        yield held_call
                 messages.append(response.message)
 
                 # 4. Final answer (no tool calls)
@@ -3057,7 +3146,7 @@ class Runner:
                         )
                         # Keepalive chunks (nothing new) emit no event.
                         if delta.tool_arguments_delta or call_ids[index] != known:
-                            yield RunEvent(
+                            call_event = RunEvent(
                                 type=RunEventType.TOOL_CALL_DELTA,
                                 run_id=state.run_id,
                                 data={
@@ -3068,6 +3157,12 @@ class Runner:
                                     "arguments_delta": delta.tool_arguments_delta or "",
                                 },
                             )
+                            if gate is not None:
+                                # Held with the text: an output or model_output rule may
+                                # still withhold the reply and drop its calls (R2-M2).
+                                state.held_tool_deltas.append(call_event)
+                                continue
+                            yield call_event
                     elif (
                         delta.kind == "continuation_delta"
                         and delta.continuation is not None
@@ -3907,6 +4002,7 @@ class Runner:
             idempotency_key=self._idempotency_key(state, step_key),
             fencing_token=state.journal.fencing_token if state.journal is not None else None,
             tool=tool.info(),
+            tool_object=tool,
         )
         limit = tool.max_retries if tool.max_retries is not None else 1
 
@@ -3927,6 +4023,17 @@ class Runner:
             )
             if blocked is not None:
                 return blocked, "guardrail_rejected"
+        # P39 G6 (R2-H1, RC-1): the arguments are validated as execute() validates them
+        # (unknown names of a plain @tool dropped, as always) before any hook or policy sees
+        # them; the policy checks those dispatched arguments and the raw ones. The tool's own
+        # input guardrails (above) may refuse a call earlier, as before.
+        try:
+            tool.dispatch_arguments(tc.arguments)
+        except ToolValidationError as invalid:
+            if tool.max_retries is None or retries >= tool.max_retries:
+                raise
+            state.tool_retries[tc.name] = retries + 1
+            return f"Invalid arguments for '{tc.name}': {invalid.message}", "invalid_arguments"
         cache_key = (id(tool), _cache_key(tc.arguments)) if tool.cache else None
         if cache_key is not None and cache_key in state.tool_cache:
             result, files = state.tool_cache[cache_key]  # same call earlier in this run

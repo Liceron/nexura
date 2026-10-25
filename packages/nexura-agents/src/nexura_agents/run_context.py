@@ -126,6 +126,12 @@ class RunContext(Generic[DepsT]):  # noqa: UP046 - keeps Python 3.11 support
     _events: _EventChannel = field(default_factory=lambda: _EventChannel(), repr=False)
     _compaction_summaries: dict[str, str] = field(default_factory=dict, repr=False)
     _save_compaction: Callable[[], Awaitable[None]] | None = field(default=None, repr=False)
+    # Model-based guardrail verdicts of this run (P39 G6, see ``nexura_agents.verdict_journal``);
+    # set by the runner, shared by every per-tool copy. None outside a Runner.
+    _verdicts: Any = field(default=None, repr=False)
+    # Inside a tool call: the Tool object itself (P39 G6: a policy validates the arguments the
+    # tool will receive). None outside a tool call or where the caller does not set it.
+    _tool_object: Any = field(default=None, repr=False)
 
     def emit(self, name: str, **data: Any) -> None:
         """Send a custom progress event to whoever streams this run.
@@ -173,6 +179,7 @@ class RunContext(Generic[DepsT]):  # noqa: UP046 - keeps Python 3.11 support
         idempotency_key: str | None = None,
         fencing_token: int | None = None,
         tool: ToolInfo | None = None,
+        tool_object: Any = None,
     ) -> RunContext[DepsT]:
         """Copy scoped to one tool call (``tool``: its metadata, see ``ToolInfo``)."""
         return RunContext(
@@ -194,4 +201,6 @@ class RunContext(Generic[DepsT]):  # noqa: UP046 - keeps Python 3.11 support
             tool=tool,
             _nested_usage=self._nested_usage,
             _events=self._events,
+            _verdicts=self._verdicts,
+            _tool_object=tool_object,
         )

@@ -11,7 +11,9 @@ import { Button } from '../../components/Button';
 import { PageHeader, PageLayout } from '../../components/PageHeader';
 import { Spinner } from '../../components/Spinner';
 import { useI18n } from '../../i18n';
+import { AgentGuardrailsSection, EffectClassBadge } from './AgentGuardrails';
 import {
+  DEFAULT_GUARDRAIL_PRESETS,
   DEFAULT_SERVER_LIMITS,
   OFFLINE_MODEL,
   draftFromRecord,
@@ -126,7 +128,7 @@ export function AgentsView() {
     resetMessages();
     setNotice(null);
     setRecord(null);
-    setDraft(emptyDraft(defaultModel));
+    setDraft(emptyDraft(defaultModel, options?.guardrails?.defaults ?? DEFAULT_GUARDRAIL_PRESETS));
     setMode('new');
     setPhonePane('detail');
     requestAnimationFrame(() => detailHeadingRef.current?.focus());
@@ -504,7 +506,8 @@ export function AgentsView() {
                         />
                         <span>
                           <strong>{o.title || o.module_id}</strong> <code>{o.module_id}</code>{' '}
-                          {o.requires_approval && approvalBadge(`agent-tool-approval-${o.module_id}`)}
+                          {o.requires_approval && approvalBadge(`agent-tool-approval-${o.module_id}`)}{' '}
+                          <EffectClassBadge effectClass={o.effect_class} testId={`agent-tool-effect-${o.module_id}`} />
                           <span className="resource-check-detail">{o.description}</span>
                         </span>
                       </label>
@@ -585,6 +588,14 @@ export function AgentsView() {
                       onChange={(e) => set('skills_label', e.target.value)}
                     />, t('agents.skillsLabelHelp'))}
                 </fieldset>
+
+                <AgentGuardrailsSection
+                  draft={draft}
+                  setDraft={setDraft}
+                  options={options?.guardrails}
+                  models={models}
+                  error={fieldError('guardrails')}
+                />
 
                 <section className="resource-section" aria-labelledby={`${ids}-output-title`}>
                   <h3 id={`${ids}-output-title`}>{t('agents.sectionOutput')}</h3>

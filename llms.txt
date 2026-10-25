@@ -23,6 +23,7 @@ Every Python example in the docs runs offline with `FakeModel`, a scripted model
 - [Teams](https://github.com/Liceron/nexura/blob/main/docs/teams.md): sequential, parallel and loop agents, group chat, approvals that pass through.
 - [Guardrails, hooks and limits](https://github.com/Liceron/nexura/blob/main/docs/guardrails-hooks-limits.md): input, output and tool guardrails, lifecycle hooks, `UsageLimits`.
 - [Guardrails package](https://github.com/Liceron/nexura/blob/main/docs/guardrails-package.md): `nexura-guardrails`, an LLM judge that fails closed, fast pre-filters, tiered and parallel checks, a category taxonomy.
+- [Guardrail policy](https://github.com/Liceron/nexura/blob/main/docs/guardrail-policy.md): declarative guardrail policy for every agent run, allowlist mode, approval gates, journaled verdicts, audit and service enforcement.
 - [Budgets and usage](https://github.com/Liceron/nexura/blob/main/docs/budgets-and-usage.md): token and cost accounting, budgets that reserve before each model call.
 - [Durable runs](https://github.com/Liceron/nexura/blob/main/docs/durable-runs.md): checkpoint agent runs and recover them after a crash, tool effect classes.
 - [Models and providers](https://github.com/Liceron/nexura/blob/main/docs/providers.md): OpenAI, Anthropic, Gemini, Vertex AI, Sarvam, Ollama, LiteLLM, retries, fallbacks, rate limits.

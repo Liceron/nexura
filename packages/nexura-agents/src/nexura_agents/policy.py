@@ -49,6 +49,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "active_hooks",
+    "check_model_stages",
     "default_hooks",
     "default_hooks_locked",
     "effective_hooks",
@@ -64,6 +65,7 @@ active_hooks: ContextVar[AgentHooks | None] = ContextVar("nexura_active_hooks", 
 
 _default: AgentHooks | None = None
 _locked = False
+_UNSET: Any = object()
 
 
 def compose_hooks(hooks: Any) -> AgentHooks | None:
@@ -168,12 +170,56 @@ def _without(member: Any, seen: set[int]) -> Any:
     return clone
 
 
+def requires_model_stages(hooks: Any) -> bool:
+    """True when ``hooks`` (or a member of a composition) says it must see every model
+    call and the agent's input and output (``requires_model_stages()``, P39 G6): a
+    guardrail policy with ``input``, ``model_input``, ``model_output`` or ``output`` rules."""
+    if hooks is None:
+        return False
+    method = getattr(hooks, "requires_model_stages", None)
+    if callable(method) and method() is True:
+        return True
+    if isinstance(hooks, ComposedHooks):
+        return any(requires_model_stages(member) for member in hooks.members)
+    return False
+
+
+def check_model_stages(applies_model_stages: bool, hooks: Any = _UNSET) -> None:
+    """Refuse a caller that runs models itself without the hooks' model stages (an
+    ``AgentCoordinator``, an ``AgentDefinition`` subagent) when the hooks it would use need
+    them (P39 G6): ``hooks``, or by default the inherited active hooks and the process
+    default (locked or not). Whatever the source: the caller's own ``hooks=policy``, an
+    unlocked ``install()``, a locked operator policy or an enclosing run's hooks."""
+    if applies_model_stages:
+        return
+    sources = (active_hooks.get(), _default) if hooks is _UNSET else (hooks,)
+    if not any(requires_model_stages(source) for source in sources):
+        return
+    raise SDKValidationError(
+        "A guardrail policy in effect has input, model or "
+        "output rules, which this code path cannot apply: it calls models without the "
+        "before_model/after_model hooks and the agent input/output guardrails (for example "
+        "AgentCoordinator and AgentDefinition subagents). It is refused instead of running "
+        "unchecked; use Agent and Runner (handoffs, Agent.as_tool, teams), or a policy "
+        "without those stages."
+    )
+
+
 def effective_hooks(
-    own: AgentHooks | None = None, *, use_default: bool = True
+    own: AgentHooks | None = None,
+    *,
+    use_default: bool = True,
+    applies_model_stages: bool = False,
 ) -> AgentHooks | None:
     """The hooks a run started now uses: the inherited active hooks, the process default
     (unless ``use_default`` is False and the default is not locked) and ``own``, in that
     order, each object once.
+
+    ``applies_model_stages``: the caller runs every model call through the hooks'
+    ``before_model``/``after_model`` and adds their input and output guardrails (the
+    ``Runner``), or makes no model calls of its own (tools served over MCP). Other callers
+    are refused with ``SDKValidationError`` when any of the returned hooks requires those
+    stages (:func:`check_model_stages`).
 
     A hooks object that also sits inside a ``ComposedHooks`` subclass met later (for
     example the policy wrapped by a developer's composition) runs only in its first
@@ -191,6 +237,8 @@ def effective_hooks(
             member = _without(member, seen)
             seen |= _contained(member)
             members.append(member)
+    for member in members:
+        check_model_stages(applies_model_stages, member)
     if not members:
         return None
     if len(members) == 1:
@@ -251,6 +299,12 @@ def tool_call_needs_approval(
         return True
     if hooks is None:
         return False
+    from nexura_agents.errors import ToolValidationError
+
+    try:
+        tool.dispatch_arguments(arguments)
+    except ToolValidationError:
+        return False  # refused as invalid by run_tool_call before anything runs
     return approval_vote(hooks, ctx, copy.copy(tool), copy.deepcopy(arguments))
 
 
@@ -274,6 +328,12 @@ async def run_tool_call(
     """
     from nexura_agents.guardrails import check_tool_input, check_tool_output
 
+    if getattr(ctx, "_tool_object", None) is None:
+        ctx._tool_object = tool  # hooks validate the arguments the tool will receive (G6)
+    # Invalid arguments are refused before guardrails, hooks or the tool run, as execute()
+    # would refuse them (unknown names of a plain @tool are dropped, not refused); hooks and
+    # the policy see the raw and the dispatched arguments (G6). Raises ToolValidationError.
+    tool.dispatch_arguments(call.arguments)
     blocked = await check_tool_input(tool, ctx, call.arguments)
     if blocked is not None:
         return blocked, True

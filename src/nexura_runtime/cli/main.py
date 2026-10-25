@@ -323,10 +323,17 @@ def serve_command(args: argparse.Namespace) -> int:
             allow_unauthenticated_network=insecure_network,
             auth_provider=auth_provider,
             allow_plain_http=plain_http,
+            guardrail_policy=getattr(args, "guardrail_policy", None),
         )
     except (UnauthenticatedNetworkError, ValueError, MissingDependencyError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
+    policy = app.state.guardrail_policy
+    if policy is not None:
+        print(
+            f"Guardrail policy '{policy.name}' enforced (digest {policy.digest[:16]}, "
+            f"{len(policy.rules)} rules) from {policy.source or 'code'}."
+        )
     if remote:
         # The operator token is never printed or logged.
         print(
@@ -382,6 +389,7 @@ def worker_command(args: argparse.Namespace) -> int:
             profile="local-owner",
             registry=registry,
             workflow_state_url=getattr(args, "workflow_state_url", None),
+            guardrail_policy=getattr(args, "guardrail_policy", None),
         )
     except (ValueError, MissingDependencyError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
@@ -711,6 +719,12 @@ WORKFLOW_STATE_HELP = (
     "Keep workflow checkpoints and their execution journal in Postgres "
     "(postgresql://...; needs nexura-postgres). Also NEXURA_WORKFLOW_STATE_URL. "
     "Default: the SQLite database (--db)."
+)
+
+GUARDRAIL_POLICY_HELP = (
+    "Enforce this guardrail policy file (.json, or .yaml with nexura-guardrails[yaml]) on every "
+    "agent run; the server refuses to start if it is missing or invalid. Also "
+    "NEXURA_GUARDRAIL_POLICY. See docs/guardrail-policy.md."
 )
 
 
@@ -1081,6 +1095,9 @@ def build_parser() -> argparse.ArgumentParser:
             "reverse proxy."
         ),
     )
+    serve_p.add_argument(
+        "--guardrail-policy", default=None, metavar="FILE", help=GUARDRAIL_POLICY_HELP
+    )
     serve_p.set_defaults(func=serve_command)
 
     # worker: standalone trigger worker sharing the serve database
@@ -1120,6 +1137,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     worker_p.add_argument("--once", action="store_true", help="Process due jobs once and exit")
     worker_p.add_argument("--handlers", action="append", metavar="MODULE:ATTR", help=HANDLERS_HELP)
+    worker_p.add_argument(
+        "--guardrail-policy", default=None, metavar="FILE", help=GUARDRAIL_POLICY_HELP
+    )
     worker_p.set_defaults(func=worker_command)
 
     # redteam: attack-case pack against an agent (offline fake model by default)

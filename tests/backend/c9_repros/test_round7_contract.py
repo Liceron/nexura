@@ -87,8 +87,26 @@ def _process_launch_violations(source):
     """
     tree = ast.parse(source)
     parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
-    modules = {"os", "subprocess", "asyncio", "sys"}
+    modules = {"os", "subprocess", "asyncio", "sys", "ctypes"}
+    tracked_names = modules | {"libc"}
+    forbidden_imports = {"multiprocessing", "pty", "importlib", "concurrent", "webbrowser"}
     issues = []
+    # Only the existing Landlock setup may use ctypes/libc. Pin arguments too:
+    # allowing arbitrary syscall numbers would permit execve through libc.
+    reviewed_native_calls = {
+        ast.dump(ast.parse(expression, mode="eval").body)
+        for expression in (
+            "ctypes.CDLL(None, use_errno=True)",
+            "ctypes.c_uint64((1 << 1) | sum(1 << bit for bit in range(4, 15)))",
+            "ctypes.byref(access)",
+            "ctypes.sizeof(access)",
+            "libc.syscall(444, None, 0, 1)",
+            "libc.syscall(444, ctypes.byref(access), ctypes.sizeof(access), 0)",
+            "libc.prctl(38, 1, 0, 0, 0)",
+            "libc.syscall(446, fd, 0)",
+        )
+    }
+    seen_native_calls = set()
     reviewed = {
         "Popen": (
             "from nexura_runtime.retention import _serve_database; _serve_database()",
@@ -120,7 +138,32 @@ def _process_launch_violations(source):
                 "forkpty",
                 "vfork",
             } or attribute.lstrip("_").startswith(("exec", "spawn", "posix_spawn"))
-        return module == "asyncio" and attribute.startswith("create_subprocess_")
+        return module == "asyncio" and (
+            attribute == "subprocess" or attribute.startswith("create_subprocess_")
+        )
+
+    def attribute_root(node):
+        while isinstance(node, (ast.Attribute, ast.Call)):
+            node = node.value if isinstance(node, ast.Attribute) else node.func
+        return node.id if isinstance(node, ast.Name) else None
+
+    def landlock_scope(node):
+        while node in parents:
+            node = parents[node]
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                return isinstance(node, ast.FunctionDef) and node.name == "_deny_filesystem_writes"
+        return False
+
+    def libc_assignment(node):
+        return (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == "libc"
+            and ast.dump(node.value)
+            == ast.dump(ast.parse("ctypes.CDLL(None, use_errno=True)", mode="eval").body)
+            and landlock_scope(node)
+        )
 
     def annotation(node):
         while node in parents:
@@ -144,31 +187,75 @@ def _process_launch_violations(source):
                 binding = item.asname or root
                 if (
                     (root in modules and (item.asname or item.name != root))
-                    or (binding in modules and binding != item.name)
-                    or root in {"multiprocessing", "pty"}
+                    or (binding in tracked_names and binding != item.name)
+                    or root in forbidden_imports | {"libc"}
                 ):
                     issues.append("unreviewed module/alias import")
         elif isinstance(node, ast.ImportFrom):
-            if (node.module or "").split(".")[0] in modules | {"multiprocessing", "pty"} or any(
-                (item.asname or item.name) in modules for item in node.names
+            if (node.module or "").split(".")[0] in tracked_names | forbidden_imports or any(
+                (item.asname or item.name) in tracked_names for item in node.names
             ):
                 issues.append("unreviewed function/alias import")
-        elif isinstance(node, ast.Name) and node.id in modules:
+        elif isinstance(node, ast.Name) and node.id in tracked_names:
             parent = parents.get(node)
             if not (
                 isinstance(node.ctx, ast.Load)
                 and isinstance(parent, ast.Attribute)
                 and parent.value is node
-            ):
+            ) and not (node.id == "libc" and libc_assignment(parent)):
                 issues.append("aliased or reflective process module")
-        elif (isinstance(node, ast.arg) and node.arg in modules) or (
+        elif (isinstance(node, ast.arg) and node.arg in tracked_names) or (
             isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-            and node.name in modules
+            and node.name in tracked_names
         ):
             issues.append("shadowed process module")
-        if not isinstance(node, ast.Attribute) or not isinstance(node.value, ast.Name):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "__import__"
+        ):
+            issues.append("reflective module import")
+        if isinstance(node, ast.Subscript):
+            value = node.value
+            if (
+                isinstance(value, ast.Attribute)
+                and attribute_root(value) == "sys"
+                and value.attr == "modules"
+            ) or (
+                isinstance(value, ast.Call)
+                and isinstance(value.func, ast.Name)
+                and value.func.id in {"globals", "locals", "vars"}
+            ):
+                issues.append("reflective module lookup")
+        if not isinstance(node, ast.Attribute):
             continue
-        module = node.value.id
+        module = attribute_root(node)
+        if (
+            module == "sys"
+            and node.attr == "get"
+            and isinstance(node.value, ast.Attribute)
+            and node.value.attr == "modules"
+        ):
+            issues.append("reflective module lookup")
+        if node.attr in {"subprocess_exec", "subprocess_shell"} or node.attr.startswith(
+            "create_subprocess_"
+        ):
+            issues.append("unreviewed async process API")
+        if module in {"ctypes", "libc"}:
+            parent = parents.get(node)
+            signature = ast.dump(parent) if isinstance(parent, ast.Call) else None
+            if not (
+                isinstance(node.value, ast.Name)
+                and isinstance(parent, ast.Call)
+                and parent.func is node
+                and landlock_scope(node)
+                and signature in reviewed_native_calls
+                and signature not in seen_native_calls
+                and (node.attr != "CDLL" or libc_assignment(parents.get(parent)))
+            ):
+                issues.append("unreviewed ctypes/libc use")
+            seen_native_calls.add(signature)
+            continue
         if not process_api(module, node.attr):
             continue
         parent = parents.get(node)
@@ -177,7 +264,11 @@ def _process_launch_violations(source):
         if not (isinstance(parent, ast.Call) and parent.func is node):
             issues.append("aliased process function")
             continue
-        if module != "subprocess" or node.attr not in reviewed:
+        if (
+            module != "subprocess"
+            or not isinstance(node.value, ast.Name)
+            or node.attr not in reviewed
+        ):
             issues.append("unreviewed process launch")
             continue
         launches.append(node.attr)

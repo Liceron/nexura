@@ -368,6 +368,10 @@ Represents a typed, executable tool for an agent.
 
 - `arun(self, **kwargs: 'Any') -> 'Any'`
   Asynchronously execute tool with given keyword arguments.
+- `coerced_arguments(self, arguments: 'Mapping[str, Any]') -> 'dict[str, Any] | None'`
+  :meth:`dispatch_arguments`, or ``None`` when they do not validate.
+- `dispatch_arguments(self, arguments: 'Mapping[str, Any]') -> 'dict[str, Any]'`
+  The arguments exactly as :meth:`execute` gives them to the function: validated
 - `effect_class(self) -> 'EffectClass'`
   The tool's effect class (``non_idempotent`` when a subclass never set one).
 - `execute(self, arguments: 'dict[str, Any]', ctx: 'RunContext[Any] | None' = None) -> 'str'`
@@ -387,7 +391,7 @@ Represents a typed, executable tool for an agent.
 
 ### `RunContext`
 
-class `RunContext(deps: 'DepsT', run_id: 'str', agent_name: 'str', turn: 'int' = 0, usage: 'Usage' = <factory>, messages: 'list[Message]' = <factory>, tool_call_id: 'str | None' = None, tool_name: 'str | None' = None, retry: 'int' = 0, metadata: 'dict[str, Any]' = <factory>, state: 'dict[str, Any]' = <factory>, tags: 'list[str]' = <factory>, tool_attachments: 'list[Any]' = <factory>, prompt: 'dict[str, Any] | None' = None, idempotency_key: 'str | None' = None, fencing_token: 'int | None' = None, tool: 'ToolInfo | None' = None, _nested_usage: 'list[Usage]' = <factory>, _events: '_EventChannel' = <factory>, _compaction_summaries: 'dict[str, str]' = <factory>, _save_compaction: 'Callable[[], Awaitable[None]] | None' = None) -> None`
+class `RunContext(deps: 'DepsT', run_id: 'str', agent_name: 'str', turn: 'int' = 0, usage: 'Usage' = <factory>, messages: 'list[Message]' = <factory>, tool_call_id: 'str | None' = None, tool_name: 'str | None' = None, retry: 'int' = 0, metadata: 'dict[str, Any]' = <factory>, state: 'dict[str, Any]' = <factory>, tags: 'list[str]' = <factory>, tool_attachments: 'list[Any]' = <factory>, prompt: 'dict[str, Any] | None' = None, idempotency_key: 'str | None' = None, fencing_token: 'int | None' = None, tool: 'ToolInfo | None' = None, _nested_usage: 'list[Usage]' = <factory>, _events: '_EventChannel' = <factory>, _compaction_summaries: 'dict[str, str]' = <factory>, _save_compaction: 'Callable[[], Awaitable[None]] | None' = None, _verdicts: 'Any' = None, _tool_object: 'Any' = None) -> None`
 
 ~~~text
 What a tool or callback can see about the run it belongs to.
@@ -401,7 +405,7 @@ annotated ``RunContext[YourDeps]``; that parameter is never shown to the model.
   Count usage from work done inside a tool (e.g. a sub-agent) toward this run.
 - `emit(self, name: 'str', **data: 'Any') -> 'None'`
   Send a custom progress event to whoever streams this run.
-- `for_tool(self, tool_call_id: 'str', tool_name: 'str', retry: 'int', *, idempotency_key: 'str | None' = None, fencing_token: 'int | None' = None, tool: 'ToolInfo | None' = None) -> 'RunContext[DepsT]'`
+- `for_tool(self, tool_call_id: 'str', tool_name: 'str', retry: 'int', *, idempotency_key: 'str | None' = None, fencing_token: 'int | None' = None, tool: 'ToolInfo | None' = None, tool_object: 'Any' = None) -> 'RunContext[DepsT]'`
   Copy scoped to one tool call (``tool``: its metadata, see ``ToolInfo``).
 - `take_nested_usage(self) -> 'list[Usage]'`
   Return the usage recorded by nested runs and clear the buffer.
@@ -833,6 +837,8 @@ call for human approval. It can add an approval gate, never remove one.
   Called before each model request with the outgoing messages.
 - `before_tool(self, ctx: 'RunContext[Any]', call: 'ToolCall') -> 'str | None'`
   Called before a tool runs; may raise to refuse the call.
+- `input_guardrails(self, ctx: 'RunContext[Any]', agent: 'Agent') -> 'Sequence[Any]'`
+  Sync. Input guardrails these hooks add to ``agent``'s own (P39 G6).
 - `on_agent_end(self, ctx: 'RunContext[Any]', agent: 'Agent', output: 'Any') -> 'None'`
   Called when an agent stops being active: with the final output when the run
 - `on_agent_start(self, ctx: 'RunContext[Any]', agent: 'Agent') -> 'None'`
@@ -894,6 +900,8 @@ passed as one member) raises ``SDKValidationError``.
   The first member's ``ModelResponse`` (list order); later members are skipped.
 - `before_tool(self, ctx: 'RunContext[Any]', call: 'ToolCall') -> 'str | None'`
   The first member's string answer (list order); later members are skipped.
+- `input_guardrails(self, ctx: 'RunContext[Any]', agent: 'Agent') -> 'Sequence[Any]'`
+  Every member's input guardrails, in list order.
 - `on_agent_end(self, ctx: 'RunContext[Any]', agent: 'Agent', output: 'Any') -> 'None'`
   Every member's ``on_agent_end``, in reverse list order.
 - `on_agent_start(self, ctx: 'RunContext[Any]', agent: 'Agent') -> 'None'`
@@ -1589,6 +1597,8 @@ The handler receives ``(ctx, arguments)`` after the arguments pass the schema.
 
 - `arun(self, **kwargs: 'Any') -> 'Any'`
   Async counterpart of ``run``; always raises because schema tools need a Runner.
+- `dispatch_arguments(self, arguments: 'Mapping[str, Any]') -> 'dict[str, Any]'`
+  The arguments the handler receives: JSON Schema validation does not coerce or
 - `execute(self, arguments: 'dict[str, Any]', ctx: 'RunContext[Any] | None' = None) -> 'str'`
   Validate arguments against the schema, run the handler and return its result.
 - `run(self, **kwargs: 'Any') -> 'Any'`

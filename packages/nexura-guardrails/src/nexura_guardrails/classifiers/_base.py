@@ -412,6 +412,61 @@ def first_token_probability(completion: Completion, positive: str, negative: str
     return None
 
 
+async def post_json(
+    url: str,
+    payload: dict[str, Any],
+    *,
+    transport: httpx.AsyncBaseTransport | None,
+    timeout: float,
+    api_key: str | None = None,
+) -> Any:
+    """POST ``payload`` as JSON and return the parsed JSON reply (fail closed).
+
+    No proxies from the environment, no redirects, no compressed bodies, at most
+    ``MAX_RESPONSE_BYTES``; transport, HTTP and body problems raise ``_CallError`` with an
+    error type (``TimeoutError``, ``HTTPStatusError``, ``MalformedResponse``...).
+    """
+    # identity: no compressed body can expand past the size cap before it is counted.
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Accept-Encoding": "identity",
+    }
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    body = bytearray()
+    try:
+        async with (
+            httpx.AsyncClient(
+                transport=transport,
+                timeout=httpx.Timeout(timeout),
+                trust_env=False,
+                follow_redirects=False,
+            ) as client,
+            client.stream("POST", url, json=payload, headers=headers) as response,
+        ):
+            encoding = response.headers.get("content-encoding", "identity").strip().lower()
+            if encoding not in ("", "identity"):
+                raise _CallError("UnsupportedEncoding", "compressed response refused")
+            # The encoding is identity (checked above), so these bytes are not expanded.
+            async for chunk in response.aiter_bytes():
+                body += chunk
+                if len(body) > MAX_RESPONSE_BYTES:
+                    raise _CallError("ResponseTooLarge", f"more than {MAX_RESPONSE_BYTES} bytes")
+            status = response.status_code
+    except httpx.TimeoutException:
+        raise _CallError("TimeoutError", f"no reply within {timeout}s") from None
+    except httpx.HTTPError as exc:
+        raise _CallError(type(exc).__name__, "could not reach the server") from None
+    if status != 200:
+        hint = " (is the model pulled?)" if status == 404 else ""
+        raise _CallError("HTTPStatusError", f"HTTP {status}{hint}")
+    try:
+        return json.loads(bytes(body).decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise _CallError("MalformedResponse", "response body is not JSON") from None
+
+
 class _EndpointCall:
     """A one-shot model object, so ``admission.generate`` admits and settles the call."""
 
@@ -680,49 +735,13 @@ class SafetyModelCheck:
     # ------------------------------------------------------------------ HTTP
 
     async def _post(self, path: str, payload: dict[str, Any]) -> Any:
-        # identity: no compressed body can expand past the size cap before it is counted.
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "Accept-Encoding": "identity",
-        }
-        if self._api_key:
-            headers["Authorization"] = f"Bearer {self._api_key}"
-        body = bytearray()
-        try:
-            async with (
-                httpx.AsyncClient(
-                    transport=self._transport,
-                    timeout=httpx.Timeout(self.timeout),
-                    trust_env=False,
-                    follow_redirects=False,
-                ) as client,
-                client.stream(
-                    "POST", self.base_url + path, json=payload, headers=headers
-                ) as response,
-            ):
-                encoding = response.headers.get("content-encoding", "identity").strip().lower()
-                if encoding not in ("", "identity"):
-                    raise _CallError("UnsupportedEncoding", "compressed response refused")
-                # The encoding is identity (checked above), so these bytes are not expanded.
-                async for chunk in response.aiter_bytes():
-                    body += chunk
-                    if len(body) > MAX_RESPONSE_BYTES:
-                        raise _CallError(
-                            "ResponseTooLarge", f"more than {MAX_RESPONSE_BYTES} bytes"
-                        )
-                status = response.status_code
-        except httpx.TimeoutException:
-            raise _CallError("TimeoutError", f"no reply within {self.timeout}s") from None
-        except httpx.HTTPError as exc:
-            raise _CallError(type(exc).__name__, "could not reach the server") from None
-        if status != 200:
-            hint = " (is the model pulled?)" if status == 404 else ""
-            raise _CallError("HTTPStatusError", f"HTTP {status}{hint}")
-        try:
-            return json.loads(bytes(body).decode("utf-8"))
-        except (UnicodeDecodeError, ValueError):
-            raise _CallError("MalformedResponse", "response body is not JSON") from None
+        return await post_json(
+            self.base_url + path,
+            payload,
+            transport=self._transport,
+            timeout=self.timeout,
+            api_key=self._api_key,
+        )
 
     async def _http(self, call: GuardCall) -> Completion:
         if self.api == "ollama":

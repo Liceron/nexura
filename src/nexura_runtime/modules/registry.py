@@ -412,6 +412,14 @@ def _register_agent_sdk_modules(registry: VersionedModuleRegistry) -> None:
         key = module_id or target.manifest.module_id
         if not registry.has(key):
             registry.register(target)
+    # P39 G6: the guardrails.check node, when nexura-guardrails is installed (optional).
+    try:
+        from nexura_guardrails.runtime.module import GuardrailCheckModule
+    except ImportError:
+        return
+    check_module = GuardrailCheckModule()
+    if not registry.has(check_module.manifest.module_id):
+        registry.register(check_module)
 
 
 _register_agent_sdk_modules(default_registry)

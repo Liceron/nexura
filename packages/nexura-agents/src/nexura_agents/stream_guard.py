@@ -8,7 +8,8 @@ that the run's hooks contribute through ``AgentHooks.output_guardrails``: an inh
 process-default policy), unchecked text must not reach the consumer. The modes:
 
 - ``"auto"`` (default): ``"hold"`` when there are output guardrails, otherwise text streams
-  as it is generated.
+  as it is generated. When every output guardrail is marked ``nexura_chunk_safe`` (a guardrail
+  policy whose reply rules are all regex scrubs), ``"chunked"``.
 - ``"hold"``: no ``TEXT_DELTA`` for the reply. The checked text arrives in
   ``FINAL_OUTPUT`` after every output guardrail passed (rewrites applied).
 - ``"chunked"``: opt-in. The raw reply is checked in windows of ``chunk_chars`` new
@@ -129,16 +130,25 @@ def coerce_stream_guard(value: Any) -> StreamGuard:
 
 
 def resolve_mode(
-    guard: StreamGuard, *, has_checks: bool, from_hooks: bool, typed: bool
+    guard: StreamGuard,
+    *,
+    has_checks: bool,
+    from_hooks: bool,
+    typed: bool,
+    chunk_safe: bool = False,
 ) -> Literal["hold", "chunked", "passthrough"]:
-    """The mode a model turn uses. No output guardrails: text streams as before."""
+    """The mode a model turn uses. No output guardrails: text streams as before.
+
+    ``chunk_safe``: every output guardrail is marked safe to run on windows
+    (``nexura_chunk_safe``, a policy's regex scrubs, P39 G6); ``"auto"`` then checks text in
+    windows instead of holding it."""
     if not has_checks:
         return "passthrough"
     mode = guard.mode
     if mode == "passthrough":
         # An agent may opt its own guardrails out; a policy's guardrails always hold.
         return "hold" if from_hooks else "passthrough"
-    if mode == "chunked":
+    if mode == "chunked" or (mode == "auto" and chunk_safe):
         return "hold" if typed else "chunked"
     return "hold"  # "auto" and "hold"
 

@@ -1279,6 +1279,21 @@ class AgentsClient:
         )
 
 
+class GuardrailsClient:
+    """Client for the operator's guardrail policy and the saved-agent presets (P39 G6)."""
+
+    def __init__(self, root: NexuraClient) -> None:
+        self._root = root
+
+    async def policy(self) -> dict[str, Any]:
+        """The enforced operator policy: ``{configured, enforced, policy}`` (read-only)."""
+        return await self._root._request("GET", "/guardrails/policy")
+
+    async def presets(self) -> dict[str, Any]:
+        """Presets a saved agent may use, with what each needs and costs."""
+        return await self._root._request("GET", "/guardrails/presets")
+
+
 class SkillsClient:
     """Client for workspace skills instructions and versions."""
 
@@ -1581,6 +1596,8 @@ class NexuraClient:
         # Agents
         ("GET", "/api/v1/agents"): ("agents", "list"),
         ("GET", "/api/v1/agents/options"): ("agents", "options"),
+        ("GET", "/api/v1/guardrails/policy"): ("guardrails", "policy"),
+        ("GET", "/api/v1/guardrails/presets"): ("guardrails", "presets"),
         ("GET", "/api/v1/agents/{agent_id}"): ("agents", "get"),
         ("POST", "/api/v1/agents"): ("agents", "create"),
         ("PUT", "/api/v1/agents/{agent_id}"): ("agents", "update"),
@@ -1635,6 +1652,7 @@ class NexuraClient:
         self.evaluations = EvaluationsClient(self)
         self.triggers = TriggersClient(self)
         self.agents = AgentsClient(self)
+        self.guardrails = GuardrailsClient(self)
         self.skills = SkillsClient(self)
         self.templates = TemplatesClient(self)
         self.builder = BuilderClient(self)

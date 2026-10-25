@@ -448,9 +448,15 @@ def test_policy_from_categories_and_file(tmp_path: Path) -> None:
 
 
 def test_model_strings_resolve_through_nexura_models() -> None:
+    # Updated deliberately in P39 G6 (lead decision after G5): an "ollama:" judge uses
+    # Ollama's native /api/chat (per-request num_ctx); api="openai" keeps the
+    # OpenAI-compatible route through nexura_agents' model strings.
     check = JudgeCheck("ollama:qwen3:8b", "p")  # builds the adapter; makes no call
     assert check.backend == "judge:ollama:qwen3:8b"
-    assert type(check.model).__name__ == "OpenAIProvider"
+    assert type(check.model).__name__ == "OllamaChatModel"
+    compat = JudgeCheck("ollama:qwen3:8b", "p", api="openai")
+    assert compat.backend == "judge:ollama:qwen3:8b"
+    assert type(compat.model).__name__ == "OpenAIProvider"
 
 
 async def test_judge_check_input_is_validated() -> None:
