@@ -86,12 +86,17 @@ async def test_node_request_pauses_on_the_approval_path_and_hands_back_details()
     assert effects == ["x@example.com"]
     assert seen == [None, {"send": "x@example.com", "node_request": True}, None]
 
-    # Reject: terminal, the node does not run again.
+    # Reject: the node does not run again. S12 round 6 (founder rule, R5-1): `ask` is an
+    # undeclared (non-idempotent) handler that already ran when it asked, so what it did is
+    # unknown; the rejection waits for a person to settle it, then ends the run "rejected".
     again = await eng.run({"to": "y@example.com"})
     assert again.pending_approval is not None
-    rejected = await eng.resume(
+    waiting = await eng.resume(
         again.workflow_run_id, again.pending_approval.approval_id, decision="reject"
     )
+    assert waiting.status == "paused" and waiting.pause_reason == "effect_unknown"
+    assert effects == ["x@example.com"]
+    rejected = await eng.resolve_effect(again.workflow_run_id, "not_applied", actor="reviewer")
     assert rejected.status == "rejected" and effects == ["x@example.com"]
 
 

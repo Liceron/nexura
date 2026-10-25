@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Liceron
+from typing import NoReturn
+
+from nexura_runtime._removed import removed
 from nexura_runtime.runtime.agents import (
     AgentCoordinator,
     AgentCoordinatorModule,
@@ -13,16 +16,6 @@ from nexura_runtime.runtime.agents import (
     ModelLengthExceededError,
     ModelRefusalError,
     ParentCancelledError,
-)
-from nexura_runtime.runtime.execution import (
-    DurableExecutionEngine,
-    DurableExecutionError,
-    DurableExecutionModule,
-    DurableNodeSpec,
-    DurableRunState,
-    DurableWorkflowSpec,
-    FencingConflictError,
-    LeaseExpiredError,
 )
 
 __all__ = [
@@ -38,12 +31,23 @@ __all__ = [
     "ModelRefusalError",
     "ModelLengthExceededError",
     "HandoffTargetNotFoundError",
-    "DurableExecutionEngine",
-    "DurableExecutionModule",
-    "DurableRunState",
-    "DurableWorkflowSpec",
-    "DurableNodeSpec",
-    "DurableExecutionError",
-    "FencingConflictError",
-    "LeaseExpiredError",
 ]
+
+# The legacy DurableExecutionEngine names (removed by P35 A6 S12) raise an ImportError
+# that names the replacement, for one release.
+_REMOVED = frozenset(
+    {
+        "DurableExecutionEngine",
+        "DurableExecutionModule",
+        "DurableRunState",
+        "DurableWorkflowSpec",
+        "DurableNodeSpec",
+        "DurableExecutionError",
+        "FencingConflictError",
+        "LeaseExpiredError",
+    }
+)
+
+
+def __getattr__(name: str) -> NoReturn:
+    removed(__name__, name, _REMOVED)

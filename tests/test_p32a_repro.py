@@ -91,12 +91,12 @@ async def test_workflow_roundtrip_and_approval(tmp_path: Path) -> None:
     registry = ModuleRegistry()
     calls: list[str] = []
 
-    @registry.register_handler("first")
+    @registry.register_handler("first", effect="pure")
     async def first(state: dict) -> dict:
         calls.append("first")
         return {"seen": state["item"]}
 
-    @registry.register_handler("fail")
+    @registry.register_handler("fail", effect="pure")
     async def fail(state: dict) -> dict:
         calls.append("fail")
         raise ValueError("workflow fixture failure")

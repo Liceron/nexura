@@ -51,7 +51,7 @@ async def replay_workflow(
     workflow_spec = WorkflowSpec.from_dict(replay_spec)
     registry = ModuleRegistry()
     for node in workflow_spec.nodes.values():
-        registry.register_handler(node.handler)(lambda state: {})
+        registry.register_handler(node.handler, effect="pure")(lambda state: {})
     executor: Any = WorkflowEngine(
         workflow_spec,
         registry,

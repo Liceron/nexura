@@ -21,13 +21,6 @@ from nexura_runtime.release import (
     get_matrix,
     get_module,
 )
-from nexura_runtime.runtime import (
-    DurableExecutionEngine,
-    DurableNodeSpec,
-    DurableWorkflowSpec,
-    FencingConflictError,
-)
-from nexura_runtime.storage import SQLiteRepository
 from nexura_runtime.workflow import (
     ModuleRegistry,
     SQLiteWorkflowStore,
@@ -228,59 +221,9 @@ def test_health_and_readiness_probes() -> None:
         assert len(readiness.probes) == 3
 
 
-@pytest.mark.asyncio
-async def test_two_worker_contention_and_fencing() -> None:
-    """Two concurrent workers contending for execution leases enforce fencing safety."""
-    with tempfile.TemporaryDirectory(prefix="nexura_b32_worker_test_") as temp_dir_str:
-        temp_dir = Path(temp_dir_str)
-        db_path = temp_dir / "contention.sqlite3"
-
-        repo = SQLiteRepository(db_path)
-        spec = DurableWorkflowSpec(
-            workflow_id="wf_contention",
-            entry_node="process",
-            nodes={"process": DurableNodeSpec(node_id="process", handler="echo")},
-            terminal_nodes=["process"],
-        )
-
-        engine = DurableExecutionEngine(repository=repo)
-        engine.register_handler(
-            "echo", lambda state, *args, **kwargs: {"processed_by": "worker_alpha"}
-        )
-
-        # Initialize run
-        run_id = "run_contention_001"
-        state = await engine.init_run(workspace_id="ws_prod", run_id=run_id, spec=spec)
-        assert state.status == "pending"
-
-        # Worker alpha claims run -> acquires lease with fencing_token = 1
-        claimed_alpha = await engine.claim_run(
-            workspace_id="ws_prod",
-            run_id=run_id,
-            worker_id="worker_alpha",
-            lease_duration=30.0,
-        )
-        assert claimed_alpha.fencing_token == 1
-        assert claimed_alpha.worker_id == "worker_alpha"
-
-        # Worker beta attempts to claim while alpha's lease is active -> FencingConflictError
-        with pytest.raises(FencingConflictError):
-            await engine.claim_run(
-                workspace_id="ws_prod",
-                run_id=run_id,
-                worker_id="worker_beta",
-                lease_duration=30.0,
-            )
-
-        # Worker alpha executes step successfully
-        step_res = await engine.execute_step(
-            workspace_id="ws_prod",
-            run_id=run_id,
-            worker_id="worker_alpha",
-            spec=spec,
-        )
-        assert step_res.state["processed_by"] == "worker_alpha"
-        assert "process" in step_res.completed_nodes
+# test_two_worker_contention_and_fencing ran on the removed DurableExecutionEngine; it moved
+# onto the execution journal as tests/p35/test_a6_s12_retired_paths.py::
+# test_two_workers_contend_for_one_lease_and_only_the_holder_commits (A6 S12).
 
 
 def test_wheel_build_and_clean_environment_install() -> None:

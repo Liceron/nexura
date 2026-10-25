@@ -3,35 +3,22 @@
 Verifies:
 1. Approval exact-action bindings: canonical argument digests, workspace, actor role,
    expiration, and duplicate resume prevention.
-2. Real OS process kill (multiprocessing.Process + SIGKILL) testing of lost remote responses,
-   ensuring non-idempotent effects stay indeterminate without phantom double execution.
-3. Safe recovery from pre-dispatch worker crash.
-4. Stale worker process fencing via CAS tokens across concurrent processes.
+2-4. (Moved, A6 S12) real OS process kills, pre-dispatch recovery and stale-worker fencing
+   now run on WorkflowEngine in tests/durability and tests/backend/b05 (see the note below).
 5. Carrying O01 budget reservations across checkpoint pause and resumption without double charging.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import json
-import multiprocessing
-import os
-import signal
-import sqlite3
-import time
-import urllib.error
-import urllib.request
 from collections.abc import AsyncIterator
 from decimal import Decimal
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 
 import pytest
 from nexura_runtime.contracts.canonical import canonical_digest
 from nexura_runtime.contracts.context import ExecutionContext
-from nexura_runtime.contracts.errors import IndeterminateEffectError
 from nexura_runtime.errors import (
     ApprovalAlreadyClaimedError,
     WorkflowTerminalError,
@@ -55,13 +42,6 @@ from nexura_runtime.runtime.approvals.errors import (
     WrongActorError,
     WrongWorkspaceError,
 )
-from nexura_runtime.runtime.execution import (
-    DurableExecutionEngine,
-    DurableNodeSpec,
-    DurableWorkflowSpec,
-    FencingConflictError,
-)
-from nexura_runtime.storage import SQLiteRepository
 from nexura_runtime.workflow import (
     ModuleRegistry,
     SQLiteWorkflowStore,
@@ -69,119 +49,6 @@ from nexura_runtime.workflow import (
     WorkflowNode,
     WorkflowSpec,
 )
-
-# ============================================================================
-# Helpers & Fixtures for Multi-Process OS Tests
-# ============================================================================
-
-
-def _run_http_effect_server(db_path: str, port_queue: multiprocessing.Queue[int]) -> None:
-    """Independent durable effect HTTP service recording calls into SQLite."""
-
-    class EffectHandler(BaseHTTPRequestHandler):
-        def do_POST(self) -> None:
-            content_len = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(content_len)
-            data = json.loads(body.decode("utf-8"))
-
-            with sqlite3.connect(db_path) as conn:
-                conn.execute(
-                    "CREATE TABLE IF NOT EXISTS remote_effects ("
-                    "  effect_id TEXT PRIMARY KEY, run_id TEXT, action TEXT, amount INTEGER"
-                    ");"
-                )
-                conn.execute(
-                    "INSERT INTO remote_effects (effect_id, run_id, action, amount) "
-                    "VALUES (?, ?, ?, ?)",
-                    (
-                        data.get("effect_id", "eff_1"),
-                        data.get("run_id", "run_1"),
-                        data.get("action", "transfer"),
-                        data.get("amount", 0),
-                    ),
-                )
-
-            # Check if simulation requests connection drop without response
-            if data.get("drop_response", False):
-                self.close_connection = True
-                return
-
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            resp_body = json.dumps({"status": "SUCCESS", "id": data.get("effect_id")}).encode()
-            self.wfile.write(resp_body)
-
-        def log_message(self, format: str, *args: Any) -> None:
-            pass  # Suppress stderr logging in tests
-
-    server = HTTPServer(("127.0.0.1", 0), EffectHandler)
-    port_queue.put(server.server_port)
-    server.serve_forever()
-
-
-def _worker_process_target(
-    db_path: str,
-    run_id: str,
-    worker_id: str,
-    effect_url: str,
-    phase_queue: multiprocessing.Queue[str],
-    spec_dict: dict[str, Any],
-    hold_after_claim: bool = False,
-) -> None:
-    """Worker child process executing a durable workflow step.
-
-    ``hold_after_claim`` parks the worker right after its claim, so the parent can kill
-    it deterministically before the step records any dispatch intent.
-    """
-
-    async def _execute() -> None:
-        repo = SQLiteRepository(db_path)
-        engine = DurableExecutionEngine(repo)
-
-        async def bank_transfer_handler(state: dict[str, Any]) -> dict[str, Any]:
-            phase_queue.put("pre_http_dispatch")
-            req = urllib.request.Request(
-                effect_url,
-                data=json.dumps(
-                    {
-                        "effect_id": state.get("effect_id", "eff_test"),
-                        "run_id": run_id,
-                        "action": "transfer",
-                        "amount": state.get("amount", 500),
-                        "drop_response": state.get("drop_response", False),
-                    }
-                ).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
-            )
-            with (
-                contextlib.suppress(urllib.error.URLError, OSError),
-                urllib.request.urlopen(req, timeout=5) as resp,
-            ):
-                resp.read()
-
-            phase_queue.put("remote_accepted")
-            # Sleep to allow parent process to issue SIGKILL while in-flight before checkpoint
-            await asyncio.sleep(10.0)
-            return {"transferred": True}
-
-        engine.register_handler("bank_transfer", bank_transfer_handler)
-        spec = DurableWorkflowSpec.model_validate(spec_dict)
-
-        try:
-            await engine.claim_run("ws_durable", run_id, worker_id, lease_duration=0.2)
-            phase_queue.put("claimed")
-            if hold_after_claim:
-                await asyncio.sleep(30.0)  # killed here by the parent
-            await engine.execute_step("ws_durable", run_id, worker_id, spec)
-            phase_queue.put("completed")
-        except Exception as exc:
-            phase_queue.put(f"error:{type(exc).__name__}")
-        finally:
-            await repo.close()
-
-    asyncio.run(_execute())
-
 
 # ============================================================================
 # Test Classes
@@ -413,259 +280,16 @@ class TestApprovalExactActionBindings:
         assert calls == 1
 
 
-class TestDurableOSProcessKillAndRecovery:
-    """Deliverable 3 & 4: Kill workers with OS SIGKILL and recover without duplicate effects."""
-
-    def test_worker_os_process_kill_after_remote_acceptance_stays_indeterminate(
-        self, tmp_path: Path
-    ) -> None:
-        """When an OS worker process is killed via SIGKILL after remote acceptance,
-        fresh recovery marks the non-idempotent effect indeterminate without extra dispatch.
-        """
-        db_path = str(tmp_path / "durable_runs.db")
-        effects_db = str(tmp_path / "effects.db")
-
-        # 1. Start background HTTP server
-        port_queue: multiprocessing.Queue[int] = multiprocessing.Queue()
-        server_proc = multiprocessing.Process(
-            target=_run_http_effect_server,
-            args=(effects_db, port_queue),
-            daemon=True,
-        )
-        server_proc.start()
-        port = port_queue.get(timeout=5)
-        effect_url = f"http://127.0.0.1:{port}/transfer"
-
-        # 2. Initialize run in SQLite store
-        run_id = "run_kill_remote_01"
-        spec = DurableWorkflowSpec(
-            workflow_id="wf_money",
-            entry_node="transfer",
-            terminal_nodes=["transfer"],
-            nodes={
-                "transfer": DurableNodeSpec(
-                    node_id="transfer",
-                    handler="bank_transfer",
-                    effect_policy="non_idempotent_write",
-                )
-            },
-        )
-        spec_dict = spec.model_dump()
-
-        async def _init() -> None:
-            repo = SQLiteRepository(db_path)
-            engine = DurableExecutionEngine(repo)
-            await engine.init_run(
-                "ws_durable",
-                run_id,
-                spec,
-                initial_state={"effect_id": "eff_wire_99", "amount": 1000},
-            )
-            await repo.close()
-
-        asyncio.run(_init())
-
-        # 3. Launch worker OS process
-        phase_queue: multiprocessing.Queue[str] = multiprocessing.Queue()
-        worker1 = multiprocessing.Process(
-            target=_worker_process_target,
-            args=(db_path, run_id, "worker_proc_1", effect_url, phase_queue, spec_dict),
-        )
-        worker1.start()
-
-        # Wait until remote effect is accepted
-        phase = ""
-        while phase != "remote_accepted":
-            phase = phase_queue.get(timeout=10)
-
-        # 4. KILL worker1 with SIGKILL while waiting before checkpoint commit
-        assert worker1.pid is not None
-        os.kill(worker1.pid, signal.SIGKILL)
-        worker1.join(timeout=3)
-        assert not worker1.is_alive()
-        # Wait for worker1's 0.2s lease to expire
-        time.sleep(0.3)
-
-        # Verify effect was recorded in remote effect server
-        with sqlite3.connect(effects_db) as conn:
-            query = "SELECT COUNT(*) FROM remote_effects WHERE effect_id = 'eff_wire_99'"
-            cur = conn.execute(query)
-            count = cur.fetchone()[0]
-        assert count == 1, "Remote effect must have been accepted by server"
-
-        # 5. Recovery with a fresh worker process
-        # Fresh worker must detect pre-dispatch intent and raise IndeterminateEffectError
-        async def _recover() -> None:
-            repo = SQLiteRepository(db_path)
-            engine = DurableExecutionEngine(repo)
-            with pytest.raises(IndeterminateEffectError) as exc_info:
-                # Use fresh worker_id; claim with lease
-                await engine.claim_run("ws_durable", run_id, "worker_proc_2", lease_duration=5.0)
-                await engine.execute_step("ws_durable", run_id, "worker_proc_2", spec)
-            assert "Indeterminate remote outcome" in str(exc_info.value)
-            await repo.close()
-
-        asyncio.run(_recover())
-
-        # CRUCIAL CHECK: Remote effect was NOT called a second time!
-        with sqlite3.connect(effects_db) as conn:
-            query = "SELECT COUNT(*) FROM remote_effects WHERE effect_id = 'eff_wire_99'"
-            cur = conn.execute(query)
-            final_count = cur.fetchone()[0]
-        assert final_count == 1, "Remote effect must NOT be re-executed on indeterminate recovery!"
-
-        # Clean up HTTP server
-        server_proc.terminate()
-        server_proc.join(timeout=2)
-
-    def test_worker_killed_before_dispatch_safely_retried(self, tmp_path: Path) -> None:
-        """When a worker process crashes before dispatch, recovery safely retries.
-
-        The effect executes exactly once.
-        """
-        db_path = str(tmp_path / "durable_runs.db")
-        effects_db = str(tmp_path / "effects.db")
-
-        port_queue: multiprocessing.Queue[int] = multiprocessing.Queue()
-        server_proc = multiprocessing.Process(
-            target=_run_http_effect_server,
-            args=(effects_db, port_queue),
-            daemon=True,
-        )
-        server_proc.start()
-        port = port_queue.get(timeout=5)
-        effect_url = f"http://127.0.0.1:{port}/transfer"
-
-        run_id = "run_kill_pre_dispatch_01"
-        spec = DurableWorkflowSpec(
-            workflow_id="wf_money",
-            entry_node="transfer",
-            terminal_nodes=["transfer"],
-            nodes={
-                "transfer": DurableNodeSpec(
-                    node_id="transfer",
-                    handler="bank_transfer",
-                    effect_policy="non_idempotent_write",
-                )
-            },
-        )
-        spec_dict = spec.model_dump()
-
-        async def _init() -> None:
-            repo = SQLiteRepository(db_path)
-            engine = DurableExecutionEngine(repo)
-            await engine.init_run(
-                "ws_durable",
-                run_id,
-                spec,
-                initial_state={"effect_id": "eff_wire_77", "amount": 250},
-            )
-            await repo.close()
-
-        asyncio.run(_init())
-
-        # Launch worker and kill it immediately after claim
-        phase_queue: multiprocessing.Queue[str] = multiprocessing.Queue()
-        worker1 = multiprocessing.Process(
-            target=_worker_process_target,
-            args=(db_path, run_id, "worker_proc_1", effect_url, phase_queue, spec_dict, True),
-        )
-        worker1.start()
-
-        # The worker parks after its claim, so the kill always lands before dispatch. (It
-        # used to race on into execute_step, and recovery then rightly reported the
-        # non-idempotent effect as indeterminate.)
-        phase = phase_queue.get(timeout=5)
-        assert phase == "claimed"
-        # Kill worker before remote acceptance
-        if worker1.pid is not None:
-            os.kill(worker1.pid, signal.SIGKILL)
-        worker1.join(timeout=3)
-        # Wait for worker1's 0.2s lease to expire
-        time.sleep(0.3)
-
-        # Fresh worker executes step successfully
-        async def _recover_and_execute() -> None:
-            repo = SQLiteRepository(db_path)
-            engine = DurableExecutionEngine(repo)
-
-            def bank_transfer_handler(state: dict[str, Any]) -> dict[str, Any]:
-                req = urllib.request.Request(
-                    effect_url,
-                    data=json.dumps(
-                        {
-                            "effect_id": state["effect_id"],
-                            "run_id": run_id,
-                            "action": "transfer",
-                            "amount": state["amount"],
-                        }
-                    ).encode("utf-8"),
-                    headers={"Content-Type": "application/json"},
-                )
-                with urllib.request.urlopen(req, timeout=5) as resp:
-                    resp.read()
-                return {"transferred": True}
-
-            engine.register_handler("bank_transfer", bank_transfer_handler)
-            # Reclaim run with fresh worker
-            await engine.claim_run("ws_durable", run_id, "worker_proc_2", lease_duration=5.0)
-            res = await engine.execute_step("ws_durable", run_id, "worker_proc_2", spec)
-            assert res.status == "completed"
-            await repo.close()
-
-        asyncio.run(_recover_and_execute())
-
-        # Remote effect must have been called exactly once
-        with sqlite3.connect(effects_db) as conn:
-            query = "SELECT COUNT(*) FROM remote_effects WHERE effect_id = 'eff_wire_77'"
-            cur = conn.execute(query)
-            count = cur.fetchone()[0]
-        assert count == 1
-
-        server_proc.terminate()
-        server_proc.join(timeout=2)
-
-
-class TestStaleWorkerFencing:
-    """Deliverable 5: Stale workers cannot commit after a newer fenced lease."""
-
-    @pytest.mark.asyncio
-    async def test_stale_worker_cannot_commit_after_newer_lease(self, tmp_path: Path) -> None:
-        """A stale worker attempting to execute step after lease expiry is rejected."""
-        db_path = tmp_path / "fencing.db"
-        repo = SQLiteRepository(db_path)
-        engine = DurableExecutionEngine(repo)
-        engine.register_handler("node_1", lambda state: {"ok": True})
-
-        spec = DurableWorkflowSpec(
-            workflow_id="wf_fence",
-            entry_node="node_1",
-            terminal_nodes=["node_1"],
-            nodes={"node_1": DurableNodeSpec(node_id="node_1", handler="node_1")},
-        )
-        await engine.init_run("ws_fence", "run_fence_01", spec)
-
-        # Worker 1 claims run with very short lease (100ms)
-        claim1 = await engine.claim_run("ws_fence", "run_fence_01", "worker_1", lease_duration=0.1)
-        assert claim1.fencing_token == 1
-
-        # Wait for Worker 1 lease to expire
-        await asyncio.sleep(0.15)
-
-        # Worker 2 claims run, advancing fencing token to 2
-        claim2 = await engine.claim_run("ws_fence", "run_fence_01", "worker_2", lease_duration=5.0)
-        assert claim2.fencing_token == 2
-
-        # Worker 1 wakes up and attempts to execute step: FencingConflictError!
-        with pytest.raises(FencingConflictError) as exc_info:
-            await engine.execute_step("ws_fence", "run_fence_01", "worker_1", spec)
-
-        assert exc_info.value.worker_id == "worker_1"
-
-        # Worker 2 executes step successfully
-        res2 = await engine.execute_step("ws_fence", "run_fence_01", "worker_2", spec)
-        assert res2.status == "completed"
-        await repo.close()
+# The OS-process kill and stale-worker cases of O02 ran on the legacy DurableExecutionEngine,
+# removed by P35 A6 S12. Their WorkflowEngine forms (real SIGKILL, an external effect service
+# with its own ledger, SQLite and Postgres) are in tests/durability/test_durability_workflows.py:
+# - kill after the remote accepted a non-idempotent effect -> one effect, run paused
+#   effect_unknown: test_mid_node_kill_recover_pauses_effect_unknown (and _without_a_budget);
+# - kill before dispatch -> the step runs exactly once:
+#   test_kill_after_node_commit_recover_continues_from_the_cursor (K5 for "a" = K1 for "b"),
+#   plus tests/backend/b05/test_durable_execution.py::test_crash_before_dispatch_runs_the_step_once;
+# - a stale worker cannot commit after a newer lease:
+#   tests/workflows/test_s6_workflow_journal.py::test_a_stale_owner_cannot_commit_after_takeover.
 
 
 class TestBudgetReservationRecovery:

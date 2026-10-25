@@ -2806,7 +2806,7 @@ Raised when an outbound URL violates security destination policy.
 ~~~
 
 
-## Execution stores (`nexura_agents.execution_store`, used by `DurableExecutionEngine`)
+## Execution stores (`nexura_agents.execution_store`)
 
 ### `ExecutionStore`
 
@@ -2839,7 +2839,7 @@ an unexpired owner/token pair, including operator effect resolution.
   Release current ownership without reducing its fencing token.
 - `renew(self, lease: 'ExecutionLease', ttl: 'float') -> 'ExecutionLease'`
   Renew active ownership; stale handles raise LeaseLostError.
-- `resolve_effect(self, lease: 'ExecutionLease', effect_id: 'str', resolution: 'EffectResolution', *, actor: 'str', result: 'Any' = None) -> 'EffectRecord'`
+- `resolve_effect(self, lease: 'ExecutionLease', effect_id: 'str', resolution: 'EffectResolution', *, actor: 'str', result: 'Any' = None, reason: 'str | None' = None) -> 'EffectRecord'`
   Resolve an indeterminate effect once and audit the actor in the same transaction.
 
 ### `MemoryExecutionStore`
@@ -4049,7 +4049,7 @@ Binds named identifiers to trusted Python handler functions or BaseModules.
 
 ### `WorkflowEngine`
 
-class `WorkflowEngine(spec: 'WorkflowSpec', registry: 'ModuleRegistry', *, store: 'WorkflowCheckpointStore | None' = None, max_steps: 'int' = 50, timeout: 'float | None' = None, workspace_id: 'str' = 'default', budget: 'Any | None' = None, event_sink: 'Any | None' = None, artifact_store: 'Any | None' = None, credential_resolver: 'Any | None' = None, approval_required_handlers: 'frozenset[str] | set[str] | None' = None, approval_ttl: 'float' = 3600.0, max_map_writes_per_approval: 'int' = 50, policy_version: 'str' = '1.0.0', lease_ttl: 'float' = 30.0) -> 'None'`
+class `WorkflowEngine(spec: 'WorkflowSpec', registry: 'ModuleRegistry', *, store: 'WorkflowCheckpointStore | None' = None, max_steps: 'int' = 50, timeout: 'float | None' = None, workspace_id: 'str' = 'default', budget: 'Any | None' = None, event_sink: 'Any | None' = None, artifact_store: 'Any | None' = None, credential_resolver: 'Any | None' = None, approval_required_handlers: 'frozenset[str] | set[str] | None' = None, approval_ttl: 'float' = 3600.0, max_map_writes_per_approval: 'int' = 50, policy_version: 'str' = '1.0.0', lease_ttl: 'float' = 30.0, guardrail_policy: 'Any | None' = None) -> 'None'`
 
 ~~~text
 Executes workflows deterministically with checkpoints and approval gates.
@@ -4065,7 +4065,7 @@ Executes workflows deterministically with checkpoints and approval gates.
   Migrate checkpoint state to this definition under the run's fenced lease.
 - `recover(self, workflow_run_id: 'str', *, on_uncertain: "Literal['pause', 'fail']" = 'pause', continue_on_old_definition: 'bool' = False) -> 'WorkflowRunResult'`
   Continue a stopped run, or an ``effect_unknown`` pause a person resolved.
-- `resolve_effect(self, workflow_run_id: 'str', resolution: 'EffectResolution | str', *, actor: 'str', result: 'Any' = None, effect_id: 'str | None' = None) -> 'WorkflowRunResult'`
+- `resolve_effect(self, workflow_run_id: 'str', resolution: 'EffectResolution | str', *, actor: 'str', result: 'Any' = None, effect_id: 'str | None' = None, reason: 'str | None' = None) -> 'WorkflowRunResult'`
   Resolve the unknown effect a run is paused on, then continue it with :meth:`recover`.
 - `resume(self, workflow_run_id: 'str', approval_id: 'str', *, decision: "Literal['approve', 'reject']" = 'approve', state_update: 'dict[str, Any] | None' = None, workspace_id: 'str | None' = None, actor: 'str | None' = None, actor_role: 'str | None' = None, expected_payload_digest: 'str | None' = None, continue_on_old_definition: 'bool' = False) -> 'WorkflowRunResult'`
   Resume an approval-gated workflow run with exact-action bindings.
@@ -4192,10 +4192,19 @@ Unlike :func:`interrupt`, this uses the approval path: the run stops with
 (``engine.resume(run_id, approval_id, decision=...)``, or the service's
 ``POST /runs/{id}/decide``) with the same workspace, role and expiry rules. On approve
 the node runs again from its start and :func:`approved_request` returns the details; on
-reject the run ends ``rejected`` and the node does not run again. Code before the call
+reject the node does not run again and the run ends ``rejected``. Code before the call
 runs again on resume, so keep side effects after it. ``details`` must be JSON and at
 most ``MAX_NODE_APPROVAL_DETAILS_CHARS`` characters; not allowed in parallel or mapped
 steps.
+
+The node has started when it calls this, so its step is never recorded as "not
+dispatched". For a ``non_idempotent`` or ``reconcilable`` handler (undeclared functions
+included) whose outcome is not known, a rejection first pauses ``effect_unknown`` until a
+person settles what the node did, then ends ``rejected``; misuse (inside parallel or
+mapped steps, non-JSON or oversized details) raises :class:`WorkflowError` and leaves the
+run paused ``effect_unknown`` the same way, failing once it is settled. An approved
+re-run that is refused before it starts (an expired deadline, for example) also pauses
+``effect_unknown`` rather than recording the step as not applied.
 ~~~
 
 ### `approved_request`

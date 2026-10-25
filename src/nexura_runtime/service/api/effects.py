@@ -49,6 +49,7 @@ class ResolveEffectRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     resolution: EffectResolution
     result: Any = None
+    reason: str | None = None
 
 
 def _conflict(code: str, message: str) -> HTTPException:
@@ -157,6 +158,7 @@ async def resolve_run_effect(
             payload.resolution,
             actor=principal.principal_id,
             result=payload.result,
+            reason=payload.reason,
         )
     except EffectAlreadyResolvedError as exc:
         raise _conflict("EFFECT_ALREADY_RESOLVED", str(exc)) from exc

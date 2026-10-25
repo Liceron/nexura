@@ -1,7 +1,9 @@
-"""Self-tests of the A6 kill harness, plus the legacy DurableExecutionEngine kill row.
+"""Self-tests of the A6 kill harness.
 
-The legacy row is the one path with a Postgres store today, so it is what exercises the
-harness against ``NEXURA_TEST_POSTGRES_URI`` (skipped when that is unset).
+The legacy ``DurableExecutionEngine`` kill row that lived here was removed with that engine
+(A6 S12); the same K3' case on its replacement, ``WorkflowEngine``, is
+``test_durability_workflows.py::test_mid_node_kill_recover_pauses_effect_unknown`` (SQLite and,
+with ``NEXURA_TEST_POSTGRES_URI``, Postgres).
 """
 
 from __future__ import annotations
@@ -11,11 +13,10 @@ import json
 import signal
 import time
 import urllib.request
-import uuid
 from typing import Any
 
 import pytest
-from durability_harness import Backend, Harness, HarnessError, process_state
+from durability_harness import Harness, HarnessError, process_state
 
 pytestmark = pytest.mark.durability
 
@@ -105,27 +106,3 @@ def test_close_leaves_no_child_running(harness: Harness) -> None:
         assert child.proc.returncode == -signal.SIGKILL
         assert process_state(child.pid) is None
     harness.close()  # idempotent: the fixture closes it again
-
-
-@pytest.mark.parametrize("backend", ["sqlite", "postgres"], indirect=True)
-def test_legacy_engine_kill_after_remote_commit_is_indeterminate(
-    harness: Harness, backend: Backend
-) -> None:
-    """Legacy ``DurableExecutionEngine``, K3': already correct on both backends.
-
-    SIGKILL after the remote committed; a new process takes over the expired lease and
-    gets ``IndeterminateEffectError`` instead of repeating the transfer.
-    """
-    backend.require("legacy")
-    run_id = f"legacy-{uuid.uuid4().hex[:12]}"
-    first = harness.spawn(
-        "legacy", "owner", run_id=run_id, init=True, block={"in_effect": "forever"}
-    )
-    first.wait_marker("in_effect", timeout=30)
-    first.kill()
-    assert harness.ledger.applied("transfer") == 1
-
-    second = harness.spawn("legacy", "taker", run_id=run_id)
-    result = second.result()
-    assert result["error_type"] == "IndeterminateEffectError", result
-    assert harness.ledger.applied("transfer") == 1

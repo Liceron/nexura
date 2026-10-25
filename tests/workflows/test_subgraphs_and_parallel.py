@@ -196,7 +196,7 @@ async def test_failing_subgraph_fails_the_parent_and_retries_with_a_fresh_child(
     calls: list[int] = []
     registry = kyc_registry([])
 
-    @registry.register_handler("flaky_bureau")
+    @registry.register_handler("flaky_bureau", effect="pure")
     def flaky_bureau(state: dict[str, Any]) -> dict[str, Any]:
         calls.append(1)
         if len(calls) == 1:
@@ -308,8 +308,8 @@ async def test_a_failing_branch_cancels_the_others_and_fails_the_step(store: Any
     async def broken(state: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError("search quota exceeded")
 
-    registry.register("slow", slow)
-    registry.register("broken", broken)
+    registry.register("slow", slow, effect="pure")
+    registry.register("broken", broken, effect="pure")
     spec = chain("p", WorkflowNode(id="p", handler="", parallel=["slow", "broken"]))
     with pytest.raises(WorkflowExecutionError, match="search quota exceeded"):
         await WorkflowEngine(spec, registry, store=store).run({}, workflow_run_id="p")
@@ -319,8 +319,8 @@ async def test_a_failing_branch_cancels_the_others_and_fails_the_step(store: Any
 
 async def test_interrupt_inside_a_parallel_branch_fails_clearly() -> None:
     registry = ModuleRegistry()
-    registry.register("asks", lambda s: {"x": interrupt("?")})
-    registry.register("fine", lambda s: {"y": 1})
+    registry.register("asks", lambda s: {"x": interrupt("?")}, effect="pure")
+    registry.register("fine", lambda s: {"y": 1}, effect="pure")
     spec = chain("p", WorkflowNode(id="p", handler="", parallel=["asks", "fine"]))
     with pytest.raises(WorkflowExecutionError, match="cannot be used inside parallel"):
         await WorkflowEngine(spec, registry, store=MemoryWorkflowStore()).run({})
@@ -478,7 +478,7 @@ async def test_retrying_a_sub_workflow_with_a_payment_inside_is_refused() -> Non
 
 async def test_interrupt_deep_inside_a_mapped_sub_workflow_fails_instead_of_hanging() -> None:
     registry = kyc_registry([])
-    registry.register("asks", lambda s: {"x": interrupt("?")})
+    registry.register("asks", lambda s: {"x": interrupt("?")}, effect="pure")
     deepest = chain("deepest", WorkflowNode(id="ask", handler="asks"))
     middle = chain("middle", WorkflowNode(id="g", handler="", subgraph=deepest))
     spec = chain("top", WorkflowNode(id="m", handler="", subgraph=middle, map_over="items"))

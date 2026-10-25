@@ -389,6 +389,12 @@ looks at the step at the cursor:
   silently: the run pauses with `pause_reason="effect_unknown"` and a `pending_effect`
   (`recover(run_id, on_uncertain="fail")` fails the run instead).
 
+So a recovered run resumes **at the step it was on**: steps that completed before the crash,
+and the effects they caused, are never run again, and nothing is restarted from the entry
+node. Trigger jobs whose worker died continue their run the same way. The whole picture,
+for agents and the service too, is in
+[How durable execution works](how-durable-execution-works.md).
+
 Declare a handler's class when you register it:
 `registry.register_handler("lookup", effect="pure")`, `effect="idempotent"`,
 `effect="non_idempotent"`, or `effect="reconcilable", reconcile=fn` where
@@ -632,6 +638,20 @@ run:
 - `reject` ends the run with `status="rejected"`. The handler never runs. A rejected
   run cannot be resumed.
 
+A node can also ask for approval itself while it runs, with `request_approval(details)`
+(and read the approved details with `approved_request()` when it runs again). That node has
+already started when it asks. If its handler is `non_idempotent` or `reconcilable`
+(including a plain function with no `effect=` declaration), the engine cannot know what it
+did before asking. So a rejection first pauses the run with `pause_reason="effect_unknown"`;
+a person resolves the effect (`engine.resolve_effect(..., "confirmed" | "not_applied" |
+"failed")`) and only then does the run end `rejected`. The same happens when the approved re-run
+is refused before it starts (an expired deadline, a saved agent that was edited or deleted
+meanwhile, `interrupt()` answered too late): the step that already ran is never recorded as
+"not applied". A `pure` or `idempotent` handler that asks is rejected at once. The saved-agent
+node reports what its agent ran: when every tool call it dispatched returned a result, a
+rejection confirms the node's effect with that list and ends `rejected` at once; otherwise a
+person resolves it first.
+
 An approval can be used once. It is claimed atomically, so of two concurrent `resume`
 calls with the same id one raises `ApprovalAlreadyClaimedError`. Resuming a run that has
 already finished raises `WorkflowTerminalError`.
@@ -778,7 +798,7 @@ registry = ModuleRegistry()
 calls: list[int] = []
 
 
-@registry.register_handler("flaky")
+@registry.register_handler("flaky", effect="pure")
 def flaky(state: dict) -> dict:
     calls.append(1)
     if len(calls) < 3:
@@ -786,7 +806,7 @@ def flaky(state: dict) -> dict:
     return {"ok": True}
 
 
-@registry.register_handler("always_bad")
+@registry.register_handler("always_bad", effect="pure")
 def always_bad(state: dict) -> dict:
     raise KeyError("missing")
 
@@ -824,12 +844,13 @@ as its cause.
 
 ### Refusing retries on non-idempotent steps
 
-A retry repeats the node's side effects. A module whose manifest says
-`effect_policy="non_idempotent_write"` (for example, one that moves money) cannot be
-retried: building the engine raises `WorkflowValidationError`. The check also covers a
-sub-workflow node: retrying the sub-workflow would re-run every step inside it, so it
-is refused if a non-idempotent step sits at any depth. Move the retry inside, onto steps
-that are safe to repeat.
+A retry repeats the node's side effects. Only `pure` and `idempotent` handlers may use
+`max_attempts > 1`. Validation and runtime dispatch reject `non_idempotent` (including
+undeclared functions and modules declared `non_idempotent_write`) and `reconcilable`
+handlers. Registry declarations, manifest policy and write operations use the same
+class resolver as recovery. The checks cover mapped items, parallel branches and steps
+at any depth inside a retried sub-workflow. Move retries onto safe steps and declare
+their class explicitly.
 
 ```python
 import asyncio
@@ -1723,8 +1744,9 @@ Three workflow tools for real-world flows, all durable in `SQLiteWorkflowStore`:
 
 - **Per-node retries.** `WorkflowNode(retry={"max_attempts": 3, "initial_delay": 0.5,
   "retry_on": ["ConnectionError"]})` retries a flaky step with exponential backoff and
-  never sleeps past the workflow deadline. Validation refuses retries on modules that
-  declare `effect_policy="non_idempotent_write"`, so a payment cannot be sent twice.
+  never sleeps past the workflow deadline. Validation and runtime dispatch allow retries
+  only for pure or idempotent handlers, including every part of a composite node. An
+  undeclared function is non-idempotent and cannot be retried.
 - **`interrupt(value)` inside a handler** pauses the run and hands `value` (any JSON) to
   a person. `engine.resume_interrupt(run_id, interrupt_id, answer)` re-runs that node,
   and the same `interrupt()` call returns `answer`. Code before the interrupt runs again
@@ -1751,7 +1773,7 @@ registry = ModuleRegistry()
 attempts = []
 
 
-@registry.register_handler("fetch_order")
+@registry.register_handler("fetch_order", effect="pure")
 def fetch_order(state: dict) -> dict:
     attempts.append(1)
     if len(attempts) < 2:

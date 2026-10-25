@@ -5,9 +5,9 @@ Demonstrates:
 2. Closing and reopening persistent SQLite storage to verify durability.
 3. Rejecting an approval request and proving zero side-effects are dispatched.
 4. Approving a separate run with an immutable audit record and executing the effect.
-5. Tracking external mutations with EffectReconciler and handling a lost response
-   (indeterminate state).
-6. Explicit operator reconciliation of the indeterminate effect.
+5. Tracking external mutations in the execution journal (an intent before dispatch, then
+   a lost response leaves the effect indeterminate).
+6. An operator resolves the indeterminate effect once, recorded with their name.
 7. Executing approval management via B01 CLI interface.
 """
 
@@ -20,6 +20,16 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from nexura_agents.contracts.canonical import canonical_digest
+from nexura_agents.contracts.execution import (
+    EffectRecord,
+    EffectResolution,
+    EffectStatus,
+    ExecutionId,
+    StepIntent,
+    StepKey,
+)
+from nexura_agents.execution_store import SQLiteExecutionStore
 from nexura_runtime.contracts import ExecutionContext
 
 from nexura_runtime.modules.cli import _run_command
@@ -31,7 +41,6 @@ from nexura_runtime.runtime.approvals import (
     ApprovalPolicyManager,
     ApprovalRequiredError,
 )
-from nexura_runtime.runtime.effects import EffectReconciler
 
 
 async def main() -> None:
@@ -46,7 +55,6 @@ async def main() -> None:
         print("1. Initializing ApprovalPolicyManager with SQLite storage...")
         manager = ApprovalPolicyManager(db_path)
         gate = ApprovalGate(manager, default_expiry_seconds=3600.0)
-        reconciler = EffectReconciler(db_path)
 
         dispatched_effects: list[dict[str, Any]] = []
 
@@ -204,39 +212,49 @@ async def main() -> None:
         # -------------------------------------------------------------
         # 6. Effect Reconciliation: Lost Response & Manual Resolution
         # -------------------------------------------------------------
-        print("\n6. Demonstrating Effect Tracking and Indeterminate Reconciliation...")
-        effect_id = "eff_tx_9011"
+        print("\n6. Demonstrating effect tracking and resolving an unknown outcome...")
         idempotency_key = "idem_order_002_tx"
 
-        # Record pre-dispatch intent
-        intent = reconciler.record_intent(
-            workspace_id=workspace,
-            effect_id=effect_id,
-            run_id="order_run_002",
-            action_name="wire_transfer",
-            idempotency_key=idempotency_key,
-            payload=order_payload_2,
-        )
-        print(f"  Pre-dispatch intent recorded: {intent.effect_id} (Status: {intent.status})")
+        journal = SQLiteExecutionStore(db_path)
+        await journal.init_db()
+        identity = ExecutionId(workspace, "order_run_002")
+        run = await journal.create(identity, owner="worker-1", definition_digest="orders-v1")
+
+        # Record the pre-dispatch intent and a pending effect in one fenced commit
+        step = StepKey.workflow("wire_transfer", 0)
+        intent = StepIntent(step, canonical_digest(order_payload_2), idempotency_key)
+        effect = EffectRecord(identity, intent)
+        await journal.commit(run.lease, state={}, steps=[intent], effects=[effect])
+        print(f"  Pre-dispatch intent recorded: {effect.effect_id[:12]}... (Status: pending)")
 
         # Simulate timeout / lost response during remote call
         print("  [Simulated event] Network dropped after packet send; response was lost!")
-        indeterminate_effect = reconciler.record_indeterminate(
-            workspace, effect_id, reason="Gateway socket read timeout"
+        unknown = EffectRecord(identity, intent, status=EffectStatus.INDETERMINATE)
+        await journal.commit(
+            run.lease,
+            state={"pause_reason": "effect_unknown"},
+            status="paused",
+            effects=[unknown],
+            events=[{"type": "effect_unknown", "reason": "Gateway socket read timeout"}],
         )
-        print(f"  Effect status marked: {indeterminate_effect.status}")
-        assert indeterminate_effect.status == "indeterminate"
+        snapshot = await journal.get(identity)
+        status = snapshot.effects[effect.effect_id].status
+        print(f"  Effect status marked: {status.value}")
+        assert status == EffectStatus.INDETERMINATE
 
-        # Operator reconciles with banking audit confirmation
-        reconciled = reconciler.reconcile_effect(
-            workspace_id=workspace,
-            effect_id=effect_id,
-            resolution="confirmed",
-            notes="Bank transaction ref TXN998823 confirmed on ledger statement",
+        # An operator resolves it once, after checking the bank's ledger
+        lease = await journal.claim(identity, "operator", 30, definition_digest="orders-v1")
+        assert lease is not None
+        resolved = await journal.resolve_effect(
+            lease,
+            effect.effect_id,
+            EffectResolution.CONFIRMED,
+            actor="ops_meera",
+            result={"bank_ref": "TXN998823"},
         )
-        print(f"  Effect explicitly reconciled! Final Status: {reconciled.status}")
-        print(f"  Notes: {reconciled.reconciliation_notes}")
-        assert reconciled.status == "reconciled"
+        print(f"  Effect resolved: {resolved.resolution.value} by {resolved.resolved_by}")
+        assert resolved.status == EffectStatus.RESOLVED
+        await journal.close()
 
         # -------------------------------------------------------------
         # 7. Invocation through B01 Module CLI

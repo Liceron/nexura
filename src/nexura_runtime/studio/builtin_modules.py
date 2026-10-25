@@ -232,11 +232,11 @@ async def synthetic_trace_agent(state: dict[str, Any]) -> dict[str, Any]:
 def get_default_registry() -> ModuleRegistry:
     """Construct a ModuleRegistry pre-populated with synthetic handlers."""
     registry = ModuleRegistry()
-    registry.register("synthetic_order_lookup", synthetic_order_lookup)
-    registry.register("synthetic_router", synthetic_router)
+    registry.register("synthetic_order_lookup", synthetic_order_lookup, effect="pure")
+    registry.register("synthetic_router", synthetic_router, effect="pure")
     registry.register("synthetic_ticket_creator", synthetic_ticket_creator)
     registry.register("synthetic_fake_agent", synthetic_fake_agent)
-    registry.register("synthetic_trace_agent", synthetic_trace_agent)
+    registry.register("synthetic_trace_agent", synthetic_trace_agent, effect="pure")
     return registry
 
 

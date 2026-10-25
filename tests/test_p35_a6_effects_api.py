@@ -1,6 +1,9 @@
 """A6 S4: REST effect inspection and resolution over the service's execution journal.
 
-All effects are local fake handlers; no network or paid provider is involved.
+The paused runs here are ``WorkflowEngine`` runs in the service database whose worker died
+inside a non-idempotent step (A6 S12 moved these tests off the removed
+``DurableExecutionEngine``). All effects are local fake handlers; no network or paid
+provider is involved.
 """
 
 from __future__ import annotations
@@ -12,48 +15,81 @@ from typing import Any
 import pytest
 from _local_env import local_headers
 from fastapi.testclient import TestClient
-from nexura_agents.contracts.errors import IndeterminateEffectError
 from nexura_agents.contracts.execution import EffectStatus, ExecutionId
 from nexura_agents.execution_store import SQLiteExecutionStore
 from starlette.requests import Request
 
-from nexura_runtime.runtime.execution import (
-    DurableExecutionEngine,
-    DurableNodeSpec,
-    DurableWorkflowSpec,
-    NodeIntent,
-)
 from nexura_runtime.service.api.app import create_api_app
 from nexura_runtime.service.auth.models import Principal
 from nexura_runtime.service.extensions import Identity
 from nexura_runtime.service.workspaces.repository import WorkspaceRepository
+from nexura_runtime.workflow import (
+    ModuleRegistry,
+    SQLiteWorkflowStore,
+    WorkflowEngine,
+    WorkflowNode,
+    WorkflowSpec,
+)
 
 API = "/api/v1"
-SPEC = DurableWorkflowSpec(
-    workflow_id="fake-payment",
+SPEC = WorkflowSpec(
+    name="fake-payment",
     entry_node="pay",
+    nodes={"pay": WorkflowNode(id="pay", handler="fake-pay")},
     terminal_nodes=["pay"],
-    nodes={"pay": DurableNodeSpec(node_id="pay", handler="fake-pay")},
 )
 
 
-async def _unknown_effect(db: Path, workspace_id: str, run_id: str) -> str:
+class Crash(BaseException):
+    """The worker process dies inside the step, after the fake payment happened."""
+
+
+class FakePay:
+    """An undeclared (so ``non_idempotent``) local fake payment that crashes once."""
+
+    def __init__(self, crash: bool = True) -> None:
+        self.calls = 0
+        self.crash = crash
+        self.registry = ModuleRegistry()
+        self.registry.register("fake-pay", self.pay)
+
+    def pay(self, state: dict[str, Any]) -> dict[str, Any]:
+        self.calls += 1
+        if self.crash:
+            self.crash = False
+            raise Crash
+        return {"paid": True}
+
+
+async def _crashed(db: Path, workspace_id: str, run_id: str, fake: FakePay) -> None:
+    """The worker died inside ``pay``: intent dispatched, effect ``pending``, lease gone."""
+    store = SQLiteWorkflowStore(db)
+    try:
+        with pytest.raises(Crash):
+            await WorkflowEngine(SPEC, fake.registry, store=store, workspace_id=workspace_id).run(
+                {}, workflow_run_id=run_id
+            )
+    finally:
+        await store.close()
+
+
+async def _recover(db: Path, workspace_id: str, run_id: str, fake: FakePay) -> Any:
+    store = SQLiteWorkflowStore(db)
+    try:
+        engine = WorkflowEngine(SPEC, fake.registry, store=store, workspace_id=workspace_id)
+        return await engine.recover(run_id)
+    finally:
+        await store.close()
+
+
+async def _unknown_effect(db: Path, workspace_id: str, run_id: str, fake: FakePay) -> str:
     """Leave a run paused with an indeterminate effect, as a crash mid-dispatch does."""
+    await _crashed(db, workspace_id, run_id, fake)
+    paused = await _recover(db, workspace_id, run_id, fake)
+    assert paused.status == "paused" and paused.pause_reason == "effect_unknown"
+    assert fake.calls == 1
     store = SQLiteExecutionStore(db)
     try:
-        engine = DurableExecutionEngine(store, {"fake-pay": lambda _: {"paid": True}})
-        await engine.init_run(workspace_id, run_id, SPEC)
-        state = await engine.claim_run(workspace_id, run_id, "crashed-worker")
-        # The crashed worker had committed its dispatch intent before dying.
-        state.pre_dispatch_intent = NodeIntent(
-            node_id="pay", effect_policy="non_idempotent_write", dispatched=True
-        )
-        records = await engine._records()
-        await records.update_run(
-            workspace_id, run_id, state.revision, "running", state.model_dump()
-        )
-        with pytest.raises(IndeterminateEffectError):
-            await engine.execute_step(workspace_id, run_id, "crashed-worker", SPEC)
         snapshot = await store.get(ExecutionId(workspace_id, run_id))
         (effect,) = snapshot.effects.values()
         assert effect.status == EffectStatus.INDETERMINATE
@@ -73,7 +109,8 @@ def _local(tmp_path: Path) -> tuple[TestClient, Path]:
 
 def test_list_and_resolve_once_then_the_run_continues(tmp_path: Path) -> None:
     client, db = _local(tmp_path)
-    effect_id = asyncio.run(_unknown_effect(db, "wsA", "run-1"))
+    fake = FakePay()
+    effect_id = asyncio.run(_unknown_effect(db, "wsA", "run-1", fake))
     headers = local_headers("wsA")
     with client:
         listed = client.get(f"{API}/runs/run-1/effects", headers=headers)
@@ -101,20 +138,18 @@ def test_list_and_resolve_once_then_the_run_continues(tmp_path: Path) -> None:
         assert again.status_code == 409
         assert again.json()["detail"]["code"] == "EFFECT_ALREADY_RESOLVED"
 
-    async def resume() -> Any:
+    done = asyncio.run(_recover(db, "wsA", "run-1", fake))
+    assert done.status == "completed" and fake.calls == 1  # confirmed: not dispatched again
+    assert done.state["receipt"] == "local-fake"
+
+    async def journal() -> Any:
         store = SQLiteExecutionStore(db)
         try:
-            calls: list[str] = []
-            engine = DurableExecutionEngine(store, {"fake-pay": lambda _: calls.append("x")})
-            state = await engine.run_until_idle("wsA", "run-1", "resumer", SPEC)
-            snapshot = await store.get(ExecutionId("wsA", "run-1"))
-            return state, calls, snapshot
+            return await store.get(ExecutionId("wsA", "run-1"))
         finally:
             await store.close()
 
-    state, calls, snapshot = asyncio.run(resume())
-    assert state.status == "completed" and calls == []  # confirmed: not dispatched again
-    assert state.state["receipt"] == "local-fake"
+    snapshot = asyncio.run(journal())
     audit = [e.payload for e in snapshot.events if e.event_type == "effect_resolved"]
     assert audit == [
         {
@@ -128,7 +163,7 @@ def test_list_and_resolve_once_then_the_run_continues(tmp_path: Path) -> None:
 
 def test_workspace_isolation_unknown_ids_and_bad_bodies(tmp_path: Path) -> None:
     client, db = _local(tmp_path)
-    effect_id = asyncio.run(_unknown_effect(db, "wsA", "run-1"))
+    effect_id = asyncio.run(_unknown_effect(db, "wsA", "run-1", FakePay()))
     with client:
         other = local_headers("wsB")
         assert client.get(f"{API}/runs/run-1/effects", headers=other).status_code == 404
@@ -166,27 +201,18 @@ def test_workspace_isolation_unknown_ids_and_bad_bodies(tmp_path: Path) -> None:
 def test_pending_effect_and_live_worker_are_conflicts(tmp_path: Path) -> None:
     client, db = _local(tmp_path)
 
-    async def running_with_pending_effect() -> str:
+    async def crashed_with_pending_effect() -> str:
+        await _crashed(db, "wsA", "run-live", FakePay())
         store = SQLiteExecutionStore(db)
         try:
-            engine = DurableExecutionEngine(store)
-            await engine.init_run("wsA", "run-live", SPEC)
-            state = await engine.claim_run("wsA", "run-live", "live-worker", lease_duration=60)
-            state.pre_dispatch_intent = NodeIntent(
-                node_id="pay", effect_policy="non_idempotent_write", dispatched=True
-            )
-            records = await engine._records()
-            await records.update_run(
-                "wsA", "run-live", state.revision, "running", state.model_dump()
-            )
             snapshot = await store.get(ExecutionId("wsA", "run-live"))
             (effect,) = snapshot.effects.values()
-            assert effect.status == EffectStatus.PENDING
+            assert effect.status == EffectStatus.PENDING  # nobody has recovered it yet
             return effect.effect_id
         finally:
             await store.close()
 
-    effect_id = asyncio.run(running_with_pending_effect())
+    effect_id = asyncio.run(crashed_with_pending_effect())
     with client:
         response = client.post(
             f"{API}/runs/run-live/effects/{effect_id}/resolve",
@@ -196,22 +222,27 @@ def test_pending_effect_and_live_worker_are_conflicts(tmp_path: Path) -> None:
         assert response.status_code == 409
         assert response.json()["detail"]["code"] == "EFFECT_NOT_INDETERMINATE"
 
-        async def mark_indeterminate_under_live_lease() -> None:
+        async def indeterminate_under_a_live_lease() -> None:
             from dataclasses import replace
 
             store = SQLiteExecutionStore(db)
             try:
-                snapshot = await store.get(ExecutionId("wsA", "run-live"))
+                identity = ExecutionId("wsA", "run-live")
+                snapshot = await store.get(identity)
+                lease = await store.claim(
+                    identity, "live-worker", 60, definition_digest=snapshot.run.definition_digest
+                )
+                assert lease is not None
                 effect = snapshot.effects[effect_id]
                 await store.commit(
-                    snapshot.run.lease,
+                    lease,
                     state=snapshot.run.state,
                     effects=[replace(effect, status=EffectStatus.INDETERMINATE)],
                 )
             finally:
                 await store.close()
 
-        asyncio.run(mark_indeterminate_under_live_lease())
+        asyncio.run(indeterminate_under_a_live_lease())
         response = client.post(
             f"{API}/runs/run-live/effects/{effect_id}/resolve",
             json={"resolution": "not_applied"},
@@ -247,7 +278,7 @@ def test_shared_service_viewer_can_list_but_not_resolve(tmp_path: Path) -> None:
         db_path=str(db), profile="authenticated-shared-service", auth_provider=_RoleProvider()
     )
     client = TestClient(app, raise_server_exceptions=False)
-    effect_id = asyncio.run(_unknown_effect(db, "default", "run-s"))
+    effect_id = asyncio.run(_unknown_effect(db, "default", "run-s", FakePay()))
     # A shared service serves only runs with a recorded owner (fail closed).
     app.state.workspace_repo.record_resource_ownership("run", "run-s", "default", "person-admin")
     url = f"{API}/runs/run-s/effects"
@@ -301,31 +332,26 @@ async def test_python_client_effect_methods_encode_ids_and_body() -> None:
 
 
 def test_timed_out_node_is_resolved_over_rest_and_continues(tmp_path: Path) -> None:
-    """A timed-out non-pure node pauses effect_unknown; REST resolves it and the run continues."""
-    from nexura_agents.contracts.errors import DeadlineExceededError
-
+    """A timeout pauses an unknown payment; REST resolution continues without a duplicate."""
     client, db = _local(tmp_path)
-    spec = DurableWorkflowSpec(
-        workflow_id="fake-timeout",
-        entry_node="pay",
-        terminal_nodes=["pay"],
-        nodes={"pay": DurableNodeSpec(node_id="pay", handler="fake-pay", timeout_seconds=0.05)},
-    )
+    calls = []
 
-    async def slow(_: dict[str, Any]) -> dict[str, Any]:
+    async def slow(state: dict[str, Any]) -> dict[str, Any]:
+        calls.append("local fake debit")
         await asyncio.sleep(1)
-        return {}
+        return {"paid": "late"}
+
+    registry = ModuleRegistry()
+    registry.register("fake-pay", slow)
 
     async def time_out() -> str:
-        store = SQLiteExecutionStore(db)
+        store = SQLiteWorkflowStore(db)
         try:
-            engine = DurableExecutionEngine(store, {"fake-pay": slow})
-            await engine.init_run("wsA", "run-t", spec)
-            await engine.claim_run("wsA", "run-t", "worker")
-            with pytest.raises(DeadlineExceededError):
-                await engine.execute_step("wsA", "run-t", "worker", spec)
-            (effect_id,) = (await store.get(ExecutionId("wsA", "run-t"))).effects
-            return effect_id
+            engine = WorkflowEngine(SPEC, registry, store=store, workspace_id="wsA", timeout=0.05)
+            paused = await engine.run({}, workflow_run_id="run-t")
+            assert paused.status == "paused" and paused.pause_reason == "effect_unknown"
+            assert paused.pending_effect is not None
+            return str(paused.pending_effect["effect_id"])
         finally:
             await store.close()
 
@@ -336,19 +362,31 @@ def test_timed_out_node_is_resolved_over_rest_and_continues(tmp_path: Path) -> N
         assert effect["status"] == "indeterminate"
         resolved = client.post(
             f"{API}/runs/run-t/effects/{effect_id}/resolve",
-            json={"resolution": "confirmed", "result": {"paid": "per ledger"}},
+            json={
+                "resolution": "confirmed",
+                "result": {"paid": "per ledger"},
+                "reason": "Checked local fake ledger",
+            },
             headers=headers,
         )
         assert resolved.status_code == 200, resolved.text
         assert resolved.json()["resolved_by"] == "local-owner"
 
-    async def resume() -> Any:
-        store = SQLiteExecutionStore(db)
+    async def recover() -> Any:
+        store = SQLiteWorkflowStore(db)
         try:
-            engine = DurableExecutionEngine(store, {"fake-pay": slow})
-            return await engine.run_until_idle("wsA", "run-t", "resumer", spec)
+            done = await WorkflowEngine(SPEC, registry, store=store, workspace_id="wsA").recover(
+                "run-t"
+            )
+            snapshot = await (await store.open_execution_store()).get(ExecutionId("wsA", "run-t"))
+            audit = [e.payload for e in snapshot.events if e.event_type == "effect_resolved"]
+            assert len(audit) == 1
+            assert audit[0]["actor"] == "local-owner"
+            assert audit[0]["reason"] == "Checked local fake ledger"
+            return done
         finally:
             await store.close()
 
-    done = asyncio.run(resume())
+    done = asyncio.run(recover())
     assert done.status == "completed" and done.state["paid"] == "per ledger"
+    assert calls == ["local fake debit"]

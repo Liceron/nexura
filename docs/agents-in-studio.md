@@ -108,8 +108,20 @@ When the agent calls a tool that needs approval, the run pauses on the normal ap
 (`status` `pending_approval` in the service, `paused` in the engine) before the call runs.
 `pending_approval.details` holds `kind: "agent_tool_calls"`, the agent id, name and revision,
 and the exact `calls` (`tool`, `arguments`, `digest`). Approving resumes the agent and runs
-exactly those calls; rejecting ends the run and they never run. If the agent was edited in
-between, the approved run fails with a message instead of running the old calls.
+exactly those calls; rejecting ends the run and they never run. If the agent was edited or
+deleted in between, the approved run does not run the old calls: the agent is refused, and
+because the node already ran before it asked, the run pauses `effect_unknown` so a person can
+record what the node did (its refusal is in the run's events).
+
+The node has already run when it asks: ungated tools, and calls approved earlier, ran before
+the pause. Its effect in the execution journal is never recorded as "not applied". With each
+pause the node records how every tool call of its agent run ended (`agent_tool_results`: call
+id, tool name and `status`: `succeeded`, `raised`, `no_result`, `not_run` or `guardrail`). On a
+rejection, when every call either returned a result or never ran, the effect is confirmed with
+that list and the run ends `rejected` at once; when a call raised or has no result, the run
+pauses `effect_unknown` until a person resolves it, then ends `rejected`. If the process stops
+while the node is pausing, recovery pauses the run `effect_unknown` instead of running the
+agent again.
 
 The pause uses two engine helpers any node can call, `request_approval(details)` and
 `approved_request()` from `nexura_runtime.workflow`.

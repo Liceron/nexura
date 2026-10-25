@@ -4,8 +4,8 @@
 
 A process that dies between admission and settlement leaves its reservation ``active``:
 it keeps counting against the allowance and nothing ends it. When a run is taken over
-(``Runner.recover``, ``WorkflowEngine.recover``, ``DurableExecutionEngine.claim_run``, a
-trigger job continuing its run) the new owner ends the run's open reservations before
+(``Runner.recover``, ``WorkflowEngine.recover``, ``resume``, a trigger job continuing
+its run) the new owner ends the run's open reservations before
 any step runs, and every runtime does the same when a run reaches a terminal status:
 
 - the step was dispatched, or may have been, so it may have been billed: the reservation

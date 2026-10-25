@@ -27,10 +27,6 @@ from nexura_runtime.runtime.approvals import (
     WrongActorError,
     WrongWorkspaceError,
 )
-from nexura_runtime.runtime.effects import (
-    EffectReconciler,
-    ReconciliationError,
-)
 
 
 @pytest.fixture
@@ -46,11 +42,6 @@ def manager(temp_db: Path) -> ApprovalPolicyManager:
 @pytest.fixture
 def gate(manager: ApprovalPolicyManager) -> ApprovalGate:
     return ApprovalGate(manager, default_expiry_seconds=300.0)
-
-
-@pytest.fixture
-def reconciler(temp_db: Path) -> EffectReconciler:
-    return EffectReconciler(temp_db)
 
 
 @pytest.fixture
@@ -326,61 +317,10 @@ async def test_approval_cannot_be_bypassed_by_subagent_or_tool(
 
 
 # ---------------------------------------------------------------------------
-# 4. Lost response stays indeterminate until explicitly reconciled
+# 4. Lost response stays indeterminate until explicitly resolved: moved with the removed
+#    EffectReconciler onto the execution journal (A6 S12), see tests/p35/
+#    test_a6_s12_retired_paths.py::test_a_lost_response_stays_indeterminate_until_resolved_once
 # ---------------------------------------------------------------------------
-def test_lost_response_stays_indeterminate(
-    reconciler: EffectReconciler,
-    temp_db: Path,
-) -> None:
-    workspace = "ws_brokerage"
-    effect_id = "eff_order_881"
-    idempotency_key = "idem_key_881"
-    payload = {"symbol": "INFY", "quantity": 100, "action": "BUY"}
-
-    # 1. Record pre-dispatch intent
-    reconciler.record_intent(
-        workspace_id=workspace,
-        effect_id=effect_id,
-        run_id="run_trade_88",
-        action_name="place_order",
-        idempotency_key=idempotency_key,
-        payload=payload,
-    )
-
-    # 2. Simulate transport connection drop / lost response
-    reconciler.record_indeterminate(
-        workspace, effect_id, reason="Brokerage gateway ECONNRESET after POST"
-    )
-
-    eff = reconciler.get_effect(workspace, effect_id)
-    assert eff is not None
-    assert eff.status == "indeterminate"
-    assert "ECONNRESET" in (eff.reconciliation_notes or "")
-
-    # 3. Reopen storage from fresh instance to verify durability
-    reopened = EffectReconciler(temp_db)
-    dur_eff = reopened.get_effect(workspace, effect_id)
-    assert dur_eff is not None
-    assert dur_eff.status == "indeterminate"
-
-    # 4. Reconcile explicitly with audit trail
-    reconciled = reopened.reconcile_effect(
-        workspace_id=workspace,
-        effect_id=effect_id,
-        resolution="confirmed",
-        notes="Order #ORD-772 confirmed directly in exchange order book",
-    )
-    assert reconciled.status == "reconciled"
-    assert "CONFIRMED" in (reconciled.reconciliation_notes or "")
-
-    # 5. Non-indeterminate effect cannot be reconciled
-    with pytest.raises(ReconciliationError):
-        reopened.reconcile_effect(
-            workspace_id=workspace,
-            effect_id=effect_id,
-            resolution="voided",
-            notes="Second reconciliation attempt",
-        )
 
 
 # ---------------------------------------------------------------------------

@@ -215,7 +215,7 @@ class Runtime:
 
         registry.register("fetch_evidence", fetch_evidence)
         registry.register("select_evidence", select_evidence)
-        registry.register("propose_action", propose_action)
+        registry.register("propose_action", propose_action, effect="pure")
         registry.register("execute_refund", execute_refund)
         return registry
 

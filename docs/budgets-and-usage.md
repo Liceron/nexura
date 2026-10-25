@@ -361,14 +361,14 @@ Two caveats from the source:
 ## Reservations across a crash
 
 A reservation made while a run dispatches a step is linked to that step. The runtimes
-covered are `Runner` model and tool calls, `WorkflowEngine` nodes, branches and items, and
-`DurableExecutionEngine` nodes. The link is in `reservation.metadata["execution"]`, the
+covered are `Runner` model and tool calls and `WorkflowEngine` nodes, branches and items
+(also in service runs and trigger jobs). The link is in `reservation.metadata["execution"]`, the
 path of enclosing runs with their step keys, plus `metadata["step_key"]` for the innermost
 step. `Reservation.run_id` stays the budget scope.
 
 When a run is taken over after a crash, the new owner ends that run's open reservations
 before any step runs. This covers `Runner.recover`, `WorkflowEngine.recover` and
-`resume`, `DurableExecutionEngine.claim_run` and a trigger job continuing its run.
+`resume`, and a trigger job continuing its run.
 
 - The step was dispatched, or may have been: it is **settled as unknown usage at the
   estimate** (`usage_state="unknown"`, the reserved cost and tokens). That is a step
@@ -407,10 +407,8 @@ A run started under a `RunBudget` records its scope in its journal.
   replaced by it with a warning, or refused when its ledger does not know the recorded
   scope. The service builds its engines that way.
 - With the SDK `Runner`, pass `Runner(budget=manager.get_run_budget(scope))`.
-- `DurableExecutionEngine.claim_run` refuses a run started under a budget when the engine
-  has none.
-- Continuing such a run without any budget raises `UsageError` (SDK), `WorkflowError`
-  (workflows) or `DurableExecutionError` (`DurableExecutionEngine`). It does so before
+- Continuing such a run without any budget raises `UsageError` (SDK) or `WorkflowError`
+  (workflows). It does so before
   anything runs and before any approval is claimed or consumed.
 - Only a `RunBudget` passed directly is recorded. A run started under a combined budget,
   a custom budget object or an inherited (ambient) budget records no scope, so it is not

@@ -5,6 +5,86 @@ has been published.
 
 ## Unreleased (0.4.0)
 
+### Removed (P35 A6 S12: legacy durable-execution paths)
+- `DurableExecutionEngine` and its `DurableWorkflowSpec`, `DurableNodeSpec`, `DurableRunState`,
+  `NodeIntent`, `WorkerLease`, `EffectPolicy`, `DurableExecutionModule`, `DurableExecutionError`,
+  `FencingConflictError` and `LeaseExpiredError` (`nexura_runtime.runtime.execution`, also
+  `nexura_runtime` and `nexura_runtime.runtime`). Use `WorkflowEngine` with `SQLiteWorkflowStore`
+  or `nexura_postgres.PostgresWorkflowStore` (`recover`, `resolve_effect`); leases and fencing are
+  `nexura_agents.execution_store`. Importing a removed name raises `RemovedAPIError` (an
+  `ImportError`) that names the replacement; the stubs are deleted in the next release.
+- `EffectReconciler` and its `EffectRecord`, `EffectStatus`, `EffectError`,
+  `EffectIndeterminateError` and `ReconciliationError` (`nexura_runtime.runtime.effects`). Effects
+  are execution-journal records (`ExecutionStore.resolve_effect`, `WorkflowEngine.resolve_effect`,
+  `POST /api/v1/runs/{id}/effects/{effect_id}/resolve`). The old `effect_records` table is left as
+  it was and no longer read.
+- `TriggerWorker(retry_mode="new_run")` / `nexura-runtime worker --retry-mode new_run` and
+  `TriggerStore.reclaim_expired_jobs(keep_run=False)`: they now raise `ValueError` naming the
+  replacement. A reclaimed trigger job continues its journaled run; the no-journal
+  compatibility fallback creates a replacement and preserves the old id in `previous_run_ids`.
+
+### Changed (P35 A6 S12)
+- Runs the removed engine wrote (`kind="durable_graph"`) stay readable through
+  `SQLiteRepository`/`PostgresRepository` `get_run` and `get_run_events`, the journal and the
+  effects API; `update_run` on one raises `StorageError`. New `durable_graph` creates and
+  ordinary execution commits raise an actionable `ExecutionConflictError`; only the narrow
+  lease/resolution operations remain writable for existing indeterminate effects.
+- A non-idempotent workflow call that raises, times out or loses its response after its intent
+  pauses with `effect_unknown` and remains resolvable. Reconcilable calls probe first and pause
+  only on `Unknown`. Confirmation continues without repeating the call; `not_applied` permits
+  another attempt and requires fresh approval for a gated step; `failed` fails the run. Optional
+  resolution reasons are audited with the actor through the workflow engine, store and REST API.
+- Workflow retries now use the same effective class policy as recovery: only pure and idempotent
+  handlers may have `max_attempts > 1`. Validation and runtime both reject non-idempotent and
+  reconcilable handlers, including undeclared functions and composite/nested handlers.
+- Composite sibling failures wait for every unresolved unsafe effect, including cancelled parts
+  and mapped sub-workflow children, before becoming terminal. A live reconciler `NotApplied`
+  answer re-gates an approved mapped/parallel step while keeping finished outcomes and keys.
+- Automatic workflow reconciliation, resends and continuation share one absolute deadline.
+  Expiry preserves uncertainty; repeated `NotApplied` loops allow at most three automatic
+  resends per part. Statically bound mapped reads keep safe retries without relaxing write checks.
+- Terminal limits and failures preserve unresolved dispatched parts and children. The run stays
+  at `effect_unknown` until settlement, then fails with the deferred error without resending.
+  Direct recovery establishes its deadline and shared three-resend allowance before probing.
+- `DurableTriggerJob.previous_run_ids` is no longer deprecated: it records runs replaced by the
+  no-journal fallback only.
+- Docs: new "How durable execution works" page; workflows, approvals, durable runs, budgets and the
+  durable-execution reference now describe recovery as it is (a run resumes at the step it was on;
+  completed steps never re-run; an unknown `non_idempotent` effect pauses the run).
+- `examples/backend/b05.py` and `b07.py` use `WorkflowEngine` and the execution journal.
+- An outcome is unknown only when the handler was actually invoked after its intent. When a
+  step key is dispatched for the first time and refused before its handler starts (an expired
+  deadline, a module's input or config schema, a saved-agent or skill refusal before the agent
+  runs), the run fails as before and the intent is settled `not_applied` by
+  `workflow:pre_dispatch`, never left as `effect_unknown`.
+- A step that has already started is never settled `not_applied` by the system. This covers
+  a node that called `request_approval()` or `interrupt()` (journaled as started with its
+  pause), and any re-run of a step key whose intent was already open. If such a re-run is
+  refused before it starts (deadline, an edited or deleted saved agent), the run pauses
+  `effect_unknown`.
+- Rejecting a node's own `request_approval()`:
+  - Saved-agent node, when every tool call it dispatched returned a result: its effect is
+    confirmed with the per-call outcomes (`agent_tool_results`: id, tool, status) and the
+    run ends `rejected` at once.
+  - Any other `non_idempotent` or `reconcilable` node, or a saved agent with a tool that
+    raised or has no result: the run pauses `effect_unknown` until a person settles what
+    the node did, then ends `rejected`.
+  - Misuse of `request_approval` still raises `WorkflowError`, and leaves the run paused the
+    same way until settlement, after which it fails.
+
+### Added (P35 A6 S12 with P39 G6)
+- `WorkflowEngine(guardrail_policy=...)`: a guardrail policy's tool rules apply to module
+  nodes (`require_approval` joins the node's approval gate; `tool_input` block/fail refuses
+  the node before its intent; `tool_output` block/scrub withhold outputs and `fail` fails the
+  run after the call is committed as applied). The items of a mapped module node are each
+  checked on their own arguments before any item runs. Without the argument the process
+  default policy applies; sub-workflows inherit it. In allowlist mode a step the policy
+  cannot match (plain handler, parallel step) is refused.
+- `AgentDefinition` subagent delegations are refused before any model call while a policy with
+  input, model or output rules is in effect; coordinator and subagent model loops refuse a reply
+  with duplicate tool-call ids (`ProviderResponseError`) before any gate, hook, ledger entry or
+  dispatch.
+
 ### Added (P39 G6: guardrail policy middleware and enforcement)
 
 - `nexura_guardrails.GuardrailPolicy`: one declarative policy for every stage of every run

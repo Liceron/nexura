@@ -68,7 +68,7 @@ async def test_flaky_node_retries_with_backoff_then_succeeds(store: Any) -> None
     calls: list[int] = []
     registry = ModuleRegistry()
 
-    @registry.register_handler("flaky")
+    @registry.register_handler("flaky", effect="pure")
     def flaky(state: dict[str, Any]) -> dict[str, Any]:
         calls.append(1)
         if len(calls) < 3:
@@ -88,7 +88,7 @@ async def test_retry_on_filters_and_exhaustion_fails_cleanly(store: Any) -> None
     calls: list[str] = []
     registry = ModuleRegistry()
 
-    @registry.register_handler("bad_input")
+    @registry.register_handler("bad_input", effect="pure")
     def bad_input(state: dict[str, Any]) -> dict[str, Any]:
         calls.append("x")
         raise ValueError("malformed order")
@@ -115,7 +115,7 @@ async def test_retry_on_filters_and_exhaustion_fails_cleanly(store: Any) -> None
 async def test_retry_respects_the_workflow_deadline() -> None:
     registry = ModuleRegistry()
 
-    @registry.register_handler("always_fails")
+    @registry.register_handler("always_fails", effect="pure")
     def always_fails(state: dict[str, Any]) -> dict[str, Any]:
         raise ConnectionError("down")
 
@@ -250,7 +250,7 @@ async def test_interrupt_is_not_swallowed_or_retried() -> None:
     calls: list[int] = []
     registry = ModuleRegistry()
 
-    @registry.register_handler("careless")
+    @registry.register_handler("careless", effect="pure")
     def careless(state: dict[str, Any]) -> dict[str, Any]:
         calls.append(1)
         try:
@@ -275,7 +275,7 @@ def test_interrupt_outside_a_workflow_fails_clearly() -> None:
 def pipeline_registry(log: list[str]) -> ModuleRegistry:
     registry = ModuleRegistry()
 
-    @registry.register_handler("classify")
+    @registry.register_handler("classify", effect="pure")
     def classify(state: dict[str, Any]) -> dict[str, Any]:
         log.append("classify")
         return {"category": "refund" if state["amount"] > 100 else "faq"}
@@ -350,7 +350,7 @@ async def test_fork_from_a_failed_run_retries_after_a_fix(store: Any) -> None:
     def prep(state: dict[str, Any]) -> dict[str, Any]:
         return {"prepared": True}
 
-    @registry.register_handler("charge")
+    @registry.register_handler("charge", effect="idempotent")
     def charge(state: dict[str, Any]) -> dict[str, Any]:
         attempts.append(1)
         if state.get("card") != "valid":
@@ -431,7 +431,7 @@ async def test_retry_after_an_answered_interrupt_reuses_the_answer() -> None:
     calls: list[str] = []
     registry = ModuleRegistry()
 
-    @registry.register_handler("confirm_then_call")
+    @registry.register_handler("confirm_then_call", effect="pure")
     def confirm_then_call(state: dict[str, Any]) -> dict[str, Any]:
         answer = interrupt("Proceed?")
         calls.append(answer)
@@ -459,7 +459,7 @@ async def test_retry_attempts_share_the_workflow_deadline() -> None:
     calls: list[int] = []
     registry = ModuleRegistry()
 
-    @registry.register_handler("fail_then_hang")
+    @registry.register_handler("fail_then_hang", effect="pure")
     async def fail_then_hang(state: dict[str, Any]) -> dict[str, Any]:
         calls.append(1)
         if len(calls) == 1:

@@ -43,7 +43,6 @@ POSTGRES_STORES: dict[str, tuple[str, str]] = {
     "agent": ("PostgresCheckpointStore", "A6 S5: no Postgres SDK checkpoint store yet"),
     "workflow": ("PostgresWorkflowStore", "A6 S8: no PostgresWorkflowStore yet"),
     "trigger": ("PostgresTriggerStore", "A6 S10b: no PostgresTriggerStore yet"),
-    "legacy": ("PostgresRepository", "PostgresRepository is missing"),
 }
 
 
@@ -67,7 +66,7 @@ class Backend:
     dsn: str | None = None
 
     def require(self, kind: str) -> None:
-        """Assert that ``kind`` (agent, workflow, trigger, legacy) has a store here.
+        """Assert that ``kind`` (agent, workflow, trigger) has a store here.
 
         Raises ``AssertionError`` so the Postgres rows of paths that have no Postgres store
         yet are strict expected failures that flip once the store lands.

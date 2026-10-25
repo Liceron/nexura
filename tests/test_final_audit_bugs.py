@@ -9,10 +9,8 @@ import pytest
 from nexura_runtime.errors import WorkflowError, WorkflowExecutionError
 
 from nexura_runtime.cli.main import build_parser
-from nexura_runtime.runtime.execution.engine import DurableExecutionEngine
-from nexura_runtime.runtime.execution.models import DurableNodeSpec, DurableWorkflowSpec
 from nexura_runtime.service.api.client import NexuraClient
-from nexura_runtime.storage.repository import SQLiteRepository, get_storage_repository
+from nexura_runtime.storage.repository import get_storage_repository
 from nexura_runtime.workflow import (
     MemoryWorkflowStore,
     ModuleRegistry,
@@ -79,39 +77,9 @@ async def test_concurrent_run_id_dispatches_only_once(checkpoint_store: Any) -> 
     assert len(calls) == 1
 
 
-async def test_conditional_cycle_reexecutes_node(tmp_path: Path) -> None:
-    async def loop(state: dict[str, Any]) -> dict[str, Any]:
-        count = state.get("count", 0) + 1
-        return {"count": count, "loop_branch": "done" if count == 2 else "again"}
-
-    async def end(state: dict[str, Any]) -> dict[str, Any]:
-        return {}
-
-    spec = DurableWorkflowSpec(
-        workflow_id="cycle",
-        entry_node="loop",
-        terminal_nodes=["end"],
-        nodes={
-            "loop": DurableNodeSpec(node_id="loop", handler="loop"),
-            "end": DurableNodeSpec(node_id="end", handler="end"),
-        },
-        transitions={"loop": {"again": "loop", "done": "end"}},
-    )
-    repo = SQLiteRepository(tmp_path / "cycle.db")
-    try:
-        engine = DurableExecutionEngine(repo, {"loop": loop, "end": end})
-        await engine.init_run("default", "r", spec)
-        # A fresh engine must recognize a new visit after the first completion commits.
-        first = await engine.run_until_idle("default", "r", "worker", spec, max_steps=1)
-        assert first.state["count"] == 1
-        result = await DurableExecutionEngine(repo, {"loop": loop, "end": end}).run_until_idle(
-            "default", "r", "worker", spec, max_steps=5
-        )
-        assert (result.status, result.state["count"]) == ("completed", 2)
-        assert result.fuel_consumed == 3
-        assert result.completed_nodes == ["loop", "loop", "end"]
-    finally:
-        await repo.close()
+# B0x "conditional cycle re-executes its node" ran on the removed DurableExecutionEngine;
+# its WorkflowEngine form is tests/backend/b05/test_durable_execution.py::
+# test_a_loop_node_is_a_new_visit_with_its_own_intent_and_key (A6 S12).
 
 
 async def test_node_grant_survives_input_pause(checkpoint_store: Any) -> None:
@@ -174,7 +142,7 @@ async def test_invalid_branch_is_persisted_as_failed(
         return {"before": True}
 
     registry = ModuleRegistry()
-    registry.register("h", handler)
+    registry.register("h", handler, effect="pure")
     registry.register("before", before)
     nodes = {"n": WorkflowNode("n", "h", retry={"max_attempts": 2, "initial_delay": 0})}
     if later_node:

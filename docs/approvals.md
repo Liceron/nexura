@@ -558,7 +558,13 @@ personal-data detector. When masking occurs, the displayed canonical JSON differ
 the stored bytes: `payload_digest` continues to identify the original approved payload.
 Review the entire pending action before deciding. REST rejection claims the same engine
 approval as acceptance, persists a terminal rejection checkpoint, and executes no gated
-node; concurrent decisions cannot both claim it.
+node; concurrent decisions cannot both claim it. One exception to "terminal at once": an
+approval that a node asked for itself (`request_approval`) from an undeclared,
+`non_idempotent` or `reconcilable` handler. That node already ran before it asked, so the
+rejection first pauses the run `effect_unknown`; a person resolves the effect
+(`POST /runs/{id}/effects/{effect_id}/resolve`), and recovery then ends the run `rejected`.
+A saved-agent node whose dispatched tool calls all returned is confirmed with that list and
+rejected at once.
 
 ## See also
 
@@ -579,8 +585,13 @@ node; concurrent decisions cannot both claim it.
   Canonical digests refuse non-string mapping keys. A plain `@tool` function is gated only
   with `requires_approval=True`, and Python code that sets `approval_granted` on an
   `ExecutionContext` itself is trusted. Details and limits: [SECURITY_MODEL.md](../SECURITY_MODEL.md).
-- Side-effecting handlers and tools are never retried automatically. A crash during
-  a side effect leaves its outcome uncertain; it is recorded, not replayed.
+- A side effect is never repeated silently after a crash. An undeclared (`non_idempotent`)
+  tool or workflow step that was sent but has no recorded outcome pauses the run
+  (`pause_reason="effect_unknown"`) until a person resolves it; only steps declared `pure`,
+  `idempotent` (re-sent with the same idempotency key) or `reconcilable` (probed first) are
+  run again automatically, and completed steps never are. An approval is used up by the
+  dispatch it was given for, so a `not_applied` resolution of a gated step needs a fresh
+  approval. See [How durable execution works](how-durable-execution-works.md).
 - Unknown token usage and unknown pricing stay unknown instead of becoming zero.
 - The open-source edition is single-user: one principal, the local owner, with no logins,
   tokens or API keys. Authentication (the `authenticated-shared-service` profile) is in the

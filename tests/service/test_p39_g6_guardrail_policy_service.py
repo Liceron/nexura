@@ -397,7 +397,8 @@ def test_round2_policy_detail_is_for_admins_only(tmp_path: Path) -> None:
     assert summary["detail"] == "summary" and summary["enforced"] is True
     assert summary["policy"] == {"digest": policy.digest, "file": "policy.yaml"}
     assert str(tmp_path) not in json.dumps(summary)
-    assert "workflow_module_nodes" in summary["exceptions"]
+    assert "workflow_module_nodes" not in summary["exceptions"]  # WorkflowEngine applies it
+    assert "coordinator_refused_with_model_stage_rules" in summary["exceptions"]
     full = policy_view(policy, admin=True)
     assert full["policy"]["source"] == str(path) and full["policy"]["rules"]
     # The local owner is an admin; a viewer of a workspace gets the summary.

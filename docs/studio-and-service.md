@@ -316,9 +316,11 @@ nexura-runtime serve --chat-model gpt=openai:gpt-4o-mini --chat-model gem=gemini
 
 The operator can enforce one [guardrail policy](guardrail-policy.md) on the agent runs of the
 service: the chat playground, saved agents, workflow agent nodes, templates, evaluations and
-any other in-process `Runner`. Not covered: workflow module nodes other than agent and
-`guardrails.check` nodes (not yet), and coordinator runs, which are refused while the policy has
-input, model or output rules.
+any other in-process `Runner`, and the tool rules on workflow module nodes (every
+`WorkflowEngine` in the process uses the installed policy, see
+[Policy rules for module nodes](guardrail-policy.md#policy-rules-for-module-nodes)). Not covered:
+coordinator runs and `AgentDefinition` subagent delegations, which are refused while the policy
+has input, model or output rules.
 
 ```bash
 pip install "nexura-guardrails[yaml]"
@@ -347,20 +349,19 @@ nexura-runtime serve --guardrail-policy /etc/nexura/guardrails.yaml
   name, the full source path, the rules and the check types (never a judge's policy text or a
   key). `exceptions` lists what is not covered. Studio shows it read-only in the agent editor,
   with the "Enforced by the server" badge only when `enforced` is true.
-- `AgentCoordinator` runs (the `nexura.agents.coordinator` module) are refused while the policy
-  has input, model or output rules: they call models without the hooks that apply those stages.
-  AgentDefinition subagents: their own model calls are not checked by model_input/model_output
-  rules, and their own input and output stages are not checked either, until a follow-up lands.
-  The parent's stages still check what reaches the user. Agents saved in Studio run on a `Runner` and are
-  covered. An agent whose answers the policy checks cannot use `stream_guard: passthrough`
+- `AgentCoordinator` runs (the `nexura.agents.coordinator` module) and `AgentDefinition`
+  subagent delegations are refused while the policy has input, model or output rules: they call
+  models without the hooks that apply those stages. Agents saved in Studio run on a `Runner` and
+  are covered. An agent whose answers the policy checks cannot use `stream_guard: passthrough`
   (refused when it is saved, and at run start). `GET /api/v1/guardrails/presets` lists
   the presets saved agents may use and what each needs and costs.
 - Decisions appear as `GUARDRAIL_DECISION` run events and `nexura.guardrail.decision` trace
   events; with `audit: {sink: jsonl, path: ...}` they are also appended to a JSON-lines file
   next to the policy (relative paths resolve against the policy file's directory).
-- Policy rules for workflow module nodes (`WorkflowEngine(guardrail_policy=...)`) are not part
-  of this release: agent nodes and the `guardrails.check` node are covered, other module nodes
-  are not.
+- Workflow module nodes: `require_approval` rules pause the node on its approval path,
+  `tool_input` blocks refuse it before anything is dispatched, and `tool_output` rules withhold
+  or fail on a module's outputs after its outcome is committed. In allowlist mode a node the
+  policy cannot match (a plain Python handler or a parallel step) is refused.
 
 ## Describe a workflow
 

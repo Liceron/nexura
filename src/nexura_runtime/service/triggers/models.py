@@ -87,7 +87,7 @@ class DurableTriggerJob(BaseModel):
     run_id: str | None = None
     lease_expires_at: float | None = None  # queue lease; None when not claimed
     attempts: int = 0  # number of claims (initial claim plus lease-expiry reclaims)
-    # Deprecated (A6 S10, removed in 0.6): runs this job replaced. Only filled by the
-    # deprecated TriggerWorker(retry_mode="new_run") or when a run without an execution
-    # journal could not be continued and a new run was started instead.
+    # Runs this job replaced. Only filled when a run without an execution journal (a legacy
+    # run, or one killed before its first journal write) could not be continued and a new run
+    # was started instead; the old retry_mode="new_run" that also filled it was removed (S12).
     previous_run_ids: list[str] = Field(default_factory=list)

@@ -383,15 +383,18 @@ def test_reclaim_keeps_the_run_for_the_new_owner(store: TriggerStore) -> None:
     assert stale is not None and stale.status == "claimed" and stale.claimed_by == "w2"
 
 
-def test_reclaim_in_new_run_mode_moves_the_run_aside(store: TriggerStore) -> None:
-    """Deprecated ``retry_mode="new_run"``: the run id moves to ``previous_run_ids``."""
+def test_reclaim_without_keeping_the_run_was_removed(store: TriggerStore) -> None:
+    """A6 S12: ``keep_run=False`` (the old ``retry_mode="new_run"``) is refused, and the
+    refusal changes nothing: the job stays with its owner and keeps its run."""
     _claimed_with_run(store, "j1", now=100.0, lease=10.0)
-    got = store.reclaim_expired_jobs("w2", lease_seconds=10, now=200.0, keep_run=False)
-    assert len(got) == 1
-    assert got[0].run_id is None and got[0].previous_run_ids == ["run-j1"]
-    assert store.set_job_run("j1", "w2", "run-new")
+    with pytest.raises(ValueError, match=r"keep_run=False\) was removed"):
+        store.reclaim_expired_jobs("w2", lease_seconds=10, now=200.0, keep_run=False)
     job = store.get_job("j1")
-    assert job is not None and job.run_id == "run-new" and job.previous_run_ids == ["run-j1"]
+    assert job is not None and job.run_id == "run-j1" and job.previous_run_ids == []
+    assert job.claimed_by != "w2" and job.attempts == 1
+    # The supported reclaim still takes it over, keeping the run.
+    got = store.reclaim_expired_jobs("w2", lease_seconds=10, now=200.0)
+    assert [(j.claimed_by, j.run_id) for j in got] == [("w2", "run-j1")]
 
 
 def test_reclaim_honours_exclusions_limit_and_age_order(store: TriggerStore) -> None:

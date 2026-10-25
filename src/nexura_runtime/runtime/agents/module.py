@@ -161,14 +161,21 @@ class AgentCoordinatorModule(BaseModule):
         names = (config or {}).get("skills") or []
         if names:
             label = str((config or {}).get("skills_label") or "production")
-            if self.skill_source is None:
-                raise SkillError("This node lists skills but no skill store is connected.")
-            if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
-                raise SkillError("Node config 'skills' must be a list of skill names.")
-            names = list(dict.fromkeys(names))  # a name listed twice is attached once
-            library = self.skill_source.library_for(context.workspace_id, names, label)
-            coordinator = _with_skills(coordinator, library, label)
+            try:
+                if self.skill_source is None:
+                    raise SkillError("This node lists skills but no skill store is connected.")
+                if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+                    raise SkillError("Node config 'skills' must be a list of skill names.")
+                names = list(dict.fromkeys(names))  # a name listed twice is attached once
+                library = self.skill_source.library_for(context.workspace_id, names, label)
+                coordinator = _with_skills(coordinator, library, label)
+            except SkillError as exc:
+                # Before _mark_dispatch_started: nothing ran (the workflow's marker decides).
+                return ModuleResult.failure("SKILL_INVALID", str(exc))
 
+        from nexura_runtime.workflow import _mark_dispatch_started
+
+        _mark_dispatch_started()  # internal: the coordinator's models and tools run from here
         result = await coordinator.run_async(
             initial_agent_name=agent_name,
             prompt=prompt,

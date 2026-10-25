@@ -438,6 +438,17 @@ async def test_database_migrations_reopen_and_version_compatibility(journal: Har
             await reopened.close()
 
 
+async def test_expected_revision_is_checked_inside_fenced_commit(journal: Harness) -> None:
+    """Moved from the deleted ``test_a6_engine_effects.py`` (A6 S12), now on every backend."""
+    store = journal.store
+    run = await _create(journal)
+    await store.commit(run.lease, state={"winner": True}, expected_revision=run.revision)
+    before = await store.get(run.execution_id)
+    with pytest.raises(ExecutionConflictError):
+        await store.commit(run.lease, state={"stale": True}, expected_revision=run.revision)
+    assert await store.get(run.execution_id) == before
+
+
 async def test_parallel_claims_have_one_winner(journal: Harness) -> None:
     run = await _create(journal)
     await journal.store.release(run.lease)

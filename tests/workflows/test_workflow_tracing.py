@@ -103,7 +103,7 @@ async def test_retry_attempts_are_counted_and_not_an_error(
             raise ConnectionError("reset")
         return {"ok": True}
 
-    reg.register("flaky", flaky)
+    reg.register("flaky", flaky, effect="pure")
     spec = chain(
         "retrying",
         WorkflowNode(id="f", handler="flaky", retry={"max_attempts": 3, "initial_delay": 0.001}),

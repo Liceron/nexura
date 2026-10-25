@@ -31,7 +31,7 @@ SECTIONS: list[tuple[str, str, list[str] | None]] = [
     ("nexura_agents.network", "Network policy (`nexura_agents.network`)", None),
     (
         "nexura_agents.execution_store",
-        "Execution stores (`nexura_agents.execution_store`, used by `DurableExecutionEngine`)",
+        "Execution stores (`nexura_agents.execution_store`)",
         None,
     ),
     (

@@ -32,12 +32,28 @@ GATED = {
     **SPEC,
     "nodes": {**SPEC["nodes"], "charge": {**SPEC["nodes"]["charge"], "requires_approval": True}},
 }
+VALIDATION_SPEC: dict[str, Any] = {
+    "name": "quote validation",
+    "entry_node": "quote",
+    "nodes": {
+        "quote": {"id": "quote", "handler": "quote", "default_transition": "check"},
+        "check": {"id": "check", "handler": "check"},
+    },
+    "terminal_nodes": ["check"],
+}
+GATED_VALIDATION = {
+    **VALIDATION_SPEC,
+    "nodes": {
+        **VALIDATION_SPEC["nodes"],
+        "check": {**VALIDATION_SPEC["nodes"]["check"], "requires_approval": True},
+    },
+}
 
 
 def _registry(calls: list[str]) -> ModuleRegistry:
     registry = ModuleRegistry()
 
-    @registry.register_handler("quote")
+    @registry.register_handler("quote", effect="pure")
     async def quote(state: dict[str, Any]) -> dict[str, Any]:
         calls.append("quote")
         return {"amount": state["qty"] * 500}
@@ -48,6 +64,11 @@ def _registry(calls: list[str]) -> ModuleRegistry:
         if state.get("fail", True):
             raise ValueError(f"card declined for amount {state['amount']} using {state['api_key']}")
         return {"charged": True}
+
+    @registry.register_handler("check", effect="pure")
+    async def check(state: dict[str, Any]) -> dict[str, Any]:
+        calls.append("check")
+        raise ValueError(f"invalid quote for amount {state['amount']} using {state['api_key']}")
 
     return registry
 
@@ -69,6 +90,14 @@ def _run(c: TestClient, spec: dict[str, Any], state: dict[str, Any]) -> dict[str
     return body
 
 
+def _unknown_charge(c: TestClient, run: dict[str, Any]) -> None:
+    assert run["status"] == "paused", run
+    effects = c.get(f"{API}/runs/{run['run_id']}/effects").json()["effects"]
+    assert len(effects) == 1 and effects[0]["status"] == "indeterminate"
+    assert effects[0]["intent"]["effect_class"] == "non_idempotent"
+    assert c.get(f"{API}/runs/{run['run_id']}/repro").status_code == 404
+
+
 @pytest.fixture(autouse=True)
 def _no_capture_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(CAPTURE_ENV, raising=False)
@@ -79,7 +108,7 @@ def test_capture_is_off_by_default(tmp_path: Path) -> None:
     c = _client(tmp_path, calls)
     assert c.app.state.repro_capture is None  # type: ignore[attr-defined]
     run = _run(c, SPEC, {"qty": 2, "api_key": SECRET})
-    assert run["status"] == "failed", run
+    _unknown_charge(c, run)
     r = c.get(f"{API}/runs/{run['run_id']}/repro")
     assert r.status_code == 404
     assert r.json()["detail"]["code"] == "REPRO_BUNDLE_NOT_FOUND"
@@ -92,8 +121,13 @@ def test_failed_run_bundle_downloads_redacted_and_replays(tmp_path: Path) -> Non
     calls: list[str] = []
     c = _client(tmp_path, calls, capture_failed_runs=True)
     run = _run(c, SPEC, {"qty": 2, "api_key": SECRET})
-    assert run["status"] == "failed", run
+    _unknown_charge(c, run)
     assert calls == ["quote", "charge"]
+    # An uncertain charge is not a failed run. Keep failed-run capture/replay coverage
+    # on a separate, genuinely pure validation failure.
+    run = _run(c, VALIDATION_SPEC, {"qty": 2, "api_key": SECRET})
+    assert run["status"] == "failed", run
+    assert calls == ["quote", "charge", "quote", "check"]
 
     r = c.get(f"{API}/runs/{run['run_id']}/repro")
     assert r.status_code == 200, r.text
@@ -104,8 +138,8 @@ def test_failed_run_bundle_downloads_redacted_and_replays(tmp_path: Path) -> Non
     data = r.json()
     assert data["run_kind"] == "workflow"
     assert data["inputs"]["api_key"] == {"$redacted": "api_key"}
-    assert data["expected_outcome"]["failing_step"] == "charge"
-    assert "card declined for amount 1000" in data["expected_outcome"]["error_message"]
+    assert data["expected_outcome"]["failing_step"] == "check"
+    assert "invalid quote for amount 1000" in data["expected_outcome"]["error_message"]
 
     path = tmp_path / "downloaded.json"
     path.write_text(r.text)
@@ -113,7 +147,7 @@ def test_failed_run_bundle_downloads_redacted_and_replays(tmp_path: Path) -> Non
     assert result.reproduced, result.first_divergence
     assert result.notes == ()  # a new bundle records the (null) final state of a failed run
     assert data["expected_outcome"]["state"] is None
-    assert calls == ["quote", "charge"]  # replay ran no handler
+    assert calls == ["quote", "charge", "quote", "check"]  # replay ran no handler
 
     # The same bundle through the CLI, straight from the service database.
     out = tmp_path / "cli.json"
@@ -163,6 +197,15 @@ def test_failure_after_an_approval_decision_is_captured(tmp_path: Path) -> None:
         f"{API}/runs/{run['run_id']}/decide",
         json={"approval_id": run["pending_approval"]["approval_id"], "decision": "approve"},
     )
+    assert d.status_code == 200, d.text
+    _unknown_charge(c, d.json())
+    assert calls == ["quote", "charge"]
+    run = _run(c, GATED_VALIDATION, {"qty": 3, "api_key": SECRET})
+    assert run["status"] == "pending_approval", run
+    d = c.post(
+        f"{API}/runs/{run['run_id']}/decide",
+        json={"approval_id": run["pending_approval"]["approval_id"], "decision": "approve"},
+    )
     assert d.status_code == 200 and d.json()["status"] == "failed", d.text
     r = c.get(f"{API}/runs/{run['run_id']}/repro")
     assert r.status_code == 200, r.text
@@ -171,8 +214,8 @@ def test_failure_after_an_approval_decision_is_captured(tmp_path: Path) -> None:
     assert data["approvals"] == [{"decision": "approve"}]
     result = asyncio.run(replay_repro_bundle(ReproBundle(data)))
     assert result.reproduced, result.first_divergence
-    assert result.outcome["failing_step"] == "charge"
-    assert calls == ["quote", "charge"]
+    assert result.outcome["failing_step"] == "check"
+    assert calls == ["quote", "charge", "quote", "check"]
 
 
 def test_environment_setting_and_explicit_override(
@@ -190,8 +233,13 @@ def test_environment_setting_and_explicit_override(
 def test_bundle_stays_downloadable_after_capture_is_turned_off(tmp_path: Path) -> None:
     c = _client(tmp_path, [], capture_failed_runs=True)
     run = _run(c, SPEC, {"qty": 1, "api_key": SECRET})
+    _unknown_charge(c, run)
+    unknown_id = run["run_id"]
+    run = _run(c, VALIDATION_SPEC, {"qty": 1, "api_key": SECRET})
+    assert run["status"] == "failed", run
     c.close()
     later = _client(tmp_path, [])  # same database, capture off
+    assert later.get(f"{API}/runs/{unknown_id}/repro").status_code == 404
     r = later.get(f"{API}/runs/{run['run_id']}/repro")
     assert r.status_code == 200, r.text
     assert json.loads(r.text)["expected_outcome"]["status"] == "failed"

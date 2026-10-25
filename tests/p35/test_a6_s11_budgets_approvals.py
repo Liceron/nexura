@@ -705,54 +705,9 @@ async def test_workflow_gated_resume_restores_and_settles() -> None:
 
 
 # ------------------------------------------------------------------- legacy engine
-
-
-async def test_durable_execution_engine_claim_settles_what_a_stopped_worker_left(
-    tmp_path: Path,
-) -> None:
-    from nexura_runtime.runtime.execution import (
-        DurableExecutionEngine,
-        DurableNodeSpec,
-        DurableWorkflowSpec,
-    )
-    from nexura_runtime.storage.repository import SQLiteRepository
-
-    mgr = manager()
-    budget = run_budget(mgr, "legacy-1")
-    repository = SQLiteRepository(str(tmp_path / "legacy.db"))
-    spec = DurableWorkflowSpec(
-        workflow_id="legacy",
-        entry_node="t",
-        terminal_nodes=["t"],
-        nodes={
-            "t": DurableNodeSpec(
-                node_id="t", handler="transfer", effect_policy="non_idempotent_write"
-            )
-        },
-    )
-    crash = {"now": True}
-
-    async def transfer(state: dict[str, Any]) -> dict[str, Any]:
-        budget.admit_provider_call("fake-model", estimated_tokens=50)
-        if crash.pop("now", False):
-            raise Crash("worker died mid-call")
-        return {"done": True}
-
-    engine = DurableExecutionEngine(repository, budget=budget)
-    engine.register_handler("transfer", transfer)
-    try:
-        await engine.init_run("ws", "legacy-1", spec)
-        await engine.claim_run("ws", "legacy-1", "w1", lease_duration=0.2)
-        with pytest.raises(Crash):
-            await engine.execute_step("ws", "legacy-1", "w1", spec)
-        (left,) = open_rows(mgr)
-        assert left.metadata["step_key"].startswith("t#") and frames_of(left.metadata)[0].tracked
-        await asyncio.sleep(0.3)
-        await engine.claim_run("ws", "legacy-1", "w2", lease_duration=5)
-        assert open_rows(mgr) == []
-        assert settlement(mgr, left.reservation_id).usage_state == "unknown"
-    finally:
-        await repository.close()
+# The DurableExecutionEngine takeover-settlement test was removed with that engine (A6 S12);
+# the same rule on WorkflowEngine is test_workflow_recover_settles_the_crashed_node_and_restores
+# _the_policy, and on the trigger worker test_a_reclaimed_trigger_job_settles_its_run_reservations.
 
 
 # ------------------------------------------------------------------- streaming
@@ -1319,48 +1274,6 @@ async def test_workflow_sweeps_after_the_terminal_commit_when_the_lease_check_ke
         assert len(_settlements(mgr, res.reservation_id)) == 1
 
 
-async def test_legacy_engine_sweeps_after_the_terminal_commit_when_the_lease_check_keeps_failing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from nexura_runtime.runtime.execution import (
-        DurableExecutionEngine,
-        DurableNodeSpec,
-        DurableWorkflowSpec,
-    )
-    from nexura_runtime.storage.repository import SQLiteRepository
-
-    mgr = manager()
-    budget = run_budget(mgr, "legacy-f4")
-    repository = SQLiteRepository(str(tmp_path / "legacy.db"))
-    spec = DurableWorkflowSpec(
-        workflow_id="legacy",
-        entry_node="t",
-        terminal_nodes=["t"],
-        nodes={
-            "t": DurableNodeSpec(node_id="t", handler="transfer", effect_policy="idempotent_write")
-        },
-    )
-
-    async def transfer(state: dict[str, Any]) -> dict[str, Any]:
-        budget.admit_provider_call("fake-model", estimated_tokens=50)  # leaks
-        return {"done": True}
-
-    engine = DurableExecutionEngine(repository, budget=budget)
-    engine.register_handler("transfer", transfer)
-    try:
-        await engine.init_run("ws", "legacy-f4", spec)
-        await engine.claim_run("ws", "legacy-f4", "w1", lease_duration=30)
-        store = await engine.get_execution_store()
-
-        async def flaky(*args: Any, **kwargs: Any) -> Any:
-            raise OSError("database is locked (transient)")
-
-        monkeypatch.setattr(store, "renew", flaky)
-        with pytest.warns(RuntimeWarning, match="settled after the terminal commit"):
-            state = await engine.execute_step("ws", "legacy-f4", "w1", spec)
-        assert state.status == "completed"
-        assert open_rows(mgr) == []
-        for res in mgr.ledger._reservations.values():
-            assert len(_settlements(mgr, res.reservation_id)) == 1
-    finally:
-        await repository.close()
+# test_legacy_engine_sweeps_after_the_terminal_commit_when_the_lease_check_keeps_failing was
+# removed with DurableExecutionEngine (A6 S12); the WorkflowEngine and Runner forms above
+# (test_workflow_sweeps_..., test_runner_sweeps_...) keep the rule.

@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import threading
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
@@ -58,6 +59,35 @@ TERMINAL = ("completed", "failed")
 def journal_capable(store: Any) -> bool:
     """A workflow store the engine can keep an execution journal for."""
     return store is not None and callable(getattr(store, "open_execution_store", None))
+
+
+class Invocation:
+    """Local proof of whether a handler started; absent for historical intents."""
+
+    def __init__(self) -> None:
+        self.started = False
+        self.closed = False
+        self._lock = threading.Lock()
+
+    def begin(self) -> bool:
+        with self._lock:
+            if self.closed:
+                return False
+            self.started = True
+            return True
+
+    def close_unstarted(self) -> bool:
+        with self._lock:
+            if self.started:
+                return False
+            self.closed = True
+            return True
+
+
+def _started_keys(state: dict[str, Any]) -> set[str]:
+    """Step keys journaled as started: a node that paused on request_approval or
+    interrupt() ran before it asked, whatever its later re-runs do (R6-1)."""
+    return set(state.get("started_steps") or ()) | set(state.get("node_requests") or ())
 
 
 class WorkflowJournal:
@@ -94,6 +124,13 @@ class WorkflowJournal:
         #: Step keys this instance dispatched (an in-process node retry re-runs them; an
         #: open intent not in here was left by a process that stopped).
         self.local: set[str] = set()
+        self.invocations: dict[str, Invocation] = {}
+        #: Effects confirmed in the terminal commit itself (a rejected node request whose
+        #: node reported its outcome): step key -> result.
+        self.finish_confirm: dict[str, Any] = {}
+        #: How a terminal exit deferred by this call ends once settled ("rejected" for a
+        #: rejected node request; otherwise "failed").
+        self.deferred_status: str | None = None
         self._heartbeat: asyncio.Task[None] | None = None
         self._closed = False
         # Parallel branches and mapped items commit concurrently; one commit at a time.
@@ -133,6 +170,13 @@ class WorkflowJournal:
         self.state = dict(snapshot.run.state)
         self.steps = dict(snapshot.steps)
         self.effects = {str(e.intent.step_key): e for e in snapshot.effects.values()}
+
+    async def refresh(self) -> None:
+        """Reload facts after sibling cancellation, including a just-completed SQL commit."""
+        async with self._lock:
+            snapshot = await self.snapshot()
+            if snapshot is not None:
+                self._load(snapshot)
 
     @staticmethod
     def _initial_state() -> dict[str, Any]:
@@ -390,6 +434,10 @@ class WorkflowJournal:
         self.local.add(str(intent.step_key))
         step = self.steps.get(str(intent.step_key))
         if step is not None and step.intent is not None:
+            known = dict(self.state.get("reconciled_not_applied") or {})
+            if str(intent.step_key) in known:
+                del known[str(intent.step_key)]
+                self.state["reconciled_not_applied"] = known
             # A re-run of the same attempt keeps its intent and key; a fresh approval for
             # it (reconcile said NotApplied) is still recorded as consumed.
             if intent.approval_id is not None and intent.approval_id != step.intent.approval_id:
@@ -420,6 +468,122 @@ class WorkflowJournal:
                 }
             ],
         )
+
+    async def record_not_applied(self, key: StepKey, node_id: str, approval_id: str | None) -> None:
+        """A probe proved no effect; the consumed approval cannot authorize another send."""
+        known = dict(self.state.get("reconciled_not_applied") or {})
+        known[str(key)] = approval_id
+        self.state["reconciled_not_applied"] = known
+        await self._commit(
+            cursor=node_id,
+            events=[{"type": "part_not_applied", "step_key": str(key), "approval_id": approval_id}],
+        )
+
+    def invocation(self, key: StepKey | str) -> Invocation:
+        """The start marker for dispatching ``key`` now (created before its intent).
+
+        A key whose intent is already open in the journal (an earlier call or process
+        dispatched it: a re-run after an approval or interrupt pause, a resend) or that is
+        journaled as started counts as started from the outset, so a refusal of this
+        re-run can never settle it ``not_applied`` (R6-1).
+        """
+        call = self.invocations.get(str(key))
+        if call is None:
+            call = Invocation()
+            step = self.steps.get(str(key))
+            if (step is not None and step.intent is not None and step.outcome is None) or str(
+                key
+            ) in _started_keys(self.state):
+                call.begin()
+            self.invocations[str(key)] = call
+        return call
+
+    def mark_started(self, key: StepKey | str) -> None:
+        """Journal that ``key`` started (saved with the next commit, e.g. its pause)."""
+        started = list(self.state.get("started_steps") or [])
+        if str(key) not in started:
+            started.append(str(key))
+        self.state["started_steps"] = started
+
+    async def record_not_dispatched(
+        self, keys: Sequence[str], node_id: str, reason: str, *, terminal: bool = True
+    ) -> None:
+        """Persist proof of refusal, then settle through the normal resolution API.
+
+        Proof and the indeterminate transition commit together. A takeover can complete
+        the known not-applied decision if this process stops before its resolution write.
+        A key journaled as started is never settled here.
+        """
+        started = _started_keys(self.state)
+        open_keys = [
+            key
+            for key in keys
+            if key in self.effects
+            and key not in started
+            and self.effects[key].status in (EffectStatus.PENDING, EffectStatus.INDETERMINATE)
+        ]
+        if not open_keys:
+            return
+        facts = dict(self.state.get("not_dispatched") or {})
+        for key in open_keys:
+            facts[key] = {"reason": reason, "terminal": terminal}
+        self.state["not_dispatched"] = facts
+        await self._commit(
+            cursor=node_id,
+            effects=self._indeterminate(open_keys),
+            events=[
+                {"type": "node_not_dispatched", "step_key": key, "reason": reason}
+                for key in open_keys
+            ],
+        )
+        await self.settle_not_dispatched()
+
+    async def record_refused_output(
+        self, key: StepKey | str, update: dict[str, Any], node_id: str, error: str
+    ) -> None:
+        """A call that returned but whose output a guardrail policy refused (P39 G6).
+
+        The outcome is known (the call ran and answered), so its effect is confirmed with the
+        withheld update; the refusal is saved as the run's terminal failure in the same
+        commit, so a recovery fails the run instead of continuing or dispatching again.
+        """
+        steps: list[StepIntent | StepOutcome] = []
+        effects: list[EffectRecord] = []
+        step = self.steps.get(str(key))
+        if step is not None and step.intent is not None and step.outcome is None:
+            steps.append(
+                StepOutcome(step.intent.step_key, "completed", {"update": update, "refused": error})
+            )
+        effect = self.effects.get(str(key))
+        if effect is not None and effect.status == EffectStatus.PENDING:
+            effects.append(
+                dataclasses.replace(effect, status=EffectStatus.CONFIRMED, result=update)
+            )
+        self.state["terminal_failure"] = error
+        await self._commit(
+            cursor=node_id,
+            steps=steps,
+            effects=effects,
+            events=[{"type": "output_refused", "step_key": str(key), "reason": error}],
+        )
+
+    async def settle_not_dispatched(self) -> None:
+        """Complete system decisions whose positive proof survived a crash/lost response."""
+        started = _started_keys(self.state)
+        for key, fact in (self.state.get("not_dispatched") or {}).items():
+            effect = self.effects.get(key)
+            if (
+                effect is not None
+                and key not in started
+                and effect.status == EffectStatus.INDETERMINATE
+            ):
+                await self.resolve(
+                    effect.effect_id,
+                    EffectResolution.NOT_APPLIED,
+                    actor="workflow:pre_dispatch",
+                    result=None,
+                    reason=fact["reason"],
+                )
 
     async def record_outcome(
         self,
@@ -489,6 +653,7 @@ class WorkflowJournal:
         keys: Sequence[StepKey | str] = (),
         *,
         effect_id: str | None = None,
+        reason: str | None = None,
     ) -> None:
         """``paused`` with ``pause_reason``; in-doubt effects become indeterminate.
 
@@ -504,15 +669,32 @@ class WorkflowJournal:
             status="paused",
             cursor=cursor,
             effects=effects,
-            events=[{"type": "run_paused", "pause_reason": pause_reason}],
+            events=[
+                {
+                    "type": "run_paused",
+                    "pause_reason": pause_reason,
+                    **({"reason": reason} if reason is not None else {}),
+                }
+            ],
         )
 
     async def finish(self, status: str, cursor: str | None, reason: str | None = None) -> None:
         """Terminal status; a failed run's dispatched-but-unfinished effects are indeterminate."""
         effects: list[EffectRecord] = []
+        confirm, self.finish_confirm = self.finish_confirm, {}
+        for key, result in confirm.items():
+            effect = self.effects.get(key)
+            if effect is not None and effect.status == EffectStatus.PENDING:
+                effects.append(
+                    dataclasses.replace(effect, status=EffectStatus.CONFIRMED, result=result)
+                )
         if status == "failed":
-            open_keys = [k for k, s in self.steps.items() if s.intent and s.outcome is None]
-            effects = self._indeterminate(open_keys)
+            open_keys = [
+                k
+                for k, s in self.steps.items()
+                if s.intent and s.outcome is None and k not in confirm
+            ]
+            effects.extend(self._indeterminate(open_keys))
         self.state["pause_reason"] = None
         self.state["pending_effect"] = None
         event: dict[str, Any] = {"type": f"run_{status}"}
@@ -521,7 +703,13 @@ class WorkflowJournal:
         await self._commit(status=status, cursor=cursor, effects=effects, events=[event])
 
     async def resolve(
-        self, effect_id: str, resolution: EffectResolution, *, actor: str, result: Any
+        self,
+        effect_id: str,
+        resolution: EffectResolution,
+        *,
+        actor: str,
+        result: Any,
+        reason: str | None = None,
     ) -> EffectRecord:
         """Record a person's resolution of an in-doubt effect (once)."""
         self.check()
@@ -529,7 +717,7 @@ class WorkflowJournal:
             raise LeaseLostError(f"Workflow run '{self.run_id}': no run lease is held.")
         try:
             record = await self.store.resolve_effect(
-                self.lease, effect_id, resolution, actor=actor, result=result
+                self.lease, effect_id, resolution, actor=actor, result=result, reason=reason
             )
         except LeaseLostError as exc:
             self.lost = exc

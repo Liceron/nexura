@@ -218,7 +218,8 @@ class PostgresRepository:
         return await journal_bridge(self, workspace_id, run_id, probe)
 
     async def get_run(self, workspace_id: str, run_id: str) -> RunRecord | None:
-        # DurableExecutionEngine runs live in the execution journal; this is their view.
+        # Runs of the removed DurableExecutionEngine live in the execution journal;
+        # this is their read-only view (an update of one is refused).
         journal = await self._journal(workspace_id, run_id)
         if journal is not None:
             return await journal.get_run(workspace_id, run_id)  # type: ignore[no-any-return]

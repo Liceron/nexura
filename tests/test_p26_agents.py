@@ -446,9 +446,14 @@ def test_agent_edited_while_paused_is_refused(env: dict[str, Any]) -> None:
         },
     )
     out = _decide(env, paused, "approve")
-    assert out["status"] == "failed"
-    assert "edited after this approval" in str(out["error"])
+    # S12 round 7 (R6-1): the node already ran once (its agent asked for the write), so the
+    # refused re-run cannot prove nothing happened: the run pauses effect_unknown for a
+    # person instead of failing; the agent's refusal is in the run's events.
+    assert out["status"] == "paused", out
+    assert "edited after this approval" in json.dumps(out["events"])  # the module's refusal
     assert env["ticket"].created == []
+    effects = c.get(f"{API}/runs/{paused['run_id']}/effects", headers=h).json()["effects"]
+    assert [e["status"] for e in effects] == ["indeterminate"]
 
 
 def test_cross_workspace_agent_id_refused_at_run(env: dict[str, Any]) -> None:

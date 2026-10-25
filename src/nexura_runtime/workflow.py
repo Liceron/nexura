@@ -23,13 +23,14 @@ import sqlite3
 import threading
 import time
 import uuid
-from collections.abc import AsyncGenerator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NoReturn, Protocol, runtime_checkable
 
 from nexura_agents import tracing
 from nexura_agents.contracts.canonical import canonical_digest, canonical_json
+from nexura_agents.contracts.events import ModuleEvent, ModuleEventType
 from nexura_agents.contracts.execution import (
     Applied,
     EffectClass,
@@ -106,6 +107,9 @@ class _InterruptState:
     index: int = 0
     # Set where a pause cannot be resumed (parallel branches, mapped sub-workflows).
     blocked: str | None = None
+    # Internal (saved-agent node): the tool calls its agent run reported results for
+    # before it asked for approval; the node's known outcome on a rejection.
+    tool_results: list[dict[str, Any]] | None = None
 
 
 _NO_PAUSE_IN_PARALLEL = (
@@ -165,6 +169,35 @@ class _NodeApprovalRequested(WorkflowInterrupt):  # noqa: N818 - control flow
         self.details = details
 
 
+_UNSAFE_CLASSES = (EffectClass.NON_IDEMPOTENT, EffectClass.RECONCILABLE)
+
+
+class _DispatchRefused(WorkflowValidationError):
+    """A framework precondition refused this action before dispatch."""
+
+
+class _OutputRefused(WorkflowError):
+    """A guardrail policy refused a module's output after it returned (P39 G6).
+
+    The call's outcome is known: it is committed as applied before the run fails.
+    """
+
+
+class _InvocationEvents:
+    """Observe BaseModule's invoke boundary after schema checks and event delivery."""
+
+    def __init__(self, sink: Any, begin: Callable[[], None]) -> None:
+        self.sink, self.begin, self.begun = sink, begin, False
+
+    def emit(self, event: ModuleEvent) -> None:
+        if self.sink is not None:
+            self.sink.emit(event)
+        # The node's own module starts first; nested module tools reuse this sink.
+        if event.type == ModuleEventType.INVOKE_STARTED and not self.begun:
+            self.begun = True
+            self.begin()
+
+
 # Set by ``resume`` when an approval is granted: the ``nexura.approval.decided`` event for the
 # workflow span that continues the run (opt-in tracing). Consumed once.
 _TRACE_DECISION: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
@@ -185,6 +218,74 @@ _NODE_GRANT: contextvars.ContextVar[dict[str, Any] | None] = contextvars.Context
 )
 
 
+# Internal: the start marker callback of a module node that marks its own dispatch.
+_DISPATCH_MARK: contextvars.ContextVar[Callable[[], None] | None] = contextvars.ContextVar(
+    "nexura_workflow_dispatch_mark", default=None
+)
+
+
+@functools.cache
+def _self_marking_modules() -> frozenset[type]:
+    """Internal: the runtime's own module classes (exact types, not subclasses) that call
+    :func:`_mark_dispatch_started` right before their first side effect, so a refusal they
+    return before that is provably "not dispatched". No other module can opt in: every
+    other module counts as started when its ``invoke`` begins."""
+    from nexura_runtime.runtime.agents.module import AgentCoordinatorModule
+    from nexura_runtime.runtime.agents.saved import SavedAgentModule
+
+    return frozenset({SavedAgentModule, AgentCoordinatorModule})
+
+
+def _mark_dispatch_started() -> None:
+    """Internal: a self-marking module is about to cause its first side effect.
+
+    Outside a workflow node this does nothing. It raises (``TimeoutError`` or
+    ``CancelledError``) when the step may no longer start.
+    """
+    mark = _DISPATCH_MARK.get()
+    if mark is not None:
+        mark()
+
+
+def _mark_current_started() -> None:
+    """Record that the current step's handler is running (conservative, never refuses)."""
+    journal, identity = _JOURNAL.get(), _STEP_IDENTITY.get()
+    if journal is None or identity is None:
+        return
+    call = journal.invocations.get(str(identity.step_key))
+    if call is not None:
+        call.begin()
+    journal.mark_started(identity.step_key)
+
+
+#: Saved-agent tool outcomes that are known: the call returned, or never ran.
+_KNOWN_TOOL_STATUSES = frozenset({"succeeded", "not_run", "guardrail"})
+
+
+def _merge_tool_results(
+    current: list[dict[str, Any]] | None, earlier: list[dict[str, Any]] | None
+) -> list[dict[str, Any]] | None:
+    """The node's tool outcomes: results replayed from an earlier attempt of the same key
+    take the status that attempt recorded (``no_result`` when none was recorded)."""
+    if current is None:
+        return None
+    before = {str(r.get("id")): r.get("status") for r in earlier or ()}
+    merged = []
+    for result in current:
+        entry = dict(result)
+        if entry.get("status") == "earlier":
+            entry["status"] = before.get(str(entry.get("id"))) or "no_result"
+        merged.append(entry)
+    return merged
+
+
+def _note_tool_results(results: list[dict[str, Any]]) -> None:
+    """Internal (saved-agent node): the tool calls its agent run reported results for."""
+    state = _INTERRUPT_STATE.get()
+    if state is not None:
+        state.tool_results = copy.deepcopy(results)
+
+
 def request_approval(details: dict[str, Any]) -> NoReturn:
     """Pause the running node until a human approves or rejects ``details``.
 
@@ -194,26 +295,38 @@ def request_approval(details: dict[str, Any]) -> NoReturn:
     (``engine.resume(run_id, approval_id, decision=...)``, or the service's
     ``POST /runs/{id}/decide``) with the same workspace, role and expiry rules. On approve
     the node runs again from its start and :func:`approved_request` returns the details; on
-    reject the run ends ``rejected`` and the node does not run again. Code before the call
+    reject the node does not run again and the run ends ``rejected``. Code before the call
     runs again on resume, so keep side effects after it. ``details`` must be JSON and at
     most ``MAX_NODE_APPROVAL_DETAILS_CHARS`` characters; not allowed in parallel or mapped
     steps.
+
+    The node has started when it calls this, so its step is never recorded as "not
+    dispatched". For a ``non_idempotent`` or ``reconcilable`` handler (undeclared functions
+    included) whose outcome is not known, a rejection first pauses ``effect_unknown`` until a
+    person settles what the node did, then ends ``rejected``; misuse (inside parallel or
+    mapped steps, non-JSON or oversized details) raises :class:`WorkflowError` and leaves the
+    run paused ``effect_unknown`` the same way, failing once it is settled. An approved
+    re-run that is refused before it starts (an expired deadline, for example) also pauses
+    ``effect_unknown`` rather than recording the step as not applied.
     """
     state = _INTERRUPT_STATE.get()
     if state is None:
         raise WorkflowError("request_approval() can only be called inside a running workflow node.")
+    # Only a running node can call this, so its step has started: whatever it did before
+    # the call can never be settled as "not dispatched" (S12 round 6, R5-1).
+    _mark_current_started()
     if state.blocked:
-        raise WorkflowValidationError(state.blocked)
+        raise _DispatchRefused(state.blocked)
     if not isinstance(details, dict):
-        raise WorkflowValidationError("request_approval() details must be a JSON object.")
+        raise _DispatchRefused("request_approval() details must be a JSON object.")
     try:
         size = len(json.dumps(details, ensure_ascii=False))
     except (TypeError, ValueError) as exc:
-        raise WorkflowValidationError(
+        raise _DispatchRefused(
             f"request_approval() details must be JSON-serializable: {exc}"
         ) from exc
     if size > MAX_NODE_APPROVAL_DETAILS_CHARS:
-        raise WorkflowValidationError(
+        raise _DispatchRefused(
             f"request_approval() details are {size} characters; the limit is "
             f"{MAX_NODE_APPROVAL_DETAILS_CHARS}."
         )
@@ -284,6 +397,7 @@ class _UncertainPart:
     pending: dict[str, Any]
     keys: list[str] = field(default_factory=list)
     failed: str | None = None
+    requires_approval: bool = False
 
 
 class _PartUncertain(WorkflowInterrupt):  # noqa: N818 - control flow
@@ -299,7 +413,7 @@ class _PartUncertain(WorkflowInterrupt):  # noqa: N818 - control flow
 
     @property
     def pending(self) -> dict[str, Any]:
-        return next(p.pending for p in self.parts if not p.failed)
+        return next(p.pending for p in self.parts if not p.failed and not p.requires_approval)
 
     @property
     def keys(self) -> list[str]:
@@ -312,6 +426,64 @@ def _raise_uncertain(results: list[Any]) -> list[dict[str, Any]]:
     if doubtful:
         raise _PartUncertain(doubtful)
     return results
+
+
+@dataclass
+class _ExecutionWindow:
+    started: float
+    deadline: float | None
+    resends: dict[tuple[str, str], int] = field(default_factory=dict)
+
+
+_EXECUTION_WINDOW: contextvars.ContextVar[_ExecutionWindow | None] = contextvars.ContextVar(
+    "nexura_workflow_execution_window", default=None
+)
+_MAX_RECONCILIATION_RESENDS = 3
+
+
+@contextlib.contextmanager
+def _invocation_window(timeout: float | None) -> Iterator[None]:
+    """One allowance for the caller's invocation, including recovery decisions."""
+    token = None
+    if _EXECUTION_WINDOW.get() is None:
+        started = time.monotonic()
+        token = _EXECUTION_WINDOW.set(
+            _ExecutionWindow(started, started + timeout if timeout is not None else None)
+        )
+    try:
+        yield
+    finally:
+        if token is not None:
+            _EXECUTION_WINDOW.reset(token)
+
+
+class _TerminalDeferred(BaseException):  # noqa: N818 - control flow, never a handler failure
+    """Unwind a terminal exit after saving its resolvable uncertainty instead."""
+
+    def __init__(self, result: WorkflowRunResult) -> None:
+        self.result = result
+
+
+def _remaining_time(limit: float | None = None) -> float | None:
+    window = _EXECUTION_WINDOW.get()
+    if window is None or window.deadline is None:
+        return limit
+    remaining = max(0.0, window.deadline - time.monotonic())
+    return remaining if limit is None else min(limit, remaining)
+
+
+def _permit_reconciled_resend(run_id: str, key: StepKey) -> bool:
+    window = _EXECUTION_WINDOW.get()
+    if _remaining_time() == 0:
+        return False
+    if window is None:
+        return True  # explicit recovery establishes its window when execution starts
+    identity = (run_id, str(key))
+    count = window.resends.get(identity, 0)
+    if count >= _MAX_RECONCILIATION_RESENDS:
+        return False
+    window.resends[identity] = count + 1
+    return True
 
 
 class _ChildLeaseBusy(BaseException):  # noqa: N818 - control flow
@@ -554,6 +726,22 @@ def _spec_has_gate(spec: WorkflowSpec) -> bool:
         node.requires_approval or (node.subgraph is not None and _spec_has_gate(node.subgraph))
         for node in spec.nodes.values()
     )
+
+
+def _resolve_guardrail_policy(value: Any) -> Any | None:
+    """P39 G6: ``value``, else the process default hooks when they are a guardrail policy
+    (``check_call`` and ``call_needs_approval``); any other explicit value is refused."""
+    from nexura_agents.policy import default_hooks
+
+    candidate = default_hooks() if value is None else value
+    usable = callable(getattr(candidate, "check_call", None)) and callable(
+        getattr(candidate, "call_needs_approval", None)
+    )
+    if value is not None and not usable:
+        raise WorkflowValidationError(
+            "guardrail_policy must be a nexura_guardrails.GuardrailPolicy."
+        )
+    return candidate if usable else None
 
 
 def _map_inputs(mapping: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
@@ -1313,6 +1501,8 @@ class WorkflowSpec:
                         f"Node '{node_id}' references unknown handler '{handler_name}'."
                     )
 
+                _check_handler_retry(registry, node, handler_name, node.module_id)
+
                 # If bound to a BaseModule, perform schema & mapping contract checks
                 mod_obj = None
                 if node.module_id and registry.has_module(node.module_id, node.module_version):
@@ -1327,17 +1517,6 @@ class WorkflowSpec:
 
                 if mod_obj is not None and hasattr(mod_obj, "manifest"):
                     manifest = mod_obj.manifest
-                    effect = getattr(manifest, "effect_policy", None)
-                    if (
-                        node.retry
-                        and int(node.retry.get("max_attempts", 1)) > 1
-                        and (effect == "non_idempotent_write")
-                    ):
-                        raise WorkflowValidationError(
-                            f"Node '{node_id}' retries module '{manifest.module_id}', whose "
-                            "effects are non-idempotent; a retry could repeat them. Remove "
-                            "the retry or make the module idempotent."
-                        )
                     if node.config:
                         try:
                             manifest.validate_config(node.config)
@@ -1437,10 +1616,7 @@ def _validate_composite(
                 continue
             if not registry.has_handler(name):
                 fail(f"parallel references unknown handler '{name}'.")
-            resolved = registry.get(name)
-            effect = getattr(getattr(resolved, "manifest", None), "effect_policy", None)
-            if effect == "non_idempotent_write" and retry_attempts > 1:
-                fail(f"retries would repeat '{name}', whose effects are non-idempotent.")
+            _check_handler_retry(registry, node, name, None)
     if node.map_over is not None and (not isinstance(node.map_over, str) or not node.map_over):
         fail("map_over must name a list in the workflow state.")
     if not isinstance(node.map_as, str) or not node.map_as.isidentifier():
@@ -1479,24 +1655,90 @@ def _validate_composite(
 def _non_idempotent_steps(
     spec: WorkflowSpec, registry: ModuleRegistry, prefix: str = ""
 ) -> list[str]:
-    """Paths of steps (at any depth) whose module declares a non-idempotent effect."""
+    """Paths of steps that cannot safely repeat, using the recovery class resolver."""
     found: list[str] = []
     for node_id, node in spec.nodes.items():
         path = f"{prefix}{node_id}"
-        candidates: list[Any] = []
-        if node.module_id and registry.has_module(node.module_id, node.module_version):
-            candidates.append(registry.get_module(node.module_id, node.module_version))
-        for name in node.parallel or ([node.handler] if node.handler else []):
-            if registry.has_handler(name):
-                candidates.append(registry.get(name))
-        if any(
-            getattr(getattr(c, "manifest", None), "effect_policy", None) == "non_idempotent_write"
-            for c in candidates
-        ):
-            found.append(path)
         if node.subgraph is not None:
             found.extend(_non_idempotent_steps(node.subgraph, registry, f"{path}/"))
+        elif any(
+            _effective_handler_effect(
+                registry, node, name, None if node.parallel else node.module_id
+            )[0]
+            not in (EffectClass.PURE, EffectClass.IDEMPOTENT)
+            for name in node.parallel or [node.handler]
+        ):
+            found.append(path)
     return found
+
+
+def _effective_handler_effect(
+    registry: ModuleRegistry,
+    node: WorkflowNode,
+    name: str,
+    module_id: str | None,
+    state: dict[str, Any] | None = None,
+) -> tuple[EffectClass, Callable[..., Any] | None]:
+    """One class policy for validation, live retries and crash recovery.
+
+    Registry declarations override manifests. An implicit manifest policy with write
+    operations is pure only for a known read; validation treats dynamic operations
+    conservatively. Undeclared functions are non-idempotent (founder decision 1).
+    """
+    name = name or module_id or ""
+    declared = registry.declared_effect(name)
+    if declared is not None:
+        return declared
+    obj = (
+        registry.get_module(module_id, node.module_version)
+        if module_id and registry.has_module(module_id, node.module_version)
+        else registry.get(name)
+    )
+    manifest = getattr(obj, "manifest", None)
+    if manifest is not None:
+        fields_set = getattr(manifest, "model_fields_set", None)
+        writes = bool(getattr(manifest, "write_operations", None) or manifest.always_write)
+        if fields_set is not None and "effect_policy" not in fields_set and writes:
+            if manifest.always_write:
+                return EffectClass.NON_IDEMPOTENT, None
+            operation = (state or {}).get(manifest.write_operation_key)
+            if node.input_mapping and not node.parallel:
+                mapping = {
+                    k: v for k, v in node.input_mapping.items() if k == manifest.write_operation_key
+                }
+                operation = _map_inputs(mapping, state or {}).get(manifest.write_operation_key)
+            return (
+                EffectClass.NON_IDEMPOTENT if manifest.write_gate(operation) else EffectClass.PURE
+            ), None
+        try:
+            return effect_class_from_policy(getattr(manifest, "effect_policy", None)), None
+        except ValueError:
+            return EffectClass.NON_IDEMPOTENT, None
+    attribute = getattr(obj, "effect_policy", None)
+    if isinstance(attribute, str):
+        with contextlib.suppress(WorkflowValidationError):
+            effect = _coerce_effect(attribute, name)
+            if effect is not None and effect != EffectClass.RECONCILABLE:
+                return effect, None
+    return EffectClass.NON_IDEMPOTENT, None
+
+
+def _check_handler_retry(
+    registry: ModuleRegistry,
+    node: WorkflowNode,
+    name: str,
+    module_id: str | None,
+    state: dict[str, Any] | None = None,
+) -> None:
+    if NodeRetryPolicy.from_dict(node.retry, node.id).max_attempts <= 1:
+        return
+    effect, _ = _effective_handler_effect(registry, node, name, module_id, state)
+    if effect not in (EffectClass.PURE, EffectClass.IDEMPOTENT):
+        raise WorkflowValidationError(
+            f"Node '{node.id}' cannot retry handler '{module_id or name}': effective class "
+            f"'{effect.value}' is non-idempotent or requires reconciliation. Remove retry "
+            "or declare a pure or idempotent handler when safe."
+        )
 
 
 @runtime_checkable
@@ -2411,6 +2653,7 @@ class WorkflowEngine:
         max_map_writes_per_approval: int = 50,
         policy_version: str = "1.0.0",
         lease_ttl: float = 30.0,
+        guardrail_policy: Any | None = None,
     ) -> None:
         self.approval_required_handlers = (
             frozenset(approval_required_handlers)
@@ -2446,6 +2689,9 @@ class WorkflowEngine:
         self.policy_version = policy_version
         # Run lease of a journaled run, renewed every lease_ttl / 3 (Execution Contract v1).
         self.lease_ttl = float(lease_ttl)
+        # P39 G6: tool_input / tool_output / require_approval rules for module nodes; None
+        # uses the process default when it is a guardrail policy (service engines included).
+        self.guardrail_policy: Any = _resolve_guardrail_policy(guardrail_policy)
         # Journal runs on stores that offer one; a sub-workflow child keeps its own journal
         # (A6 S7) with ``parent_run_id`` set to the run that started it.
         self._journal_enabled = True
@@ -2462,6 +2708,7 @@ class WorkflowEngine:
         assert self.store is not None
         journal = self._journal_for(checkpoint.workflow_run_id)
         if checkpoint.status in ("completed", "failed", "rejected"):
+            await self._guard_terminal(checkpoint)
             # Every step is finished: end open reservations before the terminal commit, so
             # a crash between the two cannot leak them (A6 S11 review m1).
             await self._settle_reservations(checkpoint.workflow_run_id, journal, "terminal")
@@ -2470,7 +2717,7 @@ class WorkflowEngine:
             return
         # The journal moves first (fenced by the lease token), then the checkpoint (fenced
         # by its revision): a stale owner is refused before it can write either.
-        await self._journal_sync(journal, checkpoint)
+        await self._journal_sync(journal, checkpoint, terminal_checked=True)
         await self._settle_deferred(checkpoint.workflow_run_id, journal)
         checkpoint.revision = journal.cp_revision
         await self.store.save(checkpoint)
@@ -2495,10 +2742,18 @@ class WorkflowEngine:
             self._parent_run_id,
         )
 
-    async def _journal_sync(self, journal: WorkflowJournal, checkpoint: WorkflowCheckpoint) -> None:
+    async def _journal_sync(
+        self,
+        journal: WorkflowJournal,
+        checkpoint: WorkflowCheckpoint,
+        *,
+        terminal_checked: bool = False,
+    ) -> None:
         """Mirror a paused or finished checkpoint's status into the journal first."""
         if journal.status in _JOURNAL_TERMINAL:
             return
+        if checkpoint.status in ("completed", "failed", "rejected") and not terminal_checked:
+            await self._guard_terminal(checkpoint)
         cursor = checkpoint.current_node_id
         if checkpoint.status == "paused":
             if journal.status != "paused":
@@ -2545,7 +2800,12 @@ class WorkflowEngine:
                 self._restore_budget(journal)
                 await self._settle_reservations(journal.run_id, journal, "takeover")
             try:
-                result = await run()
+                try:
+                    result = await run()
+                except _TerminalDeferred as deferred:
+                    result = deferred.result
+                except _ChildLeaseBusy as busy:
+                    raise _LeaseBusyError(busy.message) from None
                 result.workflow_version = self.spec.version
                 result.definition_digest = self.spec.canonical_hash()
                 return result
@@ -2877,33 +3137,21 @@ class WorkflowEngine:
     def _handler_effect(
         self, node: WorkflowNode, name: str, module_id: str | None, state: dict[str, Any]
     ) -> tuple[EffectClass, Callable[..., Any] | None]:
-        declared = self.registry.declared_effect(name)
-        if declared is not None:
-            return declared
-        try:
-            obj = self._resolve_handler(name, module_id, node.module_version)
-        except Exception:
-            return EffectClass.NON_IDEMPOTENT, None
-        manifest = getattr(obj, "manifest", None)
-        if manifest is not None:
-            fields_set = getattr(manifest, "model_fields_set", None)
-            writes = bool(
-                getattr(manifest, "write_operations", None) or getattr(manifest, "always_write", 0)
-            )
-            if fields_set is not None and "effect_policy" not in fields_set and writes:
-                gated = self._write_operation_gated(node, state)
-                return (EffectClass.NON_IDEMPOTENT if gated else EffectClass.PURE), None
-            try:
-                return effect_class_from_policy(getattr(manifest, "effect_policy", None)), None
-            except ValueError:
-                return EffectClass.NON_IDEMPOTENT, None
-        attribute = getattr(obj, "effect_policy", None)
-        if isinstance(attribute, str):
-            with contextlib.suppress(WorkflowValidationError):
-                effect = _coerce_effect(attribute, name)
-                if effect is not None and effect != EffectClass.RECONCILABLE:
-                    return effect, None
-        return EffectClass.NON_IDEMPOTENT, None
+        return _effective_handler_effect(self.registry, node, name, module_id, state)
+
+    def _check_node_retry(self, node: WorkflowNode, state: dict[str, Any]) -> None:
+        if node.subgraph is not None:
+            if NodeRetryPolicy.from_dict(node.retry, node.id).max_attempts > 1:
+                unsafe = _non_idempotent_steps(node.subgraph, self.registry)
+                if unsafe:
+                    raise WorkflowValidationError(
+                        f"Node '{node.id}' cannot retry non-idempotent sub-workflow steps {unsafe}."
+                    )
+        else:
+            for name in node.parallel or [node.handler]:
+                _check_handler_retry(
+                    self.registry, node, name, None if node.parallel else node.module_id, state
+                )
 
     async def _before_dispatch(
         self,
@@ -2924,6 +3172,7 @@ class WorkflowEngine:
         its own intent and outcome and decides for itself after a crash); it carries the
         approval the step runs under.
         """
+        self._check_node_retry(node, state)
         journal = self._journal_for(workflow_run_id)
         if journal is None:
             return _StepIdentity(
@@ -2946,6 +3195,8 @@ class WorkflowEngine:
                 node.id,
             )
         elif effect != EffectClass.PURE:
+            if effect in _UNSAFE_CLASSES:  # only an unsafe call can leave an unknown outcome
+                journal.invocation(key)
             await journal.record_intent(
                 StepIntent(
                     key,
@@ -3275,8 +3526,8 @@ class WorkflowEngine:
         if not await self.store.claim_approval(workflow_run_id, approval_id):
             if deadline is not None and time.time() > deadline:
                 raise ApprovalExpiredError(
-                    f"Approval request '{approval_id}' expired before it was claimed. "
-                    "Zero side effects dispatched.",
+                    f"Approval request '{approval_id}' expired before it was claimed; "
+                    "nothing it gates was dispatched under it.",
                     approval_id=approval_id,
                     expired_at=deadline,
                 )
@@ -3320,7 +3571,10 @@ class WorkflowEngine:
                 state_update = None  # it applied to the sub-workflow's state
 
             if decision == "reject":
-                # Rejection executes zero gated effects and becomes terminal
+                # A rejection dispatches nothing it gates. It ends the run, unless the node
+                # that asked already ran with an unknown outcome (then a person settles it).
+                if journal is not None:
+                    self._confirm_node_request_outcome(journal, pending, cursor, step_count)
                 checkpoint.status = "rejected"
                 checkpoint.pending_approval = None
                 checkpoint.error = f"Approval rejected for node '{cursor}'."
@@ -3331,7 +3585,9 @@ class WorkflowEngine:
                     else None
                 )
                 rejected_span = self._start_workflow_span(workflow_run_id, "resume")
-                rejected_span.skip_spec_duration()  # nothing ran: no invoke_workflow.duration
+                # Nothing ran under this decision (a node that asked ran before it asked):
+                # no invoke_workflow.duration.
+                rejected_span.skip_spec_duration()
                 tracing.approval_decided(
                     rejected_span, approval_id, kind="workflow_node", decision="reject"
                 )
@@ -4032,6 +4288,20 @@ class WorkflowEngine:
         (call ``recover`` on the top-level run, not on a child): when it pauses
         ``effect_unknown``, so does this run, with the child's effect and ``"run_id"``.
         """
+        with _invocation_window(self.timeout):
+            return await self._recover(
+                workflow_run_id,
+                on_uncertain=on_uncertain,
+                continue_on_old_definition=continue_on_old_definition,
+            )
+
+    async def _recover(
+        self,
+        workflow_run_id: str,
+        *,
+        on_uncertain: Literal["pause", "fail"],
+        continue_on_old_definition: bool,
+    ) -> WorkflowRunResult:
         if on_uncertain not in ("pause", "fail"):
             raise WorkflowValidationError("on_uncertain must be 'pause' or 'fail'.")
         selected = await self._version_engine(workflow_run_id, continue_on_old_definition)
@@ -4069,6 +4339,7 @@ class WorkflowEngine:
         actor: str,
         result: Any = None,
         effect_id: str | None = None,
+        reason: str | None = None,
     ) -> WorkflowRunResult:
         """Resolve the unknown effect a run is paused on, then continue it with :meth:`recover`.
 
@@ -4076,7 +4347,8 @@ class WorkflowEngine:
         with an optional ``"_branch"``, becomes the node's output and the node is not run
         again), ``"not_applied"`` (it did not happen: the node is dispatched again as a new
         attempt with a new idempotency key; a gated node first asks for a fresh approval) or
-        ``"failed"`` (the run fails). The decision and ``actor`` are journaled once; a
+        ``"failed"`` (the run fails). The decision, ``actor`` and optional ``reason`` are
+        journaled once; a
         second, different resolution raises ``EffectAlreadyResolvedError``.
 
         For a parallel branch or mapped item the decision applies to that part only (its
@@ -4120,7 +4392,7 @@ class WorkflowEngine:
             if record is None:
                 raise WorkflowError(f"Effect '{wanted}' is not in the run's journal.")
             if record.status != EffectStatus.RESOLVED or record.resolution != resolution:
-                await journal.resolve(wanted, resolution, actor=actor, result=result)
+                await journal.resolve(wanted, resolution, actor=actor, result=result, reason=reason)
         finally:
             await journal.close()
         return await self.recover(workflow_run_id)
@@ -4321,6 +4593,7 @@ class WorkflowEngine:
         if cp.spec_hash != self.spec.canonical_hash():
             raise WorkflowSpecMismatchError(cp.spec_hash, self.spec.canonical_hash())
         journal.cp_revision = cp.revision
+        await journal.settle_not_dispatched()
         if cp.status in ("completed", "failed", "rejected"):
             with contextlib.suppress(LeaseLostError):
                 await self._journal_sync(journal, cp)  # finished meanwhile: end the journal
@@ -4329,6 +4602,14 @@ class WorkflowEngine:
             )
         if cp.status == "paused" and cp.pending_effect is None:
             return self._result_from_checkpoint(cp)
+        if journal.state.get("terminal_failure"):
+            # Settlement may update results, but a deferred limit/error forbids dispatch.
+            # _save's guard keeps waiting while any other part or child is still unknown.
+            return await self._fail_recovered(
+                cp,
+                str(journal.state["terminal_failure"]),
+                status=str(journal.state.get("terminal_status") or "failed"),
+            )
         part = cp.pending_effect if cp.pending_effect and cp.pending_effect.get("part") else None
         if part is not None and part.get("run_id") == workflow_run_id:
             in_doubt = journal.effect_by_id(part.get("effect_id"))
@@ -4344,6 +4625,23 @@ class WorkflowEngine:
             raise WorkflowValidationError(f"Unknown node ID '{cursor}' in run '{workflow_run_id}'.")
         _, key, record = journal.latest(node.id, step + 1)
         effect = journal.effects.get(str(key)) if record is not None else None
+
+        refusal = (journal.state.get("not_dispatched") or {}).get(str(key))
+        if refusal and refusal["terminal"]:
+            return await self._fail_recovered(cp, str(refusal["reason"]))
+
+        deferred = (journal.state.get("composite_failures") or {}).get(str(key))
+        if self._is_composite(node) and deferred:
+            doubtful = await self._unfinished_parts(journal, node, cp.state, step + 1)
+            if doubtful:
+                return await self._pause_part_uncertain(
+                    workflow_run_id,
+                    node,
+                    cp.state,
+                    step,
+                    _PartUncertain([*doubtful, _UncertainPart({}, failed=str(deferred))]),
+                )
+            return await self._fail_recovered(cp, str(deferred))
 
         outcome = record.outcome if record is not None else None
         if (
@@ -4396,7 +4694,9 @@ class WorkflowEngine:
                 if isinstance(probe, Applied):
                     update, branch = _parse_handler_output(copy.deepcopy(probe.result))
                     return await self._continue_after(journal, cp, node, key, update, branch)
-                if isinstance(probe, NotApplied):
+                if isinstance(probe, NotApplied) and _permit_reconciled_resend(
+                    workflow_run_id, key
+                ):
                     # Same key; a gated node needs a fresh approval to send it again.
                     gated = self._is_gated(node, cp.state)
                     return await self._continue_from(
@@ -4438,7 +4738,100 @@ class WorkflowEngine:
             or node.handler in self.approval_required_handlers
             or (node.module_id is not None and node.module_id in self.approval_required_handlers)
             or self._write_operation_gated(node, state)
+            or self._policy_gated(node, state)
         )
+
+    # ------------------------------------------------------- guardrail policy (P39 G6)
+
+    def _node_guard(
+        self, node: WorkflowNode, state: dict[str, Any], run_id: str, *, items: bool = True
+    ) -> tuple[Any, Any, list[dict[str, Any]]] | None:
+        """(ctx, ToolInfo, the call arguments) for a module node under a policy, else None.
+
+        The arguments are what the module will receive: the node's input mapping applied to
+        the state, or, for a mapped node (``items``), to each item's own state (the item
+        under ``map_as`` and its ``<map_as>_index``), in item order (R5-2).
+
+        Module nodes are tool-like: name = handler, origin ``workflow:<module_id>``, the
+        manifest's effect class and a ``node:<id>`` tag. Plain Python handlers, parallel and
+        sub-workflow steps have no manifest to match (see :meth:`_policy_input_refusal`).
+        """
+        policy = self.guardrail_policy
+        if policy is None or node.subgraph is not None or node.parallel:
+            return None
+        try:
+            handler = self._resolve_handler(node.handler, node.module_id, node.module_version)
+        except Exception:
+            return None  # the normal path reports the missing handler
+        manifest = getattr(handler, "manifest", None)
+        if manifest is None:
+            return None
+        from nexura_agents.run_context import RunContext
+        from nexura_guardrails.runtime import node_tool_info
+
+        info = node_tool_info(
+            manifest.module_id, manifest.effect_policy, handler=node.handler, node_id=node.id
+        )
+        ctx = RunContext(
+            deps=None,
+            run_id=run_id,
+            agent_name=f"workflow:{self.spec.name}",
+            metadata={"workspace_id": self.workspace_id},
+        ).for_tool(node.id, node.handler, 0, tool=info)
+
+        def call_inputs(view: dict[str, Any]) -> dict[str, Any]:
+            if node.input_mapping:
+                return _map_inputs(node.input_mapping, view)
+            return copy.deepcopy(view)
+
+        if not items or node.map_over is None:
+            return ctx, info, [call_inputs(state)]
+        values = state.get(node.map_over)
+        if not isinstance(values, list):
+            return ctx, info, []  # the step itself refuses a non-list
+        calls = []
+        for index, value in enumerate(values):
+            view = {**state, node.map_as: value, f"{node.map_as}_index": index}
+            calls.append(call_inputs(view))
+        return ctx, info, calls
+
+    def _policy_gated(self, node: WorkflowNode, state: dict[str, Any]) -> bool:
+        guard = self._node_guard(node, state, "gate")
+        if guard is None:
+            return False
+        ctx, info, calls = guard
+        # A mapped step is approved as a whole (like its write gate): any item that a
+        # require_approval rule matches gates the step before any item's intent.
+        return any(
+            bool(self.guardrail_policy.call_needs_approval(ctx, info, inputs)) for inputs in calls
+        )
+
+    async def _policy_input_refusal(
+        self, node: WorkflowNode, state: dict[str, Any], run_id: str
+    ) -> str | None:
+        """The refusal message when the policy's tool_input rules block the node, else None.
+
+        In allowlist mode (``default_tool_action="block"``) a step the policy cannot match
+        (a plain Python handler or a parallel step) is refused rather than run unchecked;
+        a sub-workflow step is checked node by node by its own engine.
+        """
+        policy = self.guardrail_policy
+        if policy is None:
+            return None
+        guard = self._node_guard(node, state, run_id)
+        if guard is None:
+            if getattr(policy, "default_tool_action", "allow") == "block" and node.subgraph is None:
+                return "Blocked by guardrail policy rule 'default_tool_action'."
+            return None
+        ctx, info, calls = guard
+        # Each call (each mapped item) is checked on its own arguments before any intent;
+        # one refused item refuses the step, so no item is dispatched (R5-2).
+        for index, inputs in enumerate(calls):
+            outcome = await policy.check_call(ctx, "tool_input", inputs, tool=info)
+            if outcome.action in ("block", "fail"):
+                where = f" (item {index})" if node.map_over is not None else ""
+                return f"Blocked by guardrail policy rule '{outcome.rule or 'policy'}'{where}."
+        return None
 
     async def _reconcile(
         self, node: WorkflowNode, intent: StepIntent, state: dict[str, Any]
@@ -4456,10 +4849,22 @@ class WorkflowEngine:
         """Call ``reconcile(state, intent)``; an error or a wrong answer is ``Unknown``."""
         import warnings
 
+        remaining = _remaining_time()
+        if remaining == 0:
+            return Unknown()
+
+        async def call() -> Any:
+            if inspect.iscoroutinefunction(reconcile):
+                return await reconcile(copy.deepcopy(state), intent)
+            answer = await asyncio.to_thread(reconcile, copy.deepcopy(state), intent)
+            return await answer if inspect.isawaitable(answer) else answer
+
         try:
-            answer = reconcile(copy.deepcopy(state), intent)
-            if inspect.isawaitable(answer):
-                answer = await answer
+            answer = (
+                await asyncio.wait_for(call(), remaining) if remaining is not None else await call()
+            )
+        except TimeoutError:
+            return Unknown()
         except Exception as exc:
             warnings.warn(
                 f"reconcile for {what} raised {type(exc).__name__}: {exc}; "
@@ -4468,6 +4873,8 @@ class WorkflowEngine:
                 stacklevel=3,
             )
             return Unknown()
+        if _remaining_time() == 0:
+            return Unknown()  # a reconciler may return after swallowing cancellation
         if isinstance(answer, (Applied, NotApplied, Unknown)):
             return answer
         warnings.warn(
@@ -4568,6 +4975,7 @@ class WorkflowEngine:
         step = cp.step_count + 1
         terminal = self._is_finished_cursor(next_node)
         if terminal:  # end open reservations before the terminal commit (S11 review m1)
+            await self._guard_terminal(cp, completing=key)
             await self._settle_reservations(cp.workflow_run_id, journal, "terminal")
         await journal.record_outcome(
             key,
@@ -4608,7 +5016,9 @@ class WorkflowEngine:
         """Paused, ``pause_reason="effect_unknown"``: a person decides what happened."""
         pending_effect = self._pending_effect_view(effect, node.id)
         if journal.status != "paused" or effect.status == EffectStatus.PENDING:
-            await journal.pause("effect_unknown", node.id, [effect.intent.step_key])
+            await journal.pause(
+                "effect_unknown", node.id, [effect.intent.step_key], reason=cp.error
+            )
         pending_effect["effect_id"] = journal.effects[str(effect.intent.step_key)].effect_id
         if cp.status != "paused" or cp.pending_effect != pending_effect:
             cp = dataclasses.replace(
@@ -4617,7 +5027,7 @@ class WorkflowEngine:
                 pending_approval=None,
                 interrupt=None,
                 pending_effect=pending_effect,
-                error=None,
+                error=cp.error,
             )
             await self._save(cp)
         self._progress(
@@ -4629,12 +5039,325 @@ class WorkflowEngine:
         )
         return self._result_from_checkpoint(cp)
 
-    async def _fail_recovered(self, cp: WorkflowCheckpoint, error: str) -> WorkflowRunResult:
+    async def _unfinished_parts(
+        self,
+        journal: WorkflowJournal,
+        node: WorkflowNode,
+        state: dict[str, Any],
+        step: int,
+    ) -> list[_UncertainPart]:
+        """Dispatched unsafe parts survive a sibling exception and TaskGroup cancellation."""
+        _, container, _ = journal.latest(node.id, step)
+        coordinates = (
+            [(None, branch) for branch in node.parallel]
+            if node.parallel
+            else [(i, None) for i, _ in enumerate(state.get(node.map_over or "", []))]
+            if node.map_over and isinstance(state.get(node.map_over), list)
+            else []
+        )
+        parts = []
+        for item, branch in coordinates:
+            family, first = _part_family(container, item, branch)
+            _, key, record = journal.latest_of(family, first)
+            effect = journal.effects.get(str(key))
+            if (
+                record is None
+                or record.outcome is not None
+                or effect is None
+                or effect.intent.effect_class
+                not in (
+                    EffectClass.NON_IDEMPOTENT,
+                    EffectClass.RECONCILABLE,
+                )
+                or effect.status not in (EffectStatus.PENDING, EffectStatus.INDETERMINATE)
+            ):
+                continue
+            view = self._pending_effect_view(effect, node.id)
+            view.update(part="branch" if branch is not None else "item", run_id=journal.run_id)
+            view["branch" if branch is not None else "item"] = (
+                branch if branch is not None else item
+            )
+            parts.append(_UncertainPart(view, [str(key)]))
+        if node.subgraph is not None:
+            parts.extend(await self._unfinished_children(journal, node, state, step))
+        return parts
+
+    async def _unfinished_children(
+        self,
+        journal: WorkflowJournal,
+        node: WorkflowNode,
+        state: dict[str, Any],
+        step: int,
+    ) -> list[_UncertainPart]:
+        """Pause cancelled sub-workflow items without recovering or dispatching their handlers."""
+        assert node.subgraph is not None and self.store is not None
+        items = list(range(len(state.get(node.map_over, [])))) if node.map_over else [None]
+        found = []
+        for item in items:
+            for attempt in range(
+                1, NodeRetryPolicy.from_dict(node.retry, node.id).max_attempts + 1
+            ):
+                child_id = _child_run_id(journal.run_id, node.id, step, attempt, item)
+                cp = await self.store.get(child_id)
+                if cp is None or cp.status in ("completed", "failed", "rejected"):
+                    continue
+                child = self._child_engine(node.subgraph, self.timeout, journal.run_id)
+                taken = await child._take_journal(child_id)
+                assert taken is not None
+                if taken.owner is None:
+                    await taken.close()
+                    raise _ChildLeaseBusy(f"Sub-workflow '{child_id}' is held by another worker.")
+
+                token = _JOURNAL.set(taken)
+                try:
+                    cp = await self.store.get(child_id)
+                    assert cp is not None
+                    taken.cp_revision = cp.revision
+                    paused = await child._pause_unfinished_child(taken, cp)
+                finally:
+                    _JOURNAL.reset(token)
+                    await taken.close()
+                if paused is not None and paused.pending_effect is not None:
+                    view = copy.deepcopy(paused.pending_effect)
+                    view.update(
+                        part="subworkflow",
+                        run_id=view.get("run_id") or child_id,
+                        node_id=f"{node.id}/{view.get('node_id')}",
+                    )
+                    if item is not None:
+                        view["item"] = item
+                    found.append(_UncertainPart(view))
+        return found
+
+    async def _pause_unfinished_child(
+        self,
+        journal: WorkflowJournal,
+        cp: WorkflowCheckpoint,
+    ) -> WorkflowRunResult | None:
+        active = self.spec.nodes.get(cp.current_node_id or "")
+        if active is None:
+            return None
+        if self._is_composite(active):
+            pending = await self._unfinished_parts(journal, active, cp.state, cp.step_count + 1)
+            if pending:
+                return await self._pause_part_uncertain(
+                    journal.run_id, active, cp.state, cp.step_count, _PartUncertain(pending)
+                )
+        else:
+            _, key, record = journal.latest(active.id, cp.step_count + 1)
+            effect = journal.effects.get(str(key))
+            if (
+                record is not None
+                and record.outcome is None
+                and effect is not None
+                and effect.intent.effect_class
+                in (EffectClass.NON_IDEMPOTENT, EffectClass.RECONCILABLE)
+                and effect.status in (EffectStatus.PENDING, EffectStatus.INDETERMINATE)
+            ):
+                return await self._pause_effect_unknown(journal, cp, active, effect)
+        return None
+
+    async def _composite_call_failure(
+        self,
+        journal: WorkflowJournal,
+        node: WorkflowNode,
+        state: dict[str, Any],
+        step_count: int,
+        error: str,
+    ) -> WorkflowRunResult | None:
+        await journal.refresh()
+        await self._settle_unstarted(journal, node.id, error)
+        try:
+            doubtful = await self._unfinished_parts(journal, node, state, step_count)
+        except _ChildLeaseBusy:
+            # Preserve the sibling failure even if an independent child owner is still live.
+            _, key, _ = journal.latest(node.id, step_count)
+            failures = dict(journal.state.get("composite_failures") or {})
+            failures[str(key)] = error
+            journal.state["composite_failures"] = failures
+            await journal.ensure_running(node.id, {"type": "composite_failure", "error": error})
+            raise
+        if not doubtful:
+            return None
+        return await self._pause_part_uncertain(
+            journal.run_id,
+            node,
+            state,
+            step_count - 1,
+            _PartUncertain([*doubtful, _UncertainPart({}, failed=error)]),
+        )
+
+    async def _uncertain_call_failure(
+        self,
+        workflow_run_id: str,
+        node: WorkflowNode,
+        state: dict[str, Any],
+        step_count: int,
+        error: Exception,
+        *,
+        reconcile: bool = True,
+    ) -> WorkflowRunResult | None:
+        """A sent call that did not return is recoverable uncertainty, not a refusal.
+
+        Pure/idempotent calls retain their terminal failure rules. Composite parts handle
+        their own errors so an uncertainty names the actual branch, item or child.
+        """
+        journal = self._journal_for(workflow_run_id)
+        if journal is None:
+            return None
+        await journal.refresh()
+        # Only intents whose handler provably never started are settled not_applied.
+        await self._settle_unstarted(journal, node.id, str(error))
+        if self._is_composite(node):
+            if not reconcile:
+                await journal.refresh()
+                doubtful = await self._unfinished_parts(journal, node, state, step_count)
+                if not doubtful:
+                    return None
+                for part in doubtful:
+                    part.pending["error"] = str(error)
+                return await self._pause_part_uncertain(
+                    workflow_run_id, node, state, step_count - 1, _PartUncertain(doubtful)
+                )
+            return await self._composite_call_failure(
+                journal, node, state, step_count, f"{type(error).__name__}: {error}"
+            )
+        _, key, record = journal.latest(node.id, step_count)
+        effect = journal.effects.get(str(key))
+        if (
+            record is None
+            or record.intent is None
+            or effect is None
+            or effect.status not in (EffectStatus.PENDING, EffectStatus.INDETERMINATE)
+        ):
+            return None  # nothing was sent, or the outcome is already known
+        if record.intent.effect_class not in (EffectClass.NON_IDEMPOTENT, EffectClass.RECONCILABLE):
+            return None
+        if isinstance(error, _DispatchRefused):
+            # request_approval misuse inside a node that already ran: a person settles what
+            # it did, then the misuse error fails the run (saved with the pause).
+            journal.state["terminal_failure"] = f"WorkflowValidationError: {error}"
+            journal.state["terminal_status"] = "failed"
+            reconcile = False
+        cp = WorkflowCheckpoint(
+            workflow_run_id=workflow_run_id,
+            spec_version=self.spec.spec_version,
+            spec_hash=self.spec.canonical_hash(),
+            current_node_id=node.id,
+            state=copy.deepcopy(state),
+            step_count=step_count - 1,
+            status="running",
+            error=f"{type(error).__name__}: {error}",
+            budget_state=self._budget_state(),
+        )
+        if reconcile and record.intent.effect_class == EffectClass.RECONCILABLE:
+            probe = await self._reconcile(node, record.intent, state)
+            if isinstance(probe, Applied):
+                update, branch = _parse_handler_output(copy.deepcopy(probe.result))
+                return await self._continue_after(journal, cp, node, key, update, branch)
+            if isinstance(probe, NotApplied) and _permit_reconciled_resend(workflow_run_id, key):
+                return await self._continue_from(journal, cp, approved=False)
+        return await self._pause_effect_unknown(journal, cp, node, effect)
+
+    async def _fail_recovered(
+        self, cp: WorkflowCheckpoint, error: str, *, status: str = "failed"
+    ) -> WorkflowRunResult:
+        """End a recovered run: ``failed``, or ``rejected`` for a rejection that waited for
+        a person to settle what its node had already done."""
+        ended: Literal["failed", "rejected"] = "rejected" if status == "rejected" else "failed"
         cp = dataclasses.replace(
-            cp, status="failed", error=error, pending_approval=None, pending_effect=None
+            cp, status=ended, error=error, pending_approval=None, pending_effect=None
         )
         await self._save(cp)
         return self._result_from_checkpoint(cp)
+
+    async def _guard_terminal(
+        self, checkpoint: WorkflowCheckpoint, *, completing: StepKey | None = None
+    ) -> None:
+        """No terminal commit may discard a dispatched unsafe part or child.
+
+        Read the pre-terminal checkpoint and authoritative intents under the run's lease.
+        A successful leaf may settle its own intent in the upcoming outcome transaction;
+        composite completion must already have settled every part. Limits and other errors
+        are saved before unwinding, so recovery can settle effects but cannot dispatch again.
+        """
+        journal = self._journal_for(checkpoint.workflow_run_id)
+        if journal is None or journal.status in _JOURNAL_TERMINAL or _ON_UNCERTAIN.get() == "fail":
+            return
+        journal.check()
+        await journal.refresh()
+        await self._settle_unstarted(
+            journal, checkpoint.current_node_id or "", checkpoint.error or "Not invoked"
+        )
+        assert self.store is not None
+        before = await self.store.get(checkpoint.workflow_run_id)
+        assert before is not None
+        node = self.spec.nodes.get(before.current_node_id or "")
+        if node is None:
+            return  # a bare terminal cursor has no executable visit
+        step = before.step_count + 1
+        error = str(
+            journal.state.get("terminal_failure")
+            or checkpoint.error
+            or "Run completion refused while a dispatched action is unresolved."
+        )
+        try:
+            if self._is_composite(node):
+                doubtful = await self._unfinished_parts(journal, node, before.state, step)
+            else:
+                _, key, record = journal.latest(node.id, step)
+                effect = journal.effects.get(str(key))
+                doubtful = (
+                    [_UncertainPart(self._pending_effect_view(effect, node.id), [str(key)])]
+                    if key != completing
+                    and str(key) not in journal.finish_confirm
+                    and record is not None
+                    and record.outcome is None
+                    and effect is not None
+                    and effect.intent.effect_class
+                    in (EffectClass.NON_IDEMPOTENT, EffectClass.RECONCILABLE)
+                    and effect.status in (EffectStatus.PENDING, EffectStatus.INDETERMINATE)
+                    else []
+                )
+        except _ChildLeaseBusy:
+            self._defer_terminal(journal, error)
+            await journal.ensure_running(node.id, {"type": "terminal_deferred", "error": error})
+            raise  # another live child owner: refuse, without terminalizing the parent
+        if not doubtful:
+            return
+        self._defer_terminal(journal, error)
+        await journal.ensure_running(node.id, {"type": "terminal_deferred", "error": error})
+        if self._is_composite(node):
+            paused = await self._pause_part_uncertain(
+                journal.run_id,
+                node,
+                before.state,
+                before.step_count,
+                _PartUncertain([*doubtful, _UncertainPart({}, failed=error)]),
+            )
+        else:
+            effect = journal.effect_by_id(doubtful[0].pending["effect_id"])
+            assert effect is not None
+            paused = await self._pause_effect_unknown(
+                journal, dataclasses.replace(before, error=error), node, effect
+            )
+        raise _TerminalDeferred(paused)
+
+    @staticmethod
+    def _defer_terminal(journal: WorkflowJournal, error: str) -> None:
+        """Save the terminal exit that waits for every unresolved action to be settled.
+
+        It ends ``failed`` with ``error``; only a rejected node request (set by ``resume``)
+        ends ``rejected`` once the node it rejected is settled.
+        """
+        if not journal.state.get("terminal_status"):
+            journal.state["terminal_status"] = journal.deferred_status or "failed"
+        journal.state["terminal_failure"] = error
+
+    @staticmethod
+    async def _settle_unstarted(journal: WorkflowJournal, node_id: str, reason: str) -> None:
+        keys = [key for key, call in journal.invocations.items() if call.close_unstarted()]
+        await journal.record_not_dispatched(keys, node_id, reason)
 
     # ------------------------------------------------------------------ steps
 
@@ -4696,19 +5419,43 @@ class WorkflowEngine:
         checkpoint.status = "failed"
         checkpoint.error = f"Approval request '{approval_id}' has expired."
         if self._journal_for(checkpoint.workflow_run_id) is None and self._journaled_store():
-            # Refused before the run's lease was taken: end its journal too (best effort).
+            # Expiry before approval claim still needs a lease and the terminal guard.
             journal = await self._take_journal(checkpoint.workflow_run_id)
-            if journal is not None and journal.owner is not None:
-                token = _JOURNAL.set(journal)
+            assert journal is not None
+            if journal.owner is None or journal.status in _JOURNAL_TERMINAL:
+                await journal.close()
+                raise WorkflowError("Cannot expire approval while another worker owns the run.")
+            token = _JOURNAL.set(journal)
+            try:
+                assert self.store is not None
+                fresh = await self.store.get(checkpoint.workflow_run_id)
+                if (
+                    fresh is None
+                    or fresh.status != "paused"
+                    or fresh.pending_approval is None
+                    or fresh.pending_approval.approval_id != approval_id
+                ):
+                    raise ApprovalAlreadyClaimedError("Approval changed before expiry was saved.")
+                journal.cp_revision = fresh.revision
+                checkpoint = dataclasses.replace(fresh, status="failed", error=checkpoint.error)
                 try:
-                    with contextlib.suppress(LeaseLostError):
-                        await self._journal_sync(journal, checkpoint)
-                finally:
-                    _JOURNAL.reset(token)
-                    await journal.close()
-        await self._save(checkpoint)
+                    await self._save(checkpoint)
+                except _TerminalDeferred:
+                    raise ApprovalExpiredError(
+                        "Approval expired; the run remains paused on an unresolved effect.",
+                        approval_id=approval_id,
+                        expired_at=deadline,
+                    ) from None
+                except _ChildLeaseBusy as busy:
+                    raise _LeaseBusyError(busy.message) from None
+            finally:
+                _JOURNAL.reset(token)
+                await journal.close()
+        else:
+            await self._save(checkpoint)
         raise ApprovalExpiredError(
-            f"Approval request '{approval_id}' has expired. Zero side effects dispatched.",
+            f"Approval request '{approval_id}' has expired; nothing it gates was dispatched "
+            "under it.",
             approval_id=approval_id,
             expired_at=deadline,
         )
@@ -4871,6 +5618,14 @@ class WorkflowEngine:
                 continue
             if not (getattr(manifest, "write_operations", None) or manifest.always_write):
                 continue
+            if node.map_over is not None and not node.parallel and not manifest.always_write:
+                literal = node.input_mapping.get(manifest.write_operation_key)
+                if (
+                    isinstance(literal, dict)
+                    and set(literal) == {"$literal"}
+                    and not manifest.write_gate(literal["$literal"])
+                ):
+                    continue
             if node.parallel or node.map_over is not None or manifest.always_write:
                 return True
             key = manifest.write_operation_key
@@ -4939,12 +5694,22 @@ class WorkflowEngine:
         use_node_io: bool = True,
     ) -> tuple[dict[str, Any], str | None]:
         """Call one handler function or module and return (state update, branch)."""
+        remaining_node_timeout = _remaining_time(remaining_node_timeout)
+        if remaining_node_timeout == 0:
+            raise TimeoutError("Workflow deadline expired before dispatch")
         from nexura_agents.contracts.base import BaseModule
 
         if isinstance(handler_obj, BaseModule) or hasattr(handler_obj, "execute"):
             from nexura_agents.contracts.context import ExecutionContext
 
             identity = _STEP_IDENTITY.get()
+            base_pipeline = (
+                isinstance(handler_obj, BaseModule)
+                and type(handler_obj).execute is BaseModule.execute
+            )
+            # Internal runtime modules (exact types) mark their own start right before their
+            # first side effect; every other module counts as started when invoke begins.
+            self_marking = type(handler_obj) in _self_marking_modules()
 
             ctx = ExecutionContext(
                 workspace_id=self.workspace_id,
@@ -4953,7 +5718,13 @@ class WorkflowEngine:
                 attempt_id=f"att_{step_count}",
                 deadline=(time.time() + remaining_node_timeout) if remaining_node_timeout else None,
                 budget=self.budget,
-                event_sink=self.event_sink,
+                event_sink=(
+                    _InvocationEvents(
+                        self.event_sink, lambda: self._begin_invocation(workflow_run_id)
+                    )
+                    if base_pipeline and not self_marking
+                    else self.event_sink
+                ),
                 artifact_store=self.artifact_store,
                 credential_resolver=self.credential_resolver,
                 approval_granted=_NODE_APPROVED.get(),
@@ -4969,19 +5740,37 @@ class WorkflowEngine:
 
             config = copy.deepcopy(node.config or {})
 
+            async def execute() -> Any:
+                if self_marking:
+                    mark = _DISPATCH_MARK.set(lambda: self._begin_invocation(workflow_run_id))
+                    try:
+                        return await handler_obj.execute(ctx, inputs, config)
+                    finally:
+                        _DISPATCH_MARK.reset(mark)
+                if not base_pipeline:
+                    self._begin_invocation(workflow_run_id)
+                return await handler_obj.execute(ctx, inputs, config)
+
             if remaining_node_timeout is not None:
                 mod_res = await asyncio.wait_for(
-                    handler_obj.execute(ctx, inputs, config),
+                    execute(),
                     timeout=remaining_node_timeout,
                 )
             else:
-                mod_res = await handler_obj.execute(ctx, inputs, config)
+                mod_res = await execute()
 
             if mod_res.status != "success":
                 raise WorkflowExecutionError(
                     node_id=node.id,
                     message=mod_res.error_message or f"Module '{node.handler}' invocation failed.",
                 )
+            guard = (
+                self._node_guard(node, state_snapshot, workflow_run_id, items=False)
+                if use_node_io
+                else None
+            )
+            if guard is not None:
+                mod_res = await self._policy_output(node, guard, mod_res, inputs, workflow_run_id)
 
             state_update: dict[str, Any] = {}
             if node.output_mapping and use_node_io:
@@ -4997,25 +5786,79 @@ class WorkflowEngine:
             return state_update, branch
         else:
             handler_fn = handler_obj
+
+            async def call_async() -> Any:
+                self._begin_invocation(workflow_run_id)
+                return await handler_fn(state_snapshot)
+
+            def call_sync() -> Any:
+                self._begin_invocation(workflow_run_id)
+                return handler_fn(state_snapshot)
+
             if inspect.iscoroutinefunction(handler_fn):
                 if remaining_node_timeout is not None:
                     raw_output = await asyncio.wait_for(
-                        handler_fn(state_snapshot),
+                        call_async(),
                         timeout=remaining_node_timeout,
                     )
                 else:
-                    raw_output = await handler_fn(state_snapshot)
+                    raw_output = await call_async()
             else:
                 if remaining_node_timeout is not None:
                     raw_output = await asyncio.wait_for(
-                        asyncio.to_thread(handler_fn, state_snapshot),
+                        asyncio.to_thread(call_sync),
                         timeout=remaining_node_timeout,
                     )
                 else:
-                    raw_output = await asyncio.to_thread(handler_fn, state_snapshot)
+                    raw_output = await asyncio.to_thread(call_sync)
 
             state_update, branch = _parse_handler_output(raw_output)
         return state_update, branch
+
+    async def _policy_output(
+        self,
+        node: WorkflowNode,
+        guard: tuple[Any, Any, list[dict[str, Any]]],
+        mod_res: Any,
+        inputs: dict[str, Any],
+        workflow_run_id: str,
+    ) -> Any:
+        """Apply tool_output rules to a module's returned outputs (P39 G6).
+
+        The module already ran, so its outcome is known: ``block``/``scrub`` withhold the
+        outputs from the run state (structured outputs cannot be redacted in place) and the
+        step completes as applied; ``fail`` commits the call as applied with the outputs
+        withheld, then fails the run (never ``effect_unknown``).
+        """
+        from nexura_agents.contracts.result import ModuleResult
+
+        ctx, info, _ = guard
+        outcome = await self.guardrail_policy.check_call(
+            ctx, "tool_output", mod_res.outputs, tool=info, arguments=inputs
+        )
+        if outcome.action not in ("block", "scrub", "fail"):
+            return mod_res
+        rule = outcome.rule or "policy"
+        withheld = ModuleResult.success({"guardrail_withheld": rule}, branch=mod_res.branch)
+        if outcome.action != "fail":
+            return withheld
+        error = f"Output of node '{node.id}' refused by guardrail policy rule '{rule}'."
+        journal = self._journal_for(workflow_run_id)
+        identity = _STEP_IDENTITY.get()
+        if journal is not None and identity is not None:
+            await journal.record_refused_output(
+                identity.step_key, {"guardrail_withheld": rule}, node.id, error
+            )
+        raise _OutputRefused(error)
+
+    def _begin_invocation(self, run_id: str) -> None:
+        if _remaining_time() == 0:
+            raise TimeoutError("Workflow deadline expired before invocation")
+        journal, identity = self._journal_for(run_id), _STEP_IDENTITY.get()
+        if journal is not None and identity is not None:
+            call = journal.invocations.get(str(identity.step_key))
+            if call is not None and not call.begin():
+                raise asyncio.CancelledError("Dispatch was cancelled before invocation")
 
     async def _run_parallel(
         self,
@@ -5163,6 +6006,13 @@ class WorkflowEngine:
         else:
             effect, reconcile = self._handler_effect(node, node.handler, node.module_id, part_state)
             label = f"item {item} of node '{node.id}'"
+        _check_handler_retry(
+            self.registry,
+            node,
+            branch or node.handler,
+            None if branch is not None else node.module_id,
+            part_state,
+        )
         attempt, key, record = journal.latest_of(family, first)
         if record is not None:
             outcome = record.outcome
@@ -5181,6 +6031,8 @@ class WorkflowEngine:
                 if decided == "new_attempt":
                     key = family(attempt + 1)
         if effect != EffectClass.PURE:
+            if effect in _UNSAFE_CLASSES:
+                journal.invocation(key)
             try:
                 digest = canonical_digest(
                     digest_of if digest_of is not None else self._gate_binding(node, part_state)
@@ -5203,7 +6055,51 @@ class WorkflowEngine:
         _STEP_IDENTITY.set(dataclasses.replace(parent, step_key=key))
         scope = self._dispatch_scope(workflow_run_id, key)
         try:
-            update = await call()
+            try:
+                update = await call()
+            except Exception as exc:
+                if isinstance(exc, _DispatchRefused):
+                    # Raised by request_approval inside a part that already started: its
+                    # intent stays open; the step pauses it effect_unknown with this error.
+                    raise
+                invocation = journal.invocations.get(str(key))
+                if invocation is not None and invocation.close_unstarted():
+                    await journal.record_not_dispatched([str(key)], node.id, str(exc))
+                if effect not in (EffectClass.NON_IDEMPOTENT, EffectClass.RECONCILABLE):
+                    raise
+                if journal.effects[str(key)].status not in (
+                    EffectStatus.PENDING,
+                    EffectStatus.INDETERMINATE,
+                ):
+                    raise  # refused before invocation, or its outcome is known
+                intent = journal.steps[str(key)].intent
+                assert intent is not None
+                decided = await self._part_after_crash(
+                    journal,
+                    node,
+                    intent,
+                    label,
+                    reconcile,
+                    part_state,
+                    item,
+                    branch,
+                )
+                if isinstance(decided, _UncertainPart):
+                    decided.pending["error"] = f"{type(exc).__name__}: {exc}"
+                    return decided
+                if isinstance(decided, dict):
+                    update = decided
+                else:  # Reconciler says NotApplied: safe to resend under the same key.
+                    _STEP_IDENTITY.set(parent)
+                    return await self._run_part(
+                        node,
+                        workflow_run_id,
+                        part_state,
+                        call,
+                        item=item,
+                        branch=branch,
+                        digest_of=digest_of,
+                    )
         finally:
             _linkage.leave_dispatch_scope(scope)
         _validate_json_serializable(update, node.id)
@@ -5225,7 +6121,11 @@ class WorkflowEngine:
         or an ``_UncertainPart`` (also used for "a person resolved it as failed")."""
         effect = journal.effects.get(str(intent.step_key))
 
-        def doubtful(failed: str | None = None) -> _UncertainPart:
+        def doubtful(
+            failed: str | None = None,
+            *,
+            requires_approval: bool = False,
+        ) -> _UncertainPart:
             assert effect is not None
             view = self._pending_effect_view(effect, node.id)
             view["part"] = "branch" if branch is not None else "item"
@@ -5234,7 +6134,7 @@ class WorkflowEngine:
             else:
                 view["item"] = item
             view["run_id"] = journal.run_id
-            return _UncertainPart(view, [str(intent.step_key)], failed)
+            return _UncertainPart(view, [str(intent.step_key)], failed, requires_approval)
 
         if effect is None:
             return "rerun"
@@ -5250,6 +6150,13 @@ class WorkflowEngine:
             return "new_attempt"  # not_applied: a new attempt with a new key
         if effect.status == EffectStatus.INDETERMINATE:
             return doubtful()  # still waiting for a person
+        known = journal.state.get("reconciled_not_applied") or {}
+        if str(intent.step_key) in known:
+            identity = _STEP_IDENTITY.get()
+            approval = identity.approval_id if identity is not None else None
+            if approval and approval != known[str(intent.step_key)] and _NODE_APPROVED.get():
+                return "rerun"  # a fresh approval authorizes the known-not-applied part
+            return doubtful(requires_approval=True)
         if intent.effect_class in (EffectClass.PURE, EffectClass.IDEMPOTENT):
             return "rerun"
         if intent.effect_class == EffectClass.RECONCILABLE and reconcile is not None:
@@ -5258,6 +6165,13 @@ class WorkflowEngine:
                 update, _ = _parse_handler_output(copy.deepcopy(probe.result))
                 return update
             if isinstance(probe, NotApplied):
+                if not _permit_reconciled_resend(journal.run_id, intent.step_key):
+                    return doubtful()
+                if self._is_gated(node, part_state):
+                    identity = _STEP_IDENTITY.get()
+                    approval = identity.approval_id if identity is not None else intent.approval_id
+                    await journal.record_not_applied(intent.step_key, node.id, approval)
+                    return doubtful(requires_approval=True)
                 return "rerun"
         return doubtful()
 
@@ -5279,6 +6193,7 @@ class WorkflowEngine:
             approval_ttl=self.approval_ttl,
             policy_version=self.policy_version,
             max_map_writes_per_approval=self.max_map_writes_per_approval,
+            guardrail_policy=self.guardrail_policy,
         )
         # A sub-workflow inside a mapped item cannot pause either, at any depth.
         child._pause_forbidden = self._pause_forbidden
@@ -5364,6 +6279,17 @@ class WorkflowEngine:
                 raise WorkflowValidationError(_NO_PAUSE_IN_PARALLEL)
             raise _SubgraphPaused(result)
         if result.status != "completed":
+            if result.status == "failed" and existing is not None and existing.pending_effect:
+                # A person's failed resolution must end the parent just as it ends the
+                # child. Ordinary child handler failures retain their exception/retry path.
+                raise _PartUncertain(
+                    [
+                        _UncertainPart(
+                            copy.deepcopy(existing.pending_effect),
+                            failed=f"Sub-workflow run '{child_id}' failed: {result.error}",
+                        )
+                    ]
+                )
             raise WorkflowExecutionError(
                 node_id=node.id,
                 message=f"Sub-workflow run '{child_id}' ended '{result.status}': {result.error}",
@@ -5446,6 +6372,45 @@ class WorkflowEngine:
             interrupt=public,
         )
 
+    @staticmethod
+    def _confirm_node_request_outcome(
+        journal: WorkflowJournal, pending: PendingApproval, cursor: str | None, step_count: int
+    ) -> None:
+        """A rejected ``request_approval`` of a node that reported its outcome.
+
+        The node ran before it asked (R5-1): its intent is never settled ``not_applied``.
+        A saved-agent node reports the tool calls its agent run returned results for; that
+        known outcome confirms the node's effect in the same commit that ends the run. A
+        node that reported nothing stays unknown: the terminal guard pauses it
+        ``effect_unknown`` and the run ends ``rejected`` after a person settles it.
+        """
+        details = pending.details if isinstance(pending.details, dict) else {}
+        if cursor is None or details.get("node_request") is not True:
+            return
+        # If the node's outcome is unknown, the rejection waits for a person to settle it
+        # and then ends the run "rejected" (not "failed").
+        journal.deferred_status = "rejected"
+        _, key, record = journal.latest(cursor, step_count + 1)
+        fact = (journal.state.get("node_requests") or {}).get(str(key)) or {}
+        effect = journal.effects.get(str(key))
+        results = fact.get("tool_results")
+        if (
+            results is None
+            # Applied only if every dispatched call returned (L6-4); a call that raised or
+            # has no result leaves the node unknown, for a person to settle.
+            or any(r.get("status") not in _KNOWN_TOOL_STATUSES for r in results)
+            or record is None
+            or record.outcome is not None
+            or effect is None
+            or effect.status != EffectStatus.PENDING
+        ):
+            return
+        journal.finish_confirm[str(key)] = {
+            "node_request": True,
+            "rejected_approval_id": pending.approval_id,
+            "agent_tool_results": copy.deepcopy(fact["tool_results"]),
+        }
+
     async def _pause_for_node_request(
         self,
         workflow_run_id: str,
@@ -5521,13 +6486,36 @@ class WorkflowEngine:
         instead. The other parts of the step already finished and recorded their outcomes.
         """
         failure = uncertain.failed
+        journal = self._journal_for(workflow_run_id)
+        doubtful = [p for p in uncertain.parts if not p.failed and not p.requires_approval]
+        if failure is not None and journal is not None:
+            doubtful = (
+                await self._unfinished_parts(journal, node, state, step_count + 1) or doubtful
+            )
+        if not doubtful and failure is None:
+            if _remaining_time() == 0:
+                doubtful = [p for p in uncertain.parts if not p.failed]
+            else:
+                assert journal is not None
+                cp = WorkflowCheckpoint(
+                    workflow_run_id=workflow_run_id,
+                    spec_version=self.spec.spec_version,
+                    spec_hash=self.spec.canonical_hash(),
+                    current_node_id=node.id,
+                    state=copy.deepcopy(state),
+                    step_count=step_count,
+                    status="running",
+                    budget_state=self._budget_state(),
+                )
+                return await self._continue_from(journal, cp, approved=False)
         if failure is None and _ON_UNCERTAIN.get() == "fail":
             failure = (
-                f"Node '{node.id}': part '{uncertain.pending.get('step_key')}' was dispatched "
+                f"Node '{node.id}': part '{doubtful[0].pending.get('step_key')}' was dispatched "
                 "before the process stopped and its outcome is unknown (on_uncertain='fail')."
             )
+            doubtful = []  # retain the explicit caller-selected recovery policy
         budget_state = self._budget_state()
-        if failure is not None:
+        if failure is not None and not doubtful:
             self._progress(
                 RunEventType.NODE_FAILED, node_id=node.id, step=step_count + 1, error=failure
             )
@@ -5545,14 +6533,21 @@ class WorkflowEngine:
             if self.store is not None:
                 await self._save(failed)
             return self._result_from_checkpoint(failed)
-        pending = copy.deepcopy(uncertain.pending)
-        journal = self._journal_for(workflow_run_id)
+        pending = copy.deepcopy(doubtful[0].pending)
+        if failure is not None:
+            pending["deferred_error"] = failure
+            if journal is not None:
+                failures = dict(journal.state.get("composite_failures") or {})
+                _, key, _ = journal.latest(node.id, step_count + 1)
+                failures[str(key)] = failure
+                journal.state["composite_failures"] = failures
         if journal is not None:
             await journal.pause(
                 "effect_unknown",
                 node.id,
-                uncertain.keys,
+                [key for part in doubtful for key in part.keys],
                 effect_id=str(pending.get("effect_id") or "") or None,
+                reason=failure or pending.get("error"),
             )
         paused = WorkflowCheckpoint(
             workflow_run_id=workflow_run_id,
@@ -5563,6 +6558,7 @@ class WorkflowEngine:
             step_count=step_count,
             status="paused",
             pending_effect=pending,
+            error=failure or pending.get("error"),
             budget_state=budget_state,
         )
         if self.store is not None:
@@ -5643,6 +6639,30 @@ class WorkflowEngine:
         operation: str = "run",
         approval_id: str | None = None,
     ) -> WorkflowRunResult:
+        """Automatic continuations and children share one deadline and resend allowance."""
+        with _invocation_window(self.timeout):
+            return await self._execute_loop_in_window(
+                workflow_run_id,
+                cursor,
+                current_state,
+                step_count,
+                node_already_approved,
+                resume_answers,
+                operation,
+                approval_id,
+            )
+
+    async def _execute_loop_in_window(
+        self,
+        workflow_run_id: str,
+        cursor: str | None,
+        current_state: dict[str, Any],
+        step_count: int,
+        node_already_approved: bool,
+        resume_answers: list[Any] | None = None,
+        operation: str = "run",
+        approval_id: str | None = None,
+    ) -> WorkflowRunResult:
         """Run the graph inside a ``workflow`` span when tracing is on."""
         span = self._start_workflow_span(workflow_run_id, operation)
         if span is tracing.NOOP:
@@ -5676,6 +6696,9 @@ class WorkflowEngine:
                     "nexura.workflow.output", "nexura.workflow.state", _redacted(result.state)
                 )
             return result
+        except _TerminalDeferred as deferred:
+            status, steps = deferred.result.status, deferred.result.step_count
+            return deferred.result
         except asyncio.CancelledError:
             status = "cancelled"
             raise
@@ -5697,7 +6720,9 @@ class WorkflowEngine:
         resume_answers: list[Any] | None = None,
         approval_id: str | None = None,
     ) -> WorkflowRunResult:
-        start_time = time.monotonic()
+        window = _EXECUTION_WINDOW.get()
+        assert window is not None
+        start_time = window.started
         cursor_ref: list[str | None] = [cursor]
 
         while cursor_ref[0] is not None:
@@ -5720,10 +6745,25 @@ class WorkflowEngine:
                 raise max_steps_err
 
             # 2. Enforce whole-workflow timeout
-            if self.timeout is not None:
+            if window.deadline is not None:
                 elapsed = time.monotonic() - start_time
-                if elapsed >= self.timeout:
-                    timeout_err = WorkflowTimeoutError(self.timeout, elapsed)
+                if _remaining_time() == 0:
+                    timeout_err = WorkflowTimeoutError(self.timeout or 0, elapsed)
+                    pending_node = self.spec.nodes.get(active_node_id)
+                    uncertain = (
+                        await self._uncertain_call_failure(
+                            workflow_run_id,
+                            pending_node,
+                            current_state,
+                            step_count + 1,
+                            timeout_err,
+                            reconcile=False,
+                        )
+                        if pending_node is not None
+                        else None
+                    )
+                    if uncertain is not None:
+                        return uncertain
                     fail_cp = WorkflowCheckpoint(
                         workflow_run_id=workflow_run_id,
                         spec_version=self.spec.spec_version,
@@ -5748,6 +6788,9 @@ class WorkflowEngine:
                     f"Unknown node ID encountered during execution: '{active_node_id}'."
                 )
 
+            # Inputs/registry can change after validation; refuse unsafe retries before
+            # asking for approval and again immediately before recording the intent.
+            self._check_node_retry(node, current_state)
             # 3. Handle approval requirement: pauses BEFORE handler runs
             provenance = _REGATE_PROVENANCE.get()
             migrated_gate = (
@@ -5766,6 +6809,7 @@ class WorkflowEngine:
                     )
                 )
                 or self._write_operation_gated(node, current_state)
+                or self._policy_gated(node, current_state)
             )
             if is_approval_needed and not node_already_approved:
                 try:
@@ -5895,10 +6939,20 @@ class WorkflowEngine:
 
             # 4. Execute node handler
             remaining_node_timeout: float | None = None
-            if self.timeout is not None:
+            if window.deadline is not None:
                 elapsed = time.monotonic() - start_time
-                if elapsed >= self.timeout:
-                    timeout_err = WorkflowTimeoutError(self.timeout, elapsed)
+                if _remaining_time() == 0:
+                    timeout_err = WorkflowTimeoutError(self.timeout or 0, elapsed)
+                    uncertain = await self._uncertain_call_failure(
+                        workflow_run_id,
+                        node,
+                        current_state,
+                        step_count + 1,
+                        timeout_err,
+                        reconcile=False,
+                    )
+                    if uncertain is not None:
+                        return uncertain
                     fail_cp = WorkflowCheckpoint(
                         workflow_run_id=workflow_run_id,
                         spec_version=self.spec.spec_version,
@@ -5912,7 +6966,7 @@ class WorkflowEngine:
                     if self.store is not None:
                         await self._save(fail_cp)
                     raise timeout_err
-                remaining_node_timeout = self.timeout - elapsed
+                remaining_node_timeout = _remaining_time()
 
             # Resolve handler callable or BaseModule (composite steps resolve their own)
             handler_obj: Any = None
@@ -5920,6 +6974,32 @@ class WorkflowEngine:
                 handler_obj = self._resolve_handler(
                     node.handler, node.module_id, node.module_version
                 )
+
+            # P39 G6: the policy's tool_input rules run before the intent, so a blocked node
+            # dispatches nothing, leaves no intent behind and fails as a refusal.
+            policy_refusal = await self._policy_input_refusal(node, current_state, workflow_run_id)
+            if policy_refusal is not None:
+                refused = WorkflowExecutionError(node_id=node.id, message=policy_refusal)
+                self._progress(
+                    RunEventType.NODE_FAILED,
+                    node_id=node.id,
+                    step=step_count + 1,
+                    error=policy_refusal,
+                )
+                if self.store is not None:
+                    await self._save(
+                        WorkflowCheckpoint(
+                            workflow_run_id=workflow_run_id,
+                            spec_version=self.spec.spec_version,
+                            spec_hash=self.spec.canonical_hash(),
+                            current_node_id=node.id,
+                            state=copy.deepcopy(current_state),
+                            step_count=step_count,
+                            status="failed",
+                            error=str(refused),
+                        )
+                    )
+                raise refused
 
             step_count += 1
             if self.budget is not None and hasattr(self.budget, "record_turn"):
@@ -5959,14 +7039,16 @@ class WorkflowEngine:
             scope_token = self._dispatch_scope(workflow_run_id, identity.step_key)
             try:
                 while True:
+                    self._check_node_retry(node, current_state)
                     attempt += 1
                     # Every attempt replays the stored interrupt answers from the first.
                     interrupt_state.index = 0
                     handler_completed = False
                     try:
-                        if attempt > 1 and self.timeout is not None:
+                        if attempt > 1 and window.deadline is not None:
                             # Earlier attempts and backoff used part of the deadline.
-                            remaining_node_timeout = self.timeout - (time.monotonic() - start_time)
+                            remaining_node_timeout = _remaining_time()
+                            assert remaining_node_timeout is not None
                             if remaining_node_timeout <= 0:
                                 raise TimeoutError
                         state_update, branch = await self._run_step(
@@ -6001,6 +7083,11 @@ class WorkflowEngine:
                     except TimeoutError as exc:
                         elapsed = time.monotonic() - start_time
                         node_timeout_err = WorkflowTimeoutError(self.timeout or 0.0, elapsed)
+                        uncertain = await self._uncertain_call_failure(
+                            workflow_run_id, node, current_state, step_count, node_timeout_err
+                        )
+                        if uncertain is not None:
+                            return uncertain
                         node_span.fail(node_timeout_err)
                         self._progress(
                             RunEventType.NODE_FAILED,
@@ -6022,15 +7109,26 @@ class WorkflowEngine:
                             await self._save(fail_cp)
                         raise node_timeout_err from exc
                     except Exception as exc:
+                        uncertain = await self._uncertain_call_failure(
+                            workflow_run_id, node, current_state, step_count, exc
+                        )
+                        if uncertain is not None:
+                            if isinstance(exc, _DispatchRefused):
+                                # Decision 2: misuse raises; the run is paused effect_unknown
+                                # until a person settles what the node did, then fails.
+                                raise WorkflowExecutionError(
+                                    node_id=node.id, message=str(exc), original_error=exc
+                                ) from exc
+                            return uncertain
                         if (
                             not handler_completed
+                            and not isinstance(exc, (_DispatchRefused, _OutputRefused))
                             and attempt < retry_policy.max_attempts
                             and retry_policy.retries(exc)
                         ):
                             wait = retry_policy.delay(attempt)
-                            within_deadline = self.timeout is None or (
-                                time.monotonic() - start_time + wait < self.timeout
-                            )
+                            remaining = _remaining_time()
+                            within_deadline = remaining is None or wait < remaining
                             if within_deadline:
                                 node_span.event(
                                     "nexura.workflow.retry",
@@ -6100,6 +7198,20 @@ class WorkflowEngine:
                     node_approved=node_approved_now,
                 )
             except _NodeApprovalRequested as asked:
+                journal = self._journal_for(workflow_run_id)
+                if journal is not None:
+                    # The node ran before it asked: its intent stays open (never settled
+                    # not_applied). A saved-agent node reports the tool results of its run;
+                    # saved with the pause commit, they are its known outcome on rejection.
+                    journal.mark_started(identity.step_key)
+                    requests = dict(journal.state.get("node_requests") or {})
+                    requests[str(identity.step_key)] = {
+                        "tool_results": _merge_tool_results(
+                            interrupt_state.tool_results,
+                            (requests.get(str(identity.step_key)) or {}).get("tool_results"),
+                        )
+                    }
+                    journal.state["node_requests"] = requests
                 self._progress(
                     RunEventType.NODE_PAUSED,
                     node_id=node.id,
@@ -6113,6 +7225,11 @@ class WorkflowEngine:
                     workflow_run_id, node, current_state, step_count - 1, asked.details
                 )
             except WorkflowInterrupt as paused_for_input:
+                interrupted = self._journal_for(workflow_run_id)
+                if interrupted is not None:
+                    # The node ran before it asked: journaled with the pause, so a refused
+                    # re-run of this open key never settles it not_applied (R6-1).
+                    interrupted.mark_started(identity.step_key)
                 self._progress(
                     RunEventType.NODE_PAUSED,
                     node_id=node.id,
@@ -6214,6 +7331,7 @@ class WorkflowEngine:
             journal = self._journal_for(workflow_run_id)
             if journal is not None:
                 if is_terminal:  # open reservations end before the terminal commit (m1)
+                    await self._guard_terminal(checkpoint, completing=identity.step_key)
                     await self._settle_reservations(workflow_run_id, journal, "terminal")
                 # Outcome, effect confirmed and the new cursor: one fenced commit, before
                 # the checkpoint moves (recover() applies it if the save below is lost).

@@ -215,7 +215,7 @@ async def test_a_completed_run_is_never_run_again(tmp_path: Path) -> None:
 
 
 async def test_a_failed_run_fails_the_job_without_running_again(tmp_path: Path) -> None:
-    env = Env(tmp_path, Fakes())
+    env = Env(tmp_path, Fakes(pay_effect="idempotent"))
     env.fakes.fail_pay = True
     run_id = await env.dead_worker_started()
     assert (await env.run(run_id))["status"] == "failed"
@@ -292,22 +292,38 @@ async def test_an_exhausted_job_leaves_a_live_run_alone(tmp_path: Path) -> None:
     assert (await env.run(run_id))["status"] == "completed"
 
 
-async def test_new_run_mode_is_deprecated_and_starts_a_new_run(tmp_path: Path) -> None:
+async def test_new_run_mode_was_removed_and_names_the_replacement(tmp_path: Path) -> None:
+    """A6 S12: ``retry_mode="new_run"`` (a new run from the entry node, repeating effects)
+    is gone. Asking for it is refused before anything runs, with a message that names what
+    a reclaimed job does instead; the crashed run is then continued as usual."""
     env = Env(tmp_path, Fakes(pay_effect=None))
     old_run = await env.dead_worker_started(crash=True)
-    with pytest.warns(DeprecationWarning, match='retry_mode="new_run"'):
-        worker = TriggerWorker(env.state, retry_mode="new_run")
+    with pytest.raises(ValueError, match="retry_mode='new_run' was removed") as refused:
+        TriggerWorker(env.state, retry_mode="new_run")  # type: ignore[arg-type]
+    assert "WorkflowEngine.recover" in str(refused.value)
+    assert "fork" in str(refused.value)
+    assert env.fakes.calls == {"note": 1, "pay": 1}  # refusing ran nothing
 
-    outcomes = await worker.run_once()
-
-    assert [o.status for o in outcomes] == ["completed"]
-    new_run = outcomes[0].run_id
-    assert new_run and new_run != old_run
-    assert env.fakes.calls == {"note": 2, "pay": 2}  # the old behaviour: effects repeat
-    old = await env.run(old_run)
-    assert old["status"] == "interrupted"
+    outcomes = await TriggerWorker(env.state).run_once()
+    assert [o.run_id for o in outcomes] == [old_run]  # the same run, continued
+    assert env.fakes.calls == {"note": 1, "pay": 1}  # and nothing repeated
     job = env.job()
-    assert job.run_id == new_run and job.previous_run_ids == [old_run]
+    assert job.run_id == old_run and job.previous_run_ids == []
+
+
+async def test_cli_new_run_mode_is_refused_with_the_replacement(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The real worker refuses ``--retry-mode new_run``: no worker starts, exit code 1."""
+    db = str(tmp_path / "cli-refused.sqlite3")
+    args = ["worker", "--db", db, "--once", "--retry-mode", "new_run"]
+    try:
+        code = await asyncio.to_thread(cli_main, args)
+    except SystemExit as exc:  # once the CLI drops the choice, argparse refuses it
+        code = exc.code
+    assert code not in (0, None)
+    if code == 1:
+        assert "retry_mode='new_run' was removed" in capsys.readouterr().err
 
 
 def test_retry_mode_is_validated() -> None:

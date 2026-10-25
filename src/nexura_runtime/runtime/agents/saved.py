@@ -133,22 +133,36 @@ class SavedAgentModule(BaseModule):
         """Read saved agents from ``source`` (the service binds its agent runtime)."""
         self.agent_source = source
 
+    @staticmethod
+    def _refused(code: str, message: str) -> ModuleResult:
+        """A validated refusal before Runner or any pending approved tool is invoked.
+
+        Returned before ``_mark_dispatch_started``: the workflow settles the node's intent
+        ``not_applied`` only because its start marker is still unset.
+        """
+        return ModuleResult.failure(code, message)
+
     async def invoke(
         self,
         context: ExecutionContext,
         inputs: dict[str, Any],
         config: dict[str, Any] | None = None,
     ) -> ModuleResult:
-        from nexura_runtime.workflow import approved_request, request_approval
+        from nexura_runtime.workflow import (
+            _mark_dispatch_started,
+            _note_tool_results,
+            approved_request,
+            request_approval,
+        )
 
         cfg = config or {}
         agent_id = cfg.get("agent_id")
         input_key = str(cfg.get("input_key") or "input")
         output_key = str(cfg.get("output_key") or "output")
         if not isinstance(agent_id, str) or not agent_id:
-            return ModuleResult.failure("AGENT_NOT_CONFIGURED", "Node config needs an agent_id.")
+            return self._refused("AGENT_NOT_CONFIGURED", "Node config needs an agent_id.")
         if self.agent_source is None:
-            return ModuleResult.failure(
+            return self._refused(
                 "AGENT_STORE_UNAVAILABLE",
                 "This node names a saved agent but no agent store is connected.",
             )
@@ -156,7 +170,7 @@ class SavedAgentModule(BaseModule):
             built = self.agent_source.build_agent(context.workspace_id, agent_id, context)
         except (AgentStoreError, AgentSpecError) as exc:
             code = getattr(exc, "code", "AGENT_INVALID")
-            return ModuleResult.failure(str(code), str(exc))
+            return self._refused(str(code), str(exc))
 
         grant = approved_request()
         resuming = (
@@ -166,13 +180,13 @@ class SavedAgentModule(BaseModule):
             and grant.get("node_id") == context.node_id
         )
         if resuming and grant is not None and grant.get("agent_revision") != built.revision:
-            return ModuleResult.failure(
+            return self._refused(
                 "AGENT_CHANGED",
                 f"Agent '{agent_id}' was edited after this approval was requested "
                 f"(revision {grant.get('agent_revision')} -> {built.revision}); start a new run.",
             )
         if not resuming and input_key not in inputs:
-            return ModuleResult.failure(
+            return self._refused(
                 "AGENT_INPUT_MISSING", f"The workflow state has no '{input_key}' for the agent."
             )
 
@@ -184,6 +198,9 @@ class SavedAgentModule(BaseModule):
             budget=context.budget,
             approval_ttl=float(context.attributes.get("approval_ttl", 3600.0)),
         )
+        # Every refusal above ran nothing. From here the agent's tools can run, so the node
+        # counts as started (internal: the workflow marker; outside a workflow a no-op).
+        _mark_dispatch_started()
         try:
             if resuming and grant is not None:
                 interruption = RunInterruption.from_json(str(grant["resume"]))
@@ -209,6 +226,8 @@ class SavedAgentModule(BaseModule):
             return ModuleResult.failure("AGENT_RUN_FAILED", f"{type(exc).__name__}: {exc}"[:500])
 
         if result.status == "paused" and result.interruption is not None:
+            # The node's outcome so far: each call its run answered, with how it ended.
+            _note_tool_results(_tool_outcomes(result))
             return self._ask_approval(request_approval, built, context, result.interruption)
         if result.status != "completed":
             return ModuleResult.failure(
@@ -268,6 +287,53 @@ class SavedAgentModule(BaseModule):
                 f"run can ask for: {exc}",
             )
         raise AssertionError("request_approval() returned")  # pragma: no cover
+
+
+#: How a tool call of the agent run ended, from the run's events (S12 round 7, L6-4).
+_RETRY_STATUS = {
+    "tool_timeout": "no_result",  # dispatched; no result before its timeout
+    "outcome_unknown": "no_result",  # dispatched by an earlier attempt; outcome unknown
+    "model_retry": "raised",  # the tool ran and raised ModelRetry
+    "rejected": "not_run",  # a person rejected it
+    "invalid_arguments": "not_run",  # refused before it ran
+    "guardrail_rejected": "guardrail",  # refused before it ran, or its result withheld
+}
+
+
+def _tool_outcomes(result: RunResult[Any]) -> list[dict[str, Any]]:
+    """``[{id, tool, status}]`` for every tool message of the run.
+
+    ``status``: ``succeeded`` (returned a result), ``raised``, ``no_result``, ``not_run``,
+    ``guardrail`` (refused or its result withheld: known either way) or ``earlier`` (the
+    result was replayed from an earlier attempt of this node; the workflow fills in what
+    that attempt recorded).
+    """
+    from nexura_agents.events import RunEventType
+
+    reasons: dict[str, str] = {}
+    completed: set[str] = set()
+    for event in result.events:
+        call_id = (event.data or {}).get("tool_call_id")
+        if not isinstance(call_id, str):
+            continue
+        if event.type == RunEventType.RETRY:
+            reasons[call_id] = str(event.data.get("reason"))
+        elif event.type == RunEventType.TOOL_COMPLETED:
+            completed.add(call_id)
+    outcomes = []
+    for message in result.messages:
+        if message.role != "tool":
+            continue
+        call_id = str(message.tool_call_id)
+        reason = reasons.get(call_id)
+        if reason is not None:
+            status = _RETRY_STATUS.get(reason, "no_result")
+        elif call_id in completed:
+            status = "succeeded"
+        else:
+            status = "earlier"
+        outcomes.append({"id": call_id, "tool": message.name, "status": status})
+    return outcomes
 
 
 def create_saved_agent_module() -> SavedAgentModule:

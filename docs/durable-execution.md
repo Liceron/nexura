@@ -1,24 +1,12 @@
 # Durable execution contract
 
-**Contract v1 (being implemented; today's behaviour per path is in the design report)**
-
-This page describes the target shared contract for SDK agents, workflows and trigger
-jobs. S1 adds value types and documentation; S2 adds standalone memory, SQLite
-and Postgres execution stores. S3 rebuilds the deprecated `DurableExecutionEngine`
-on those stores, and S4 adds effect resolution over REST and the TypeScript client
-(see [DurableExecutionEngine on the journal](#durableexecutionengine-on-the-journal-s3)
-and [Resolving an unknown effect](#resolving-an-unknown-effect-s4)). S5 puts the SDK
-`Runner` on the journal (see [SDK agents on the journal](#sdk-agents-on-the-journal-s5)).
-S6 puts top-level `WorkflowEngine` runs on it (see
-[Workflows on the journal](#workflows-on-the-journal-s6)), and S8 adds a Postgres workflow
-store (see [Workflows on Postgres](#workflows-on-postgres-s8)). S9 puts the service on the
-journal, and S10 makes a reclaimed trigger job continue its run, with a Postgres trigger
-queue in S10b (see [Trigger jobs on the journal](#trigger-jobs-on-the-journal-s10)). The A6
-design report
-(`P35_A6_DURABLE_EXECUTION_DESIGN.md`, an internal planning record that is not part of
-the public repository) gives today's behavior per path in §1 and the implementation
-sequence in §3. Teams and
-`AgentCoordinator` are outside this contract for now.
+**Contract v1.** This is the reference for the one execution and external-effect contract
+that SDK agents (`Runner`), workflows (`WorkflowEngine`), the service and trigger jobs share.
+For a guided explanation of what happens after a crash, start with
+[How durable execution works](how-durable-execution-works.md). The sections below give the
+contract (§ identity to § approvals and budgets), the store API, and how each runtime uses it
+(the step that built it is named in each heading). Teams and `AgentCoordinator` are outside
+this contract for now.
 
 The founder approved these defaults:
 
@@ -27,13 +15,13 @@ The founder approved these defaults:
 - **Unknown outcomes pause the run:** status `paused`,
   `pause_reason="effect_unknown"`. A person resolves the outcome before it continues.
 - **A reclaimed trigger job continues the same run.** A completed run is never
-  executed again. The `retry_mode="new_run"` compatibility option (deprecated, removed
-  in 0.6) preserves the old behavior for one release.
+  executed again. (The old `retry_mode="new_run"` option was removed by S12.)
 
 ## Execution identity
 
 `ExecutionId` is the pair `(workspace_id, run_id)`. The run id is opaque. A run
-also records its kind (`agent`, `workflow` or `durable_graph`), its
+also records its kind (`agent` or `workflow`; `durable_graph` marks runs of the removed
+`DurableExecutionEngine`, which stay readable), its
 `definition_digest`, and its origin (`api`, `sdk`, or a trigger's `job_id` and
 `attempt`). Sub-workflows, map items and sub-agents record `parent_run_id`;
 existing child id formats stay supported. One trigger job owns one run throughout
@@ -104,7 +92,7 @@ and advance the cursor together. Intent granularity is one effect: one tool call
 just before invocation, rather than a whole batch, or one workflow node, branch
 or map item.
 
-The planned `nexura_exec_effects` journal uses `EffectRecord` with states
+The `nexura_exec_effects` journal uses `EffectRecord` with states
 `pending → confirmed | indeterminate → resolved`. Resolution is a separate
 machine-readable value: `confirmed`, `not_applied` or `failed`, with the resolving
 actor recorded. `(workspace_id, idempotency_key)` must be unique. S1's dataclasses
@@ -142,7 +130,8 @@ wrapped tool's own class (an undeclared `@tool` is `non_idempotent_write`), and 
 
 ## Recovery after a crash
 
-Before an intent commits, the step may run: no dispatch has been recorded. After
+For a journaled non-pure step with no intent, recovery can dispatch it. Pure steps
+deliberately omit intents and can repeat even if they already started. After
 an outcome commits, execution continues from the stored cursor. Between those
 two commits, the remote system may have received nothing, committed an effect
 whose response was lost, or returned a result that was never saved. Recovery
@@ -271,8 +260,11 @@ In serialized specs `workflow_version` carries `WorkflowSpec.version`. Legacy to
 
 ## Approvals and budgets across takeover
 
-Claiming an approval and writing the linked step intent happen in one fenced
-transaction, called "claim for dispatch".
+Claiming an approval and writing the linked dispatch intent are separate operations.
+Workflows claim the approval in the checkpoint store first; the later fenced journal
+transaction commits the intent with its consumed marker. SDK approval claims and
+approval-store consumption also precede the individual dispatch writes. There is a
+claimed-but-not-dispatched window; a claim alone is not proof of a send.
 
 - Waiting for approval holds no lease and survives a crash.
 - If an approval was claimed but no intent was written, the new owner rechecks
@@ -281,6 +273,8 @@ transaction, called "claim for dispatch".
 - Once the intent is dispatched, the class rules above apply and the approval
   is consumed. A `not_applied` resolution needs a fresh approval for a gated
   re-dispatch. A2 supplies SDK consumed records; A6 links them to intents.
+  This includes a crash after the intent committed but before the network send: an
+  intent without an outcome cannot prove whether the external system received it.
 
 Reservations carry `run_id` and `metadata.step_key`. Takeover examines active
 reservations: a dispatched intent without an outcome settles as **unknown usage
@@ -299,7 +293,7 @@ library and existing SDK error types. Postgres remains optional in
 `nexura_agents.execution_store` exports `ExecutionStore`, `MemoryExecutionStore`,
 `SQLiteExecutionStore`, lease/snapshot types and store errors.
 `nexura_postgres.PostgresExecutionStore` implements the same asynchronous protocol.
-`DurableExecutionEngine` is the first executor that uses them (S3).
+The SDK `Runner`, `WorkflowEngine`, the service and the trigger worker all run on them.
 
 Call `init_db()` before using a new SQL database and `close()` when finished.
 `create(execution_id, owner=..., definition_digest=..., state=..., ttl=...)`
@@ -375,122 +369,108 @@ async def example():
 asyncio.run(example())
 ```
 
-## DurableExecutionEngine on the journal (S3)
+## Removed legacy paths (S12)
 
-`DurableExecutionEngine` (`nexura_runtime.runtime.execution`, deprecated, removed in
-0.6) keeps its public methods and errors, but its runs now live in the execution
-journal as `kind="durable_graph"`:
+Once every runtime ran on the journal, the older paths were removed (none had a product
+caller). Importing a removed name raises `nexura_runtime._removed.RemovedAPIError`, an
+`ImportError` whose message names the replacement; these stubs stay for one release.
 
-- Pass a `StorageRepository` as before: `SQLiteRepository` uses a
-  `SQLiteExecutionStore` on the same database file and `PostgresRepository` a
-  `PostgresExecutionStore` on the same pool. You can also pass an `ExecutionStore`
-  directly. `engine.get_execution_store()` returns the store in use.
-- `repository.get_run`, `update_run` and `get_run_events` serve these runs from the
-  journal (the legacy `runs`/`run_events` rows are not written for them), so existing
-  callers keep working and a stale `update_run` is still refused.
-- Leases, fencing tokens and expiry come from the journal and the store's clock.
-  `claim_run(..., lease_duration=)` bounds each step as before: this engine does
-  **not** heartbeat, and a step that outlives its lease cannot commit
-  (`LeaseExpiredError`). A changed spec raises `DurableDefinitionMismatchError`, which is
-  both a `DurableExecutionError` and a `DefinitionMismatchError`.
-- Before a non-pure node runs, the same fenced commit that records the legacy
-  `pre_dispatch_intent` writes a `StepIntent` and a `pending` effect. A handler that
-  returns marks it `confirmed` with its output. A missing handler is detected before any
-  intent is written.
-- A non-pure handler that **raises or times out** may still have applied its effect (a
-  lost response looks like a refusal), so the run pauses (`status="paused"`,
-  `pause_reason="effect_unknown"`, effect `indeterminate`, lease released) and the
-  exception (`DeadlineExceededError` for a timeout) propagates; resolve it as below. A
-  `pure`/`read` handler that raises or times out fails the run as before.
-- Cancelling the worker task (worker shutdown) is treated as a crash: nothing is
-  committed, the dispatched intent stays, and after the lease expires the next worker
-  applies the crash rules below. `request_cancellation` while a node is in flight ends the
-  run `cancelled` and marks that node's effect `indeterminate`; the handler's late result
-  is refused.
-- Handlers that take an `ExecutionContext` get `ctx.attributes["idempotency_key"]`
-  (stable for this graph visit across takeover) and `ctx.attributes["fencing_token"]`
-  (the journal token; `DurableRunState.fencing_token` keeps the legacy numbering, one
-  lower).
-- After a crash with a dispatched intent: `pure`/`read` nodes re-run, `idempotent_write`
-  nodes re-run with the same key, and `non_idempotent_write` nodes now **pause**
-  (`status="paused"`, `pause_reason="effect_unknown"`, `pending_effect` set, effect
-  `indeterminate`) and raise `IndeterminateEffectError`, instead of failing.
-- **Behavior change:** `DurableNodeSpec.effect_policy` now defaults to
-  `"non_idempotent_write"` (it was `"pure"`), following the founder default that
-  undeclared effects are `non_idempotent`. Declare `effect_policy="pure"` or `"read"`
-  for nodes that may repeat. This also changes the spec digest, so a run started with an
-  undeclared policy must continue with the same declaration.
-- Upgrade note: runs started before 0.5 live only in the legacy `runs` table and are not
-  visible to the rebuilt engine; finish them on 0.4 first.
+- **`DurableExecutionEngine`** and its `DurableWorkflowSpec`, `DurableNodeSpec`,
+  `DurableRunState`, `NodeIntent`, `WorkerLease`, `EffectPolicy`, `DurableExecutionModule`,
+  `DurableExecutionError`, `FencingConflictError` and `LeaseExpiredError`
+  (`nexura_runtime.runtime.execution`, also re-exported from `nexura_runtime` and
+  `nexura_runtime.runtime`). Use `WorkflowEngine` with `SQLiteWorkflowStore` or
+  `nexura_postgres.PostgresWorkflowStore`: it holds a heartbeat-renewed run lease, writes an
+  intent before each non-pure step, continues a stopped run with `recover(run_id)` and
+  settles an unknown outcome with `resolve_effect(...)`. Leases and fencing tokens are
+  `nexura_agents.execution_store` (a stale owner gets `LeaseLostError`). A raised or
+  timed-out non-idempotent call after its intent pauses with `effect_unknown`; a
+  reconcilable call probes first and pauses only for `Unknown`. These effects can be
+  resolved through the engine or REST API. Pure failures remain terminal with no effects;
+  idempotent retries may fail terminally when exhausted. The per-node `fuel_cost` budget
+  is replaced by `WorkflowEngine(max_steps=...)`, which also survives a restart.
+- **`EffectReconciler`** and its `EffectRecord`, `EffectStatus`, `EffectError`,
+  `EffectIndeterminateError` and `ReconciliationError` (`nexura_runtime.runtime.effects`).
+  Effects are journal records: `ExecutionStore.commit(..., effects=...)`,
+  `ExecutionStore.resolve_effect`, `WorkflowEngine.resolve_effect` and the effects REST API
+  below. The old `effect_records` table is left as it was and no longer read.
+- **`TriggerWorker(retry_mode="new_run")`** and **`reclaim_expired_jobs(keep_run=False)`**
+  raise `ValueError` (see [Trigger jobs on the journal](#trigger-jobs-on-the-journal-s10)).
 
-`EffectReconciler` (`nexura_runtime.runtime.effects`) is now a deprecated synchronous
-wrapper (removed in 0.6) over `SQLiteExecutionStore` effects: each legacy `effect_id`
-is a journal run `legacy-effect:<effect_id>` with one effect. `reconcile_effect(...,
-actor=...)` records who resolved it; `rolled_back` is stored as `not_applied` and
-`voided` as `failed`; a second resolution raises `ReconciliationError`. Rows in the
-pre-0.5 `effect_records` table are imported when the wrapper opens the database (the old
-table is left as it was). Idempotency keys are unique per workspace, so a second effect
-with the same key is refused.
+Runs the removed engine wrote (`kind="durable_graph"`) are not lost: `SQLiteRepository` and
+`PostgresRepository` still return them from `get_run` and `get_run_events` (a read-only
+view of the journal), the effects API lists them, and their effects can still be resolved.
+`update_run` on one raises `StorageError`, since nothing can continue them.
+`ExecutionStore.create(kind="durable_graph")` and ordinary `commit` also refuse with
+`ExecutionConflictError` naming `WorkflowEngine` and the resolution APIs, before changing
+any row. The kind remains deserializable. Only the lease operations and `resolve_effect`
+remain writable so an existing indeterminate effect can be settled.
 
 ## Resolving an unknown effect (S4)
 
-A paused run waits for a person. `DurableExecutionEngine.resolve_effect(workspace_id,
-run_id, effect_id, resolution, actor=..., result=...)`, `ExecutionStore.resolve_effect`
-and the REST endpoints record the decision once:
+A paused run waits for a person. `WorkflowEngine.resolve_effect(run_id, resolution,
+actor=..., result=...)`, `ExecutionStore.resolve_effect` and the REST endpoints record the
+decision once:
 
-- `confirmed` with `result`: it happened; the node completes with `result` as its output
-  and the handler is **not** called again.
-- `not_applied`: it did not happen; the node runs again as a new attempt with a new
+- `confirmed` with `result`: it happened; the step completes with `result` as its output
+  and its handler is **not** called again.
+- `not_applied`: it did not happen; the step runs again as a new attempt with a new
   idempotency key.
 - `failed`: the run fails.
 
+`WorkflowEngine.resolve_effect(..., reason="...")`, `ExecutionStore.resolve_effect` and
+the REST resolution body's optional `reason` record the operator's explanation beside
+the authenticated actor and resolution in the `effect_resolved` audit event.
+
 The decision and actor are journaled together (an `effect_resolved` event). A second
 resolution raises `EffectAlreadyResolvedError` (REST: `409 EFFECT_ALREADY_RESOLVED`).
-Resolution runs nothing; the next `claim_run`/`run_until_idle` continues the run.
+`WorkflowEngine.resolve_effect` continues the run; resolving through the store or REST runs
+nothing, and `recover` (or `POST /runs/{id}/recover`) continues it afterwards.
 
 ```python
 import asyncio
-from nexura_agents.contracts.errors import IndeterminateEffectError
-from nexura_agents.contracts.execution import EffectResolution, ExecutionId
-from nexura_runtime.runtime.execution import (
-    DurableExecutionEngine, DurableNodeSpec, DurableWorkflowSpec, NodeIntent,
+from nexura_agents.contracts.execution import EffectStatus, ExecutionId
+from nexura_runtime.workflow import (
+    MemoryWorkflowStore, ModuleRegistry, WorkflowEngine, WorkflowNode, WorkflowSpec,
 )
-from nexura_runtime.storage import SQLiteRepository
 
-spec = DurableWorkflowSpec(
-    workflow_id="refund", entry_node="pay", terminal_nodes=["pay"],
-    nodes={"pay": DurableNodeSpec(node_id="pay", handler="pay")},  # non_idempotent
-)
+
+class Crash(BaseException):
+    """Stands in for the worker process dying mid-step."""
+
 
 async def example():
-    repository = SQLiteRepository(":memory:")
-    engine = DurableExecutionEngine(repository, {"pay": lambda state: {"paid": "local fake"}})
-    await engine.init_run("local", "run-1", spec)
-    # Simulate a worker that crashed right after recording its dispatch.
-    state = await engine.claim_run("local", "run-1", "crashed-worker")
-    state.pre_dispatch_intent = NodeIntent(
-        node_id="pay", effect_policy="non_idempotent_write", dispatched=True
-    )
-    await repository.update_run(
-        "local", "run-1", state.revision, "running", state.model_dump()
-    )
-    try:
-        await engine.execute_step("local", "run-1", "crashed-worker", spec)
-    except IndeterminateEffectError:
-        pass
-    paused = await engine.get_state("local", "run-1")
-    assert paused.status == "paused" and paused.pause_reason == "effect_unknown"
+    sent = []
 
-    store = await engine.get_execution_store()
-    snapshot = await store.get(ExecutionId("local", "run-1"))
-    (effect_id,) = snapshot.effects
-    await engine.resolve_effect(
-        "local", "run-1", effect_id, EffectResolution.CONFIRMED,
-        actor="ops@example.test", result={"paid": "confirmed on the ledger"},
+    def pay(state):  # undeclared: non_idempotent
+        sent.append("local fake payment")
+        if len(sent) == 1:
+            raise Crash
+        return {"paid": "local fake"}
+
+    registry = ModuleRegistry()
+    registry.register("pay", pay)
+    spec = WorkflowSpec(
+        name="refund", entry_node="pay", terminal_nodes=["pay"],
+        nodes={"pay": WorkflowNode(id="pay", handler="pay")},
     )
-    done = await engine.run_until_idle("local", "run-1", "worker-2", spec)
-    assert done.status == "completed" and done.state["paid"] == "confirmed on the ledger"
-    await repository.close()
+    store = MemoryWorkflowStore()
+    try:
+        await WorkflowEngine(spec, registry, store=store).run({}, workflow_run_id="run-1")
+    except Crash:
+        pass
+    engine = WorkflowEngine(spec, registry, store=store)
+    paused = await engine.recover("run-1")
+    assert paused.status == "paused" and paused.pause_reason == "effect_unknown"
+    journal = await store.open_execution_store()
+    (effect,) = (await journal.get(ExecutionId("default", "run-1"))).effects.values()
+    assert effect.status == EffectStatus.INDETERMINATE
+
+    done = await engine.resolve_effect(
+        "run-1", "confirmed", actor="ops@example.test", result={"paid": "on the ledger"}
+    )
+    assert done.status == "completed" and done.state["paid"] == "on the ledger"
+    assert sent == ["local fake payment"]  # sent once, never repeated
 
 asyncio.run(example())
 ```
@@ -500,8 +480,8 @@ Over HTTP, `GET /api/v1/runs/{run_id}/effects` lists a run's effects and
 `{"resolution": "not_applied"}` resolves one; the authenticated caller is recorded as
 `resolved_by` and the `approve` permission is required. The service reads the journal
 in its own database (`create_api_app(execution_store=...)` supplies another store, for
-example Postgres). Only `DurableExecutionEngine` writes effects there today; other runs
-list none. The TypeScript client has `client.runs.effects(runId)` and
+example Postgres). The service's workflow runs journal their effects there; a run that
+does not journal lists none. The TypeScript client has `client.runs.effects(runId)` and
 `client.runs.resolveEffect(runId, effectId, {resolution, result})`. Studio has no effects
 view yet. Endpoint details are in [Studio and service](studio-and-service.md).
 
@@ -536,9 +516,10 @@ in [Durable agent runs](durable-runs.md).
   intent first renews the lease against the store. When the result is in the checkpoint
   it commits the `StepOutcome` and marks the effect `confirmed` (a timed-out call:
   `indeterminate`); if a crash came between the two, recovery confirms it from the
-  checkpoint. Pure calls write no intent. On recovery, an unanswered call without an
-  intent never started and simply runs; a sibling in the same batch is no longer a false
-  "unknown". The class rules use the class **persisted in the intent** (or the current
+  checkpoint. On recovery, a journaled non-pure call without an intent has not dispatched
+  and can run. Pure calls deliberately write no intent even after starting and may repeat.
+  An unstarted sibling in the same batch is no longer a false "unknown". The class rules
+  use the class **persisted in the intent** (or the current
   declaration if that is stricter), so re-declaring a crashed tool cannot loosen them.
 - **Keys and tokens.** Tools get `ctx.idempotency_key` (`nx-` + 32 hex characters of the
   effect id of their step key; the same for a crash re-run, a new one for a new
@@ -642,6 +623,13 @@ graph reads; the journal records the lease and what was dispatched. User guide a
   the run fails. `WorkflowRunResult` has `pause_reason` and `pending_effect`;
   `WorkflowCheckpoint` has `pending_effect`, `revision` and a `pause_reason` property.
 
+Automatic reconciliation and continuation within one workflow invocation retain one absolute
+deadline, including sub-workflows and individual mapped/parallel sends. A probe is bounded by
+the remaining time; an expired deadline leaves the effect indeterminate and pauses for a person.
+Repeated `NotApplied` answers permit at most three automatic resends per part per invocation,
+even without a configured timeout. Explicit caller `resume`/`recover` calls keep their own
+timeout allowance. These reconciliation resends are distinct from `retry=` admission.
+
 Limits: `SQLiteWorkflowStore` is single-host (for several hosts use
 `PostgresWorkflowStore`, S8 below). Budget reservations are linked to intents (S11
 below). Trigger
@@ -652,6 +640,14 @@ reclaim continues the run (S10 below). The service side (lease-based "interrupte
 
 User guide and example:
 [Workflows: parallel, map and sub-workflow steps](workflows.md#parallel-map-and-sub-workflow-steps).
+
+A sibling error does not discard uncertain non-idempotent/reconcilable parts, including parts
+cancelled by that error. The run pauses with `effect_unknown` until those effects are settled;
+the stored sibling error then fails the run. All-pure failures stay terminal with no effects.
+A live `NotApplied` probe in a gated mapped/parallel part requires fresh approval of the
+enclosing step. Its key and finished sibling outcomes survive that approval boundary. A mapped
+module's literal read operation remains eligible for safe retries even when the module also
+declares write operations; each actual item's class is checked again before dispatch.
 
 - **Container intent.** A parallel, `map_over` or sub-workflow node with any non-pure part
   writes an intent of class `pure` for the step itself (`<node>#<step>`, carrying the
@@ -870,14 +866,15 @@ still be recovered over REST.
 
 API changes:
 
-- `TriggerWorker(retry_mode="continue")` is the default. `retry_mode="new_run"` (and
-  `nexura-runtime worker --retry-mode new_run`) keeps the old behaviour: the old run is
-  marked interrupted and a new run starts from the entry node, so effects that already
-  happened repeat. It raises a `DeprecationWarning` and is removed in 0.6.
-- `TriggerStore.reclaim_expired_jobs(..., keep_run=True)`: the reclaimed job keeps its
-  `run_id`; `keep_run=False` is the old behaviour (the id moves to `previous_run_ids`).
-  `DurableTriggerJob.previous_run_ids` is deprecated; it is only filled by the
-  deprecated mode or the no-journal fallback (`set_job_run` moves a replaced run id there).
+- A reclaimed job always continues its run. The old `retry_mode="new_run"` (a new run
+  from the entry node, repeating effects that already happened) was removed by S12:
+  `TriggerWorker(retry_mode="new_run")` raises `ValueError` naming the replacement, and so
+  does `nexura-runtime worker --retry-mode new_run` (exit code 1). To start over on purpose,
+  fork the run from a checkpoint or start a new run.
+- `TriggerStore.reclaim_expired_jobs(...)`: the reclaimed job keeps its `run_id`.
+  `keep_run=False` (the old behaviour) was removed by S12 and raises `ValueError`.
+  `DurableTriggerJob.previous_run_ids` is only filled by the no-journal fallback
+  (`set_job_run` moves a replaced run id there).
 - `TriggerWorker(clock=None)`: without an injected clock each store times leases itself,
   so `PostgresTriggerStore` uses the database clock.
 - `nexura_runtime.service.api.runs.recover_workflow_run(app_state, run_id=...,
@@ -904,7 +901,7 @@ Tests: `tests/backend/test_trigger_store_contract.py` (one contract suite over m
 SQLite and Postgres, including two-instance races), `tests/postgres/test_postgres_trigger_store.py`
 (secrets at rest, migrations, the service end to end on Postgres),
 `tests/p35/test_a6_s10_trigger_continuation.py` (in-process: crash mid-run, completed,
-failed and waiting runs, a live run lease, the deprecated mode) and the trigger rows of
+failed and waiting runs, a live run lease, the removed mode refused) and the trigger rows of
 `tests/durability` (real SIGKILL on SQLite and Postgres: a worker killed inside `pay`, or
 after its run completed but before `complete_job`; the second worker continues the same
 run and no effect repeats).
@@ -928,8 +925,7 @@ Every runtime opens a *dispatch scope* around what it dispatches:
   anything else admitted while the run executes), and inside it each model call
   (`turn:<n>/model`) and each tool call (`turn:<n>/call:<id>`); an inner scope replaces
   the run's own entry;
-- `WorkflowEngine`: each node visit (`<node>#<step>`), parallel branch and mapped item;
-- `DurableExecutionEngine`: each node visit.
+- `WorkflowEngine`: each node visit (`<node>#<step>`), parallel branch and mapped item.
 
 A reservation the ledger makes inside a scope records it in its metadata:
 - `metadata["execution"]`: the path of enclosing steps, outermost first, one entry per run
@@ -950,8 +946,7 @@ gave `create_run_budget`. The link is in `nexura_agents.usage.linkage`.
 
 Before any step runs, the new owner ends the run's `active` (or `expired`) reservations.
 This happens in `Runner.recover`, `WorkflowEngine.recover`, `resume` and
-`resume_interrupt`, `DurableExecutionEngine.claim_run` and a trigger job continuing its
-run.
+`resume_interrupt`, and a trigger job continuing its run.
 
 | The reservation's step | Action |
 |---|---|
@@ -977,9 +972,8 @@ and before the commit, the takeover finds those reservations already ended: each
 settled exactly once.
 
 The terminal sweep is fenced:
-- It first confirms the run lease with a fenced store call (`renew`). On the legacy engine
-  it also checks the revision it read and the lease owner. A stale owner, whose run was
-  taken over, stops there.
+- It first confirms the run lease with a fenced store call (`renew`). A stale owner, whose
+  run was taken over, stops there.
 - It then ends only reservations made under a lease token no newer than its own.
 - Unlinked reservations of a budget scope named after the run (the service convention)
   are ended too, if they were made before the lease was confirmed. A newer owner could
@@ -1062,18 +1056,14 @@ id) in its journal.
   budget, without the recorded policy. That covers another `RunBudget` scope, and a
   combined budget, looked through, without it. The Runner cannot swap the budget of a
   stream that has already started.
-- `DurableExecutionEngine`: `init_run` records the engine's `RunBudget` scope in the run
-  metadata (`budget_scope`), and `claim_run` refuses to take such a run without a budget.
 - Fail closed: continuing a run that was started under a budget, without any budget,
   raises before anything runs, before any approval or answer is claimed or consumed and
-  before any journal write. The SDK raises `UsageError`, workflows raise `WorkflowError`,
-  and `DurableExecutionEngine.claim_run` raises `DurableExecutionError`.
+  before any journal write. The SDK raises `UsageError` and workflows raise `WorkflowError`.
 - Fail closed means the refusal is a read-only check:
   - `Runner.resume` and `recover` check the journal state before the run lease is taken;
-  - workflows check it before the approval is claimed;
-  - the legacy engine checks it before its claim.
+  - workflows check it before the approval is claimed.
 - What is recorded: only a `RunBudget` given directly, as `Runner(budget=...)`,
-  `WorkflowEngine(budget=...)` or `DurableExecutionEngine(budget=...)`.
+  `WorkflowEngine(budget=...)`.
   - A run *started* under a combined budget, a custom budget object or the *ambient*
     budget it inherits from an enclosing run (for example `Agent.as_tool()` children or
     nested runners) records no scope. Such a run can be continued without a budget; its
@@ -1157,12 +1147,10 @@ expires. Workflows already recorded the approval with the node intent (S6).
 Tests:
 - `tests/p35/test_a6_s11_review_r*.py`: the review's repros (a rejected call after a
   crash, a concurrent second resume, workflow scope restore and resume fail closed, a
-  history-processor reservation, a refused duplicate resume, the legacy engine fail
-  closed).
+  history-processor reservation, a refused duplicate resume).
 - `tests/p35/test_a6_s11_budgets_approvals.py` (in-process): linkage, the decision
   table, a stale owner, the restored policy and fail-closed refusals, `Runner`,
-  `WorkflowEngine`, `DurableExecutionEngine` and trigger continuation, the approval
-  claim windows, edits and expiry.
+  `WorkflowEngine` and trigger continuation, the approval claim windows, edits and expiry.
 - `tests/durability` rows run with a budget on a SQLite usage ledger shared by every
   process, on SQLite and Postgres (with `NEXURA_TEST_POSTGRES_URI`). They assert that no
   reservation is `active` after a terminal status (or a takeover pause), and that the
@@ -1188,8 +1176,9 @@ Limits:
 
 ## See also
 
-- [Durable runs today](durable-runs.md)
-- [Workflows today](workflows.md)
+- [How durable execution works](how-durable-execution-works.md)
+- [Durable agent runs](durable-runs.md)
+- [Workflows](workflows.md)
 - [Human approval](approvals.md)
 - [API reference](api-reference.md)
 - [Documentation index](README.md)

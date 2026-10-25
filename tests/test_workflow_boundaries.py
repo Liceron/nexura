@@ -25,7 +25,7 @@ async def test_deadline_interrupts_a_single_terminal_handler() -> None:
         return HandlerOutput(state_update={"finished": True})
 
     registry = ModuleRegistry()
-    registry.register("slow", slow)
+    registry.register("slow", slow, effect="pure")
     spec = WorkflowSpec(
         name="single slow node", entry_node="slow", nodes={"slow": WorkflowNode("slow", "slow")}
     )

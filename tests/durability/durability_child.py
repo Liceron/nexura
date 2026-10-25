@@ -691,70 +691,6 @@ async def scenario_service(config: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-# ---------------------------------------------------- legacy DurableExecutionEngine
-
-
-def _legacy_spec() -> Any:
-    from nexura_runtime.runtime.execution import DurableNodeSpec, DurableWorkflowSpec
-
-    return DurableWorkflowSpec(
-        workflow_id="durability-legacy",
-        entry_node="transfer",
-        terminal_nodes=["transfer"],
-        nodes={
-            "transfer": DurableNodeSpec(
-                node_id="transfer", handler="transfer", effect_policy="non_idempotent_write"
-            )
-        },
-    )
-
-
-async def scenario_legacy(config: dict[str, Any]) -> dict[str, Any]:
-    from nexura_runtime.runtime.execution import DurableExecutionEngine, FencingConflictError
-
-    backend = config["backend"]
-    repository: Any
-    if backend["name"] == "sqlite":
-        from nexura_runtime.storage.repository import SQLiteRepository
-
-        repository = SQLiteRepository(config["db"])
-    else:
-        from nexura_postgres import PostgresRepository
-
-        repository = PostgresRepository(dsn=backend["dsn"])
-    engine = DurableExecutionEngine(repository)
-
-    async def transfer(state: dict[str, Any]) -> dict[str, Any]:
-        h.effect("transfer")
-        h.point("in_effect")
-        return {"done": True}
-
-    engine.register_handler("transfer", transfer)
-    run_id = config["run_id"]
-    spec = _legacy_spec()
-    try:
-        if config.get("init"):
-            if backend["name"] != "sqlite":
-                await repository.init_db()
-            await engine.init_run(WORKSPACE, run_id, spec)
-
-        async def execute() -> Any:
-            deadline = time.monotonic() + 10
-            while True:
-                try:
-                    await engine.claim_run(WORKSPACE, run_id, config["name"], lease_duration=0.5)
-                    break
-                except FencingConflictError:
-                    if time.monotonic() > deadline:
-                        raise
-                    await asyncio.sleep(0.1)
-            return await engine.execute_step(WORKSPACE, run_id, config["name"], spec)
-
-        return await outcome(execute, lambda state: {"status": state.status})
-    finally:
-        await repository.close()
-
-
 # ------------------------------------------------------------------------ self-test
 
 
@@ -871,7 +807,6 @@ SCENARIOS: dict[str, Callable[[dict[str, Any]], Coroutine[Any, Any, dict[str, An
     "workflow": scenario_workflow,
     "trigger": scenario_trigger,
     "service": scenario_service,
-    "legacy": scenario_legacy,
     "selftest": scenario_selftest,
 }
 

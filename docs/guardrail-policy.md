@@ -72,17 +72,17 @@ same process from removing it (`set_default_hooks(..., locked=True)`, see
 
 Two runtime paths call models without a `Runner`: `AgentCoordinator` (and the
 `nexura.agents.coordinator` workflow module) and `AgentDefinition` subagents. They cannot apply
-the `input`, `model_input`, `model_output` and `output` stages, so a coordinator run is
-**refused** with `SDKValidationError` when it starts whenever the hooks it would use include a
-policy with rules for any of those stages, whatever their source: `AgentCoordinator(hooks=policy)`,
-`policy.install()` with or without the lock, or an enclosing run's hooks. A policy with only tool
-rules does not refuse it: its tool calls go through the policy as in a `Runner`.
+the `input`, `model_input`, `model_output` and `output` stages, so a coordinator run, and an
+`AgentDefinition` subagent delegation, is **refused** with `SDKValidationError` when it starts
+(before any model call) whenever the hooks it would use include a policy with rules for any of
+those stages, whatever their source: `AgentCoordinator(hooks=policy)`, `policy.install()` with
+or without the lock, or an enclosing run's hooks. A policy with only tool rules does not refuse
+them: their tool calls go through the policy as in a `Runner`. As in a `Runner`, a model reply in
+which two tool calls share an id fails the coordinator or subagent run with
+`ProviderResponseError` before any gate, hook, ledger entry or dispatch.
 
-**AgentDefinition subagents: their own model calls are not checked by model_input/model_output
-rules, and their own input and output stages are not checked either, until a follow-up lands.
-The parent's stages still check what reaches the user.** (A
-subagent that calls a tool is refused at that call under such a policy.) Workflow module nodes
-other than agent nodes and `guardrails.check` are not covered yet.
+Workflow module nodes are covered by `WorkflowEngine(guardrail_policy=...)` (see
+[In a workflow](#in-a-workflow)).
 
 ## Stages and actions
 
@@ -378,8 +378,39 @@ result = asyncio.run(WorkflowEngine(spec, registry).run({"message": "mail me at 
 assert result.state["reply"] == "Handled: mail me at [REDACTED:email]"
 ```
 
-Policy rules for module nodes themselves (`WorkflowEngine(guardrail_policy=...)`) are not part of
-this release; agent nodes are covered, since their runs use the process default.
+### Policy rules for module nodes
+
+`WorkflowEngine(guardrail_policy=policy)` applies the policy's tool rules to module nodes (nodes
+whose handler is a `BaseModule`). Without the argument, the engine uses the process default when
+it is a guardrail policy (`policy.install()`), so every engine in a service process (runs API,
+trigger worker, sub-workflows) is covered; a sub-workflow inherits its parent's policy. Any other
+value is refused with `WorkflowValidationError`.
+
+A module node is matched like a tool: its name is the node's handler, its origin
+`workflow:<module_id>`, its effect class the manifest's declaration, with a `node:<id>` tag. The
+arguments are the inputs the module will receive (the node's input mapping applied to the state).
+For a mapped node (`map_over`), each item is a separate call: its arguments are the input mapping
+applied to that item's own state (the item under `map_as`, plus `<map_as>_index`), so a rule on
+`$.amount` sees each item's amount.
+
+- `require_approval` rules join the node's own approval gate: a matching node pauses before it
+  runs, with the same binding and expiry rules as `requires_approval`. A mapped node is approved
+  as a whole, like its write gate: if the rule matches any item, the step pauses before any item
+  runs, and the approval covers all of its items.
+- `tool_input` `block` or `fail` rules refuse the node before its intent is recorded: nothing is
+  dispatched, no effect is left unknown, and the run fails with `WorkflowExecutionError`. Every
+  item of a mapped node is checked on its own arguments before any item's intent; one refused
+  item refuses the step (the error names the item) and no item runs.
+- `tool_output` rules run after the module returns. The module already ran, so its outcome is
+  known and committed as applied: `block` and `scrub` withhold its outputs from the run state
+  (structured outputs cannot be redacted in place, so `scrub` withholds them too; the state gets
+  `guardrail_withheld: <rule>` instead), and `fail` fails the run without running the module
+  again and without an `effect_unknown` pause.
+- Allowlist mode (`default_tool_action: block`): a step the policy cannot match (a plain Python
+  handler, or a parallel step) is refused, not run unchecked. A sub-workflow step is checked
+  node by node by its own engine.
+
+Agent nodes are covered too, since their runs use the process default.
 
 ## In the service
 
@@ -423,10 +454,13 @@ script written by one call and run by another, a different tool) are not single 
 - `require_approval` matches tool facts and arguments only (no checks), and needs a run that can
   pause (a `Runner`; refused over MCP, as other approval gates).
 - One policy per process for the service. Per-workspace policies are not supported yet.
-- `AgentCoordinator` runs are refused (not covered) under a policy with input, model or output
-  rules. AgentDefinition subagents: their own model calls are not checked by
-  model_input/model_output rules, and their own input and output stages are not checked either,
-  until a follow-up lands; the parent's stages still check what reaches the user. Workflow module nodes are not covered yet.
+- `AgentCoordinator` runs and `AgentDefinition` subagent delegations are refused (not covered)
+  under a policy with input, model or output rules.
+- Module-node `tool_input` and `tool_output` model checks are not journaled: a recovered run
+  checks them again (regex checks are deterministic). The branches of a parallel step are not
+  matched (outside allowlist mode they run without the tool rules). A mapped module node's
+  items are checked one by one: each item's arguments by the `tool_input` and approval rules
+  before the step dispatches, and each item's outputs by the `tool_output` rules.
 - A `require_approval` rule is skipped when a check-less `block` or `fail` rule (or allowlist
   mode) refuses the call anyway: a person is never asked to approve a refused call. Block rules
   with checks run after approval, in `before_tool`.

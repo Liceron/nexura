@@ -46,6 +46,9 @@ asyncio.run(main())
 `Runner(checkpoint_store=...)` turns checkpointing on. It is off by default and costs
 nothing when off: the runner does not call any store.
 
+This is the agent side of one contract that workflows, the service and trigger jobs share;
+[How durable execution works](how-durable-execution-works.md) explains it across all of them.
+
 The memory, SQLite and Postgres stores also keep an **execution journal** next to the
 checkpoints (the [durable execution contract](durable-execution.md)): the run holds a
 fenced lease from its first write, and each tool call that is not `pure` records an
@@ -350,5 +353,8 @@ returns the journal, for example to list a run's effects.
 - Recovering or resuming with a changed agent definition (`Agent.definition_digest()`:
   tools, argument schemas, effect classes, instructions, handoffs, output type) emits a
   `RuntimeWarning` in this release; a later release refuses it.
-- Budget reservations and approval records are not linked to tool intents yet.
+- Budget reservations and approval records are linked to tool intents (A6 S11): on a
+  takeover a dispatched call's reservation is settled at its estimate and an undispatched
+  one released, and an approval is consumed by the intent it was sent under. See
+  [Budgets and approvals across a takeover](durable-execution.md#budgets-and-approvals-across-a-takeover-s11).
 - Each checkpoint rewrites the whole transcript; very long runs write proportionally more.

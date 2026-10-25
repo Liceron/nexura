@@ -173,13 +173,6 @@ __all__ = [
     "MetricsCollector",
     "NexuraTracer",
     "SqliteEventSink",
-    "DurableExecutionEngine",
-    "DurableExecutionModule",
-    "DurableRunState",
-    "DurableWorkflowSpec",
-    "DurableNodeSpec",
-    "FencingConflictError",
-    "LeaseExpiredError",
     "BudgetConfig",
     "BudgetStatus",
     "CostEstimate",
@@ -388,13 +381,6 @@ if TYPE_CHECKING:
     from nexura_runtime.release import ReleaseDiagnostics as ReleaseDiagnostics
     from nexura_runtime.release import WorkflowMigrator as WorkflowMigrator
     from nexura_runtime.release import get_matrix as get_matrix
-    from nexura_runtime.runtime import DurableExecutionEngine as DurableExecutionEngine
-    from nexura_runtime.runtime import DurableExecutionModule as DurableExecutionModule
-    from nexura_runtime.runtime import DurableNodeSpec as DurableNodeSpec
-    from nexura_runtime.runtime import DurableRunState as DurableRunState
-    from nexura_runtime.runtime import DurableWorkflowSpec as DurableWorkflowSpec
-    from nexura_runtime.runtime import FencingConflictError as FencingConflictError
-    from nexura_runtime.runtime import LeaseExpiredError as LeaseExpiredError
     from nexura_runtime.service.api import ExportBundle as ExportBundle
     from nexura_runtime.service.api import NexuraApiError as NexuraApiError
     from nexura_runtime.service.api import NexuraClient as NexuraClient
@@ -444,11 +430,6 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "DatasetRegistry": ("nexura_runtime.evaluation", "DatasetRegistry"),
     "DatasetValidationError": ("nexura_runtime.evaluation", "DatasetValidationError"),
     "DestinationPolicy": ("nexura_agents.network", "DestinationPolicy"),
-    "DurableExecutionEngine": ("nexura_runtime.runtime", "DurableExecutionEngine"),
-    "DurableExecutionModule": ("nexura_runtime.runtime", "DurableExecutionModule"),
-    "DurableNodeSpec": ("nexura_runtime.runtime", "DurableNodeSpec"),
-    "DurableRunState": ("nexura_runtime.runtime", "DurableRunState"),
-    "DurableWorkflowSpec": ("nexura_runtime.runtime", "DurableWorkflowSpec"),
     "EvaluationBudgetExceededError": (
         "nexura_runtime.evaluation",
         "EvaluationBudgetExceededError",
@@ -470,7 +451,6 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "ExportBundle": ("nexura_runtime.service.api", "ExportBundle"),
     "FXRate": ("nexura_agents.usage", "FXRate"),
     "FakeModel": ("nexura_agents.models", "FakeModel"),
-    "FencingConflictError": ("nexura_runtime.runtime", "FencingConflictError"),
     "Grader": ("nexura_runtime.evaluation", "Grader"),
     "GraderResult": ("nexura_runtime.evaluation", "GraderResult"),
     "HandlerOutput": ("nexura_runtime.workflow", "HandlerOutput"),
@@ -478,7 +458,6 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "IsolatedProcessWorker": ("nexura_runtime.integrations.sandbox", "IsolatedProcessWorker"),
     "JsonSchemaGrader": ("nexura_runtime.evaluation", "JsonSchemaGrader"),
     "JudgeUnauthorizedEffectError": ("nexura_runtime.evaluation", "JudgeUnauthorizedEffectError"),
-    "LeaseExpiredError": ("nexura_runtime.runtime", "LeaseExpiredError"),
     "LedgerEntry": ("nexura_agents.usage", "LedgerEntry"),
     "LocalArtifactStore": ("nexura_runtime.artifacts", "LocalArtifactStore"),
     "MaxToolCallsExceededError": ("nexura_agents.errors", "MaxToolCallsExceededError"),
@@ -596,9 +575,28 @@ _EXPORTS: dict[str, tuple[str, str]] = {
 }
 
 
+# Removed by P35 A6 S12 (the legacy DurableExecutionEngine): importing one raises an
+# ImportError that names the replacement, for one release.
+_REMOVED = frozenset(
+    {
+        "DurableExecutionEngine",
+        "DurableExecutionModule",
+        "DurableRunState",
+        "DurableWorkflowSpec",
+        "DurableNodeSpec",
+        "FencingConflictError",
+        "LeaseExpiredError",
+    }
+)
+
+
 def __getattr__(name: str) -> Any:
     target = _EXPORTS.get(name)
     if target is None:
+        if name in _REMOVED:
+            from nexura_runtime._removed import removed
+
+            removed(__name__, name, _REMOVED)
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     value = getattr(importlib.import_module(target[0]), target[1])
     globals()[name] = value

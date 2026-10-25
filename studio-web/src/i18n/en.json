@@ -968,7 +968,7 @@
     },
     "guardrailsPolicyUnnamed": "(unnamed)",
     "guardrailsPolicyRules": "{rules} rules.",
-    "guardrailsPolicyExceptions": "Not covered yet: workflow module nodes (other than agent and guardrail-check nodes). Coordinator agents are refused while the policy checks model input or output.",
+    "guardrailsPolicyExceptions": "Coordinator agents are refused while the policy checks model input or output.",
     "guardrailsStreamChecked": "Show at once is not available: this agent's answers are checked before they are shown."
   },
   "ui": {

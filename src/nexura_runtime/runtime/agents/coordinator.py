@@ -19,6 +19,7 @@ from nexura_agents.contracts.context import ExecutionContext
 from nexura_agents.errors import (
     EventLoopError,
     MaxTurnsExceededError,
+    ProviderResponseError,
     SDKValidationError,
     UnknownToolError,
 )
@@ -57,6 +58,21 @@ from nexura_runtime.runtime.agents.types import (
 )
 from nexura_runtime.runtime.approvals.errors import ApprovalClaimConflictError
 from nexura_runtime.runtime.approvals.gate import ApprovalGate
+
+
+def refuse_duplicate_call_ids(response: ModelResponse) -> None:
+    """Refuse a model reply in which two tool calls share an id (two empty ids count), as
+    the Runner does (P39 G6): approvals, recorded gates and ledger entries are keyed by the
+    call id, so such calls would be released or refused together. Raised before any gate,
+    hook, ledger entry or dispatch."""
+    seen: set[str] = set()
+    for call in response.message.tool_calls or ():
+        if call.id in seen:
+            raise ProviderResponseError(
+                f"Model reply has more than one tool call with id {call.id!r}; "
+                "tool call ids must be unique within a reply."
+            )
+        seen.add(call.id)
 
 
 def _coordinator_approval_id(
@@ -501,6 +517,7 @@ class AgentCoordinator:
                     )
                     if recorded_response is not None and recorded_response.result is not None:
                         response = _response_from_json(recorded_response.result)
+                        refuse_duplicate_call_ids(response)
                         _audit_replay(effective_context, "model", agent.name, "", model_entry)
                     else:
                         response = await admission.generate(
@@ -509,6 +526,8 @@ class AgentCoordinator:
                             tools=tools_schema,
                             context=effective_context,
                         )
+                        # Before the ledger records the reply, any gate, hook or dispatch.
+                        refuse_duplicate_call_ids(response)
                         if ledger is not None:
                             stored = ledger.record_once(
                                 workspace,

@@ -52,7 +52,7 @@ async def test_workflow_route_terminal_goldens(
             raise RuntimeError("local fixture failure")
         return {"checked": True}
 
-    registry.register("fixture", node)
+    registry.register("fixture", node, effect="pure")
     spec = WorkflowSpec(
         name="Review fixture",
         entry_node="n",
@@ -327,7 +327,7 @@ async def test_workflow_agent_route_guardrails(
         return {"reply": result.final_output}
 
     registry = ModuleRegistry()
-    registry.register("fixture", node)
+    registry.register("fixture", node, effect="pure")
     spec = WorkflowSpec(
         name="Guarded workflow",
         entry_node="n",

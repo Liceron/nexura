@@ -243,7 +243,7 @@ async def test_retry_on_matches_error_inside_subworkflow() -> None:
             raise ConnectionError("transient")
         return {"ok": True}
 
-    reg.register("flaky", flaky)
+    reg.register("flaky", flaky, effect="pure")
     child = WorkflowSpec(
         name="c",
         entry_node="a",
@@ -275,7 +275,7 @@ async def test_retry_on_does_not_match_unrelated_subworkflow_error() -> None:
         calls.append(1)
         raise ValueError("permanent")
 
-    reg.register("bad", bad)
+    reg.register("bad", bad, effect="pure")
     child = WorkflowSpec(
         name="c",
         entry_node="a",

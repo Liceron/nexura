@@ -319,7 +319,8 @@ describe('Guardrails section of the agent editor', () => {
     expect(note.textContent).toContain('guardrails.yaml');
     expect(note.textContent).not.toContain('applies to every run of every agent');
     expect(screen.queryByTestId('agent-guardrails-policy-rules')).toBeNull();
-    expect(screen.getByTestId('agent-guardrails-policy-exceptions').textContent).toMatch(/workflow module nodes/);
+    expect(screen.getByTestId('agent-guardrails-policy-exceptions').textContent).toMatch(/Coordinator agents are refused/);
+    expect(screen.getByTestId('agent-guardrails-policy-exceptions').textContent).not.toMatch(/workflow module nodes/);
   });
 
   it('does not offer passthrough while answers are checked', async () => {

@@ -12,7 +12,6 @@ import math
 import re
 import socket
 import uuid
-import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -26,11 +25,19 @@ from nexura_runtime.workflow import WorkflowSpec, _LeaseBusyError
 
 logger = logging.getLogger("nexura_runtime.triggers.worker")
 
-#: How a reclaimed job is retried. ``"continue"`` (default, A6 S10): the job's run continues
-#: under its run lease. ``"new_run"`` (deprecated, removed in 0.6): a new run starts from the
-#: entry node and the old one is marked interrupted.
-RetryMode = Literal["continue", "new_run"]
-RETRY_MODES: tuple[str, ...] = ("continue", "new_run")
+#: How a reclaimed job is retried: ``"continue"`` (A6 S10), the job's run continues under its
+#: run lease. The old ``"new_run"`` mode (a new run from the entry node, repeating effects that
+#: already happened) was removed by A6 S12; passing it raises ``ValueError`` naming this.
+RetryMode = Literal["continue"]
+RETRY_MODES: tuple[str, ...] = ("continue",)
+_NEW_RUN_REMOVED = (
+    "retry_mode='new_run' was removed (P35 A6 S12): it started a new run from the entry node "
+    "and repeated effects that had already happened. A reclaimed job now always continues the "
+    "run it owns (WorkflowEngine.recover): completed steps are not run again and a step whose "
+    "outcome is unknown pauses the run 'effect_unknown' for a person. To start over on "
+    "purpose, fork the run from a checkpoint (POST /api/v1/runs/{run_id}/fork) or start a new "
+    "run; drop the retry_mode argument (or --retry-mode new_run)."
+)
 
 #: Run statuses that end a job's work: the run finished, or waits for a person.
 _HANDED_OFF = frozenset({"completed", "pending_approval", "waiting_for_input", "paused"})
@@ -111,9 +118,8 @@ class TriggerWorker:
     ``effect_unknown`` for a person), and a run that already finished is never run again (the
     job is completed or failed from it). The job lease only coordinates the queue; the run
     lease in the execution journal decides who executes the run, so the worker waits while
-    another live process still holds it. ``retry_mode="new_run"`` keeps the old behaviour
-    (deprecated, removed in 0.6): the old run is marked interrupted and a new run starts from
-    the entry node.
+    another live process still holds it. ``retry_mode`` accepts only ``"continue"``; the old
+    ``"new_run"`` mode was removed (A6 S12) and raises ``ValueError``.
 
     ``clock``: a time source for leases (tests). By default each store uses its own clock
     (the database clock for ``PostgresTriggerStore``).
@@ -131,7 +137,7 @@ class TriggerWorker:
         max_concurrent_jobs: int = 4,
         shutdown_grace_seconds: float = 20.0,
         clock: Callable[[], float] | None = None,
-        retry_mode: RetryMode = "continue",
+        retry_mode: RetryMode | str = "continue",
     ) -> None:
         if not math.isfinite(lease_seconds) or lease_seconds <= 0:
             raise ValueError("lease_seconds must be a positive finite number")
@@ -139,17 +145,11 @@ class TriggerWorker:
             raise ValueError("max_attempts must be at least 1")
         if max_concurrent_jobs < 1:
             raise ValueError("max_concurrent_jobs must be at least 1")
-        if retry_mode not in RETRY_MODES:
-            raise ValueError("retry_mode must be 'continue' or 'new_run'")
         if retry_mode == "new_run":
-            warnings.warn(
-                'TriggerWorker(retry_mode="new_run") is deprecated and will be removed in 0.6: '
-                "a reclaimed job then starts a new run from the entry node, repeating effects "
-                "that already happened. The default continues the job's run.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-        self.retry_mode: RetryMode = retry_mode
+            raise ValueError(_NEW_RUN_REMOVED)
+        if retry_mode not in RETRY_MODES:
+            raise ValueError("retry_mode must be 'continue'")
+        self.retry_mode: RetryMode = "continue"
         self.app_state = app_state
         self.worker_id = worker_id or f"worker-{socket.gethostname()}-{uuid.uuid4().hex[:8]}"
         self.poll_interval = poll_interval
@@ -219,7 +219,6 @@ class TriggerWorker:
         budget = min(self.max_jobs_per_tick, slots) - len(self._reclaimed_backlog)
         if budget <= 0:
             return []
-        new_run = self.retry_mode == "new_run"
         reclaimed = store.reclaim_expired_jobs(
             self.worker_id,
             lease_seconds=self.lease_seconds,
@@ -227,7 +226,6 @@ class TriggerWorker:
             limit=budget,
             now=self._now(),
             exclude_job_ids=set(self._active),
-            keep_run=not new_run,
         )
         retries: list[DurableTriggerJob] = []
         for job in reclaimed:
@@ -235,10 +233,6 @@ class TriggerWorker:
                 # Out of attempts: the job fails and keeps its run. That run is marked
                 # interrupted only once nobody executes it (journaled runs: its run lease).
                 dead_run = job.run_id
-            elif new_run:
-                # Deprecated: the old run moved to previous_run_ids; a new run starts.
-                dead_run = job.previous_run_ids[-1] if job.previous_run_ids else None
-                retries.append(job)
             else:
                 dead_run = None  # the job's run is continued when the job is processed
                 retries.append(job)
@@ -246,9 +240,7 @@ class TriggerWorker:
                 "Trigger job %s lease expired (attempt %s); %s",
                 job.job_id,
                 job.attempts,
-                "failed"
-                if job.status == "failed"
-                else ("retrying as a new run" if new_run else "continuing its run"),
+                "failed" if job.status == "failed" else "continuing its run",
             )
             if dead_run:
                 await self._interrupt_run(dead_run, _ABANDONED)
@@ -358,7 +350,7 @@ class TriggerWorker:
         started: list[str] = []
         try:
             # A reclaimed job continues the run it owns; a newly claimed one starts its run.
-            if reclaimed and job.run_id and self.retry_mode == "continue":
+            if reclaimed and job.run_id:
                 run_id, run_error = await self._continue(job, started)
             else:
                 run_id, run_error = await self._start(job, started)

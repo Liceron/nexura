@@ -36,6 +36,13 @@ from .models import (
     ExecutionVersionError,
 )
 
+_LEGACY_REMOVAL = (
+    "durable_graph writes were removed (P35 A6 S12). Use "
+    "nexura_runtime.workflow.WorkflowEngine for new workflows. Existing legacy rows "
+    "are read-only through ExecutionStore.get; claim/renew/release and resolve_effect "
+    "remain available to settle an indeterminate effect. See docs/durable-execution.md."
+)
+
 
 @runtime_checkable
 class ExecutionStore(Protocol):
@@ -112,6 +119,7 @@ class ExecutionStore(Protocol):
         *,
         actor: str,
         result: Any = None,
+        reason: str | None = None,
     ) -> EffectRecord:
         """Resolve an indeterminate effect once and audit the actor in the same transaction."""
         ...
@@ -210,6 +218,8 @@ class _Store:
         _ttl(owner, ttl)
         if not definition_digest:
             raise ValueError("definition_digest must be nonempty")
+        if kind == "durable_graph":
+            raise ExecutionConflictError(_LEGACY_REMOVAL)
         if kind not in ("agent", "workflow", "durable_graph"):
             raise ValueError("Unknown execution kind")
         values: dict[str, Any] = dict(
@@ -285,6 +295,8 @@ class _Store:
             step_keys=sorted(keys),
             effect_ids=[effect.effect_id for effect in effects],
         ) as tx:
+            if tx.snapshot.run.kind == "durable_graph":
+                raise ExecutionConflictError(_LEGACY_REMOVAL)
             tx.check(lease)
             if expected_revision is not None and tx.snapshot.run.revision != expected_revision:
                 raise ExecutionConflictError("Execution revision changed")
@@ -361,12 +373,15 @@ class _Store:
         *,
         actor: str,
         result: Any = None,
+        reason: str | None = None,
     ) -> EffectRecord:
         """Resolve only indeterminate effects, once, recording actor and an audit event."""
         async with self._edit(lease.execution_id, step_keys=(), effect_ids=[effect_id]) as tx:
             tx.check(lease)
             if not isinstance(actor, str) or not actor:
                 raise ValueError("actor must be nonempty")
+            if reason is not None and not isinstance(reason, str):
+                raise ValueError("reason must be a string")
             resolution = EffectResolution(resolution)
             old = tx.snapshot.effects[effect_id]
             if old.status == EffectStatus.RESOLVED:
@@ -390,6 +405,7 @@ class _Store:
                         "effect_id": effect_id,
                         "resolution": resolution.value,
                         "actor": actor,
+                        **({"reason": reason} if reason is not None else {}),
                     },
                     tx.now,
                 )

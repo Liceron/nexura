@@ -370,7 +370,6 @@ router = APIRouter(prefix="/guardrails", tags=["guardrails"])
 
 #: What a guardrail policy does not cover in this release (shown with the policy view).
 POLICY_EXCEPTIONS = (
-    "workflow_module_nodes",  # until WorkflowEngine(guardrail_policy=...) lands
     "coordinator_refused_with_model_stage_rules",  # AgentCoordinator runs are refused
 )
 

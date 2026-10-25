@@ -49,6 +49,7 @@ from nexura_runtime.service.triggers.store import (
     DEFAULT_LEASE_SECONDS,
     DEFAULT_MAX_ATTEMPTS,
     lease_expired_message,
+    require_keep_run,
 )
 
 _T = TypeVar("_T")
@@ -718,6 +719,7 @@ class PostgresTriggerStore:
         The expired rows are locked ``FOR UPDATE SKIP LOCKED``: a row another reclaimer (or
         its owner renewing it) holds is skipped, so each job has exactly one new owner.
         """
+        require_keep_run(keep_run)
         excluded = sorted(exclude_job_ids)
 
         async def op(conn: Any) -> list[Any]:
@@ -753,9 +755,6 @@ class PostgresTriggerStore:
                 else:
                     previous = list(job.previous_run_ids)
                     run_id = job.run_id
-                    if run_id and not keep_run:
-                        previous.append(run_id)
-                        run_id = None
                     updated = await conn.fetchrow(
                         """UPDATE nexura_trigger_jobs
                            SET claimed_by = $2, claimed_at = $3::float8,

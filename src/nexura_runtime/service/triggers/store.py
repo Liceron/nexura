@@ -30,6 +30,16 @@ def lease_expired_message(attempts: int) -> str:
     return f"worker lease expired {attempts} times"
 
 
+def require_keep_run(keep_run: bool) -> None:
+    """Refuse ``reclaim_expired_jobs(keep_run=False)``, removed with ``retry_mode="new_run"``."""
+    if keep_run is not True:
+        raise ValueError(
+            "reclaim_expired_jobs(keep_run=False) was removed (P35 A6 S12) together with "
+            "TriggerWorker(retry_mode='new_run'): a reclaimed job always keeps its run_id and "
+            "the worker continues that run with WorkflowEngine.recover. Omit keep_run."
+        )
+
+
 class TriggerStore(Protocol):
     """Authoritative storage contract for webhook receipts, schedules, and trigger jobs."""
 
@@ -98,8 +108,8 @@ class TriggerStore(Protocol):
         """Record the run of a claimed job; False when ``worker_id`` lost ownership.
 
         A job owns one run for its life (A6 S10). If the job already records a different run
-        (a run without an execution journal was replaced, or ``retry_mode="new_run"``), that
-        run id moves to the deprecated ``previous_run_ids``.
+        (a run without an execution journal was replaced by a new one), that run id moves to
+        ``previous_run_ids``.
         """
         ...
 
@@ -121,9 +131,9 @@ class TriggerStore(Protocol):
         whose compare-and-swap wins gets a job. ``now`` defaults to the store's clock (the
         database clock for Postgres).
 
-        ``keep_run`` (default, A6 S10): the job keeps its ``run_id`` and the new owner
-        continues that run. ``keep_run=False`` is the deprecated ``retry_mode="new_run"``
-        behaviour: the run id moves to ``previous_run_ids`` and ``run_id`` is cleared.
+        The job keeps its ``run_id`` and the new owner continues that run (A6 S10).
+        ``keep_run`` must stay ``True``: ``keep_run=False`` (the old ``retry_mode="new_run"``
+        behaviour) was removed by A6 S12 and raises ``ValueError``.
         """
         ...
 
@@ -350,6 +360,7 @@ class MemoryTriggerStore:
         exclude_job_ids: Collection[str] = (),
         keep_run: bool = True,
     ) -> list[DurableTriggerJob]:
+        require_keep_run(keep_run)
         current = time.time() if now is None else now
         results: list[DurableTriggerJob] = []
         retried = 0
@@ -374,9 +385,6 @@ class MemoryTriggerStore:
                     continue
                 else:
                     retried += 1
-                    if job.run_id and not keep_run:
-                        job.previous_run_ids.append(job.run_id)
-                        job.run_id = None
                     job.claimed_by = worker_id
                     job.claimed_at = current
                     job.lease_expires_at = current + lease_seconds
@@ -942,6 +950,7 @@ class SqliteTriggerStore:
         exclude_job_ids: Collection[str] = (),
         keep_run: bool = True,
     ) -> list[DurableTriggerJob]:
+        require_keep_run(keep_run)
         current = time.time() if now is None else now
         results: list[DurableTriggerJob] = []
         retried = 0
@@ -985,9 +994,6 @@ class SqliteTriggerStore:
                 else:
                     previous = list(job.previous_run_ids)
                     run_id = job.run_id
-                    if run_id and not keep_run:
-                        previous.append(run_id)
-                        run_id = None
                     with self._conn:
                         cur = self._conn.execute(
                             """

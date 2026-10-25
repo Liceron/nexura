@@ -1,20 +1,30 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Liceron
-"""Effects tracking, idempotency, and reconciliation package."""
+"""Removed: the ``EffectReconciler`` wrapper (P35 A6 S12).
 
-from nexura_runtime.runtime.effects.errors import (
-    EffectError,
-    EffectIndeterminateError,
-    ReconciliationError,
+Effects live in the execution journal (``nexura_agents.execution_store``). Importing a
+name from here raises ``RemovedAPIError`` naming the replacement.
+"""
+
+from __future__ import annotations
+
+from typing import NoReturn
+
+from nexura_runtime._removed import removed
+
+_REMOVED = frozenset(
+    {
+        "EffectError",
+        "EffectIndeterminateError",
+        "EffectReconciler",
+        "EffectRecord",
+        "EffectStatus",
+        "ReconciliationError",
+    }
 )
-from nexura_runtime.runtime.effects.models import EffectRecord, EffectStatus
-from nexura_runtime.runtime.effects.reconciler import EffectReconciler
 
-__all__ = [
-    "EffectReconciler",
-    "EffectRecord",
-    "EffectStatus",
-    "EffectError",
-    "EffectIndeterminateError",
-    "ReconciliationError",
-]
+__all__: list[str] = []
+
+
+def __getattr__(name: str) -> NoReturn:
+    removed(__name__, name, _REMOVED)

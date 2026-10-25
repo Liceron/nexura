@@ -1,33 +1,36 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Liceron
-"""Durable execution and worker lifecycle package."""
+"""Removed: the legacy DurableExecutionEngine (P35 A6 S12).
 
-from nexura_runtime.runtime.execution.engine import DurableExecutionEngine
-from nexura_runtime.runtime.execution.errors import (
-    DurableExecutionError,
-    FencingConflictError,
-    LeaseExpiredError,
-)
-from nexura_runtime.runtime.execution.models import (
-    DurableNodeSpec,
-    DurableRunState,
-    DurableWorkflowSpec,
-    EffectPolicy,
-    NodeIntent,
-    WorkerLease,
-)
-from nexura_runtime.runtime.execution.module import DurableExecutionModule
+Importing a name from here raises ``RemovedAPIError`` naming the replacement
+(``nexura_runtime.workflow.WorkflowEngine`` on the execution journal).
+"""
 
-__all__ = [
-    "DurableExecutionEngine",
-    "DurableExecutionModule",
-    "DurableRunState",
-    "DurableWorkflowSpec",
-    "DurableNodeSpec",
-    "NodeIntent",
-    "WorkerLease",
-    "EffectPolicy",
-    "DurableExecutionError",
-    "FencingConflictError",
-    "LeaseExpiredError",
-]
+from __future__ import annotations
+
+from typing import NoReturn
+
+from nexura_runtime._removed import removed
+
+_REMOVED = frozenset(
+    {
+        "DurableDefinitionMismatchError",
+        "DurableExecutionEngine",
+        "DurableExecutionError",
+        "DurableExecutionModule",
+        "DurableNodeSpec",
+        "DurableRunState",
+        "DurableWorkflowSpec",
+        "EffectPolicy",
+        "FencingConflictError",
+        "LeaseExpiredError",
+        "NodeIntent",
+        "WorkerLease",
+    }
+)
+
+__all__: list[str] = []
+
+
+def __getattr__(name: str) -> NoReturn:
+    removed(__name__, name, _REMOVED)

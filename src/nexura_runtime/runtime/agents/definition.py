@@ -266,6 +266,12 @@ class AgentDefinition:
             effective_allowed = set(self.allowed_tools)
 
         async def _delegate(query: str, context_data: dict[str, Any] | None = None) -> str:
+            from nexura_agents import policy
+
+            # P39 G6: this loop calls models without the before_model/after_model hooks and
+            # the agent input/output guardrails; under a policy with those stages it is
+            # refused here, before any model call, instead of running unchecked.
+            policy.check_model_stages(False)
             parent_ctx = current_agent_context.get()
 
             # 1. Check parent cancellation
@@ -388,6 +394,12 @@ class AgentDefinition:
                             tokens_used=response.usage.total_tokens if response.usage else None,
                         )
 
+                    # Duplicate tool-call ids fail closed before any gate, hook or dispatch.
+                    from nexura_runtime.runtime.agents.coordinator import (
+                        refuse_duplicate_call_ids,
+                    )
+
+                    refuse_duplicate_call_ids(response)
                     child_messages.append(response.message)
 
                     # Final answer if no tool calls
@@ -431,7 +443,6 @@ class AgentDefinition:
                         # and its approval gates apply here as in a Runner. A subagent
                         # cannot wait for a person inside the delegation: a gated call
                         # fails closed before anything runs.
-                        from nexura_agents import policy
                         from nexura_agents.run_context import RunContext
 
                         hooks = policy.effective_hooks()
