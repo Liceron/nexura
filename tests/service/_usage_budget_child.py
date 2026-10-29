@@ -4,8 +4,8 @@
 
 Arguments: a go-file path, threads, cap (USD), cost per reservation (USD). The child opens its
 ledger, prints ``ready`` and waits (up to 120 s) until the go-file exists, so every child is
-running before any reserves. The
-ledger target comes from ``NEXURA_WP5_CHILD_TARGET`` (a SQLite path or a Postgres URL; never
+running before any reserves; a 10 ms pause after each grant keeps the children overlapping.
+The ledger target comes from ``NEXURA_WP5_CHILD_TARGET`` (a SQLite path or a Postgres URL; never
 printed) and ``NEXURA_WP5_CHILD_BACKEND``. Every thread reserves against one workspace cap until it
 is refused. Prints one JSON line: reservations granted, and unexpected errors (their class names).
 """
@@ -66,6 +66,9 @@ def main() -> None:
                 return
             with lock:
                 granted += 1
+            # A short pause between reservations: without it the first child to see the
+            # go-file (polled every 5 ms) can take the whole cap before the others start.
+            time.sleep(0.01)
 
     workers = [threading.Thread(target=work) for _ in range(threads)]
     for worker in workers:
