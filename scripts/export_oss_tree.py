@@ -30,6 +30,8 @@ ALLOW: tuple[str, ...] = (
     "src/**",
     "packages/**",
     "tests/**",
+    # Registers the shared pytest fixtures (nexura_runtime.testing.pytest_backend) repo-wide.
+    "conftest.py",
     "examples/**",
     "docs/**",
     "llms.txt",
