@@ -153,6 +153,29 @@ class TriggerStore(Protocol):
         """Finish a job; with ``expected_worker`` it is a no-op unless that worker still owns it."""
         ...
 
+    def acquire_lease(
+        self, name: str, holder: str, *, ttl_seconds: float, now: float | None = None
+    ) -> bool:
+        """Take the named lease for ``ttl_seconds`` unless another holder has it unexpired.
+
+        True only for the caller that took it (an atomic insert-or-take-over-if-expired, so of
+        any number of racers on any instance exactly one wins). A lease held by ``holder``
+        itself is not renewed (False): every acquisition needs a fresh holder id. Used by the
+        trigger tick (MVP WP9) so one bounded pass runs at a time across instances.
+        """
+        ...
+
+    def release_lease(self, name: str, holder: str) -> bool:
+        """Drop the named lease if ``holder`` still holds it; True when it did."""
+        ...
+
+
+def _check_lease_ttl(ttl_seconds: float) -> float:
+    ttl = float(ttl_seconds)
+    if not ttl > 0 or ttl == float("inf"):
+        raise ValueError("ttl_seconds must be a positive finite number")
+    return ttl
+
 
 def _lease_end(job: DurableTriggerJob, default_lease: float) -> float:
     """Lease expiry; jobs claimed before leases existed expire ``default_lease`` after claim."""
@@ -202,6 +225,28 @@ class MemoryTriggerStore:
         self._receipts: dict[tuple[str, str], WebhookReceipt] = {}
         self._schedules: dict[str, ScheduleConfig] = {}
         self._jobs: dict[str, DurableTriggerJob] = {}
+        # name -> (holder, expires_at)
+        self._leases: dict[str, tuple[str, float]] = {}
+
+    def acquire_lease(
+        self, name: str, holder: str, *, ttl_seconds: float, now: float | None = None
+    ) -> bool:
+        ttl = _check_lease_ttl(ttl_seconds)
+        with self._lock:
+            current = time.time() if now is None else now
+            held = self._leases.get(name)
+            if held is not None and held[1] > current:
+                return False
+            self._leases[name] = (holder, current + ttl)
+            return True
+
+    def release_lease(self, name: str, holder: str) -> bool:
+        with self._lock:
+            held = self._leases.get(name)
+            if held is None or held[0] != holder:
+                return False
+            del self._leases[name]
+            return True
 
     def save_webhook_config(self, config: WebhookConfig) -> None:
         with self._lock:
@@ -513,6 +558,12 @@ class SqliteTriggerStore:
 
                 CREATE INDEX IF NOT EXISTS idx_jobs_status
                     ON durable_trigger_jobs (status, created_at);
+
+                CREATE TABLE IF NOT EXISTS trigger_leases (
+                    name TEXT PRIMARY KEY,
+                    holder TEXT NOT NULL,
+                    expires_at REAL NOT NULL
+                );
             """)
             # Safe migrations for databases created before jobs recorded their run and lease.
             columns = {
@@ -1085,6 +1136,32 @@ class SqliteTriggerStore:
                 params,
             )
             return self.get_job(job_id)
+
+    def acquire_lease(
+        self, name: str, holder: str, *, ttl_seconds: float, now: float | None = None
+    ) -> bool:
+        ttl = _check_lease_ttl(ttl_seconds)
+        with self._lock, self._conn:
+            current = time.time() if now is None else now
+            # One statement: insert, or take over only an expired lease (atomic across the
+            # processes sharing the file).
+            cur = self._conn.execute(
+                """
+                INSERT INTO trigger_leases (name, holder, expires_at) VALUES (?, ?, ?)
+                ON CONFLICT (name) DO UPDATE SET
+                    holder = excluded.holder, expires_at = excluded.expires_at
+                WHERE trigger_leases.expires_at <= ?
+                """,
+                (name, holder, current + ttl, current),
+            )
+            return cur.rowcount == 1
+
+    def release_lease(self, name: str, holder: str) -> bool:
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "DELETE FROM trigger_leases WHERE name = ? AND holder = ?", (name, holder)
+            )
+            return cur.rowcount == 1
 
     def close(self) -> None:
         with self._lock:

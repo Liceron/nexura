@@ -34,6 +34,18 @@ resumed or recovered run reuses it instead of asking the model again
 (``nexura_agents.verdict_journal``). Errors, timeouts and malformed verdicts follow
 ``on_error`` (``"block"`` by default: fail closed).
 
+Shadow mode (``mode="shadow"`` on the policy, or ``enforcement="shadow"`` on a rule; a rule's
+own setting wins): shadow rules are evaluated exactly as enforced ones (checks, judges and
+journaled verdicts included) and every decision is audited and sent as a decision event with
+``mode: "shadow"`` and ``applied: false``, but the action is never applied: nothing is blocked,
+scrubbed, held, sent for approval or failed. Enforced rules are decided over enforced rules only,
+so a shadow rule never weakens (or strengthens) them; shadow results are reported alongside.
+Shadow model checks (judges, safety models) do not count toward the run's usage limits or its
+budget admission: their usage is reported apart (audit ``tokens``, :meth:`shadow_usage`), and
+``shadow_budget`` caps it per run (further shadow model checks are skipped and audited as
+``skipped: shadow_budget``). ``mode`` and each rule's effective enforcement are fixed when the
+policy is built.
+
 Guardrail checks reduce risk and leave an audit trail; they are not a security boundary.
 The structural controls are a tool allowlist, human approval for side effects and a sandbox.
 """
@@ -45,9 +57,12 @@ import dataclasses
 import hashlib
 import json
 import logging
+import math
 import time
 import weakref
+from collections import OrderedDict
 from collections.abc import Iterable, Mapping, Sequence
+from types import MappingProxyType
 from typing import Any, Literal
 
 from nexura_agents.errors import GuardrailTripwireTriggered, RunnerError, SDKValidationError
@@ -71,6 +86,7 @@ from nexura_guardrails.checks import Check, is_hard_error, rejection_message, ru
 from nexura_guardrails.compose import parallel, tiered
 from nexura_guardrails.policy.audit import AuditRecord, AuditSink
 from nexura_guardrails.policy.rules import (
+    ENFORCEMENT_MODES,
     POLICY_STAGES,
     SEVERITY,
     PolicyError,
@@ -78,7 +94,7 @@ from nexura_guardrails.policy.rules import (
 )
 from nexura_guardrails.verdict import CheckInput, Role, Verdict
 
-__all__ = ["GuardrailPolicy", "PolicyAuditError", "StageOutcome"]
+__all__ = ["GuardrailPolicy", "PolicyAuditError", "ShadowBudget", "StageOutcome"]
 
 logger = logging.getLogger("nexura_guardrails.policy")
 
@@ -109,19 +125,139 @@ class PolicyAuditError(RunnerError):
 
 @dataclasses.dataclass(frozen=True)
 class StageOutcome:
-    """What the policy decided for one stage item."""
+    """What the policy decided for one stage item.
 
-    action: Literal["allow", "block", "scrub", "fail"]
+    ``mode`` is ``"enforce"`` (the action is applied) or ``"shadow"`` (only reported:
+    ``applied`` is False). An enforced outcome carries the shadow rules' result, if any, in
+    ``shadow``; that one's ``action`` is what the shadow rules would have done (``block``,
+    ``scrub``, ``require_approval``, ``fail`` or ``allow``).
+    """
+
+    action: Literal["allow", "block", "scrub", "require_approval", "fail"]
     rule: str | None = None
     verdict: Verdict | None = None
     replacement: str | None = None
     source: str = "live"
     error_type: str | None = None
+    mode: Literal["enforce", "shadow"] = "enforce"
+    shadow: StageOutcome | None = None
+    #: Why a shadow check did not run (``"shadow_budget"``), else None.
+    skipped: str | None = None
+
+    @property
+    def applied(self) -> bool:
+        """False for a shadow outcome: its action was reported, not applied."""
+        return self.mode != "shadow"
 
     @property
     def check(self) -> str | None:
         """The deciding check's name, when a check decided."""
         return self.verdict.check if self.verdict is not None else None
+
+
+def _positive(value: Any, what: str, *, integer: bool = False) -> None:
+    ok = (
+        not isinstance(value, bool)
+        and isinstance(value, int if integer else (int, float))
+        and (isinstance(value, int) or math.isfinite(value))  # a huge int cannot overflow
+        and value > 0
+    )
+    if not ok:
+        kind = "a positive whole number" if integer else "a positive number"
+        raise PolicyError(f"must be {kind}.", f"shadow_budget.{what}")
+
+
+@dataclasses.dataclass(frozen=True)
+class ShadowBudget:
+    """A per-run cap on what shadow model checks (judges, safety models) may use.
+
+    Shadow checks never count toward the run's usage limits or budget; this caps them on their
+    own. ``max_tokens``: tokens per run. ``max_cost``: estimated cost per run, from
+    ``cost_per_1k_tokens`` (your price per 1,000 tokens, in your currency; required with
+    ``max_cost``). Before each shadow model check the tokens already used, plus those reserved
+    by checks still running, plus an estimate of the text to check are compared with the cap;
+    when the sum would exceed it, the check is skipped and audited as
+    ``skipped: shadow_budget``. A check's real usage can exceed its estimate (the judge's
+    instructions and reply), so a run can end slightly above the cap.
+    """
+
+    max_tokens: int | None = None
+    max_cost: float | None = None
+    cost_per_1k_tokens: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.max_tokens is None and self.max_cost is None:
+            raise PolicyError("give max_tokens, max_cost or both.", "shadow_budget")
+        if self.max_tokens is not None:
+            _positive(self.max_tokens, "max_tokens", integer=True)
+        if self.max_cost is not None:
+            _positive(self.max_cost, "max_cost")
+            if self.cost_per_1k_tokens is None:
+                raise PolicyError(
+                    "max_cost needs cost_per_1k_tokens (the price used to estimate cost).",
+                    "shadow_budget.cost_per_1k_tokens",
+                )
+        if self.cost_per_1k_tokens is not None:
+            _positive(self.cost_per_1k_tokens, "cost_per_1k_tokens")
+
+    @classmethod
+    def coerce(cls, value: Any) -> ShadowBudget | None:
+        """``value`` as a ``ShadowBudget``: one already, a mapping of its fields, or None."""
+        if value is None or isinstance(value, ShadowBudget):
+            return value
+        if not isinstance(value, Mapping):
+            raise PolicyError("must be an object such as {max_tokens: 200000}.", "shadow_budget")
+        unknown = sorted(set(value) - {"max_tokens", "max_cost", "cost_per_1k_tokens"})
+        if unknown:
+            raise PolicyError(
+                f"unknown keys {unknown}; allowed: ['cost_per_1k_tokens', 'max_cost', "
+                "'max_tokens'].",
+                "shadow_budget",
+            )
+        return cls(**value)
+
+    def cost(self, tokens: int) -> float | None:
+        """The estimated cost of ``tokens``, or None without ``cost_per_1k_tokens``."""
+        if self.cost_per_1k_tokens is None:
+            return None
+        return tokens * self.cost_per_1k_tokens / 1000
+
+    def exceeded(self, tokens: int) -> bool:
+        """True when ``tokens`` is over ``max_tokens`` or its cost over ``max_cost``."""
+        if self.max_tokens is not None and tokens > self.max_tokens:
+            return True
+        cost = self.cost(tokens)
+        return self.max_cost is not None and cost is not None and cost > self.max_cost
+
+    def describe(self) -> dict[str, Any]:
+        """A JSON-safe summary (without unset fields)."""
+        return {k: v for k, v in dataclasses.asdict(self).items() if v is not None}
+
+
+@dataclasses.dataclass
+class _ShadowSpend:
+    """What shadow model checks used in one run."""
+
+    calls: int = 0
+    tokens: int = 0
+    reserved: int = 0
+    skipped: int = 0
+
+
+#: How many runs' shadow usage a policy keeps (the oldest is dropped first).
+_SHADOW_RUNS = 1024
+
+
+def _usage_tokens(verdict: Verdict) -> int | None:
+    """The tokens a fresh (not cached, not journaled) verdict's check used, when reported."""
+    usage = verdict.usage
+    if usage is None or verdict.cached:
+        return None
+    if usage.total_tokens is not None:
+        return int(usage.total_tokens)
+    if usage.prompt_tokens is None and usage.completion_tokens is None:
+        return None
+    return int(usage.prompt_tokens or 0) + int(usage.completion_tokens or 0)
 
 
 def _verdict_record(verdict: Verdict, identity: Mapping[str, Any]) -> dict[str, Any]:
@@ -236,7 +372,9 @@ class GuardrailPolicy(AgentHooks):
     (seconds; ``None`` for no extra bound, the run's timeout still applies). ``audit``:
     one sink or a list (see ``nexura_guardrails.policy.audit``); ``audit_allows`` also
     audits ``allow`` decisions; ``audit_required`` fails the run when a sink fails.
-    ``digest``/``source`` are set by the loader (file digest and path).
+    ``digest``/``source`` are set by the loader (file digest and path). ``mode`` is
+    ``"enforce"`` (default) or ``"shadow"`` (report every decision, apply none); a rule's
+    ``enforcement`` overrides it for that rule.
     """
 
     def __init__(
@@ -255,10 +393,18 @@ class GuardrailPolicy(AgentHooks):
         digest: str | None = None,
         source: str | None = None,
         resolved_source: str | None = None,
+        mode: Literal["enforce", "shadow"] = "enforce",
+        shadow_budget: ShadowBudget | Mapping[str, Any] | None = None,
     ) -> None:
         if not isinstance(name, str) or not name.strip():
             raise PolicyError("name must be non-empty text.", "name")
+        if not isinstance(mode, str) or mode not in ENFORCEMENT_MODES:
+            raise PolicyError(f"unknown mode {mode!r}; use 'enforce' or 'shadow'.", "mode")
         self.name = name
+        # Read-only (a property): changing the mode means building a new policy (P40 L1).
+        self._mode: Literal["enforce", "shadow"] = mode
+        self._shadow_budget = ShadowBudget.coerce(shadow_budget)
+        self._shadow_spend: OrderedDict[str, _ShadowSpend] = OrderedDict()
         self.checks: dict[str, Check] = dict(checks or {})
         for check_name, check in self.checks.items():
             if not isinstance(check_name, str) or not check_name:
@@ -332,8 +478,19 @@ class GuardrailPolicy(AgentHooks):
                 self._rule_checks[rule.id] = parallel(*members, name=rule.id)
             else:
                 self._rule_checks[rule.id] = tiered(*members, name=rule.id)
+        # Each rule's effective enforcement, fixed now: behaviour, reporting and the digest
+        # cannot drift apart (P40 L1).
+        self._rule_modes: Mapping[str, Literal["enforce", "shadow"]] = MappingProxyType(
+            {r.id: self._effective_mode(r) for r in self.rules}
+        )
         self.digest = digest or self._compute_digest()
         self._stages = frozenset(s for r in self.rules for s in r.when.stage)
+        self._enforced_stages = frozenset(
+            s for r in self.rules if self.rule_mode(r) == "enforce" for s in r.when.stage
+        )
+        self._shadow_stages = frozenset(
+            s for r in self.rules if self.rule_mode(r) == "shadow" for s in r.when.stage
+        )
         self._input_guard = self._agent_guardrail("input")
         # The output stage plus the model_output rules, so streamed text is held or checked
         # in windows like any output guardrail (H1); a chunk-safe twin for "auto".
@@ -355,6 +512,10 @@ class GuardrailPolicy(AgentHooks):
             "checks": {name: _check_identity(c) for name, c in sorted(self.checks.items())},
             "rules": [r.describe() for r in self.rules],
         }
+        if self.mode != "enforce":
+            document["mode"] = self.mode  # only when set: older digests stay the same
+        if self._shadow_budget is not None:
+            document["shadow_budget"] = self._shadow_budget.describe()
         encoded = json.dumps(document, sort_keys=True, default=str).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
 
@@ -386,14 +547,73 @@ class GuardrailPolicy(AgentHooks):
             "digest": self.digest,
             "source": self.source,
             "resolved_source": self.resolved_source,
+            "mode": self.mode,
+            "shadow_rules": self.shadow_rule_count,
+            "shadow_budget": (
+                self._shadow_budget.describe() if self._shadow_budget is not None else None
+            ),
             "on_error": self.on_error,
             "default_tool_action": self.default_tool_action,
             "check_timeout": self.check_timeout,
             "stage_timeout": self.stage_timeout,
             "checks": checks,
-            "rules": [r.describe() for r in self.rules],
+            # Each rule's effective enforcement (its own, else the policy's mode).
+            "rules": [{**r.describe(), "enforcement": self.rule_mode(r)} for r in self.rules],
             "audit": [type(s).__name__ for s in self.audit],
         }
+
+    @property
+    def mode(self) -> Literal["enforce", "shadow"]:
+        """``"enforce"`` or ``"shadow"``; read-only (build a new policy to change it)."""
+        return self._mode
+
+    @property
+    def shadow_budget(self) -> ShadowBudget | None:
+        """The per-run cap on shadow model checks, or None; read-only."""
+        return self._shadow_budget
+
+    def _effective_mode(self, rule: Rule) -> Literal["enforce", "shadow"]:
+        own = rule.enforcement
+        return "shadow" if (own or self._mode) == "shadow" else "enforce"
+
+    def rule_mode(self, rule: Rule) -> Literal["enforce", "shadow"]:
+        """``rule``'s effective enforcement, fixed when the policy was built: its own
+        ``enforcement``, else the policy's ``mode``."""
+        frozen = self._rule_modes.get(rule.id) if hasattr(self, "_rule_modes") else None
+        return frozen if frozen is not None else self._effective_mode(rule)
+
+    def shadow_usage(self, run_id: str | None) -> dict[str, Any]:
+        """What shadow model checks used in run ``run_id`` (not counted toward the run's
+        usage limits or budget): ``calls``, ``tokens``, ``skipped`` (checks skipped by
+        ``shadow_budget``) and ``estimated_cost`` (with ``cost_per_1k_tokens``, else None).
+        The policy keeps the most recent 1,024 runs."""
+        spend = self._shadow_spend.get(run_id or "") or _ShadowSpend()
+        budget = self._shadow_budget
+        return {
+            "calls": spend.calls,
+            "tokens": spend.tokens,
+            "skipped": spend.skipped,
+            "estimated_cost": budget.cost(spend.tokens) if budget is not None else None,
+        }
+
+    def _spend(self, run_id: str | None) -> _ShadowSpend:
+        key = run_id or ""
+        spend = self._shadow_spend.get(key)
+        if spend is None:
+            spend = self._shadow_spend[key] = _ShadowSpend()
+            while len(self._shadow_spend) > _SHADOW_RUNS:
+                self._shadow_spend.popitem(last=False)
+        return spend
+
+    @property
+    def shadow_rule_count(self) -> int:
+        """How many rules run in shadow mode (reported, never applied)."""
+        return sum(1 for r in self.rules if self.rule_mode(r) == "shadow")
+
+    def _allowlist_mode(self) -> Literal["enforce", "shadow"] | None:
+        """The mode of allowlist mode (``default_tool_action="block"``, the policy's
+        ``mode``), or None without it."""
+        return self._mode if self.default_tool_action == "block" else None
 
     def install(self, *, locked: bool = False) -> GuardrailPolicy:
         """Make this policy the process default (``set_default_hooks``); ``locked=True``
@@ -402,20 +622,22 @@ class GuardrailPolicy(AgentHooks):
         return self
 
     def requires_model_stages(self) -> bool:
-        """True when a rule names ``input``, ``model_input``, ``model_output`` or ``output``:
-        code that calls models without ``before_model``/``after_model`` and the agent
-        input/output guardrails must refuse to run under this policy when it is the locked
-        default (``nexura_agents.policy.check_model_stages``)."""
-        return bool(self._stages & {"input", "model_input", "model_output", "output"})
+        """True when an enforced rule names ``input``, ``model_input``, ``model_output`` or
+        ``output``: code that calls models without ``before_model``/``after_model`` and the
+        agent input/output guardrails must refuse to run under this policy when it is the
+        locked default (``nexura_agents.policy.check_model_stages``). Shadow rules never
+        refuse such code (they are not evaluated there)."""
+        return bool(self._enforced_stages & {"input", "model_input", "model_output", "output"})
 
     def text_rules(self, agent: str | None) -> list[Rule]:
-        """The ``model_output``/``output`` rules that can change or stop reply text of
-        ``agent`` (scrub, block, fail): with any of them, streamed text must be held or
-        checked in windows, never passed through."""
+        """The enforced ``model_output``/``output`` rules that can change or stop reply text
+        of ``agent`` (scrub, block, fail): with any of them, streamed text must be held or
+        checked in windows, never passed through. Shadow rules never hold a stream."""
         return [
             r
             for r in self.rules
             if r.action in ("scrub", "block", "fail")
+            and self.rule_mode(r) == "enforce"
             and any(
                 stage in r.when.stage and r.when.matches(stage, agent=agent)
                 for stage in ("model_output", "output")
@@ -444,17 +666,35 @@ class GuardrailPolicy(AgentHooks):
             )
 
     def has_stage(self, stage: str) -> bool:
-        """True when a rule names ``stage`` (or, for ``tool_input``, allowlist mode)."""
+        """True when a rule names ``stage`` (or, for ``tool_input``, allowlist mode), in
+        either mode."""
         if stage == "tool_input" and self.default_tool_action == "block":
             return True
         return stage in self._stages
 
+    def _has_mode_stage(self, stage: str, mode: str) -> bool:
+        if stage == "tool_input" and self._allowlist_mode() == mode:
+            return True
+        return stage in (self._shadow_stages if mode == "shadow" else self._enforced_stages)
+
     # ------------------------------------------------------------------ evaluation
 
     async def _run_one(
-        self, ctx: RunContext[Any], rule: Rule, stage: str, text: str, context: str | None
+        self,
+        ctx: RunContext[Any],
+        rule: Rule,
+        stage: str,
+        text: str,
+        context: str | None,
+        *,
+        shadow: bool = False,
     ) -> tuple[Verdict, str]:
-        """Run ``rule``'s check on ``text``: a journaled verdict when there is one."""
+        """Run ``rule``'s check on ``text``: a journaled verdict when there is one.
+
+        For a shadow rule's model check (``shadow``): the call is kept out of the run's
+        budget admission and usage limits, counted in :meth:`shadow_usage`, and skipped
+        (an ``allow`` verdict, audited as ``skipped: shadow_budget``) when ``shadow_budget``
+        would be exceeded."""
         check = self._rule_checks[rule.id]
         check_stage, role = _CHECK_STAGE[stage]
         journaled = not getattr(check, "deterministic", False)
@@ -490,24 +730,66 @@ class GuardrailPolicy(AgentHooks):
             tool_name=ctx.tool_name if stage in ("tool_input", "tool_output") else None,
             context=context,
         )
-        if self.check_timeout is not None:
-            try:
-                verdict = await asyncio.wait_for(run_check(check, ctx, item), self.check_timeout)
-            except TimeoutError:
-                verdict = Verdict(
-                    decision="error",
-                    reason=f"no verdict within {self.check_timeout}s",
-                    check=str(getattr(check, "name", rule.id)),
-                    evidence={"error_type": "TimeoutError"},
+        metered = shadow and journaled  # a shadow model check: kept apart from the run
+        estimate = 0
+        spend: _ShadowSpend | None = None
+        if metered:
+            from nexura_guardrails.judge import estimate_tokens
+
+            spend = self._spend(ctx.run_id)
+            estimate = estimate_tokens(text) + estimate_tokens(context or "")
+            budget = self._shadow_budget
+            if budget is not None and budget.exceeded(spend.tokens + spend.reserved + estimate):
+                spend.skipped += 1
+                skipped = StageOutcome(
+                    "allow", rule=rule.id, mode="shadow", skipped="shadow_budget"
                 )
-        else:
-            verdict = await run_check(check, ctx, item)
-        if verdict.usage is not None and not verdict.cached:
+                await self._audit(ctx, stage, "allow", skipped, time.monotonic(), event=True)
+                name = str(getattr(check, "name", rule.id))
+                return Verdict(
+                    decision="allow", check=name, evidence={"skipped": "shadow_budget"}
+                ), ("live")
+            spend.reserved += estimate
+        try:
+            verdict = await self._call_check(check, ctx, item, rule, isolated=metered)
+        finally:
+            if spend is not None:
+                spend.reserved -= estimate
+        if spend is not None:
+            used = _usage_tokens(verdict)
+            spend.calls += 1
+            # Unknown usage is never counted as zero: the estimate stands in for it.
+            spend.tokens += used if used is not None else (0 if verdict.cached else estimate)
+        elif verdict.usage is not None and not verdict.cached:
             ctx.add_usage(verdict.usage)  # the run's usage counts the check's model calls
         if journaled and key is not None:
             # Recorded (and, in a durable run, committed) before anything acts on it.
             await record_verdict(ctx, key, _verdict_record(verdict, identity))
         return verdict, "cache" if verdict.cached else "live"
+
+    async def _call_check(
+        self, check: Check, ctx: RunContext[Any], item: CheckInput, rule: Rule, *, isolated: bool
+    ) -> Verdict:
+        """Run ``check`` within ``check_timeout``. ``isolated``: outside the run's budget
+        admission (no active budget while it runs), for shadow model checks."""
+        from nexura_agents.usage import admission
+
+        token = admission.active_budget.set(None) if isolated else None
+        try:
+            if self.check_timeout is None:
+                return await run_check(check, ctx, item)
+            try:
+                return await asyncio.wait_for(run_check(check, ctx, item), self.check_timeout)
+            except TimeoutError:
+                return Verdict(
+                    decision="error",
+                    reason=f"no verdict within {self.check_timeout}s",
+                    check=str(getattr(check, "name", rule.id)),
+                    evidence={"error_type": "TimeoutError"},
+                )
+        finally:
+            if token is not None:
+                admission.active_budget.reset(token)
 
     def _triggered(self, rule: Rule, verdict: Verdict) -> bool:
         if verdict.decision == "allow":
@@ -536,15 +818,41 @@ class GuardrailPolicy(AgentHooks):
         if stage not in POLICY_STAGES:
             raise ValueError(f"unknown stage {stage!r}")
         views = argument_views(getattr(ctx, "_tool_object", None), arguments)
-        work = self._evaluate(ctx, stage, text, tool, views, context, scrub_text)
+        outcome = await self._bounded(
+            ctx, stage, text, tool, views, context, scrub_text, shadow=False
+        )
+        if self._has_mode_stage(stage, "shadow"):
+            # Shadow rules after the enforced ones, under their own stage timeout: they are
+            # only reported, so they can neither delay nor change the enforced decision.
+            found = await self._bounded(
+                ctx, stage, text, tool, views, context, scrub_text, shadow=True
+            )
+            outcome = dataclasses.replace(outcome, shadow=found)
+        return outcome
+
+    async def _bounded(
+        self,
+        ctx: RunContext[Any],
+        stage: str,
+        text: str,
+        tool: ToolInfo | None,
+        views: Sequence[Any],
+        context: str | None,
+        scrub_text: str | None,
+        *,
+        shadow: bool,
+    ) -> StageOutcome:
+        """One mode's rules for ``stage``, bounded by ``stage_timeout``."""
+        mode: Literal["enforce", "shadow"] = "shadow" if shadow else "enforce"
+        work = self._evaluate(ctx, stage, text, tool, views, context, scrub_text, shadow=shadow)
         if self.stage_timeout is None:
             return await work
         try:
             return await asyncio.wait_for(work, self.stage_timeout)
         except TimeoutError:
             if self.on_error == "allow":
-                return StageOutcome("allow", error_type="TimeoutError")
-            return StageOutcome("block", rule="stage_timeout", error_type="TimeoutError")
+                return StageOutcome("allow", error_type="TimeoutError", mode=mode)
+            return StageOutcome("block", rule="stage_timeout", error_type="TimeoutError", mode=mode)
 
     async def _evaluate(
         self,
@@ -555,40 +863,85 @@ class GuardrailPolicy(AgentHooks):
         views: Sequence[Any],
         context: str | None,
         scrub_text: str | None,
+        *,
+        shadow: bool = False,
     ) -> StageOutcome:
+        """The decision of one mode's rules (``shadow``: the shadow rules, else the enforced
+        ones). Both modes are evaluated the same way; only the rules differ."""
+        mode: Literal["enforce", "shadow"] = "shadow" if shadow else "enforce"
         matched = self._matched(stage, ctx.agent_name, tool, views)
-        allowlisted = any(r.action == "allow" for r in matched)
-        if stage == "tool_input" and self.default_tool_action == "block" and not allowlisted:
-            return StageOutcome("block", rule="default_tool_action")
+        own = [r for r in matched if self.rule_mode(r) == mode]
+        if stage == "tool_input" and self._allowlist_mode() == mode:
+            # An enforced allowlist admits by enforced allow rules only (a shadow allow rule
+            # never weakens it); a shadow allowlist by any allow rule.
+            admitting = matched if shadow else own
+            if not any(r.action == "allow" for r in admitting):
+                return StageOutcome("block", rule="default_tool_action", mode=mode)
         # Rules without checks act on every match: the most severe one wins.
-        unconditional = [r for r in matched if not r.checks and r.action in ("fail", "block")]
+        unconditional = [r for r in own if not r.checks and r.action in ("fail", "block")]
         if unconditional:
             top = max(unconditional, key=lambda r: r.severity)  # first of the highest rank
-            return StageOutcome(top.action, rule=top.id)  # type: ignore[arg-type]
+            return StageOutcome(top.action, rule=top.id, mode=mode)  # type: ignore[arg-type]
         # Rules with checks, most severe first, so a cheaper finding never hides a fail.
         conditional = sorted(
-            (r for r in matched if r.checks and r.action in ("fail", "block", "scrub")),
+            (r for r in own if r.checks and r.action in ("fail", "block", "scrub")),
             key=lambda r: -SEVERITY[r.action],
         )
         current = scrub_text if scrub_text is not None else text
         scrubbed: StageOutcome | None = None
+        # Shadow mode reports a check error that on_error lets through (not a finding).
+        unreported_error: StageOutcome | None = None
         for rule in conditional:
             if rule.action == "scrub":
-                verdict, source = await self._run_one(ctx, rule, stage, current, context)
+                verdict, source = await self._run_one(
+                    ctx, rule, stage, current, context, shadow=shadow
+                )
                 if not self._triggered(rule, verdict):
+                    unreported_error = unreported_error or self._error_note(rule, verdict, source)
                     continue
                 if verdict.decision == "rewrite" and verdict.replacement is not None:
                     current = verdict.replacement
                     scrubbed = StageOutcome(
-                        "scrub", rule=rule.id, verdict=verdict, replacement=current, source=source
+                        "scrub",
+                        rule=rule.id,
+                        verdict=verdict,
+                        replacement=current,
+                        source=source,
+                        mode=mode,
                     )
                     continue
                 # A scrub check that blocks (or errors) cannot redact: block, fail closed.
-                return self._finding("block", rule, verdict, source)
-            verdict, source = await self._run_one(ctx, rule, stage, text, context)
+                return self._finding("block", rule, verdict, source, mode)
+            verdict, source = await self._run_one(ctx, rule, stage, text, context, shadow=shadow)
             if self._triggered(rule, verdict):
-                return self._finding(rule.action, rule, verdict, source)  # type: ignore[arg-type]
-        return scrubbed or StageOutcome("allow")
+                return self._finding(rule.action, rule, verdict, source, mode)  # type: ignore[arg-type]
+            unreported_error = unreported_error or self._error_note(rule, verdict, source)
+        if scrubbed is not None:
+            return scrubbed
+        if shadow and stage == "tool_input":
+            # require_approval as call_needs_approval decides it, over the shadow rules: the
+            # call reached here, so no shadow block refuses it.
+            gate = next((r for r in own if r.action == "require_approval"), None)
+            if gate is not None:
+                return StageOutcome("require_approval", rule=gate.id, mode=mode)
+        if shadow and unreported_error is not None:
+            return unreported_error
+        return StageOutcome("allow", mode=mode)
+
+    @staticmethod
+    def _error_note(rule: Rule, verdict: Verdict, source: str) -> StageOutcome | None:
+        """A shadow ``allow`` that records a check error ``on_error`` let through."""
+        if verdict.decision != "error":
+            return None
+        error = verdict.evidence.get("error_type")
+        return StageOutcome(
+            "allow",
+            rule=rule.id,
+            verdict=verdict,
+            source=source,
+            error_type=error if isinstance(error, str) else "error",
+            mode="shadow",
+        )
 
     def _matched(
         self, stage: str, agent: str | None, tool: ToolInfo | None, views: Sequence[Any]
@@ -619,7 +972,11 @@ class GuardrailPolicy(AgentHooks):
 
     @staticmethod
     def _finding(
-        action: Literal["block", "fail"], rule: Rule, verdict: Verdict, source: str
+        action: Literal["block", "fail"],
+        rule: Rule,
+        verdict: Verdict,
+        source: str,
+        mode: Literal["enforce", "shadow"] = "enforce",
     ) -> StageOutcome:
         error = verdict.evidence.get("error_type")
         return StageOutcome(
@@ -628,6 +985,7 @@ class GuardrailPolicy(AgentHooks):
             verdict=verdict,
             source=source,
             error_type=error if isinstance(error, str) else None,
+            mode=mode,
         )
 
     # ------------------------------------------------------------------ audit and events
@@ -636,6 +994,8 @@ class GuardrailPolicy(AgentHooks):
         info: dict[str, Any] = {
             "policy_digest": self.short_digest,
             "source": outcome.source,
+            "mode": outcome.mode,
+            "applied": outcome.applied,
         }
         if outcome.rule is not None:
             info["rule"] = outcome.rule
@@ -653,6 +1013,11 @@ class GuardrailPolicy(AgentHooks):
             )
         if outcome.error_type is not None:
             info["error_type"] = outcome.error_type
+        if outcome.skipped is not None:
+            info["skipped"] = outcome.skipped
+        tokens = _usage_tokens(verdict) if verdict is not None else None
+        if tokens is not None:
+            info["tokens"] = tokens
         return {k: v for k, v in info.items() if v is not None}
 
     async def _audit(
@@ -665,8 +1030,16 @@ class GuardrailPolicy(AgentHooks):
         *,
         event: bool,
     ) -> None:
-        """Record one decision: run event and trace (tool and model stages) and the sinks."""
-        if action == "allow" and not self.audit_allows:
+        """Record one decision: run event and trace (tool and model stages) and the sinks.
+
+        A shadow decision is recorded like an enforced one, with ``mode: "shadow"`` and
+        ``applied: false``; a shadow ``allow`` that hides a check error, or a shadow check
+        skipped by ``shadow_budget``, is always recorded, and a failing sink never fails the
+        run for a shadow decision (it is counted)."""
+        shadow_note = outcome.mode == "shadow" and (
+            outcome.error_type is not None or outcome.skipped is not None
+        )
+        if action == "allow" and not self.audit_allows and not shadow_note:
             return
         from nexura_agents.guardrails import decision_record
 
@@ -710,6 +1083,10 @@ class GuardrailPolicy(AgentHooks):
             tool_call_id=ctx.tool_call_id if on_tool else None,
             policy=self.name,
             policy_digest=self.short_digest,
+            mode=outcome.mode,
+            applied=outcome.applied,
+            tokens=_usage_tokens(verdict) if verdict is not None else None,
+            skipped=outcome.skipped,
         )
         for sink in self.audit:
             try:
@@ -724,11 +1101,19 @@ class GuardrailPolicy(AgentHooks):
                     type(sink).__name__,
                     type(exc).__name__,
                 )
-                if self.audit_required:
+                if self.audit_required and outcome.mode != "shadow":
                     raise PolicyAuditError(
                         f"Audit sink {type(sink).__name__} failed and the policy requires "
                         "auditing (audit_required=True)."
                     ) from exc
+
+    async def _report_shadow(
+        self, ctx: RunContext[Any], stage: str, outcome: StageOutcome | None, started: float
+    ) -> None:
+        """Audit and send the shadow rules' result of a stage item (never applied)."""
+        if outcome is None:
+            return
+        await self._audit(ctx, stage, outcome.action, outcome, started, event=True)
 
     def _trip(self, stage: str, outcome: StageOutcome, tool: str | None = None) -> Exception:
         return GuardrailTripwireTriggered(
@@ -755,25 +1140,41 @@ class GuardrailPolicy(AgentHooks):
     # ------------------------------------------------------------------ agent stages
 
     async def _output_outcome(self, ctx: RunContext[Any], text: str) -> tuple[str, StageOutcome]:
-        """``model_output`` rules (unless after_model already produced exactly this text),
-        then ``output`` rules on the result. Returns the deciding stage and its outcome; a
-        scrub's replacement covers both stages."""
+        """Enforced ``model_output`` rules (unless after_model already produced exactly this
+        text), then enforced ``output`` rules on the result. Returns the deciding stage and its
+        outcome; a scrub's replacement covers both stages. Shadow rules are not run here (this
+        guardrail may run on every streamed window): ``after_model`` reports the shadow
+        ``model_output`` rules and ``on_agent_end`` the shadow ``output`` rules."""
         first = StageOutcome("allow")
         run = getattr(ctx, "_verdicts", None)
         done = self._model_output_done.get(run, set()) if run is not None else set()
-        if self.has_stage("model_output") and _digest(text) not in done:
-            first = await self.evaluate(ctx, "model_output", text, scrub_text=text)
+        if self._has_mode_stage("model_output", "enforce") and _digest(text) not in done:
+            first = await self._enforced(ctx, "model_output", text, scrub_text=text)
             if first.action in ("block", "fail"):
                 return "model_output", first
             if first.action == "scrub" and first.replacement is not None:
                 text = first.replacement
-        if self.has_stage("output"):
-            second = await self.evaluate(ctx, "output", text, context=_latest_user(ctx))
+        if self._has_mode_stage("output", "enforce"):
+            second = await self._enforced(ctx, "output", text, context=_latest_user(ctx))
             if second.action != "allow":
                 return "output", second
         if first.action == "scrub":
             return "model_output", first
         return "output", StageOutcome("allow")
+
+    async def _enforced(
+        self,
+        ctx: RunContext[Any],
+        stage: str,
+        text: str,
+        *,
+        context: str | None = None,
+        scrub_text: str | None = None,
+    ) -> StageOutcome:
+        """The enforced rules' decision only (no shadow rules)."""
+        return await self._bounded(
+            ctx, stage, text, None, [None], context, scrub_text, shadow=False
+        )
 
     def _agent_guardrail(
         self, stage: Literal["input", "output"], *, chunk_safe: bool = False
@@ -784,6 +1185,8 @@ class GuardrailPolicy(AgentHooks):
                 where, outcome = await self._output_outcome(ctx, value_text(value))
             else:
                 where, outcome = stage, await self.evaluate(ctx, stage, value_text(value))
+                # Shadow input rules: reported as a decision event, never a trip.
+                await self._report_shadow(ctx, stage, outcome.shadow, started)
             if outcome.action == "allow":
                 await self._audit(ctx, where, "allow", outcome, started, event=False)
                 return GuardrailResult.passed(self._info(where, outcome))
@@ -820,8 +1223,27 @@ class GuardrailPolicy(AgentHooks):
 
     async def on_agent_start(self, ctx: RunContext[Any], agent: Any) -> None:
         """Refuse ``stream_guard="passthrough"`` at run start (and at a handoff) when this
-        policy has text rules for the agent: a clear error, not a silent downgrade."""
+        policy has enforced text rules for the agent: a clear error, not a silent
+        downgrade."""
         self._refuse_passthrough(agent)
+
+    async def on_agent_end(self, ctx: RunContext[Any], agent: Any, output: Any) -> None:
+        """Shadow ``output`` rules on the agent's final answer: evaluated and reported, never
+        applied. They run here, not as an output guardrail, so they never hold a stream."""
+        if output is None or not self._has_mode_stage("output", "shadow"):
+            return
+        started = time.monotonic()
+        found = await self._bounded(
+            ctx,
+            "output",
+            value_text(output),
+            None,
+            [None],
+            _latest_user(ctx),
+            None,
+            shadow=True,
+        )
+        await self._report_shadow(ctx, "output", found, started)
 
     # ------------------------------------------------------------------ model stages
 
@@ -834,6 +1256,7 @@ class GuardrailPolicy(AgentHooks):
         started = time.monotonic()
         outcome = await self.evaluate(ctx, "model_input", _model_input_text(messages))
         await self._audit(ctx, "model_input", outcome.action, outcome, started, event=True)
+        await self._report_shadow(ctx, "model_input", outcome.shadow, started)
         if outcome.action == "fail":
             raise self._trip("model_input", outcome)
         if outcome.action == "block":
@@ -860,6 +1283,7 @@ class GuardrailPolicy(AgentHooks):
             scrub_text=_reply_text(response, with_calls=False),
         )
         await self._audit(ctx, "model_output", outcome.action, outcome, started, event=True)
+        await self._report_shadow(ctx, "model_output", outcome.shadow, started)
         if outcome.action == "fail":
             raise self._trip("model_output", outcome)
         if outcome.action == "block":
@@ -902,6 +1326,7 @@ class GuardrailPolicy(AgentHooks):
             arguments=call.arguments,
         )
         await self._audit(ctx, "tool_input", outcome.action, outcome, started, event=True)
+        await self._report_shadow(ctx, "tool_input", outcome.shadow, started)
         if outcome.action == "fail":
             raise self._trip("tool_input", outcome, tool=call.name)
         if outcome.action == "block":
@@ -924,6 +1349,7 @@ class GuardrailPolicy(AgentHooks):
             arguments=call.arguments,
         )
         await self._audit(ctx, "tool_output", outcome.action, outcome, started, event=True)
+        await self._report_shadow(ctx, "tool_output", outcome.shadow, started)
         if outcome.action == "fail":
             raise self._trip("tool_output", outcome, tool=call.name)
         if outcome.action == "block":
@@ -950,10 +1376,16 @@ class GuardrailPolicy(AgentHooks):
         on those the tool will receive after validation (``tool_object``). False when the
         call is refused anyway: allowlist mode without an ``allow`` rule, or a check-less
         ``block``/``fail`` rule (a person is never asked to approve a refused call). Sync and
-        deterministic; also for calls outside a ``Runner``."""
+        deterministic; also for calls outside a ``Runner``. Enforced rules only: a shadow
+        ``require_approval`` rule never pauses a run (``before_tool`` reports it), and a
+        shadow ``block`` rule never spares a call its approval."""
         views = argument_views(tool_object, arguments)
-        matched = self._matched("tool_input", getattr(ctx, "agent_name", None), info, views)
-        if self.default_tool_action == "block" and not any(r.action == "allow" for r in matched):
+        matched = [
+            r
+            for r in self._matched("tool_input", getattr(ctx, "agent_name", None), info, views)
+            if self.rule_mode(r) == "enforce"
+        ]
+        if self._allowlist_mode() == "enforce" and not any(r.action == "allow" for r in matched):
             return False  # refused in before_tool: nothing to approve
         if any(not r.checks and r.action in ("block", "fail") for r in matched):
             return False  # refused in before_tool (L4)
@@ -989,6 +1421,7 @@ class GuardrailPolicy(AgentHooks):
             arguments=value if arguments is None and stage == "tool_input" else arguments,
         )
         await self._audit(ctx, stage, outcome.action, outcome, started, event=True)
+        await self._report_shadow(ctx, stage, outcome.shadow, started)
         return outcome
 
     # ------------------------------------------------------------------ helpers

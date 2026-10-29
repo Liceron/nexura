@@ -48,6 +48,7 @@ Core runtime dependencies are `httpx`, `pydantic`, `packaging` and `cryptography
 | `knowledge` | pypdf | PDF ingestion |
 | `secrets` | (nothing; `cryptography` is core since 0.4.0) | Compatibility with old install commands |
 | `sandbox` | pydantic-monty | Default Monty code-execution backend |
+| `gcs` | google-cloud-storage | `NEXURA_BLOB_URL=gs://...`: large run and trace payloads in a Cloud Storage bucket |
 
 `nexura-agents[litellm]` adds LiteLLM and `nexura-agents[otel]` adds tracing. Use `nexura-sandbox[wasi]` for WASI. Earlier `postgres`, `vector`, `vertex` and `sandbox-wasi` extras became the separate packages above. Missing dependencies are reported as `MODULE_UNAVAILABLE` rather than silently skipped.
 
@@ -170,7 +171,7 @@ Workflow JSON never contains code: only trusted registered handlers run. Approva
 
 Historical fake-model measurements establish neither real-model quality, provider bills/cache savings, production scale, customer demand nor superiority over other frameworks. The older gate that skipped a required browser check remains documented separately. The approximately 135 ms SDK import on 2026-10-09 (Python 3.12, warm cache, lazy provider loading) is a single local measurement, not a benchmark. See the [verification record](https://github.com/Liceron/nexura/blob/main/docs/testing.md#verification-record) for the complete chronology and limitations.
 
-Version 0.4.0 was published to PyPI and npm on 2026-10-25. Copyright holder and security contact: Liceron, info@liceron.in.
+Version 0.4.0 was published to PyPI and npm on 2026-10-25; 0.4.1 on 2026-10-29. Copyright holder and security contact: Liceron, info@liceron.in.
 
 ## Documentation map
 

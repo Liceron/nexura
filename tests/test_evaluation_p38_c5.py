@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from _service_state import service_evaluation_store
 from httpx import ASGITransport, AsyncClient
 from nexura_agents import Agent, FakeModel, ToolCall, tool
 from nexura_agents.events import RunEvent, RunEventType
@@ -467,7 +468,8 @@ async def test_eval_api_roundtrip_simulation_online_and_persistence(tmp_path: Pa
         )
         assert invalid.status_code == 422
         application.state.eval_store.close()
-        reopened = SqliteEvaluationStore(str(tmp_path / "api.sqlite"))
+        # The service's evaluation store as another process opens it (Postgres with a URL).
+        reopened = service_evaluation_store(tmp_path / "api.sqlite")
         assert reopened.get_run(result["run_id"]) is not None
         assert len(reopened.list_traces()) == 1
         reopened.close()

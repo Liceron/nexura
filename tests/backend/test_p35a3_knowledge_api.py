@@ -10,7 +10,6 @@ import pytest
 from nexura_runtime.knowledge.embeddings.config import describe_embedder
 from nexura_runtime.knowledge.embeddings.embedder import EmbeddingOrchestrator
 from nexura_runtime.knowledge.embeddings.provider import DeterministicEmbeddingProvider
-from nexura_runtime.knowledge.hybrid import HybridKnowledgeIndex
 from nexura_runtime.service.api.app import create_api_app
 from nexura_runtime.studio.store import StudioStore
 
@@ -40,9 +39,10 @@ async def test_status_lineage_conflict_and_explicit_reindex(tmp_path: Path) -> N
         # A service restart with a different operator configuration uses this same DB.
         changed = EmbeddingOrchestrator(DeterministicEmbeddingProvider(model_id="fixture-v2"))
         app.state.knowledge_embedder = changed
-        app.state.hybrid_knowledge_index = HybridKnowledgeIndex(
-            app.state.vector_store._conn,
-            embedder=changed,
+        # The service's own factory: the SQLite index on its connection, or the Postgres index
+        # under --service-backend=postgres (MVP WP7).
+        app.state.hybrid_knowledge_index = app.state.service_stores.knowledge_index(
+            app.state.vector_store, changed
         )
         assert (await client.get(base + "/status")).json()["requires_reindex"] is True
         for route, body in (

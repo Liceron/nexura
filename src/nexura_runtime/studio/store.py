@@ -29,6 +29,8 @@ from nexura_agents.errors import (
     WorkflowValidationError,
 )
 
+from nexura_runtime.blobs.binding import SQLiteBlobBinding
+from nexura_runtime.blobs.payloads import RUN_EVENT_NAMESPACE, DeferredPayload, decode_json
 from nexura_runtime.studio.builtin_modules import get_default_workflow_spec
 from nexura_runtime.workflow import (
     PendingApproval,
@@ -168,17 +170,188 @@ def _run_read_snapshot(conn: sqlite3.Connection) -> Iterator[None]:
             conn.rollback()
 
 
+#: Error text and event reason of the open-time sweep of legacy runs (shared by the backends).
+SWEEP_ERROR = "Run was interrupted by server restart or shutdown."
+SWEEP_REASON = "Server shutdown / restart while run was executing."
+#: The workflow seeded into an empty workflow table.
+DEFAULT_WORKFLOW_ID = "wf-order-support"
+
+# Column lists and row converters shared by the SQLite store and the Postgres store
+# (``nexura_postgres.PostgresStudioStore``), so both return the same dictionaries.
+WORKFLOW_COLUMNS = "workflow_id, name, revision, spec_json, created_at, updated_at"
+RUN_SUMMARY_COLUMNS = (
+    "run_id, workflow_id, spec_hash, status, current_node_id, "
+    "step_count, error, created_at, updated_at, current_state_json, "
+    "approval_json, pending_input_json, forked_from_json, cancel_reason, "
+    "pending_effect_json"
+)
+RUN_DETAIL_COLUMNS = (
+    "run_id, workflow_id, spec_hash, spec_json, status, "
+    "current_node_id, input_state_json, current_state_json, "
+    "step_count, approval_json, error, created_at, updated_at, "
+    "pending_input_json, forked_from_json, cancel_reason, "
+    "pending_effect_json, journal_workspace"
+)
+EVENT_COLUMNS = "event_seq, event_type, node_id, data_json, timestamp"
+
+
+def workflow_summary(row: Sequence[Any]) -> dict[str, Any]:
+    """A workflow list entry from a ``WORKFLOW_COLUMNS`` row."""
+    wf_id, name, rev, spec_json, c_at, u_at = row
+    try:
+        spec_dict = json.loads(spec_json)
+        node_count = len(spec_dict.get("nodes", {}))
+        entry_node = spec_dict.get("entry_node", "")
+    except Exception:
+        node_count = 0
+        entry_node = ""
+    return {
+        "workflow_id": wf_id,
+        "name": name,
+        "revision": rev,
+        "entry_node": entry_node,
+        "node_count": node_count,
+        "created_at": c_at,
+        "updated_at": u_at,
+    }
+
+
+def workflow_detail(row: Sequence[Any]) -> dict[str, Any]:
+    """A workflow with its parsed spec from a ``WORKFLOW_COLUMNS`` row."""
+    wf_id, name, rev, spec_json, c_at, u_at = row
+    spec = WorkflowSpec.from_dict(json.loads(spec_json))
+    return {
+        "workflow_id": wf_id,
+        "name": name,
+        "revision": rev,
+        "spec": spec.to_dict(),
+        "spec_hash": spec.canonical_hash(),
+        "created_at": c_at,
+        "updated_at": u_at,
+    }
+
+
+def run_summary(row: Sequence[Any]) -> dict[str, Any]:
+    """A run list entry from a ``RUN_SUMMARY_COLUMNS`` row."""
+    (
+        r_id,
+        wf_id,
+        s_hash,
+        status,
+        node_id,
+        steps,
+        err,
+        c_at,
+        u_at,
+        curr_json,
+        app_json,
+        input_json,
+        forked_json,
+        cancel_reason,
+        effect_json,
+    ) = row
+    pending_effect = json.loads(effect_json) if effect_json else None
+    return {
+        "run_id": r_id,
+        "workflow_id": wf_id,
+        "spec_hash": s_hash,
+        "status": status,
+        "current_node_id": node_id,
+        "step_count": steps,
+        "error": err,
+        "created_at": c_at,
+        "updated_at": u_at,
+        "current_state": json.loads(curr_json) if curr_json else {},
+        "pending_approval": json.loads(app_json) if app_json else None,
+        "pending_input": json.loads(input_json) if input_json else None,
+        "forked_from": json.loads(forked_json) if forked_json else None,
+        "cancel_reason": cancel_reason,
+        "pending_effect": pending_effect,
+        "pause_reason": "effect_unknown" if pending_effect else None,
+    }
+
+
+def run_event(row: Sequence[Any], raw_data: bool) -> dict[str, Any]:
+    """An event from an ``EVENT_COLUMNS`` row; with ``raw_data`` "data" keeps the stored text."""
+    seq, ev_type, ev_node, d_json, ts = row
+    return {
+        "seq": seq,
+        "type": ev_type,
+        "node_id": ev_node,
+        "data": d_json if raw_data else json.loads(d_json),
+        "timestamp": ts,
+    }
+
+
+def run_detail(row: Sequence[Any], events: list[dict[str, Any]], raw_data: bool) -> dict[str, Any]:
+    """A run with its events from a ``RUN_DETAIL_COLUMNS`` row."""
+    (
+        r_id,
+        wf_id,
+        s_hash,
+        s_json,
+        status,
+        node_id,
+        in_state_json,
+        curr_state_json,
+        steps,
+        app_json,
+        err,
+        c_at,
+        u_at,
+        input_json,
+        forked_json,
+        cancel_reason,
+        effect_json,
+        run_journal_workspace,
+    ) = row
+    pending_effect = json.loads(effect_json) if effect_json else None
+    run: dict[str, Any] = {
+        "run_id": r_id,
+        "workflow_id": wf_id,
+        "spec_hash": s_hash,
+        "spec": json.loads(s_json),
+        "status": status,
+        "current_node_id": node_id,
+        "step_count": steps,
+        "input_state": json.loads(in_state_json),
+        "current_state": json.loads(curr_state_json),
+        "pending_approval": json.loads(app_json) if app_json else None,
+        "pending_input": json.loads(input_json) if input_json else None,
+        "forked_from": json.loads(forked_json) if forked_json else None,
+        "error": err,
+        "cancel_reason": cancel_reason,
+        "pending_effect": pending_effect,
+        "pause_reason": "effect_unknown" if pending_effect else None,
+        "events": events,
+        "created_at": c_at,
+        "updated_at": u_at,
+    }
+    if raw_data:
+        run["_journal_workspace"] = run_journal_workspace
+    return run
+
+
 class StudioStore:
     """Manages SQLite storage for Studio definitions, runs, and event streams."""
 
-    def __init__(self, db_path: str | Path, *, checkpoint_store: Any = None) -> None:
+    def __init__(
+        self, db_path: str | Path, *, checkpoint_store: Any = None, blob_payloads: Any = None
+    ) -> None:
         """Open the Studio database at ``db_path``.
 
         ``checkpoint_store``: where workflow checkpoints live (for example
         ``nexura_postgres.PostgresWorkflowStore``); the store then owns it and closes it
         with ``close()``. Default: a ``SQLiteWorkflowStore`` on the same database file.
+
+        ``blob_payloads``: a ``nexura_runtime.blobs.BlobPayloads``. Run-event payloads above
+        its threshold are then stored as blobs under the run's workspace, and ``data_json``
+        keeps a reference with a short preview (MVP WP2b). The service sets it; without it
+        every payload stays inline, as before. Inline rows always read as before.
         """
         self.db_path = Path(db_path).resolve()
+        self._blob_payloads: Any = None
+        self.blob_payloads = blob_payloads
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._closed = False
@@ -279,12 +452,12 @@ class StudioStore:
                     """
                     UPDATE nexura_studio_runs
                     SET status = 'interrupted',
-                        error = 'Run was interrupted by server restart or shutdown.',
+                        error = ?,
                         updated_at = ?
                     WHERE run_id = ? AND status = 'running' AND owner_process IS ?
                       AND journal_workspace IS NULL
                     """,
-                    (now, r_id, owner),
+                    (SWEEP_ERROR, now, r_id, owner),
                 )
                 if swept.rowcount > 0:
                     interrupted_ids.append(r_id)
@@ -308,10 +481,7 @@ class StudioStore:
                             next_seq,
                             "RUN_INTERRUPTED",
                             None,
-                            json.dumps(
-                                {"reason": "Server shutdown / restart while run was executing."},
-                                ensure_ascii=False,
-                            ),
+                            json.dumps({"reason": SWEEP_REASON}, ensure_ascii=False),
                             now,
                         ),
                     )
@@ -328,7 +498,7 @@ class StudioStore:
                     ) VALUES (?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        "wf-order-support",
+                        DEFAULT_WORKFLOW_ID,
                         default_spec.name,
                         1,
                         default_spec_json,
@@ -343,6 +513,29 @@ class StudioStore:
             checkpoint_store if checkpoint_store is not None else SQLiteWorkflowStore(self.db_path)
         )
 
+    #: One database file per host: run liveness uses the B46 owner rule only.
+    shared_across_instances = False
+
+    def this_owner(self) -> str:
+        """The ``owner_process`` value runs started or resumed by this process record."""
+        return _process_owner()
+
+    def owner_is_gone(self, owner: str | None) -> bool:
+        """The B46 rule: a run of this host whose process is gone (or a row without an owner)."""
+        return _owner_is_gone(owner)
+
+    @property
+    def blob_payloads(self) -> Any:
+        return self._blob_payloads
+
+    @blob_payloads.setter
+    def blob_payloads(self, codec: Any) -> None:
+        """Set the codec; this database is registered as one its references live in, so it
+        records the store identity before its first blob reference (``blobs.binding``)."""
+        self._blob_payloads = codec
+        if codec is not None and hasattr(codec, "add_binding"):
+            codec.add_binding(SQLiteBlobBinding(self.db_path))
+
     def _ensure_open(self) -> sqlite3.Connection:
         if self._closed or self._conn is None:
             raise WorkflowError("StudioStore connection is closed.")
@@ -356,61 +549,19 @@ class StudioStore:
         with self._lock:
             conn = self._ensure_open()
             cursor = conn.execute(
-                """
-                SELECT workflow_id, name, revision, spec_json, created_at, updated_at
-                FROM nexura_studio_workflows
-                ORDER BY updated_at DESC
-                """
+                f"SELECT {WORKFLOW_COLUMNS} FROM nexura_studio_workflows ORDER BY updated_at DESC"
             )
-            rows = cursor.fetchall()
-            results: list[dict[str, Any]] = []
-            for wf_id, name, rev, spec_json, c_at, u_at in rows:
-                try:
-                    spec_dict = json.loads(spec_json)
-                    node_count = len(spec_dict.get("nodes", {}))
-                    entry_node = spec_dict.get("entry_node", "")
-                except Exception:
-                    node_count = 0
-                    entry_node = ""
-                results.append(
-                    {
-                        "workflow_id": wf_id,
-                        "name": name,
-                        "revision": rev,
-                        "entry_node": entry_node,
-                        "node_count": node_count,
-                        "created_at": c_at,
-                        "updated_at": u_at,
-                    }
-                )
-            return results
+            return [workflow_summary(row) for row in cursor.fetchall()]
 
     def _get_workflow_sync(self, workflow_id: str) -> dict[str, Any] | None:
         with self._lock:
             conn = self._ensure_open()
             cursor = conn.execute(
-                """
-                SELECT workflow_id, name, revision, spec_json, created_at, updated_at
-                FROM nexura_studio_workflows
-                WHERE workflow_id = ?
-                """,
+                f"SELECT {WORKFLOW_COLUMNS} FROM nexura_studio_workflows WHERE workflow_id = ?",
                 (workflow_id,),
             )
             row = cursor.fetchone()
-            if row is None:
-                return None
-            wf_id, name, rev, spec_json, c_at, u_at = row
-            spec_dict = json.loads(spec_json)
-            spec = WorkflowSpec.from_dict(spec_dict)
-            return {
-                "workflow_id": wf_id,
-                "name": name,
-                "revision": rev,
-                "spec": spec.to_dict(),
-                "spec_hash": spec.canonical_hash(),
-                "created_at": c_at,
-                "updated_at": u_at,
-            }
+            return None if row is None else workflow_detail(row)
 
     def _create_workflow_sync(
         self, spec: WorkflowSpec, workflow_id: str | None = None
@@ -513,11 +664,16 @@ class StudioStore:
         started_by: dict[str, Any] | None = None,
         journal_workspace: str | None = None,
     ) -> None:
+        # A large initial state goes to the blob store before the database lock is taken.
+        started_json = self._event_data_text(
+            journal_workspace,
+            {"workflow_id": workflow_id, "initial_state": initial_state},
+        )
         with self._lock:
             conn = self._ensure_open()
             now = time.time()
             forked_json = json.dumps(forked_from, ensure_ascii=False) if forked_from else None
-            started_json = json.dumps(started_by, ensure_ascii=False) if started_by else None
+            started_by_json = json.dumps(started_by, ensure_ascii=False) if started_by else None
             spec_json = spec.to_json(indent=2)
             spec_hash = spec.canonical_hash()
             state_json = json.dumps(initial_state, ensure_ascii=False)
@@ -545,7 +701,7 @@ class StudioStore:
                         now,
                         now,
                         forked_json,
-                        started_json,
+                        started_by_json,
                         _process_owner(),
                         journal_workspace,
                     ),
@@ -561,13 +717,33 @@ class StudioStore:
                         1,
                         "RUN_STARTED",
                         spec.entry_node,
-                        json.dumps(
-                            {"workflow_id": workflow_id, "initial_state": initial_state},
-                            ensure_ascii=False,
-                        ),
+                        started_json,
                         now,
                     ),
                 )
+
+    def _run_workspace(self, run_id: str) -> str | None:
+        """The workspace a run's blobs are filed under (its journal workspace), if recorded."""
+        with self._lock:
+            row = (
+                self._ensure_open()
+                .execute(
+                    "SELECT journal_workspace FROM nexura_studio_runs WHERE run_id = ?", (run_id,)
+                )
+                .fetchone()
+            )
+        return row[0] if row else None
+
+    def _event_data_text(self, workspace_id: str | None, data: Any) -> str:
+        """``data_json`` for a run event: inline JSON, or a blob reference when it is large.
+
+        Blobs of runs that have no journal workspace (runs recorded outside the service) are
+        filed under ``default``, the local owner's workspace.
+        """
+        text = data if isinstance(data, str) else json.dumps(data, ensure_ascii=False)
+        if self.blob_payloads is None:
+            return text
+        return str(self.blob_payloads.encode(workspace_id or "default", RUN_EVENT_NAMESPACE, text))
 
     def _record_run_event_sync(
         self,
@@ -576,10 +752,15 @@ class StudioStore:
         node_id: str | None = None,
         data: dict[str, Any] | None = None,
     ) -> None:
+        data_json = json.dumps(data or {}, ensure_ascii=False)
+        codec = self.blob_payloads
+        if codec is not None and codec.needs_offload(data_json):
+            # The blob is written outside the database lock; an event that is then not
+            # recorded (no parent run) leaves an unreferenced blob for blob retention.
+            data_json = self._event_data_text(self._run_workspace(run_id), data_json)
         with self._lock:
             conn = self._ensure_open()
             now = time.time()
-            data_json = json.dumps(data or {}, ensure_ascii=False)
             with conn:
                 # Serialize the parent check and append with retention's DELETEs.
                 # Preserve legacy batching: commit the caller's existing write
@@ -739,147 +920,61 @@ class StudioStore:
     ) -> list[dict[str, Any]]:
         where, params = self._run_filter(workflow_id, run_ids, status)
         sql = (
-            "SELECT run_id, workflow_id, spec_hash, status, current_node_id, "
-            "step_count, error, created_at, updated_at, current_state_json, "
-            "approval_json, pending_input_json, forked_from_json, cancel_reason, "
-            "pending_effect_json "
-            "FROM nexura_studio_runs" + where + " ORDER BY created_at DESC, run_id DESC "
-            "LIMIT ? OFFSET ?"
+            f"SELECT {RUN_SUMMARY_COLUMNS} FROM nexura_studio_runs"
+            + where
+            + " ORDER BY created_at DESC, run_id DESC LIMIT ? OFFSET ?"
         )
         params = [*params, -1 if limit is None else limit, max(0, offset)]
         with self._lock:
             conn = self._ensure_open()
-            cursor = conn.execute(sql, params)
-            rows = cursor.fetchall()
-            results: list[dict[str, Any]] = []
-            for (
-                r_id,
-                wf_id,
-                s_hash,
-                status,
-                node_id,
-                steps,
-                err,
-                c_at,
-                u_at,
-                curr_json,
-                app_json,
-                input_json,
-                forked_json,
-                cancel_reason,
-                effect_json,
-            ) in rows:
-                pending_effect = json.loads(effect_json) if effect_json else None
-                results.append(
-                    {
-                        "run_id": r_id,
-                        "workflow_id": wf_id,
-                        "spec_hash": s_hash,
-                        "status": status,
-                        "current_node_id": node_id,
-                        "step_count": steps,
-                        "error": err,
-                        "created_at": c_at,
-                        "updated_at": u_at,
-                        "current_state": json.loads(curr_json) if curr_json else {},
-                        "pending_approval": json.loads(app_json) if app_json else None,
-                        "pending_input": json.loads(input_json) if input_json else None,
-                        "forked_from": json.loads(forked_json) if forked_json else None,
-                        "cancel_reason": cancel_reason,
-                        "pending_effect": pending_effect,
-                        "pause_reason": "effect_unknown" if pending_effect else None,
-                    }
-                )
-            return results
+            return [run_summary(row) for row in conn.execute(sql, params).fetchall()]
 
-    def _get_run_sync(self, run_id: str) -> dict[str, Any] | None:
+    def _get_run_sync(
+        self, run_id: str, payloads: bool = True, payloads_after_seq: int = 0
+    ) -> dict[str, Any] | None:
+        codec = self.blob_payloads
+        run = self._read_run_sync(run_id, raw_data=codec is not None)
+        if run is None or codec is None:
+            return run
+        # Blob references are followed after the database lock is released, and only for the
+        # events the caller wants; the others stay DeferredPayload placeholders.
+        workspace = run.pop("_journal_workspace") or "default"
+        for event in run["events"]:
+            stored = event["data"]
+            if codec.reference(stored, workspace) is None:
+                event["data"] = json.loads(stored)  # inline (or not this workspace's marker)
+            elif payloads and int(event.get("seq") or 0) > payloads_after_seq:
+                event["data"] = decode_json(codec, stored, workspace)
+            else:
+                event["data"] = DeferredPayload(stored, workspace)
+        return run
+
+    def _load_payloads_sync(self, run: dict[str, Any], after_seq: int) -> dict[str, Any]:
+        codec = self.blob_payloads
+        if codec is None:
+            return run
+        for event in run.get("events") or []:
+            data = event.get("data")
+            if isinstance(data, DeferredPayload) and int(event.get("seq") or 0) > after_seq:
+                event["data"] = decode_json(codec, data.stored, data.workspace_id)
+        return run
+
+    def _read_run_sync(self, run_id: str, *, raw_data: bool = False) -> dict[str, Any] | None:
         with self._lock, _run_read_snapshot(self._ensure_open()):
             conn = self._ensure_open()
-            cursor = conn.execute(
-                """
-                SELECT run_id, workflow_id, spec_hash, spec_json, status,
-                       current_node_id, input_state_json, current_state_json,
-                       step_count, approval_json, error, created_at, updated_at,
-                       pending_input_json, forked_from_json, cancel_reason,
-                       pending_effect_json
-                FROM nexura_studio_runs
-                WHERE run_id = ?
-                """,
+            row = conn.execute(
+                f"SELECT {RUN_DETAIL_COLUMNS} FROM nexura_studio_runs WHERE run_id = ?",
                 (run_id,),
-            )
-            row = cursor.fetchone()
+            ).fetchone()
             if row is None:
                 return None
-
-            (
-                r_id,
-                wf_id,
-                s_hash,
-                s_json,
-                status,
-                node_id,
-                in_state_json,
-                curr_state_json,
-                steps,
-                app_json,
-                err,
-                c_at,
-                u_at,
-                input_json,
-                forked_json,
-                cancel_reason,
-                effect_json,
-            ) = row
-            pending_effect = json.loads(effect_json) if effect_json else None
-
-            in_state = json.loads(in_state_json)
-            curr_state = json.loads(curr_state_json)
-            pending_app = json.loads(app_json) if app_json else None
-            spec_dict = json.loads(s_json)
-
-            # Fetch ordered events
-            ev_cursor = conn.execute(
-                """
-                SELECT event_seq, event_type, node_id, data_json, timestamp
-                FROM nexura_studio_run_events
-                WHERE run_id = ?
-                ORDER BY event_seq ASC
-                """,
+            ev_rows = conn.execute(
+                f"SELECT {EVENT_COLUMNS} FROM nexura_studio_run_events "
+                "WHERE run_id = ? ORDER BY event_seq ASC",
                 (run_id,),
-            )
-            events: list[dict[str, Any]] = []
-            for seq, ev_type, ev_node, d_json, ts in ev_cursor.fetchall():
-                events.append(
-                    {
-                        "seq": seq,
-                        "type": ev_type,
-                        "node_id": ev_node,
-                        "data": json.loads(d_json),
-                        "timestamp": ts,
-                    }
-                )
-
-            return {
-                "run_id": r_id,
-                "workflow_id": wf_id,
-                "spec_hash": s_hash,
-                "spec": spec_dict,
-                "status": status,
-                "current_node_id": node_id,
-                "step_count": steps,
-                "input_state": in_state,
-                "current_state": curr_state,
-                "pending_approval": pending_app,
-                "pending_input": json.loads(input_json) if input_json else None,
-                "forked_from": json.loads(forked_json) if forked_json else None,
-                "error": err,
-                "cancel_reason": cancel_reason,
-                "pending_effect": pending_effect,
-                "pause_reason": "effect_unknown" if pending_effect else None,
-                "events": events,
-                "created_at": c_at,
-                "updated_at": u_at,
-            }
+            ).fetchall()
+            # With raw_data, "data" holds the stored text until _get_run_sync decodes it.
+            return run_detail(row, [run_event(ev, raw_data) for ev in ev_rows], raw_data)
 
     def _list_journaled_runs_sync(
         self,
@@ -1105,8 +1200,23 @@ class StudioStore:
     ) -> int:
         return await asyncio.to_thread(self._count_runs_sync, workflow_id, run_ids, status)
 
-    async def get_run(self, run_id: str) -> dict[str, Any] | None:
-        return await asyncio.to_thread(self._get_run_sync, run_id)
+    async def get_run(
+        self, run_id: str, *, payloads: bool = True, payloads_after_seq: int = 0
+    ) -> dict[str, Any] | None:
+        """The run with its events.
+
+        ``payloads=False`` reads no blob: an offloaded event payload is then a
+        ``DeferredPayload`` placeholder. Use it for status checks and before an ownership check;
+        ``load_payloads`` reads the payloads afterwards. ``payloads_after_seq`` reads only the
+        payloads of events after that sequence number (live streams).
+        """
+        return await asyncio.to_thread(self._get_run_sync, run_id, payloads, payloads_after_seq)
+
+    async def load_payloads(self, run: dict[str, Any], *, after_seq: int = 0) -> dict[str, Any]:
+        """Replace the ``DeferredPayload`` placeholders of ``run`` (events after ``after_seq``)."""
+        if not any(isinstance(e.get("data"), DeferredPayload) for e in run.get("events") or []):
+            return run
+        return await asyncio.to_thread(self._load_payloads_sync, run, after_seq)
 
     async def close(self) -> None:
         if isinstance(self.checkpoint_store, SQLiteWorkflowStore):

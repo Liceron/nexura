@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Liceron
 import { Modal } from '../../components/Modal';
 import { Button } from '../../components/Button';
-import { useState, useEffect, useMemo } from 'react';
+import { Fragment, useState, useEffect, useMemo } from 'react';
 import { useApi } from '../../api/context';
 import type { ModuleDescriptor } from '@liceron/nexura-sdk';
 import { Card } from '../../components/Card';
@@ -14,30 +14,32 @@ import { connectorOperations, requiredCredentialTypes } from './connectors';
 import { useBuilderT } from '../builder/composite';
 import { formatApiError } from '../../api/errors';
 
+export const MODULE_DRAG_TYPE = 'application/x-nexura-module';
+
 interface ModulePaletteProps {
   open: boolean;
   onClose: () => void;
   onSelectModule: (module: ModuleDescriptor) => void;
+  sidebar?: boolean;
+  catalog?: ReturnType<typeof useModuleCatalog>;
 }
 
-export function ModulePalette({ open, onClose, onSelectModule }: ModulePaletteProps) {
-  const { manager } = useApi();
+export function useModuleCatalog(open: boolean) {
+  const { manager, connection } = useApi();
   const t = useBuilderT();
   const [modules, setModules] = useState<ModuleDescriptor[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const [activeCategory, setActiveCategory] = useState<ModuleCategory>('all');
-  const [search, setSearch] = useState('');
-
   useEffect(() => {
     if (!open) return;
     let isMounted = true;
+    setModules([]);
     setLoading(true);
     setError(null);
 
-    manager.client.modules
-      .list()
+    Promise.resolve()
+      .then(() => manager.client.modules.list())
       .then((res) => {
         if (!isMounted) return;
         const list = res.items || res.modules || [];
@@ -54,10 +56,21 @@ export function ModulePalette({ open, onClose, onSelectModule }: ModulePalettePr
     return () => {
       isMounted = false;
     };
-  }, [open, manager]);
+  }, [open, manager, connection?.workspace, connection?.principal]);
+
+  return { modules, loading, error };
+}
+
+export function ModulePalette({ open, onClose, onSelectModule, sidebar = false, catalog }: ModulePaletteProps) {
+  const ownCatalog = useModuleCatalog(open && !catalog);
+  const { modules, loading, error } = catalog ?? ownCatalog;
+  const t = useBuilderT();
+  const [activeCategory, setActiveCategory] = useState<ModuleCategory>('all');
+  const [search, setSearch] = useState('');
+  const categoryOf = (module: ModuleDescriptor) => MODULE_CATEGORIES.find(category => category.id !== 'all' && moduleMatchesCategory(module, category.id))?.id ?? 'all';
 
   const filteredModules = useMemo(() => {
-    return modules.filter((mod) => {
+    const filtered = modules.filter((mod) => {
       // Service-internal modules (descriptor flag) stay registered but are not offered.
       if (!isOfferedInPalette(mod)) return false;
 
@@ -78,12 +91,12 @@ export function ModulePalette({ open, onClose, onSelectModule }: ModulePalettePr
 
       return true;
     });
-  }, [modules, activeCategory, search]);
+    return sidebar && activeCategory === 'all' ? filtered.sort((a, b) => categoryOf(a).localeCompare(categoryOf(b))) : filtered;
+  }, [modules, activeCategory, search, sidebar]);
 
   if (!open) return null;
 
-  return (
-    <Modal open={open} onClose={onClose} title={t('ui.availableModulesDrawer')} maxWidth={480}>
+  const content = <>
       <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{filteredModules.length} {t('ui.available2')}</div>
       {/* Search Input */}
       <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--border-subtle)' }}>
@@ -163,11 +176,20 @@ export function ModulePalette({ open, onClose, onSelectModule }: ModulePalettePr
 
         {!loading &&
           !error &&
-          filteredModules.map((mod) => {
+          filteredModules.map((mod, index) => {
             const isSynthetic = mod.module_id.startsWith('synthetic_');
             return (
+              <Fragment key={`${mod.module_id}-${mod.version}`}>
+              {sidebar && activeCategory === 'all' && (index === 0 || categoryOf(filteredModules[index - 1]) !== categoryOf(mod)) && <h3 style={{ fontSize: 12, margin: '8px 0 0' }}>{t(`paletteCategories.${categoryOf(mod)}`)}</h3>}
               <Card
-                key={`${mod.module_id}-${mod.version}`}
+                onClick={event => {
+                  if (sidebar && !(event.target as HTMLElement).closest('button, a, input, select, summary')) onSelectModule(mod);
+                }}
+                draggable={sidebar}
+                onDragStart={(event) => {
+                  event.dataTransfer.setData(MODULE_DRAG_TYPE, JSON.stringify({ module_id: mod.module_id, version: mod.version }));
+                  event.dataTransfer.effectAllowed = 'copy';
+                }}
                 style={{
                   padding: 10,
                   cursor: 'pointer',
@@ -210,12 +232,17 @@ export function ModulePalette({ open, onClose, onSelectModule }: ModulePalettePr
                     <span>{t('ui.kind2') + " "}{mod.kind}</span>
                     {mod.requires_approval && <Badge variant="warning">{t('ui.approvalGate')}</Badge>}
                   </div>
-                  <Button variant="ghost" size="sm" onClick={() => onSelectModule(mod)}>{t('ui.addNode')}</Button>
+                  <Button variant="ghost" size="sm" aria-label={sidebar ? t('builderTest.addStep', { title: mod.title || mod.module_id }) : undefined} onClick={() => onSelectModule(mod)}>{t('ui.addNode')}</Button>
                 </div>
               </Card>
+              </Fragment>
             );
           })}
       </div>
-    </Modal>
-  );
+    </>;
+  return sidebar ? <aside className="workflow-module-sidebar" aria-label={t('builderTest.modules')}>
+    <div className="builder-panel-heading"><strong>{t('builderTest.modules')}</strong><Button variant="ghost" size="sm" onClick={onClose}>{t('builderTest.collapse')}</Button></div>
+    <p className="builder-panel-hint">{t('builderTest.dragHint')}</p>
+    {content}
+  </aside> : <Modal open={open} onClose={onClose} title={t('ui.availableModulesDrawer')} maxWidth={480}>{content}</Modal>;
 }

@@ -9,9 +9,6 @@ in EDITIONS_PLAN step 7.
 
 from __future__ import annotations
 
-import json
-import sqlite3
-from contextlib import closing
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
@@ -25,6 +22,8 @@ from nexura_runtime.service.auth.errors import (
 )
 from nexura_runtime.service.auth.models import Principal, WorkspaceRole
 from nexura_runtime.service.auth.permissions import check_permission
+from nexura_runtime.service.workspaces.membership import remembered_member
+from nexura_runtime.service.workspaces.models import WorkspaceMember
 from nexura_runtime.service.workspaces.repository import WorkspaceExistsError, WorkspaceRepository
 from nexura_runtime.service.workspaces.scoping import ResourceScopeEnforcer
 
@@ -82,6 +81,39 @@ def check_workspace_access(request: Request, workspace_id: str) -> None:
             status_code=status.HTTP_403_FORBIDDEN,
             detail={"code": "PERMISSION_DENIED", "message": str(exc)},
         ) from exc
+
+
+def checked_workspace_member(request: Request, workspace_id: str) -> WorkspaceMember | None:
+    """``check_workspace_access`` and the caller's membership record from one membership read
+    (MVP WP11a; a route that needs both used to read it twice, after the authentication read).
+    When this request's authentication already read that record (``remember_member``), it is
+    used: the same read the request was authorised with.
+
+    Returns the record (``None``: none, which only the local owner may have) or raises the
+    403 that ``check_workspace_access`` raises.
+    """
+    principal: Principal | None = getattr(request.state, "principal", None)
+    repo = _get_scope_enforcer(request).workspace_repo
+    principal_id = principal.principal_id if principal is not None else "local-owner"
+    # The read the authentication of this request made, when it was for this workspace.
+    known, member = remembered_member(request.state, workspace_id, principal_id)
+    if not known:
+        member = repo.get_member(workspace_id, principal_id)
+    if (
+        member is None
+        and principal is not None
+        and principal.profile == "authenticated-shared-service"
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "PERMISSION_DENIED",
+                "message": (
+                    f"Principal '{principal_id}' does not belong to workspace '{workspace_id}'."
+                ),
+            },
+        )
+    return member
 
 
 @router.get("", response_model=PaginatedResponse[dict[str, Any]])
@@ -221,18 +253,9 @@ async def update_workspace_policy(
             },
         )
     previous = ws.metadata.get("require_promotion_approval") is True
-    ws.metadata["require_promotion_approval"] = payload.require_promotion_approval
-    if repo.db_path is not None:
-        with (
-            closing(
-                sqlite3.connect(str(repo.db_path), check_same_thread=False, timeout=10.0)
-            ) as conn,
-            conn,
-        ):
-            conn.execute(
-                "UPDATE nexura_service_workspaces SET metadata_json = ? WHERE workspace_id = ?",
-                (json.dumps(ws.metadata), workspace_id),
-            )
+    repo.update_workspace_metadata(
+        workspace_id, {"require_promotion_approval": payload.require_promotion_approval}
+    )
     pub_store = getattr(request.app.state, "publication_store", None)
     if pub_store is not None and previous != payload.require_promotion_approval:
         pub_store.add_audit(

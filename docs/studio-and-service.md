@@ -87,6 +87,7 @@ Every request other than GET, HEAD and OPTIONS must send the server's per-sessio
 - Studio reads the token from `GET /api/v1/local-session` on its own origin and sends it for you. The server refuses that read when the browser marks it cross-site or same-site (`Sec-Fetch-Site`) or when its `Origin` is another server. The built-in Studio page (`nexura-studio`) also receives it in the page itself; with `NEXURA_STUDIO_TOKEN` set and a non-local browser (Docker), open the page as `http://127.0.0.1:8765/#token=<your token>`.
 - The TypeScript client (`@liceron/nexura-sdk`) and the Python `NexuraClient` read the token from that endpoint when the server refuses a request for it, then retry once; pass `sessionToken` / `session_token` to set it yourself.
 - Scripts on this machine can read it the same way (`curl http://127.0.0.1:8765/api/v1/local-session`). An app that embeds `create_api_app()` finds it on `app.state.session_token`.
+- **The token is optional.** For curl and other plain HTTP scripts, start the server with `nexura-runtime serve --no-session-token`, or set `NEXURA_REQUIRE_SESSION_TOKEN=off` before starting (also read by `nexura-studio` and `create_api_app()`; `create_api_app(require_session_token=False)` in code). Programs on this machine then need no header, and a token that is still sent is ignored. What protects you instead: a state-changing request that a browser marks as coming from another page (`Sec-Fetch-Site` cross-site or same-site, or an `Origin` other than the server's own address) is refused with 403 `CROSS_ORIGIN_REQUEST`, so web pages on other sites and on other local ports cannot change anything; a body without a `Content-Type` is refused; and only connections from this machine with a local `Host` are accepted. The trade-off: any program running on this machine as any user can call the API without first reading the token (with the token on, such a program can already read it from `/api/v1/local-session`). The switch is refused together with `--auth token` and with the unsafe network opt-in.
 - State-changing requests must be JSON: `text/plain`, form and multipart bodies are answered with 415. Raw Python source sent to `/api/v1/workflows/import/python` with `Content-Type: text/plain` by a non-browser client is still accepted. Signed webhook deliveries (`/api/v1/triggers/webhooks/{id}/deliver`) need no token.
 
 `GET /api/v1/capabilities` reports `supported_profiles: ["local-owner"]` in OSS. The shared profile requires an installed authenticating provider from the hosted or enterprise edition; selecting its name alone fails closed.
@@ -109,6 +110,93 @@ The service covers these areas under `/api/v1`:
 | Workspaces | `/workspaces` |
 
 Saving a workflow that someone else changed first returns HTTP 409 with code `REVISION_CONFLICT`, so you can reload or save a copy. Chat streaming sends ordered events for each model turn and tool call, then the same body as the non-streaming endpoint. Reply text arrives whole, not token by token, and a turn that is cancelled or disconnected is not saved. The chat endpoints answer with a local deterministic `FakeModel`, not a real model, so the playground needs no keys and shows no live model output. The playground also has a `knowledge_search` tool over the caller's workspace knowledge, so answers about your documents carry real citation footnotes (see [Knowledge](knowledge.md)).
+
+### Service storage on Postgres
+
+The shared, multi-instance deployment keeps the service's state in Postgres
+(`create_api_app(database_url=...)` or `NEXURA_DATABASE_URL`, with the `nexura-postgres` package).
+With a database URL **every** service store lives in Postgres and the service opens or creates no
+SQLite file at all, so several instances behind one load balancer share one state.
+
+Run it like this:
+
+```bash
+pip install nexura-postgres
+export NEXURA_DATABASE_URL='postgresql://user:password@host/db?sslmode=verify-full'
+export NEXURA_BLOB_URL=gs://my-bucket/nexura     # large payloads; a local folder is refused on Cloud Run
+export NEXURA_MASTER_KEY=...                     # the same on every instance (encrypted credentials)
+export NEXURA_TRIGGER_SECRET_KEY=...             # the same on every instance (webhook secrets)
+nexura-runtime db migrate                         # create or upgrade every table (also done at startup)
+nexura-runtime db status                          # exit 0 when every component is current
+nexura-runtime serve                              # the service reads NEXURA_DATABASE_URL
+```
+
+A Postgres service refuses to start without `NEXURA_MASTER_KEY` or `NEXURA_TRIGGER_SECRET_KEY`
+(`SharedKeyMissingError`, naming the missing variable), before it connects or creates anything:
+the credentials and webhook secrets are stored encrypted in the shared database, and a key made
+up by one instance would leave them unreadable on every other one. This holds for every profile
+and is not lifted by `NEXURA_INSECURE_ALLOW_PLAINTEXT_SECRETS`. Generate the master key with
+`python -c "from nexura_runtime.secrets import generate_master_key; print(generate_master_key())"`;
+the trigger key is any long random string. No `<database>.trigger.key` file is used in Postgres
+mode. An app object runs one lifespan: started again after its shutdown it raises
+`ServiceShutDownError` (build a new app; a new process does).
+
+`db migrate` and `db status` print one line per migration component (`studio`, `sessions`,
+`knowledge`, `evaluations`, `channels`, `integrations` and the rest) and never print the URL.
+The database must offer the pgvector `vector` extension: the service creates it at startup (or
+`db migrate` does) even if knowledge is never used, and refuses to start if the role cannot.
+
+What lives in Postgres: workspaces and resource ownership, Studio workflows, runs and run events,
+workflow state and triggers, chat sessions, saved agents and skills, encrypted credentials, the
+usage ledger, the knowledge index, evaluation datasets, runs and imported traces, Studio eval
+datasets and runs, channel dedup keys and dry-run outbox receipts, and persisted integration
+tool registrations (plus, in the closed edition, organisations and publications). What that
+gives several instances:
+
+- Chat sessions keep their compare-and-swap saves across instances: of two saves of the same
+  revision, one on each instance, one wins and the other gets a revision conflict, and a deleted
+  session's revision is never handed out again. The per-workspace limits (100 agents, 200 skills)
+  and the one-name-per-workspace rule for agents hold when several instances create at once.
+- A credential is stored with the same envelope encryption as in the SQLite file, so a row copied
+  between the two decrypts with the same master key, and another key fails closed. Credentials
+  created, revoked or deleted through one instance are seen at once by the others. Of two
+  instances creating one credential name at the same moment, one gets 201 and the other 409, and
+  replacing a value never undoes a revocation made on another instance. Budget reservations from
+  several instances never exceed a cap: each one takes one database-wide lock.
+- The knowledge index uses pgvector for similarity and a `tsvector` keyword index ranked with
+  `ts_rank_cd` instead of FTS5 `bm25`, so the order of similar hits can differ (see
+  [Knowledge on Postgres](knowledge.md#on-postgres-several-service-instances)). No SQLite vector
+  store is created. Uploads on several instances never lose a document or exceed the workspace
+  quota, and a reindex is seen everywhere as the old index or the new one.
+- A channel dedup key (`POST /triggers/outbox/test-dispatch` with `dedup_key`) recorded through
+  any instance is a duplicate on every other: the insert itself detects the conflict. Outbox
+  receipts are shared.
+- A Studio eval dataset save is a compare-and-set on its revision across instances (a stale save
+  gets 409), and Studio eval runs and evaluation runs list in one stable order on every instance
+  (Studio runs are stamped by the database clock).
+- Large imported eval traces go to the blob store, as large run-event payloads do; the row keeps
+  a reference that `db blob-gc` finds.
+- An integration tool registered through one instance is owned by its workspace at once on all of
+  them (the same id is refused for another workspace, and two instances racing for one id give
+  one success), and every instance restores the registration into its module registry when it
+  starts. An instance that is already running sees the new tool only after it restarts, because
+  module registries are per process. A request for an id another workspace holds gets
+  403 `CROSS_WORKSPACE_DENIED` when the claim is already stored, and 409
+  `INTEGRATION_TOOL_ID_CONFLICT` when two requests race for it (both passed the ownership check
+  before either stored its claim); clients should treat both as "this id is taken".
+
+`/readyz` checks the database with a read-only query (`SELECT 1` on Postgres; a read of the
+schema page on SQLite) and writes nothing; its operator view shows `"storage": "postgres"`. Calls
+to these stores that wait on the network or a lock run off the event loop. Postgres `TEXT`
+cannot hold NUL: a NUL in a stored id, name or recipient of these stores is kept as U+FFFD (JSON
+values keep it escaped).
+
+Two optional features still keep rows in a SQLite file and are refused with a database URL:
+the remote single-operator mode's webhook delivery tokens (`serve --auth token`) and failed-run
+repro capture (`NEXURA_CAPTURE_FAILED_RUNS`). `NEXURA_ALLOW_PARTIAL_POSTGRES=1` allows them next
+to Postgres for development and tests only (never on Cloud Run); `/readyz` then shows
+`"storage": "partial-postgres"` and the service logs a warning at startup. Without a database URL
+the service uses its SQLite file exactly as before.
 
 ## Run Studio
 
@@ -217,7 +305,7 @@ if (waiting.status === "waiting_for_input" && waiting.pending_input) {
 
 Schedules and signed webhooks enqueue durable trigger jobs. A trigger worker turns each job into a normal workflow run: same engine, approval policy, workspace ownership and events as `POST /runs`, with the schedule payload or webhook body as the initial state. The run is owned by the job's workspace and started by the principal `trigger:<schedule|webhook>:<id>`. Without a worker, jobs stay `pending` and nothing runs.
 
-Start the worker inside the service, or as separate processes that share the same SQLite file. Claims are atomic, so `nexura-runtime serve --worker` and any number of `nexura-runtime worker` processes can run together and each job runs once. With `--workflow-state-url postgresql://...` (or `NEXURA_WORKFLOW_STATE_URL`) the job queue, webhooks and schedules live in Postgres next to the workflow state (`nexura_postgres.PostgresTriggerStore`); webhook secrets are then encrypted with `NEXURA_TRIGGER_SECRET_KEY`, or else the `<database>.trigger.key` file. Studio run records stay in the SQLite file, so processes sharing a Postgres queue must also share that file (one machine) for now.
+Start the worker inside the service, or as separate processes that share the same SQLite file. Claims are atomic, so `nexura-runtime serve --worker` and any number of `nexura-runtime worker` processes can run together and each job runs once. With `--workflow-state-url postgresql://...` (or `NEXURA_WORKFLOW_STATE_URL`) the job queue, webhooks and schedules live in Postgres next to the workflow state (`nexura_postgres.PostgresTriggerStore`); webhook secrets are then encrypted with `NEXURA_TRIGGER_SECRET_KEY`, or else (only without `NEXURA_DATABASE_URL`) the `<database>.trigger.key` file. Without `NEXURA_DATABASE_URL`, Studio run records stay in the SQLite file, so processes sharing a Postgres queue must also share that file (one machine); with it, everything is in Postgres (see [Service storage on Postgres](#service-storage-on-postgres)).
 
 ```bash
 nexura-runtime serve --db ./nexura_service.sqlite3 --worker --poll-interval 1
@@ -236,7 +324,7 @@ curl -s -X POST http://127.0.0.1:8765/api/v1/triggers/schedules \
        "payload": {"msg": "hello from the schedule"}}'
 ```
 
-Register a webhook, then sign and deliver an event. Webhooks registered through the API use signature scheme v2: HMAC-SHA256, hex encoded, over `v2.<integer unix timestamp>.<event id>.` followed by the canonical JSON body (keys sorted, separators `,` and `:`, no spaces). The event id is part of the signed string, so a captured delivery cannot be replayed under a different `X-Webhook-Event-ID`. Event ids are 1-200 characters of `[A-Za-z0-9_:-]` (no dots). The legacy v1 signature (`v1.<timestamp>.<body>`, no event id) is rejected for API-registered endpoints; it is only still accepted for endpoints that existed before v2 and for direct `TriggerManager` use. Deliveries older than the replay window (300 seconds by default) are rejected, and a repeated `(endpoint, X-Webhook-Event-ID)` pair is accepted but creates no second job; ids are scoped per endpoint. The body must be a JSON object. The signing secret is returned only when the webhook is registered and is stored encrypted at rest (key from `NEXURA_TRIGGER_SECRET_KEY`, or a 0600 `<database>.trigger.key` file next to the database). An endpoint id or schedule id already used by another workspace returns 409. Registering a webhook requires the `edit` and `run` permissions, deleting and scheduling require `edit`, and `POST /webhooks/{id}/test` requires `admin` and does not return the computed signature. The signature, replay window and body limit (1 MB) apply in every profile. `openssl -hmac` and `curl -H` put the secret on the command line, where other local users can see them in the process list; on a shared machine sign with the Python snippet instead. Schedule `interval_seconds` must be at least 60 by default (set `NEXURA_MIN_SCHEDULE_INTERVAL_SECONDS` to change it). In [remote single-operator mode](remote-single-operator.md#webhooks) a delivery also needs the endpoint's own delivery token as `Authorization: Bearer` (returned once at registration, rotated with `POST /api/v1/triggers/webhooks/{id}/delivery-credential`), v1 signatures are refused, and every refused delivery is the same 401.
+Register a webhook, then sign and deliver an event. Webhooks registered through the API use signature scheme v2: HMAC-SHA256, hex encoded, over `v2.<integer unix timestamp>.<event id>.` followed by the canonical JSON body (keys sorted, separators `,` and `:`, no spaces). The event id is part of the signed string, so a captured delivery cannot be replayed under a different `X-Webhook-Event-ID`. Event ids are 1-200 characters of `[A-Za-z0-9_:-]` (no dots). The legacy v1 signature (`v1.<timestamp>.<body>`, no event id) is rejected for API-registered endpoints; it is only still accepted for endpoints that existed before v2 and for direct `TriggerManager` use. Deliveries older than the replay window (300 seconds by default) are rejected, and a repeated `(endpoint, X-Webhook-Event-ID)` pair is accepted but creates no second job; ids are scoped per endpoint. The body must be a JSON object. The signing secret is returned only when the webhook is registered and is stored encrypted at rest (key from `NEXURA_TRIGGER_SECRET_KEY`, or, without a database URL, a 0600 `<database>.trigger.key` file next to the database; a Postgres service needs the variable). An endpoint id or schedule id already used by another workspace returns 409. Registering a webhook requires the `edit` and `run` permissions, deleting and scheduling require `edit`, and `POST /webhooks/{id}/test` requires `admin` and does not return the computed signature. The signature, replay window and body limit (1 MB) apply in every profile. `openssl -hmac` and `curl -H` put the secret on the command line, where other local users can see them in the process list; on a shared machine sign with the Python snippet instead. Schedule `interval_seconds` must be at least 60 by default (set `NEXURA_MIN_SCHEDULE_INTERVAL_SECONDS` to change it). In [remote single-operator mode](remote-single-operator.md#webhooks) a delivery also needs the endpoint's own delivery token as `Authorization: Bearer` (returned once at registration, rotated with `POST /api/v1/triggers/webhooks/{id}/delivery-credential`), v1 signatures are refused, and every refused delivery is the same 401.
 
 ```bash
 curl -s -X POST http://127.0.0.1:8765/api/v1/triggers/webhooks \
@@ -276,6 +364,8 @@ When the attempts are used up the job becomes `failed` with `worker lease expire
 
 `TriggerWorker(retry_mode="new_run")` (or `nexura-runtime worker --retry-mode new_run`) keeps the behaviour from before: the old run is marked `interrupted` and a NEW run starts from the beginning of the workflow, so side effects that ran before the crash may run again. It is deprecated (it raises a `DeprecationWarning`) and will be removed in 0.6.
 
+A service that scales to zero has no process polling for due schedules. There an external scheduler calls an authenticated endpoint that runs one bounded pass, `nexura_runtime.service.triggers.tick.run_trigger_tick(app.state, budget_seconds=45)` (the closed edition's `POST /internal/triggers/tick`, called by Cloud Scheduler every minute): due schedules are enqueued, expired jobs reclaimed and pending jobs run until the budget ends; a job still running then keeps running under its heartbeat. The pass holds the trigger store's named lease `trigger-tick` (`acquire_lease`/`release_lease`; it outlives the budget by 15 seconds, so a pass whose instance died is taken over), so one pass runs at a time across instances, and a call that finds the lease held returns `{"status": "busy"}`. Every step is a compare-and-swap in the store, so the pass and an in-process worker can run together and each due fire still becomes one job and one run.
+
 Each claimed job runs as its own asyncio task, at most `--max-concurrent-jobs` at a time (default 4), so a long run does not delay schedule ticks or lease recovery. On shutdown the worker waits a grace period (default 20 seconds) for running jobs, then cancels them; a cancelled job is failed with `worker cancelled`. Databases created before leases are migrated by adding nullable columns on open; an old `claimed` job without a lease is treated as expiring one lease period after `claimed_at`, so it is recovered rather than stuck. `nexura-runtime serve --worker` uses the default lease settings.
 
 ## Using a real model in chat
@@ -296,6 +386,18 @@ nexura-runtime serve --chat-model gpt=openai:gpt-4o-mini --chat-model gem=gemini
   `vertex`, `sarvam`, `ollama`, `litellm`). Programmatic use:
   `create_api_app(chat_models={"gpt": "openai:gpt-4o-mini"}, chat_usage_limits=UsageLimits(...))`
   (values may also be model objects).
+- Prices: a run under a cost cap (`budget_config.max_cost_usd`, a publication's daily limit)
+  refuses a model whose price is unknown, before anything is sent (the run fails; nothing is
+  claimed as done). The built-in table knows only a few older models; add yours with
+  `NEXURA_MODEL_PRICING`, JSON keyed by model id, merged over the built-in table:
+  `{"gemini-3.5-flash-lite": {"input_per_million": "0.10", "output_per_million": "0.40",
+  "source": "Google price list", "effective_date": "2026-10-01"}}` (USD per million tokens,
+  decimal strings or numbers, 0 to 100000; optional `cached_input_per_million`; any other key,
+  a model listed twice or an invalid value stops the start). A price you give for the provider
+  id or for the `NEXURA_CHAT_MODELS` name counts for both; a built-in price never crosses a
+  chat model name (a chat model named like a built-in model does not price its provider model). Programmatic use:
+  `create_api_app(model_pricing=...)` (the same JSON text or a dict); the table is
+  `app.state.pricing_table` and also prices traces and run diagnostics.
 - Why an allowlist: requests carry only a configured name (`"model": "gpt"`). Any other value is
   rejected with `400 MODEL_NOT_AVAILABLE` listing the allowed names, so callers cannot choose
   arbitrary providers, endpoints or keys, and no key is ever read from a request.
@@ -344,11 +446,16 @@ nexura-runtime serve --guardrail-policy /etc/nexura/guardrails.yaml
 - A judge's `model` in the policy file may name one of the server's chat models
   (`--chat-model`), whose key then comes from the server environment, or a Nexura model string
   (`ollama:qwen3:8b`). The file holds no keys.
-- `GET /api/v1/guardrails/policy` returns `{configured, enforced, detail, policy, exceptions}`.
-  Everyone gets the digest and the policy file's base name; workspace **admins** also get the
-  name, the full source path, the rules and the check types (never a judge's policy text or a
-  key). `exceptions` lists what is not covered. Studio shows it read-only in the agent editor,
-  with the "Enforced by the server" badge only when `enforced` is true.
+- `GET /api/v1/guardrails/policy` returns `{configured, enforced, mode, shadow_rules, detail,
+  policy, exceptions}`. Everyone gets the policy's `mode` (`enforce` or `shadow`),
+  `shadow_rules` (how many rules only report), the digest and the policy file's base name;
+  workspace **admins** also get the name, the full source path, the rules (each with its
+  effective `enforcement`) and the check types (never a judge's policy text or a key). `exceptions` lists what is not covered. Studio
+  shows it read-only in the agent editor, with the "Enforced by the server" badge only when
+  `enforced` is true, and a "Shadow mode: reporting only, nothing is blocked" badge instead when
+  the policy's `mode` is `shadow` (see [Shadow mode](guardrail-policy.md#shadow-mode)). An
+  older Studio or client that does not read `mode` shows a shadow policy as "Enforced by the
+  server": `enforced` only says the server installed and locked the policy.
 - `AgentCoordinator` runs (the `nexura.agents.coordinator` module) and `AgentDefinition`
   subagent delegations are refused while the policy has input, model or output rules: they call
   models without the hooks that apply those stages. Agents saved in Studio run on a `Runner` and
@@ -519,7 +626,9 @@ is saved. The TS client exposes this as `sessions.chatStream()`.
 
 ## Retention and cleanup
 
-For 0.4, retention deletes only database rows. Export bundles and trace files are
+For 0.4, retention deletes only database rows. Payload blobs (see "Large payloads outside
+the database" below) are not deleted with their rows: run `nexura-runtime db blob-gc` after
+retention. Export bundles and trace files are
 reported as eligible for manual removal (path, run ID, age, size, reason).
 Retention never deletes, renames, or opens those files for writing, even with
 `--apply`. The CLI prints **"Files listed, not deleted"**.
@@ -748,6 +857,110 @@ an empty trace export contains zero records. Bytes measure UTF-8 TEXT/BLOB paylo
 including all text fields in selected rows. Legacy `bytes_freed`
 and `bytes_reclaimed` aliases represent this logical total, not physical SQLite
 space reclaimed. The CLI exits nonzero on partial failure and prints its report.
+
+## Large payloads outside the database
+
+A plain SQLite service keeps everything in its database file, as before. With
+`NEXURA_BLOB_URL` set (or a Postgres `NEXURA_DATABASE_URL`), run-event payloads and imported
+evaluation traces larger than `NEXURA_BLOB_OFFLOAD_BYTES` (8 KiB by default) are stored in a
+blob store, and the row keeps a reference (key, sha256, size, store id) and a 256-character
+preview:
+
+| `NEXURA_BLOB_URL` | Store |
+|---|---|
+| unset | the folder `<database file>.blobs` (used only when offloading is on) |
+| `file:///<absolute path>` | a local folder (0700; a folder others can write is refused) |
+| `gs://<bucket>/<prefix>` | Google Cloud Storage; needs `pip install "nexura-runtime[gcs]"` and Application Default Credentials |
+
+Keys are `<workspace>/<namespace>/<random id>` (`default` for runs recorded outside the service,
+`_h<sha256 prefix>` for workspace ids outside the API pattern). Reads verify the sha256 and are
+cached in memory. A payload that cannot be read shows as `payload_unavailable` with its preview
+and a `reason` (`missing`, `integrity` or `store_error`); the run itself still reads. Back up the
+blob folder or bucket together with the database: a SQLite backup alone does not contain them.
+
+`nexura-runtime db blob-gc --sqlite ./nexura_service.sqlite3` deletes blobs no row references,
+once older than a grace period (`--grace-hours`, default 24, minimum 1), and with
+`--payload-max-age-days N` also payloads older than N days, except those of unfinished runs.
+Run retention (`nexura-runtime retention --apply`) deletes rows only, so run `db blob-gc` after
+it. The command prints a JSON report and supports `--dry-run`. The database records the store
+it uses (table `nexura_blob_store_binding`, written when the service starts with offloading on), so the
+command refuses (exit 2, nothing deleted) a database bound to another store, or an unbound one
+that references none of this store's blobs; `--force` overrides that check. A database bound to
+the store passes even after run retention removed every reference. An instance that cached a
+payload keeps showing it after `--payload-max-age-days` deleted it, until eviction or restart. It cannot recognise a stale copy of the right database, so
+never point it at one.
+
+Channel keys, outbox receipts and evaluation trace rows have separate, explicit retention:
+
+```bash
+# Postgres: use NEXURA_DATABASE_URL; apply schema upgrades with db migrate first.
+nexura-runtime db prune --dedup-days 7 --outbox-days 30 --eval-trace-days 30 --dry-run
+# SQLite: name the existing service file (repeat --sqlite for separate store files).
+nexura-runtime db prune --sqlite ./nexura_service.sqlite3 --dedup-days 7 --outbox-days 30 --eval-trace-days 30 --dry-run
+```
+
+Remove `--dry-run` to delete. All three ages are required, finite positive days; nothing runs
+automatically. The command prints JSON counts and exclusive epoch-second cutoffs. Rows exactly
+at a cutoff stay. Each invocation handles at most `--limit` rows **per category per database**
+(default 1,000; maximum 10,000), including dry-run counts. Repeat to drain a backlog; a count
+equal to the limit may mean more remain. Counts can change while writers or other pruners run.
+Exit 0 means success, 2 means refused input, and 1 means Postgres migrations are needed. SQLite
+files must already exist; dry runs open them read-only and perform no schema upgrades.
+
+**Dedup safety:** the minimum supported delivery retry/replay window is seven days, measured
+from when a key was first recorded (`processed_at`), not from the message's timestamp. Shorter
+dedup retention is refused. Seven days is an operational retention contract, not a guarantee
+about a provider's retry policy: configure `--delivery-retry-days` to cover the deployment's
+longest actual retry/replay window, and keep `--dedup-days` at least that large. Do not replay
+deliveries after their key retention expires. The synchronous adapters have bounded attempt
+counts but do not themselves impose a time limit on callers' later replays. Receipt retention
+uses `created_at` and can be shorter independently; deleting a receipt does not remove its key.
+
+The channel stores expose `prune(older_than_seconds, now=None, limit=1000, dry_run=False,
+dedup=True, outbox=True)` with keyword-only options, returning `dedup_keys` and `outbox_receipts`
+counts. A store call caps their **combined** count at `limit`; disable one category for an
+independent policy. Constructors accept `delivery_retry_window_seconds` (minimum seven days).
+Evaluation stores expose the same prune age/clock/limit/dry-run options and return an
+`eval_traces` count. Memory evaluation storage uses a private SQLite in-memory database.
+SQLite deletes select a bounded batch atomically; PostgreSQL uses one select-lock-delete
+statement per table batch with `FOR UPDATE SKIP LOCKED`, so concurrent instances do not count
+the same deletion twice. PostgreSQL adds numbered `channel_retention` and
+`evaluation_trace_retention` migration components, leaving the WP8 component ledgers intact.
+
+Evaluation retention deletes trace rows only: it keeps datasets and summary reports. There is
+no newest-N exemption from the explicit age policy, so a dataset's last trace can expire.
+A matching run summary's `created_at` is authoritative; traces imported without a summary use
+their recorded run timestamp, stored separately from `trace_json` on new writes. SQLite opens
+upgrade the schema. Legacy traces without that column's value and without a matching summary
+are retained conservatively until re-saved with known timestamps; pruning never reads blob
+payloads to guess their age. A deleted trace's blob remains in place. Run `db blob-gc` afterwards
+with the same deployment database(s) and the usual grace/ownership checks to collect orphans.
+Row deletion makes database space reusable; it does not promise immediate reduction of Neon
+storage or bills. Continue monitoring database and blob storage.
+
+With a Postgres `NEXURA_DATABASE_URL` the binding is two-way: the database has a random id
+(table `nexura_database_identity`) and the store records the id of the database that owns it
+and when it claimed the store (`_nexura/store-owner` in a folder, `<prefix>.nexura-store-owner`
+in a bucket). A service whose database is not the owner refuses to start, and `db blob-gc`
+refuses unless the owning database is scanned. A database claims a store on its own only when
+the store is empty or its rows already reference it; for a store that already holds blobs (for
+example after moving a SQLite deployment to Postgres) run
+`nexura-runtime db blob-claim --i-own-this-store` once. `db blob-gc` never deletes unreferenced
+blobs written before the claim without `--force`. A SQLite service refuses a store that a
+Postgres database owns.
+
+Use one bucket prefix per deployment. A copy of the database (`pg_dump` restore, Neon branch)
+keeps the id and the binding; before starting a copy as a separate deployment run
+`nexura-runtime db reset-identity --this-is-a-copy` and give it a new prefix. `db blob-gc` also
+refuses when the store holds unreferenced blobs newer than the scanned database's newest run
+activity (a stale copy), but it cannot recognise every copy.
+
+When the blob store fails, a payload is kept in the row instead, logged at ERROR; alert on that
+log line. The operator view of `/readyz` shows per-instance counters
+(`blob_payloads.inline_fallbacks`, `omitted_payloads`) that reset when the instance stops. In
+Postgres or `gs://` mode a run-event payload above `NEXURA_BLOB_MAX_INLINE_BYTES` (1 MiB by
+default) keeps only its preview and reads as `payload_unavailable` with reason `not_stored`.
+The run's own state columns are never offloaded or capped.
 
 ## Package overview
 

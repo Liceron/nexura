@@ -7,7 +7,7 @@ const api = vi.hoisted(() => ({
     clearCache: vi.fn(),
     client: {
       request: vi.fn(),
-      credentials: { list: vi.fn(async () => ({ items: [] })) },
+      credentials: { list: vi.fn(async () => ({ items: [] })), create: vi.fn() },
       modules: { list: vi.fn(async () => ({ items: [] })) },
     },
   },
@@ -64,5 +64,30 @@ describe('P28 step 7 local credentials', () => {
     await waitFor(() => expect(screen.queryByTestId('tab-members')).toBeNull());
     expect(screen.queryByTestId('add-member-button')).toBeNull();
     expect(screen.getByTestId('current-role-badge').textContent).toContain('Admin');
+  });
+
+  it('does not show an old verification time on a revoked credential', async () => {
+    api.manager.client.request.mockRejectedValue({ statusCode: 404 });
+    const base = { workspace_id: 'default', credential_type: 'api_key', provider: 'gemini', description: '', created_at: 1, last_verified_at: 1_800_000_000 };
+    api.manager.client.credentials.list.mockResolvedValueOnce({ items: [
+      { ...base, credential_id: 'old-key', status: 'revoked' },
+      { ...base, credential_id: 'live-key', status: 'active' },
+    ] } as never);
+    render(<CredentialsView />);
+    expect((await screen.findByTestId('cred-row-old-key')).textContent).not.toContain('Verified');
+    expect(screen.getByTestId('verification-none-old-key').textContent).toBe('—');
+    expect(screen.getByTestId('cred-row-live-key').textContent).toContain('Verified');
+  });
+
+  it('says which characters a credential ID may use before sending it', async () => {
+    api.manager.client.request.mockRejectedValue({ statusCode: 404 });
+    render(<CredentialsView />);
+    fireEvent.click(await screen.findByTestId('register-credential-button'));
+    fireEvent.change(screen.getByTestId('cred-id-input'), { target: { value: 'my key!' } });
+    fireEvent.change(screen.getByTestId('cred-secret-input'), { target: { value: 'not-a-real-secret' } });
+    fireEvent.submit(screen.getByTestId('register-credential-form'));
+    expect((await screen.findByTestId('credential-form-error')).textContent).toContain('letters, digits');
+    expect(screen.getByTestId('cred-id-input')).toHaveAttribute('aria-invalid', 'true');
+    expect(api.manager.client.credentials.create).not.toHaveBeenCalled();
   });
 });

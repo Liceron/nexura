@@ -18,7 +18,8 @@ from nexura_agents.skills import SkillError
 from pydantic import BaseModel, Field
 
 from nexura_runtime.service.api.credentials import _enforce_perm, _get_caller_context
-from nexura_runtime.skills_store import SkillNotFoundError, SkillStore
+from nexura_runtime.service.storage_protocols import SkillsBackend
+from nexura_runtime.skills_store import SkillNotFoundError
 
 router = APIRouter(prefix="/skills", tags=["skills"])
 
@@ -40,8 +41,8 @@ class SetLabelRequest(BaseModel):
     version: int = Field(ge=1)
 
 
-def _store(request: Request) -> SkillStore:
-    store: SkillStore = request.app.state.skills_store
+def _store(request: Request) -> SkillsBackend:
+    store: SkillsBackend = request.app.state.skills_store
     return store
 
 
@@ -140,7 +141,7 @@ async def remove_skill(
 
 def mount_skills(app: FastAPI, api_v1: APIRouter) -> None:
     """Create the skills store on the service database, wire it to agent nodes and mount routes."""
-    store = SkillStore(app.state.store.db_path)
+    store = app.state.skills_store
     app.state.skills_store = store
     # Agent-node modules already registered read their skills from this store at run time.
     registry = app.state.registry

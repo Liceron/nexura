@@ -66,6 +66,7 @@ from nexura_runtime.service.run_liveness import (
     SHUTDOWN_ERROR,
     SHUTDOWN_REASON,
     journal_workspace,
+    liveness_options,
     reconcile_quietly,
     run_journal,
     run_liveness,
@@ -80,6 +81,7 @@ from nexura_runtime.service.stream_adapters import (
     select_stream_format,
     stream_response,
 )
+from nexura_runtime.service.workspaces.membership import remembered_member
 from nexura_runtime.service.workspaces.repository import UNOWNED_WORKSPACE, WorkspaceRepository
 from nexura_runtime.service.workspaces.scoping import ResourceScopeEnforcer
 from nexura_runtime.studio.store import StudioStore
@@ -132,7 +134,10 @@ def _started_by(principal_id: str, api_key_id: str | None) -> dict[str, Any]:
 
 
 def _access_ended_check(
-    app_state: Any, workspace_id: str, principal: Principal | None
+    app_state: Any,
+    workspace_id: str,
+    principal: Principal | None,
+    request_state: Any = None,
 ) -> Callable[[], str | None] | None:
     """A check that the caller still has the access this request was authorised with (B40).
 
@@ -140,12 +145,18 @@ def _access_ended_check(
     after a new run's ownership is recorded and returns ``access_revoked`` when the caller's
     membership ended or its API key was revoked meanwhile. A revocation landing later finds
     the run by its ownership and cancels it, so neither order leaves a live run behind.
+
+    ``request_state``: the request's ``state``; when the authentication of this request read
+    the caller's membership, that read is the starting point (MVP WP11a: one read fewer).
     """
     if principal is None or principal.profile == "local-owner":
         return None
     ws_repo: WorkspaceRepository = app_state.workspace_repo
     principal_id = principal.principal_id
-    was_member = ws_repo.get_member(workspace_id, principal_id) is not None
+    known, member = remembered_member(request_state, workspace_id, principal_id)
+    if not known:
+        member = ws_repo.get_member(workspace_id, principal_id)
+    was_member = member is not None
     key_id = _api_key_id(principal)
     key_manager = getattr(getattr(app_state, "profile_manager", None), "api_key_manager", None)
 
@@ -639,19 +650,24 @@ async def list_runs(
             r_id = row.get("run_id", "")
             if ws_repo.get_resource_workspace("run", r_id) is None:
                 ws_repo.record_resource_ownership("run", r_id, "default", principal.principal_id)  # type: ignore[union-attr]
-    # A6 S9: journaled runs nobody executes any more become interrupted before filtering.
-    live_again = await reconcile_quietly(request.app.state, workspace_id=caller_ws)
     # The workspace filter runs in SQL before LIMIT/OFFSET so other tenants' runs can
     # neither hide nor delay this workspace's runs.
     owned_ids = ws_repo.list_workspace_resource_ids("run", caller_ws)
-    total = await store.count_runs(workflow_id=workflow_id, run_ids=owned_ids, status=status)
-    rows = await store.list_runs(
-        workflow_id=workflow_id,
-        limit=limit,
-        offset=offset,
-        run_ids=owned_ids,
-        status=status,
-    )
+    live_again: set[str] = set()
+    if owned_ids:
+        # A6 S9: journaled runs nobody executes any more become interrupted before filtering.
+        # A workspace that owns no run has nothing to show, so nothing to reconcile (WP11a).
+        live_again = await reconcile_quietly(request.app.state, workspace_id=caller_ws)
+        total = await store.count_runs(workflow_id=workflow_id, run_ids=owned_ids, status=status)
+        rows = await store.list_runs(
+            workflow_id=workflow_id,
+            limit=limit,
+            offset=offset,
+            run_ids=owned_ids,
+            status=status,
+        )
+    else:
+        total, rows = 0, []  # the workspace owns no run: nothing to count or read (WP11a)
     identities = await workflow_run_identities(store.checkpoint_store, [r["run_id"] for r in rows])
     page_items = [
         await _run_snapshot(
@@ -691,7 +707,7 @@ async def start_run(request: Request, payload: StartRunRequest) -> dict[str, Any
             ) from exc
 
     # Before the first await: access ending while this request runs stops its run (B40).
-    access_ended = _access_ended_check(request.app.state, caller_ws, principal)
+    access_ended = _access_ended_check(request.app.state, caller_ws, principal, request.state)
     store: StudioStore = request.app.state.store
     base_registry: ModuleRegistry = request.app.state.registry
     ws_repo: WorkspaceRepository = request.app.state.workspace_repo
@@ -853,7 +869,7 @@ async def start_workflow_run(
         from nexura_agents.usage.manager import BudgetManager
 
         if budget_mgr is None:
-            budget_mgr = BudgetManager()
+            budget_mgr = BudgetManager(pricing_table=getattr(app_state, "pricing_table", None))
             app_state.budget_manager = budget_mgr
         run_budget = budget_mgr.create_run_budget(
             workspace_id=workspace_id,
@@ -953,7 +969,7 @@ async def start_workflow_run(
         assert snapshot is not None
         if run_budget is not None:
             snapshot = dict(snapshot)
-            snapshot["budget_status"] = run_budget.to_dict()["status"]
+            snapshot["budget_status"] = (await run_budget.to_dict_async())["status"]
         return await _run_snapshot(snapshot, app_state)
 
     # Synchronous execution, as a task a cancel or revocation can stop (B40)
@@ -962,7 +978,7 @@ async def start_workflow_run(
     assert snapshot is not None
     if run_budget is not None:
         snapshot = dict(snapshot)
-        snapshot["budget_status"] = run_budget.to_dict()["status"]
+        snapshot["budget_status"] = (await run_budget.to_dict_async())["status"]
     return await _run_snapshot(snapshot, app_state)
 
 
@@ -970,7 +986,8 @@ async def start_workflow_run(
 async def get_run(request: Request, run_id: str) -> dict[str, Any]:
     """Retrieve full run snapshot and event history, enforcing workspace isolation."""
     store: StudioStore = request.app.state.store
-    run = await store.get_run(run_id)
+    # No blob is read before the caller is authorised (WP2b): payloads load afterwards.
+    run = await store.get_run(run_id, payloads=False)
     if run is None:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,
@@ -982,7 +999,8 @@ async def get_run(request: Request, run_id: str) -> dict[str, Any]:
         # A6 S9: the status comes from the run's journal lease, not from who opened the
         # database last: a run another live process executes is never shown interrupted.
         live_again = await reconcile_quietly(request.app.state, run_ids=[run_id])
-        run = show_live(await store.get_run(run_id) or run, live_again)
+        run = show_live(await store.get_run(run_id, payloads=False) or run, live_again)
+    run = await store.load_payloads(run)
     run = await _run_snapshot(run, request.app.state)
     run = dict(run)
     run["has_subworkflows"] = _spec_has_subworkflows(
@@ -993,7 +1011,8 @@ async def get_run(request: Request, run_id: str) -> dict[str, Any]:
     if budget_mgr is not None:
         rb = budget_mgr.get_run_budget(run_id)
         if rb is not None:
-            run["budget_status"] = rb.to_dict()["status"]
+            # The status read may wait on the ledger lock (Postgres): off the loop.
+            run["budget_status"] = (await rb.to_dict_async())["status"]
     return run
 
 
@@ -1015,7 +1034,16 @@ def _child_key(parent_id: str, child_id: str) -> str:
 async def cancel_run(
     request: Request, run_id: str, payload: CancelRunRequest | None = None
 ) -> dict[str, Any]:
-    """Explicitly cancel an active run and halt running background execution."""
+    """Cancel a run that has not finished and stop its background execution.
+
+    Works for a running run and for one waiting for a person: ``pending_approval``,
+    ``waiting_for_input`` and ``paused`` (``pause_reason`` ``approval`` or ``effect_unknown``).
+    Needs the ``run`` permission. The ``RUN_CANCELLED`` event records who cancelled it, the
+    status it left and, for an ``effect_unknown`` pause, the effect still unresolved
+    (cancelling does not decide whether that step happened; it can still be resolved for the
+    record). Budget and publication spend reservations are released. 409
+    ``RUN_ALREADY_TERMINAL`` for a finished run.
+    """
     caller_ws, principal, role = _get_caller_context(request)
     if principal:
         try:
@@ -1027,7 +1055,7 @@ async def cancel_run(
             ) from exc
 
     store: StudioStore = request.app.state.store
-    run = await store.get_run(run_id)
+    run = await store.get_run(run_id, payloads=False)  # status only
     if run is None:
         if principal is not None and principal.resources is not None:
             # A resource-scoped key learns nothing about runs it did not start.
@@ -1050,10 +1078,15 @@ async def cancel_run(
         raise _already_terminal(run_id, current_status)
 
     reason = payload.reason if payload and payload.reason else "Cancelled by user"
-    updated = await cancel_run_record(request.app.state, run_id, reason=reason)
+    updated = await cancel_run_record(
+        request.app.state,
+        run_id,
+        reason=reason,
+        actor=principal.principal_id if principal is not None else None,
+    )
     if updated is None:
         # The run finished while its background task was being stopped.
-        latest = await store.get_run(run_id)
+        latest = await store.get_run(run_id, payloads=False)
         raise _already_terminal(run_id, latest["status"] if latest else current_status)
     return await _run_snapshot(updated, request.app.state)
 
@@ -1186,6 +1219,7 @@ async def cancel_run_record(
     reason: str,
     cancel_reason: str | None = None,
     wait_seconds: float = 5.0,
+    actor: str | None = None,
 ) -> dict[str, Any] | None:
     """Stop a run's background task and mark the run cancelled.
 
@@ -1194,6 +1228,8 @@ async def cancel_run_record(
     (up to ``wait_seconds``) before the run row is written, so its own cancellation handler
     cannot overwrite the result. ``cancel_reason`` (``access_revoked``,
     ``publication_revoked``) is stored on the run and returned by ``GET /runs/{id}``.
+    ``actor`` (who cancelled), the status the run left and an unresolved ``effect_unknown``
+    effect are recorded on the ``RUN_CANCELLED`` event.
 
     Engine calls running inside a request (see :func:`run_in_request`) are stopped the same
     way. When the cancel runs inside the run's own execution (an in-process call made by one
@@ -1227,12 +1263,18 @@ async def cancel_run_record(
             task.cancel()
         if tasks:
             await asyncio.wait(tasks, timeout=wait_seconds)
-        run = await store.get_run(run_id)
+        run = await store.get_run(run_id, payloads=False)
         if run is None or run["status"] in _CANCEL_TERMINAL_STATUSES:
             return None
-        data: dict[str, Any] = {"reason": reason}
+        data: dict[str, Any] = {"reason": reason, "previous_status": run["status"]}
+        if actor:
+            data["actor"] = actor
         if cancel_reason:
             data["cancel_reason"] = cancel_reason
+        pending_effect = run.get("pending_effect")
+        if isinstance(pending_effect, dict) and pending_effect.get("effect_id"):
+            # Cancelling does not decide whether the in-doubt step happened.
+            data["unresolved_effect_id"] = pending_effect["effect_id"]
         await _record_event(store, run_id, "RUN_CANCELLED", data=data)
         written = await store.update_run(
             run_id=run_id,
@@ -1453,14 +1495,21 @@ async def _get_owned_run(request: Request, run_id: str) -> dict[str, Any]:
 
 
 def _budget_manager(app_state: Any) -> Any:
-    """Restore named run policies and spend from the service's durable SQLite store."""
-    from nexura_agents.usage.ledger import UsageLedger
+    """Restore named run policies and spend from the service's durable usage store.
+
+    Prices come from ``app_state.pricing_table`` (the built-in table plus the operator's
+    ``NEXURA_MODEL_PRICING``); without one the built-in table is used.
+    """
     from nexura_agents.usage.manager import BudgetManager
+
+    from nexura_runtime.service.storage_backend import app_usage_ledger
 
     manager = getattr(app_state, "budget_manager", None)
     if manager is None:
-        path = getattr(app_state.store, "db_path", None)
-        manager = BudgetManager(ledger=UsageLedger(str(path) if path else None))
+        manager = BudgetManager(
+            ledger=app_usage_ledger(app_state),
+            pricing_table=getattr(app_state, "pricing_table", None),
+        )
         app_state.budget_manager = manager
     return manager
 
@@ -1906,7 +1955,9 @@ async def recover_run(
         rows = await store.list_journaled_runs(("running",), run_ids=[run_id]) or [
             {"run_id": run_id, "journal_workspace": caller_ws, "owner_process": None}
         ]
-        verdict = (await run_liveness(journal, rows)).get(run_id)
+        verdict = (await run_liveness(journal, rows, **liveness_options(request.app.state))).get(
+            run_id
+        )
         if verdict == LIVE:
             raise _conflict(
                 "RUN_LEASE_HELD",
@@ -2029,7 +2080,9 @@ async def migrate_run(request: Request, run_id: str, payload: MigrateRunRequest)
     ) or [{"run_id": run_id, "journal_workspace": caller_ws, "owner_process": None}]
     if (
         snapshot.run.status in ("running", "interrupted") or snapshot.run.lease_owner is not None
-    ) and (await run_liveness(journal, rows)).get(run_id) == LIVE:
+    ) and (await run_liveness(journal, rows, **liveness_options(request.app.state))).get(
+        run_id
+    ) == LIVE:
         raise _conflict("RUN_LEASE_HELD", f"Run '{run_id}' is being executed by a live process.")
 
     async def migrate_and_resume() -> None:
@@ -2245,7 +2298,7 @@ async def fork_run(request: Request, run_id: str, payload: ForkRunRequest) -> di
     """Start a new run from a past checkpoint of this run, optionally changing its state."""
     caller_ws, principal = _require_permission(request, "run")
     # Before the first await: access ending while this request runs stops the fork (B40).
-    access_ended = _access_ended_check(request.app.state, caller_ws, principal)
+    access_ended = _access_ended_check(request.app.state, caller_ws, principal, request.state)
     store: StudioStore = request.app.state.store
     ws_repo: WorkspaceRepository = request.app.state.workspace_repo
     source = await _get_owned_run(request, run_id)
@@ -2369,7 +2422,7 @@ async def stream_run_events(
 ) -> StreamingResponse:
     """Stream lifecycle events via SSE with replay cursor, enforcing tenant ownership."""
     store: StudioStore = request.app.state.store
-    run = await store.get_run(run_id)
+    run = await store.get_run(run_id, payloads=False)  # blobs only after authorisation
     if run is None:
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,
@@ -2382,6 +2435,8 @@ async def stream_run_events(
     effective_cursor = cursor
     if last_event_id and last_event_id.isdigit():
         effective_cursor = int(last_event_id)
+    # Only the events this stream will send have their payloads read.
+    run = await store.load_payloads(run, after_seq=effective_cursor)
 
     run = _redact_events(run, request.app.state)
 
@@ -2411,7 +2466,8 @@ async def stream_run_events(
         while iteration < max_poll_iterations:
             await asyncio.sleep(0.1)
             iteration += 1
-            fresh_run = await store.get_run(run_id)
+            # Payloads of events already sent are not read again (WP2b).
+            fresh_run = await store.get_run(run_id, payloads_after_seq=last_sent_seq)
             if fresh_run is None:
                 break
             fresh_run = _redact_events(fresh_run, request.app.state)

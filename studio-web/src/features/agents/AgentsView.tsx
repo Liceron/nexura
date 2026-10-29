@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Liceron
+import { useAfterRender } from '../../app/useAfterRender';
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { AgentRecord } from '@liceron/nexura-sdk';
@@ -51,6 +52,7 @@ export function AgentsView() {
   const ids = useId();
   const listRef = useRef<HTMLUListElement>(null);
   const detailHeadingRef = useRef<HTMLHeadingElement>(null);
+  const afterRender = useAfterRender();
   const newButtonRef = useRef<HTMLButtonElement>(null);
   // On phones the list is hidden once a row opens, so focus follows into the detail pane.
   const compact = useCompactLayout();
@@ -115,12 +117,12 @@ export function AgentsView() {
         setDraft(draftFromRecord(loaded));
         setMode('edit');
         setPhonePane('detail');
-        if (compactRef.current) requestAnimationFrame(() => detailHeadingRef.current?.focus());
+        if (compactRef.current) afterRender(() => detailHeadingRef.current?.focus());
       } catch (err: unknown) {
         if (request === openRequest.current) setActionError(formatApiError(err, t));
       }
     },
-    [get],
+    [get, afterRender],
   );
 
   const startNew = () => {
@@ -131,7 +133,7 @@ export function AgentsView() {
     setDraft(emptyDraft(defaultModel, options?.guardrails?.defaults ?? DEFAULT_GUARDRAIL_PRESETS));
     setMode('new');
     setPhonePane('detail');
-    requestAnimationFrame(() => detailHeadingRef.current?.focus());
+    afterRender(() => detailHeadingRef.current?.focus());
   };
 
   const set = <K extends keyof AgentDraft>(key: K, value: AgentDraft[K]) =>
@@ -230,7 +232,7 @@ export function AgentsView() {
   const editing = mode !== 'none';
   const backToList = () => {
     setPhonePane('list');
-    requestAnimationFrame(() => listRef.current?.querySelector<HTMLButtonElement>('[aria-pressed="true"]')?.focus());
+    afterRender(() => listRef.current?.querySelector<HTMLButtonElement>('[aria-pressed="true"]')?.focus());
   };
 
   return (

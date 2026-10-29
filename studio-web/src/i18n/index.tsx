@@ -6,6 +6,15 @@ import en from './en.json';
 import hi from './hi.json';
 
 export type Language = 'en' | 'hi';
+
+/**
+ * Studio is English-only for now (founder decision 2026-10-29). The Hindi dictionary and the
+ * language controls stay in the code, switched off; a build with VITE_LANGUAGE_CHOICE=on turns
+ * them back on.
+ */
+export function languageChoiceEnabled(): boolean {
+  return import.meta.env.VITE_LANGUAGE_CHOICE === 'on';
+}
 export type Translate = (key: string, fallback?: string) => string;
 
 type Dict = typeof en;
@@ -44,7 +53,7 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
   const [language, setLanguageState] = useState<Language>(() => {
     try {
       const saved = localStorage.getItem('nexura_locale');
-      if (saved === 'hi' || saved === 'en') return saved;
+      if (saved === 'hi' && languageChoiceEnabled()) return saved;
     } catch {
       // localStorage not accessible
     }
@@ -52,6 +61,7 @@ export function I18nProvider({ children }: { children: React.ReactNode }) {
   });
 
   const setLanguage = (lang: Language) => {
+    if (lang !== 'en' && !languageChoiceEnabled()) return;
     setLanguageState(lang);
     try {
       localStorage.setItem('nexura_locale', lang);

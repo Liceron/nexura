@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 
 from nexura_runtime.credentials.errors import (
     CredentialAccessDeniedError,
+    CredentialAlreadyExistsError,
     CredentialNotFoundError,
 )
 from nexura_runtime.credentials.store import ScopedCredentialStore
@@ -52,12 +53,19 @@ class CreateCredentialRequest(BaseModel):
 
 
 class VerifyCredentialResponse(BaseModel):
-    """Result of credential verification check."""
+    """Result of a credential check made on this server (never with the provider).
+
+    ``stored``: the credential exists, is not revoked, and its secret can be read and is not
+    empty. Nobody asked the provider, so a wrong or expired key also passes
+    (``checked_with_provider`` is always false). ``invalid``: the secret cannot be read or is
+    empty. ``revoked``: it was revoked and fails closed.
+    """
 
     credential_id: str
-    status: Literal["valid", "invalid", "revoked"]
+    status: Literal["stored", "invalid", "revoked"]
     message: str
     checked_at: float
+    checked_with_provider: bool = False
 
 
 def _enforce_perm(principal: Principal, role: WorkspaceRole, permission: Any) -> None:
@@ -196,18 +204,29 @@ async def create_credential(
     except CredentialNotFoundError:
         pass
 
-    # Store credential in isolated scoped store
-    meta = store.store(
-        workspace_id=caller_ws,
-        credential_id=cid,
-        credential_type=payload.credential_type,
-        secret=payload.secret,
-        description=payload.description,
-        environment_variable=payload.environment_variable,
-        provider=payload.provider,
-        status="active",
-        created_by=principal.principal_id,
-    )
+    # Store credential in isolated scoped store. Create-only, atomically in the backend: of two
+    # instances creating one name at once, one gets 201 and the other 409 (MVP WP5 review M2).
+    try:
+        meta = store.store(
+            workspace_id=caller_ws,
+            credential_id=cid,
+            credential_type=payload.credential_type,
+            secret=payload.secret,
+            description=payload.description,
+            environment_variable=payload.environment_variable,
+            provider=payload.provider,
+            status="active",
+            created_by=principal.principal_id,
+            mode="create",
+        )
+    except CredentialAlreadyExistsError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "CREDENTIAL_ALREADY_EXISTS",
+                "message": f"Credential '{cid}' already exists.",
+            },
+        ) from exc
 
     # Return metadata ONLY — NEVER return secret
     return {
@@ -295,9 +314,12 @@ async def verify_credential(
     request: Request,
     credential_id: str,
 ) -> VerifyCredentialResponse:
-    """Verify availability and validity of the stored credential reference.
+    """Check that the stored credential can be used: it exists in this workspace, is not
+    revoked, and its secret can be read and is not empty.
 
-    Verification writes ``last_verified_at``, so it needs the edit permission.
+    It does not call the provider, so it cannot tell a working key from a wrong one: the
+    answer is ``stored`` ("stored and readable; not checked with the provider"), never
+    "valid". Writes ``last_verified_at``, so it needs the edit permission.
     """
     caller_ws, principal, role = _get_caller_context(request)
     _enforce_perm(principal, role, "edit")
@@ -337,8 +359,11 @@ async def verify_credential(
     store.mark_verified(caller_ws, credential_id, now)
     return VerifyCredentialResponse(
         credential_id=credential_id,
-        status="valid",
-        message="Credential verified: active in vault and format conforms.",
+        status="stored",
+        message=(
+            "Stored and readable (not empty, not revoked). Not checked with the provider: "
+            "a wrong or expired key also passes this check."
+        ),
         checked_at=now,
     )
 

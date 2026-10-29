@@ -1256,6 +1256,10 @@ GUARDRAIL_LATENCY_MS = "nexura.guardrail.latency_ms"
 GUARDRAIL_CACHED = "nexura.guardrail.cached"
 GUARDRAIL_SOURCE = "nexura.guardrail.source"
 GUARDRAIL_POLICY_DIGEST = "nexura.guardrail.policy_digest"
+GUARDRAIL_MODE = "nexura.guardrail.mode"
+GUARDRAIL_APPLIED = "nexura.guardrail.applied"
+GUARDRAIL_TOKENS = "nexura.guardrail.tokens"
+GUARDRAIL_SKIPPED = "nexura.guardrail.skipped"
 GUARDRAIL_DECISION_VALUE = "nexura.guardrail.decision"
 _EFFECT_EVENTS = {
     "pending": EVENT_EFFECT_INTENT,
@@ -1454,6 +1458,10 @@ def guardrail_decision(on: Any, decision: dict[str, Any], *, run_id: str) -> Non
         "cached": GUARDRAIL_CACHED,
         "decision": GUARDRAIL_DECISION_VALUE,
         "policy_digest": GUARDRAIL_POLICY_DIGEST,
+        "mode": GUARDRAIL_MODE,
+        "applied": GUARDRAIL_APPLIED,
+        "tokens": GUARDRAIL_TOKENS,
+        "skipped": GUARDRAIL_SKIPPED,
         "tool_name": TOOL_NAME,
         "tool_call_id": TOOL_CALL_ID,
         "error_type": ERROR_TYPE,

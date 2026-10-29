@@ -13,7 +13,8 @@ from nexura_agents.contracts.manifest import EffectPolicy, ModuleManifest
 from nexura_agents.contracts.result import ModuleResult
 from nexura_agents.types import Usage
 from nexura_agents.usage.errors import BudgetExceededError, UsageError
-from nexura_agents.usage.manager import BudgetManager
+from nexura_agents.usage.ledger import ledger_call
+from nexura_agents.usage.manager import BudgetManager, budget_call
 from nexura_agents.usage.models import BudgetConfig, FXRate
 
 
@@ -122,10 +123,13 @@ class UsageBudgetModule(BaseModule):
 
             elif operation == "check_budget":
                 run_budget = self.manager.get_run_budget(run_id)
+                # Ledger reads may wait on a database-wide lock (Postgres): off the loop.
                 if run_budget:
-                    status = run_budget.get_status()
+                    status = await run_budget.get_status_async()
                 else:
-                    status = self.manager.get_workspace_status(workspace_id)
+                    status = await ledger_call(
+                        self.manager.ledger, self.manager.get_workspace_status, workspace_id
+                    )
                 return ModuleResult.success(
                     {
                         "status": "ok",
@@ -178,7 +182,9 @@ class UsageBudgetModule(BaseModule):
                         run_id=run_id,
                     )
 
-                estimate = run_budget.reconcile(
+                estimate = await budget_call(
+                    run_budget,
+                    run_budget.reconcile,
                     res_id,
                     usage=usage,
                     model_id=inputs.get("model_id"),
@@ -207,11 +213,12 @@ class UsageBudgetModule(BaseModule):
                         run_id=run_id,
                         default_model=inputs.get("model_id", "gpt-4o"),
                     )
-                run_budget.record_usage(usage)
+                await run_budget.record_usage_async(usage)
+                status = await run_budget.get_status_async()
                 return ModuleResult.success(
                     {
                         "status": "usage_recorded",
-                        "budget_status": run_budget.get_status().model_dump(mode="json"),
+                        "budget_status": status.model_dump(mode="json"),
                     }
                 )
 

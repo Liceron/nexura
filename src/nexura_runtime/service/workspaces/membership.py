@@ -15,7 +15,7 @@ closed edition in EDITIONS_PLAN step 7 (a protocol that extends this one, and a
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from nexura_runtime.service.workspaces.models import Workspace, WorkspaceMember
 
@@ -37,4 +37,40 @@ class MembershipStore(Protocol):
         ...
 
 
-__all__ = ["MembershipStore"]
+#: ``request.state`` attribute where an authentication provider leaves the membership record it
+#: read for the request's principal (MVP WP11a), so a route can reuse that read instead of
+#: repeating it. Only ever set per request; never a cache across requests.
+AUTHENTICATED_MEMBER = "authenticated_member"
+
+
+def remember_member(
+    state: Any, workspace_id: str, principal_id: str, member: WorkspaceMember | None
+) -> None:
+    """Record, on ``request.state``, the membership read made while authenticating."""
+    setattr(state, AUTHENTICATED_MEMBER, (workspace_id, principal_id, member))
+
+
+def forget_member(state: Any) -> None:
+    """Drop the remembered membership read (the membership may have changed since)."""
+    if state is not None and hasattr(state, AUTHENTICATED_MEMBER):
+        delattr(state, AUTHENTICATED_MEMBER)
+
+
+def remembered_member(
+    state: Any, workspace_id: str, principal_id: str
+) -> tuple[bool, WorkspaceMember | None]:
+    """``(True, record)`` when this request's authentication read the membership of
+    ``principal_id`` in ``workspace_id``; ``(False, None)`` otherwise."""
+    found = getattr(state, AUTHENTICATED_MEMBER, None) if state is not None else None
+    if isinstance(found, tuple) and len(found) == 3 and found[:2] == (workspace_id, principal_id):
+        return True, found[2]
+    return False, None
+
+
+__all__ = [
+    "AUTHENTICATED_MEMBER",
+    "MembershipStore",
+    "forget_member",
+    "remember_member",
+    "remembered_member",
+]

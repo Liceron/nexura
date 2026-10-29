@@ -14,9 +14,9 @@ from typing import Any
 
 import pytest
 from _local_env import local_headers
+from _service_state import service_execution_store, service_workflow_store
 from fastapi.testclient import TestClient
 from nexura_agents.contracts.execution import EffectStatus, ExecutionId
-from nexura_agents.execution_store import SQLiteExecutionStore
 from starlette.requests import Request
 
 from nexura_runtime.service.api.app import create_api_app
@@ -25,7 +25,6 @@ from nexura_runtime.service.extensions import Identity
 from nexura_runtime.service.workspaces.repository import WorkspaceRepository
 from nexura_runtime.workflow import (
     ModuleRegistry,
-    SQLiteWorkflowStore,
     WorkflowEngine,
     WorkflowNode,
     WorkflowSpec,
@@ -63,7 +62,7 @@ class FakePay:
 
 async def _crashed(db: Path, workspace_id: str, run_id: str, fake: FakePay) -> None:
     """The worker died inside ``pay``: intent dispatched, effect ``pending``, lease gone."""
-    store = SQLiteWorkflowStore(db)
+    store = service_workflow_store(db)
     try:
         with pytest.raises(Crash):
             await WorkflowEngine(SPEC, fake.registry, store=store, workspace_id=workspace_id).run(
@@ -74,7 +73,7 @@ async def _crashed(db: Path, workspace_id: str, run_id: str, fake: FakePay) -> N
 
 
 async def _recover(db: Path, workspace_id: str, run_id: str, fake: FakePay) -> Any:
-    store = SQLiteWorkflowStore(db)
+    store = service_workflow_store(db)
     try:
         engine = WorkflowEngine(SPEC, fake.registry, store=store, workspace_id=workspace_id)
         return await engine.recover(run_id)
@@ -88,7 +87,7 @@ async def _unknown_effect(db: Path, workspace_id: str, run_id: str, fake: FakePa
     paused = await _recover(db, workspace_id, run_id, fake)
     assert paused.status == "paused" and paused.pause_reason == "effect_unknown"
     assert fake.calls == 1
-    store = SQLiteExecutionStore(db)
+    store = service_execution_store(db)
     try:
         snapshot = await store.get(ExecutionId(workspace_id, run_id))
         (effect,) = snapshot.effects.values()
@@ -143,7 +142,7 @@ def test_list_and_resolve_once_then_the_run_continues(tmp_path: Path) -> None:
     assert done.state["receipt"] == "local-fake"
 
     async def journal() -> Any:
-        store = SQLiteExecutionStore(db)
+        store = service_execution_store(db)
         try:
             return await store.get(ExecutionId("wsA", "run-1"))
         finally:
@@ -203,7 +202,7 @@ def test_pending_effect_and_live_worker_are_conflicts(tmp_path: Path) -> None:
 
     async def crashed_with_pending_effect() -> str:
         await _crashed(db, "wsA", "run-live", FakePay())
-        store = SQLiteExecutionStore(db)
+        store = service_execution_store(db)
         try:
             snapshot = await store.get(ExecutionId("wsA", "run-live"))
             (effect,) = snapshot.effects.values()
@@ -225,7 +224,7 @@ def test_pending_effect_and_live_worker_are_conflicts(tmp_path: Path) -> None:
         async def indeterminate_under_a_live_lease() -> None:
             from dataclasses import replace
 
-            store = SQLiteExecutionStore(db)
+            store = service_execution_store(db)
             try:
                 identity = ExecutionId("wsA", "run-live")
                 snapshot = await store.get(identity)
@@ -345,7 +344,7 @@ def test_timed_out_node_is_resolved_over_rest_and_continues(tmp_path: Path) -> N
     registry.register("fake-pay", slow)
 
     async def time_out() -> str:
-        store = SQLiteWorkflowStore(db)
+        store = service_workflow_store(db)
         try:
             engine = WorkflowEngine(SPEC, registry, store=store, workspace_id="wsA", timeout=0.05)
             paused = await engine.run({}, workflow_run_id="run-t")
@@ -373,7 +372,7 @@ def test_timed_out_node_is_resolved_over_rest_and_continues(tmp_path: Path) -> N
         assert resolved.json()["resolved_by"] == "local-owner"
 
     async def recover() -> Any:
-        store = SQLiteWorkflowStore(db)
+        store = service_workflow_store(db)
         try:
             done = await WorkflowEngine(SPEC, registry, store=store, workspace_id="wsA").recover(
                 "run-t"

@@ -79,7 +79,7 @@ Or build and install a wheel into any Python 3.12 environment:
 
 ```bash
 uv build
-pip install "dist/nexura_runtime-0.4.0-py3-none-any.whl[studio]"
+pip install "dist/nexura_runtime-0.4.1-py3-none-any.whl[studio]"
 ```
 
 The repository builds one package per feature group (`uv build --all-packages` writes every
@@ -109,6 +109,7 @@ Core dependencies are only `httpx`, `pydantic`, `packaging` and `cryptography`. 
 | `knowledge` | pypdf | PDF ingestion |
 | `secrets` | (nothing; `cryptography` is core since 0.4.0) | Kept so old install commands work |
 | `sandbox` | pydantic-monty | The Monty code-execution sandbox backend (`NEXURA_SANDBOX_BACKENDS=monty`) |
+| `gcs` | google-cloud-storage | Blob storage in a Cloud Storage bucket (`NEXURA_BLOB_URL=gs://...`) for large run and trace payloads |
 
 The `postgres`, `vector`, `vertex` and `sandbox-wasi` extras of earlier versions became the
 `nexura-postgres`, `nexura-qdrant`, `nexura-vertex` and `nexura-sandbox[wasi]` packages above.

@@ -9,7 +9,6 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from nexura_runtime.service.api.app import create_api_app
-from nexura_runtime.service.triggers.store import SqliteTriggerStore
 
 
 @pytest.fixture
@@ -416,7 +415,8 @@ async def test_scheduler_restart_reconciliation(tmp_db_path: str):
 
     # Simulate that schedule fire was missed during service downtime
     # By modifying next_run_at to past timestamp
-    sqlite_store = SqliteTriggerStore(tmp_db_path)
+    # The app's own trigger store: the SQLite file, or Postgres under --service-backend=postgres.
+    sqlite_store = app1.state.trigger_store
     sched = sqlite_store.get_schedule("sched_restart_test")
     assert sched is not None
     past_time = time.time() - 300  # 5 minutes in the past
@@ -424,8 +424,12 @@ async def test_scheduler_restart_reconciliation(tmp_db_path: str):
 
     # 2. Restart app with the exact same database
     app2 = create_api_app(db_path=tmp_db_path, profile="local-owner")
-    # Trigger reconcile on restarted app
-    async with AsyncClient(transport=ASGITransport(app=app2), base_url="http://testserver") as c2:
+    # Trigger reconcile on restarted app. Its startup (lifespan) runs as on a real restart: a
+    # Postgres trigger store (--service-backend=postgres) reconciles only there.
+    async with (
+        app2.router.lifespan_context(app2),
+        AsyncClient(transport=ASGITransport(app=app2), base_url="http://testserver") as c2,
+    ):
         jobs_res = await c2.get("/api/v1/triggers/jobs")
         assert jobs_res.status_code == 200
         # Reconcile enqueued exactly one job for the missed run per "fire_once" policy

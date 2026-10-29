@@ -5,13 +5,13 @@
 from __future__ import annotations
 
 import os
-import sqlite3
 import sys
 import time
-from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
+
+from nexura_runtime.service.storage_backend import DatabaseProbe, SQLiteProbe
 
 HealthState = Literal["healthy", "unhealthy", "degraded"]
 
@@ -48,9 +48,11 @@ class HealthChecker:
         *,
         db_path: str | Path | None = None,
         artifact_dir: str | Path | None = None,
+        database: DatabaseProbe | None = None,
     ) -> None:
         self.db_path = Path(db_path).resolve() if db_path else None
         self.artifact_dir = Path(artifact_dir).resolve() if artifact_dir else None
+        self.database = database or (SQLiteProbe(self.db_path) if self.db_path else None)
 
     def check_liveness(self) -> ProbeResult:
         """Fast liveness check: verifies process responsiveness and memory status."""
@@ -69,8 +71,8 @@ class HealthChecker:
         )
 
     def check_database(self) -> ProbeResult:
-        """Readiness check: verifies SQLite database connectivity, WAL mode, and writeability."""
-        if not self.db_path:
+        """Read-only readiness check through the selected backend."""
+        if self.database is None:
             return ProbeResult(
                 name="database",
                 state="healthy",
@@ -80,30 +82,15 @@ class HealthChecker:
 
         t0 = time.perf_counter()
         try:
-            self.db_path.parent.mkdir(parents=True, exist_ok=True)
-            with closing(sqlite3.connect(str(self.db_path), timeout=3.0)) as conn, conn:
-                cursor = conn.cursor()
-                cursor.execute("SELECT 1;")
-                res = cursor.fetchone()
-                if not res or res[0] != 1:
-                    raise RuntimeError("Database ping query returned unexpected result")
-
-                # Test table writeability
-                cursor.execute(
-                    "CREATE TABLE IF NOT EXISTS _nexura_health_ping "
-                    "(id INTEGER PRIMARY KEY, ping_at REAL);"
-                )
-                cursor.execute(
-                    "INSERT INTO _nexura_health_ping (ping_at) VALUES (?);", (time.time(),)
-                )
-                conn.commit()
+            if not self.database.ping():
+                raise RuntimeError("Database ping query returned unexpected result")
 
             duration = (time.perf_counter() - t0) * 1000.0
             return ProbeResult(
                 name="database",
                 state="healthy",
                 latency_ms=duration,
-                details={"db_path": str(self.db_path), "status": "read_write_verified"},
+                details={"db_path": str(self.db_path), "status": "read_verified"},
             )
         except Exception as exc:
             duration = (time.perf_counter() - t0) * 1000.0
@@ -194,7 +181,10 @@ def create_health_router(checker: HealthChecker | None = None) -> Any:
 
     @router.get("/readyz")
     async def readiness() -> Any:
-        health = active_checker.assess_readiness()
+        import asyncio
+
+        # The database probe may wait on the network; keep the event loop free.
+        health = await asyncio.to_thread(active_checker.assess_readiness)
         body = {
             "status": health.state,
             "timestamp": health.timestamp,

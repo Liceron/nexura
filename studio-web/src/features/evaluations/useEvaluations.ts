@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Liceron
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useLatestT } from '../../i18n';
 import { useApi } from '../../api/context';
 import type {
@@ -21,6 +21,8 @@ export function useEvaluations() {
   const [selectedDataset, setSelectedDataset] = useState<EvaluationDataset | null>(null);
   const [runs, setRuns] = useState<EvaluationSummary[]>([]);
   const [selectedRun, setSelectedRun] = useState<EvaluationSummary | null>(null);
+  const [runLoading, setRunLoading] = useState(false);
+  const runLoadGeneration = useRef(0);
   const [comparison, setComparison] = useState<EvaluationComparison | null>(null);
 
   const [loading, setLoading] = useState<boolean>(true);
@@ -94,6 +96,12 @@ export function useEvaluations() {
   useEffect(() => {
     refreshAll();
   }, [connection.workspace]);
+
+  useEffect(() => {
+    setSelectedRun(null);
+    setRunLoading(false);
+    return () => { runLoadGeneration.current += 1; };
+  }, [client, connection.workspace]);
 
   // Load selected dataset detail
   useEffect(() => {
@@ -175,6 +183,21 @@ export function useEvaluations() {
     }
   };
 
+  const handleOpenRun = async (runId: string) => {
+    const generation = ++runLoadGeneration.current;
+    setRunLoading(true);
+    setSelectedRun(null);
+    setError(null);
+    try {
+      const detail = await client.evaluations.getRun(runId);
+      if (generation === runLoadGeneration.current) setSelectedRun(detail);
+    } catch (cause) {
+      if (generation === runLoadGeneration.current) setError(formatApiError(cause, t));
+    } finally {
+      if (generation === runLoadGeneration.current) setRunLoading(false);
+    }
+  };
+
   const handleRunEvaluation = async () => {
     if (!evalDatasetId) {
       setError(t('validationMessages.selectDataset'));
@@ -228,6 +251,8 @@ export function useEvaluations() {
     runs,
     selectedRun,
     setSelectedRun,
+    runLoading,
+    handleOpenRun,
     comparison,
     loading,
     actionLoading,
@@ -254,6 +279,18 @@ export function useEvaluations() {
     setNewExamplesJson,
     handleCreateDataset,
     handleDeleteDataset,
+    handleDeleteRun: async (runId: string) => {
+      setActionLoading(true); setError(null);
+      try {
+        await client.request('DELETE', `/evaluations/runs/${encodeURIComponent(runId)}`);
+        setRuns(current => current.filter(run => run.run_id !== runId));
+        setSelectedRun(current => current?.run_id === runId ? null : current);
+        if (baseRunId === runId) setBaseRunId('');
+        if (candidateRunId === runId) setCandidateRunId('');
+        setComparison(null);
+      } catch (cause) { setError(formatApiError(cause, t)); throw cause; }
+      finally { setActionLoading(false); }
+    },
     handleRunEvaluation,
     handleCompareRuns,
     refreshAll,

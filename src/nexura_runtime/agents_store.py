@@ -90,6 +90,21 @@ def new_agent_id() -> str:
     return f"agt_{uuid.uuid4().hex[:16]}"
 
 
+def agent_summary(record: dict[str, Any]) -> dict[str, Any]:
+    """The list view of one stored record (shared by the SQLite and Postgres stores)."""
+    spec = record["spec"]
+    return {
+        "agent_id": record["agent_id"],
+        "name": spec.get("name", ""),
+        "description": spec.get("description", ""),
+        "model": spec.get("model", ""),
+        "tool_count": len(spec.get("tools") or []),
+        "tools": list(spec.get("tools") or []),
+        "revision": record["revision"],
+        "updated_at": record["updated_at"],
+    }
+
+
 class AgentStore:
     """SQLite-backed agent store; every call names the workspace it acts for."""
 
@@ -138,23 +153,7 @@ class AgentStore:
                 "WHERE workspace_id=? ORDER BY name",
                 (workspace_id,),
             ).fetchall()
-        out = []
-        for row in rows:
-            record = self._record(row)
-            spec = record["spec"]
-            out.append(
-                {
-                    "agent_id": record["agent_id"],
-                    "name": spec.get("name", ""),
-                    "description": spec.get("description", ""),
-                    "model": spec.get("model", ""),
-                    "tool_count": len(spec.get("tools") or []),
-                    "tools": list(spec.get("tools") or []),
-                    "revision": record["revision"],
-                    "updated_at": record["updated_at"],
-                }
-            )
-        return out
+        return [agent_summary(self._record(row)) for row in rows]
 
     def get(self, workspace_id: str, agent_id: str) -> dict[str, Any]:
         """The stored record (spec, revision, timestamps); raises :class:`AgentNotFoundError`."""
@@ -282,5 +281,6 @@ __all__ = [
     "AgentRevisionConflictError",
     "AgentStore",
     "AgentStoreError",
+    "agent_summary",
     "new_agent_id",
 ]

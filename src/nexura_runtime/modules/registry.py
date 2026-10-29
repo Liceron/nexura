@@ -272,6 +272,15 @@ class VersionedModuleRegistry:
 
         self._modules[key] = RegisteredModule(manifest=manifest, target=module)
 
+    def unregister(self, module_id: str, version: str, *, target: Any = None) -> bool:
+        """Remove one registration; with ``target``, only when it is that exact object (a
+        registry shared by several apps keeps the other apps' modules)."""
+        entry = self._modules.get((module_id, version))
+        if entry is None or (target is not None and entry.target is not target):
+            return False
+        del self._modules[(module_id, version)]
+        return True
+
     def register_unavailable(self, manifest: ModuleManifest, package: str) -> None:
         """Register ``manifest`` as provided by the distribution ``package``, not installed.
 

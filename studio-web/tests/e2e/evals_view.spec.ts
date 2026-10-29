@@ -91,6 +91,7 @@ test.describe('Studio evals view (P4)', () => {
     await page.locator('[data-testid="studio-evals-save-case"]').click();
     await expect(page.locator('[data-testid="studio-evals-case-extra"]')).toBeVisible();
     await page.locator('[data-testid="studio-evals-delete-extra"]').click();
+    await page.getByRole('button', { name: 'Confirm', exact: true }).click();
     await expect(page.locator('[data-testid="studio-evals-case-extra"]')).toHaveCount(0);
 
     await page.locator('[data-testid="studio-evals-save-dataset"]').click();

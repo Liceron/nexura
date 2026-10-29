@@ -56,7 +56,7 @@ const fixture = vi.hoisted(() => {
       rotateDeliveryToken: vi.fn(async () => ({ endpoint_id: 'एंडपॉइंट', delivery_token: 'टोकन-मान', delivery_token_header: 'Authorization: Bearer <delivery_token>' })),
     },
     runs: { start: vi.fn(async () => ({ run_id: 'रन', status: 'completed', current_state: { reply: 'नमस्ते' } })), diagnostics: vi.fn(async () => ({ usage: { known_input_tokens: 1, known_output_tokens: 2, reported_attempts: 1, complete: false }, attempt_count: 1, truncated_attempts: 0, attempts: [{ id: 'प्रयास', node_id: 'नोड', module_id: 'मॉड्यूल', status: 'completed', duration_ms: 2, input_tokens: 1, output_tokens: 2 }] })), history: vi.fn(async () => ({ items: [] })), children: vi.fn(async () => ({ items: [] })) },
-    request: vi.fn(async (): Promise<Record<string, unknown>> => ({ datasets: [], targets: [], runs: [], items: [], max_file_bytes: 5000000, max_workspace_bytes: 50000000, workspace_used_bytes: 0, max_top_k: 50 })),
+    request: vi.fn(async (): Promise<Record<string, unknown>> => ({ registrations: [], datasets: [], targets: [], runs: [], items: [], max_file_bytes: 5000000, max_workspace_bytes: 50000000, workspace_used_bytes: 0, max_top_k: 50 })),
   };
   const api = { manager: { client, clearCache: vi.fn(), abortSignal: new AbortController().signal, baseUrl: '/api' }, connection: { status: 'connected', workspace: 'कार्यस्थान', principal: 'स्वामी', profile: 'local-owner', baseUrl: '/api' }, changeWorkspace: vi.fn(), refreshConnection: vi.fn() };
   return { api, client, spec, workflow, dataset, run };

@@ -19,6 +19,7 @@ from typing import Any
 from nexura_agents.durable import DEFAULT_CLAIM_LEASE_SECONDS, DEFAULT_WORKSPACE, check_fence
 from nexura_agents.errors import ApprovalDecisionError
 
+from nexura_postgres.db import noop_reset, normalize_url
 from nexura_postgres.execution_store import PostgresExecutionStore
 
 _NOW = "SELECT EXTRACT(EPOCH FROM clock_timestamp())::double precision"
@@ -78,7 +79,13 @@ class PostgresCheckpointStore:
             if self._pool is None:
                 import asyncpg  # type: ignore[import-untyped]
 
-                self._pool = await asyncpg.create_pool(self._dsn, min_size=1, max_size=5)
+                self._pool = await asyncpg.create_pool(
+                    normalize_url(self._dsn, strict=False),
+                    min_size=1,
+                    max_size=5,
+                    statement_cache_size=0,
+                    reset=noop_reset,
+                )
             if not self._ready:
                 async with self._pool.acquire() as conn, conn.transaction():
                     # Concurrent first use from several processes: create tables once.

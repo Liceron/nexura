@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.metadata
+import os
 import sys
 import textwrap
 from collections.abc import Iterator
@@ -203,8 +204,15 @@ def test_two_extensions_cannot_claim_one_capability(tmp_path: Path) -> None:
 
 
 def test_readyz_unchanged_without_health_fields(tmp_path: Path) -> None:
+    expected = {"status", "timestamp", "probes"}
+    if os.environ.get("NEXURA_DATABASE_URL"):
+        # Postgres mode adds the service's own storage keys to the operator view (partial mode
+        # and the WP3 blob-payload counters); still no ``extensions`` key without health fields.
+        expected |= {"storage", "blob_payloads"}
     with TestClient(create_api_app(db_path=_db(tmp_path))) as client:
-        assert set(client.get("/readyz").json()) == {"status", "timestamp", "probes"}
+        body = client.get("/readyz").json()
+    assert "extensions" not in body
+    assert set(body) == expected
 
 
 def test_health_fields_must_be_json(tmp_path: Path) -> None:

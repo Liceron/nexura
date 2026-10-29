@@ -15,6 +15,12 @@ from nexura_runtime.integrations.channels.models import (
     ChannelType,
     OutboxReceipt,
 )
+from nexura_runtime.store_retention import (
+    DEFAULT_PRUNE_LIMIT,
+    MIN_DEDUP_RETENTION_SECONDS,
+    prune_cutoff,
+    sqlite_prune_channels,
+)
 
 
 class ChannelStore(Protocol):
@@ -25,6 +31,17 @@ class ChannelStore(Protocol):
     def record_dedup(self, key: str, status: str = "processed") -> bool: ...
 
     def record_receipt(self, receipt: OutboxReceipt) -> None: ...
+
+    def prune(
+        self,
+        older_than_seconds: float,
+        *,
+        now: float | None = None,
+        limit: int = DEFAULT_PRUNE_LIMIT,
+        dry_run: bool = False,
+        dedup: bool = True,
+        outbox: bool = True,
+    ) -> dict[str, int]: ...
 
     def get_receipt(self, receipt_id: str) -> OutboxReceipt | None: ...
 
@@ -46,7 +63,13 @@ class ChannelStore(Protocol):
 class MemoryChannelStore:
     """Thread-safe in-memory store for channel deduplication and outbox receipts."""
 
-    def __init__(self) -> None:
+    blocking_io = False
+
+    def __init__(
+        self, *, delivery_retry_window_seconds: float = MIN_DEDUP_RETENTION_SECONDS
+    ) -> None:
+        prune_cutoff(delivery_retry_window_seconds, None, 1, minimum=MIN_DEDUP_RETENTION_SECONDS)
+        self.delivery_retry_window_seconds = delivery_retry_window_seconds
         self._lock = threading.Lock()
         self._dedup: dict[str, float] = {}
         self._receipts: dict[str, OutboxReceipt] = {}
@@ -54,6 +77,51 @@ class MemoryChannelStore:
     def is_duplicate(self, key: str) -> bool:
         with self._lock:
             return key in self._dedup
+
+    def prune(
+        self,
+        older_than_seconds: float,
+        *,
+        now: float | None = None,
+        limit: int = DEFAULT_PRUNE_LIMIT,
+        dry_run: bool = False,
+        dedup: bool = True,
+        outbox: bool = True,
+    ) -> dict[str, int]:
+        """Expire at most ``limit`` rows total, strictly older than the cutoff.
+
+        Dedup retention must cover the configured delivery retry window (minimum seven
+        days). Disable ``dedup`` to expire receipts with a shorter independent policy.
+        """
+        cutoff = prune_cutoff(
+            older_than_seconds,
+            now,
+            limit,
+            minimum=self.delivery_retry_window_seconds if dedup else 0,
+        )
+        with self._lock:
+            keys = (
+                sorted(
+                    (k for k, stamp in self._dedup.items() if stamp < cutoff),
+                    key=self._dedup.__getitem__,
+                )[:limit]
+                if dedup
+                else []
+            )
+            receipts = (
+                sorted(
+                    (k for k, r in self._receipts.items() if r.created_at < cutoff),
+                    key=lambda k: self._receipts[k].created_at,
+                )[: limit - len(keys)]
+                if outbox
+                else []
+            )
+            if not dry_run:
+                for key in keys:
+                    del self._dedup[key]
+                for key in receipts:
+                    del self._receipts[key]
+            return {"dedup_keys": len(keys), "outbox_receipts": len(receipts)}
 
     def record_dedup(self, key: str, status: str = "processed") -> bool:
         with self._lock:
@@ -103,9 +171,23 @@ class MemoryChannelStore:
 
 
 class SqliteChannelStore:
-    """Crash-resilient persistent SQLite store for outbox and deduplication."""
+    """Crash-resilient persistent SQLite store for outbox and deduplication.
 
-    def __init__(self, db_path: str = ":memory:") -> None:
+    ``nexura_postgres.PostgresChannelStore`` is the Postgres twin (MVP WP8). Receipts list by
+    ``created_at``, then by insertion (``rowid``; a replaced receipt counts as new).
+    """
+
+    #: Local file I/O: async callers may run calls inline (Postgres: a network round trip).
+    blocking_io = False
+
+    def __init__(
+        self,
+        db_path: str = ":memory:",
+        *,
+        delivery_retry_window_seconds: float = MIN_DEDUP_RETENTION_SECONDS,
+    ) -> None:
+        prune_cutoff(delivery_retry_window_seconds, None, 1, minimum=MIN_DEDUP_RETENTION_SECONDS)
+        self.delivery_retry_window_seconds = delivery_retry_window_seconds
         self.db_path = db_path
         self._lock = threading.RLock()
         self._connection: sqlite3.Connection | None = None
@@ -153,7 +235,35 @@ class SqliteChannelStore:
             self._conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_outbox_msg ON channel_outbox(message_id);
             """)
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_dedup_retention ON channel_dedup(processed_at)"
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_outbox_retention ON channel_outbox(created_at)"
+            )
             self._conn.commit()
+
+    def prune(
+        self,
+        older_than_seconds: float,
+        *,
+        now: float | None = None,
+        limit: int = DEFAULT_PRUNE_LIMIT,
+        dry_run: bool = False,
+        dedup: bool = True,
+        outbox: bool = True,
+    ) -> dict[str, int]:
+        """Bounded row retention; see :meth:`MemoryChannelStore.prune`."""
+        cutoff = prune_cutoff(
+            older_than_seconds,
+            now,
+            limit,
+            minimum=self.delivery_retry_window_seconds if dedup else 0,
+        )
+        with self._lock, self._conn:
+            return sqlite_prune_channels(
+                self._conn, cutoff, limit, dry_run=dry_run, dedup=dedup, outbox=outbox
+            )
 
     def is_duplicate(self, key: str) -> bool:
         with self._lock:
@@ -170,6 +280,9 @@ class SqliteChannelStore:
                 self._conn.commit()
                 return True
             except sqlite3.IntegrityError:
+                # End the implicit transaction the failed INSERT opened, so this connection does
+                # not keep the file's write lock until its next commit (MVP WP8).
+                self._conn.rollback()
                 return False
 
     def record_receipt(self, receipt: OutboxReceipt) -> None:
@@ -212,7 +325,7 @@ class SqliteChannelStore:
         with self._lock:
             cur = self._conn.execute(
                 "SELECT * FROM channel_outbox WHERE message_id = ? "
-                "ORDER BY created_at DESC LIMIT 1",
+                "ORDER BY created_at DESC, rowid DESC LIMIT 1",
                 (message_id,),
             )
             row = cur.fetchone()
@@ -243,7 +356,7 @@ class SqliteChannelStore:
             if dry_run is not None:
                 query += " AND dry_run = ?"
                 params.append(1 if dry_run else 0)
-            query += " ORDER BY created_at ASC"
+            query += " ORDER BY created_at ASC, rowid ASC"
             cur = self._conn.execute(query, params)
             return [self._row_to_receipt(r) for r in cur.fetchall()]
 

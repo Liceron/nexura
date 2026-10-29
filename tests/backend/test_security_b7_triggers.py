@@ -335,6 +335,10 @@ def test_test_endpoint_ignores_role_headers_and_returns_no_signature(tmp_path: P
 # --- finding 30: secrets encrypted at rest -----------------------------------------------
 
 
+# sqlite_only: it checkpoints the SQLite WAL and scans the SQLite files for the secret; on
+# Postgres the trigger store is PostgresTriggerStore and there is no file to scan (the same
+# marker as the closed edition's copy of this test).
+@pytest.mark.sqlite_only
 def test_webhook_secret_not_in_database_files(tmp_path: Path) -> None:
     c, k, app = _local(tmp_path)
     secret = "WEBHOOKSECRET-ABCDEF-123456"

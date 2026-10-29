@@ -49,7 +49,6 @@ from nexura_runtime.agents_spec import (
 from nexura_runtime.agents_store import (
     MAX_AGENTS_PER_WORKSPACE,
     AgentRevisionConflictError,
-    AgentStore,
     AgentStoreError,
 )
 from nexura_runtime.runtime.agents.saved import AGENT_NODE_MODULE_ID, BuiltAgent
@@ -62,6 +61,7 @@ from nexura_runtime.service.api.sessions import (
     knowledge_search_tool,
     looks_like_document_question,
 )
+from nexura_runtime.service.storage_protocols import AgentBackend
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -109,7 +109,7 @@ def offline_agent_model(spec: AgentSpec) -> FakeModel:
 class AgentRuntime:
     """Checks saved specs against one app and builds runnable agents from them."""
 
-    def __init__(self, app: FastAPI, store: AgentStore) -> None:
+    def __init__(self, app: FastAPI, store: AgentBackend) -> None:
         self._app = app
         self.store = store
         # Knowledge helpers read ``.app.state``; outside a request this stands in for one.
@@ -590,7 +590,7 @@ async def delete_agent(
 
 def mount_agents(app: FastAPI, api_v1: APIRouter) -> None:
     """Create the agent store on the service database, bind agent nodes and mount routes."""
-    store = AgentStore(app.state.store.db_path)
+    store = app.state.agent_store
     runtime = AgentRuntime(app, store)
     app.state.agent_store = store
     app.state.agent_runtime = runtime

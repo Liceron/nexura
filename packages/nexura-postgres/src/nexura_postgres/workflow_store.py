@@ -30,6 +30,7 @@ from typing import Any
 
 from nexura_agents.errors import WorkflowError
 
+from nexura_postgres.db import noop_reset, normalize_url
 from nexura_postgres.execution_store import PostgresExecutionStore
 from nexura_runtime.workflow import (
     WorkflowCheckpoint,
@@ -41,7 +42,6 @@ from nexura_runtime.workflow import (
     checkpoint_to_dict,
 )
 
-_NOW = "SELECT EXTRACT(EPOCH FROM clock_timestamp())::double precision"
 # Serializes concurrent first use (migrations) across processes; distinct from the
 # journal's (734658101) and the SDK checkpoint store's (734658102) constants.
 _MIGRATION_LOCK = 734658103
@@ -80,6 +80,37 @@ MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
         ),
     ),
 )
+
+
+_INSERT = """INSERT INTO nexura_workflow_checkpoints (
+    workflow_run_id, workspace_id, status, current_node_id, step_count,
+    spec_hash, approval_id, approval_expires_at, revision, updated_at,
+    checkpoint_json)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"""
+_HISTORY = """
+INSERT INTO nexura_workflow_checkpoint_history
+    (workflow_run_id, workspace_id, revision, checkpoint_json, created_at)
+SELECT $1, $2, $9, $11, $10 FROM latest"""
+#: Store a checkpoint as the run's latest (MVP WP11a: one statement with its history row).
+_WRITE = (
+    _INSERT
+    + """
+ON CONFLICT (workflow_run_id) DO UPDATE SET
+    workspace_id = EXCLUDED.workspace_id,
+    status = EXCLUDED.status,
+    current_node_id = EXCLUDED.current_node_id,
+    step_count = EXCLUDED.step_count,
+    spec_hash = EXCLUDED.spec_hash,
+    approval_id = EXCLUDED.approval_id,
+    approval_expires_at = EXCLUDED.approval_expires_at,
+    revision = EXCLUDED.revision,
+    updated_at = EXCLUDED.updated_at,
+    checkpoint_json = EXCLUDED.checkpoint_json"""
+)
+_WRITE_WITH_HISTORY = "WITH latest AS (" + _WRITE + " RETURNING 1)" + _HISTORY
+#: A new run's first checkpoint; no row is returned when the id is taken.
+_CREATE = _INSERT + " ON CONFLICT (workflow_run_id) DO NOTHING RETURNING 1"
+_CREATE_WITH_HISTORY = "WITH latest AS (" + _CREATE + ")" + _HISTORY + " RETURNING 1"
 
 
 class _SharedPoolExecutionStore(PostgresExecutionStore):
@@ -158,7 +189,11 @@ class PostgresWorkflowStore:
                 import asyncpg  # type: ignore[import-untyped]
 
                 self._pool = await asyncpg.create_pool(
-                    self._dsn, min_size=1, max_size=self._max_pool_size
+                    normalize_url(self._dsn, strict=False),
+                    min_size=1,
+                    max_size=self._max_pool_size,
+                    statement_cache_size=0,
+                    reset=noop_reset,
                 )
                 self._pool_loop = loop
             if not self._ready:
@@ -225,11 +260,16 @@ class PostgresWorkflowStore:
 
     @staticmethod
     async def _run_lock(conn: Any, workflow_run_id: str) -> float:
-        await conn.execute(
-            "SELECT pg_advisory_xact_lock(hashtextextended('nexura-workflow/' || $1::text, 0))",
+        """Take the run's advisory lock, then read the database clock (one statement, MVP
+        WP11a). The clock is the outer query's projection of the locked subquery's row, so
+        it is read after the lock is granted; the subquery has a volatile function, so the
+        planner cannot flatten it into the outer query."""
+        now: float = await conn.fetchval(
+            "SELECT EXTRACT(EPOCH FROM clock_timestamp())::double precision FROM ("
+            "SELECT pg_advisory_xact_lock(hashtextextended('nexura-workflow/' || $1::text, 0))"
+            ") AS locked",
             workflow_run_id,
         )
-        now: float = await conn.fetchval(_NOW)
         return now
 
     def _visible(self, row: Any) -> bool:
@@ -317,6 +357,10 @@ class PostgresWorkflowStore:
         pool = await self._get_pool()
         async with pool.acquire() as conn, conn.transaction():
             now = await self._run_lock(conn, run_id)
+            if create:
+                # MVP WP11a: no row read; the insert itself refuses a taken id (visible to this
+                # store or not), as the read did.
+                return await self._create_row(conn, checkpoint, now)
             row = await conn.fetchrow(
                 "SELECT workspace_id, revision, checkpoint_json FROM nexura_workflow_checkpoints "
                 "WHERE workflow_run_id = $1 FOR UPDATE",
@@ -367,38 +411,39 @@ class PostgresWorkflowStore:
                 now,
                 document,
             )
-            await conn.execute(
-                """INSERT INTO nexura_workflow_checkpoints (
-                    workflow_run_id, workspace_id, status, current_node_id, step_count,
-                    spec_hash, approval_id, approval_expires_at, revision, updated_at,
-                    checkpoint_json)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-                ON CONFLICT (workflow_run_id) DO UPDATE SET
-                    workspace_id = EXCLUDED.workspace_id,
-                    status = EXCLUDED.status,
-                    current_node_id = EXCLUDED.current_node_id,
-                    step_count = EXCLUDED.step_count,
-                    spec_hash = EXCLUDED.spec_hash,
-                    approval_id = EXCLUDED.approval_id,
-                    approval_expires_at = EXCLUDED.approval_expires_at,
-                    revision = EXCLUDED.revision,
-                    updated_at = EXCLUDED.updated_at,
-                    checkpoint_json = EXCLUDED.checkpoint_json""",
-                *values,
-            )
-            if not (create and _is_start_reservation(stored)):
-                await conn.execute(
-                    "INSERT INTO nexura_workflow_checkpoint_history "
-                    "(workflow_run_id, workspace_id, revision, checkpoint_json, created_at) "
-                    "VALUES ($1, $2, $3, $4, $5)",
-                    run_id,
-                    stored.workspace_id,
-                    revision,
-                    document,
-                    now,
-                )
+            # The latest checkpoint and its history row in one statement (MVP WP11a); a start
+            # reservation has no history row.
+            history = not (create and _is_start_reservation(stored))
+            await conn.execute(_WRITE_WITH_HISTORY if history else _WRITE, *values)
         if create or expected is not None:
             checkpoint.revision = revision
+        return True
+
+    async def _create_row(self, conn: Any, checkpoint: WorkflowCheckpoint, now: float) -> bool:
+        """The first checkpoint (revision 1), under the run lock; False when the id is taken."""
+        stored = copy.copy(checkpoint)
+        if stored.workspace_id is None:
+            stored.workspace_id = self.workspace_id
+        stored.updated_at = now
+        pending = stored.pending_approval
+        values = (
+            checkpoint.workflow_run_id,
+            stored.workspace_id,
+            stored.status,
+            stored.current_node_id,
+            stored.step_count,
+            stored.spec_hash,
+            _pending_id(stored),
+            pending.expires_at if pending is not None else None,
+            1,
+            now,
+            json.dumps(checkpoint_to_dict(stored)),
+        )
+        # A start reservation has no history row.
+        sql = _CREATE if _is_start_reservation(stored) else _CREATE_WITH_HISTORY
+        if await conn.fetchval(sql, *values) is None:
+            return False
+        checkpoint.revision = 1
         return True
 
     async def history(self, workflow_run_id: str) -> list[WorkflowCheckpoint]:

@@ -4,6 +4,9 @@
 
 from __future__ import annotations
 
+import threading
+from typing import Any, Literal
+
 from nexura_agents.contracts import CredentialReference
 
 from nexura_runtime.credentials.backends import (
@@ -14,6 +17,7 @@ from nexura_runtime.credentials.backends import (
 )
 from nexura_runtime.credentials.errors import (
     CredentialAccessDeniedError,
+    CredentialAlreadyExistsError,
     CredentialNotFoundError,
 )
 from nexura_runtime.credentials.models import CredentialMetadata, SecretValue
@@ -39,6 +43,11 @@ class ScopedCredentialStore:
     ``secret_store`` is an optional ``CredentialBackend`` (for example the encrypted
     ``EncryptedSecretStore``); without one, secrets are held in memory. ``environment`` is the
     source of environment-variable fallbacks (``os.environ`` by default).
+
+    A backend whose ``shared`` attribute is true (``nexura_postgres.PostgresSecretStore``, MVP
+    WP5) is shared by several service instances, so the metadata held here is re-read from it
+    on every lookup: a credential created, revoked or deleted through another instance is seen
+    at once. Such a backend also provides ``get_info`` and ``list_info``.
     """
 
     def __init__(
@@ -52,6 +61,10 @@ class ScopedCredentialStore:
         # Optional backend: when set, plaintext lives only in the backend (encrypted at rest for
         # EncryptedSecretStore) and the in-memory entries hold metadata with an empty placeholder.
         self._backend = secret_store
+        self._shared = bool(getattr(secret_store, "shared", False))
+        # Guards ``_entries``: a shared backend's read-through replaces entries while other
+        # threads (resolvers in worker threads) read them.
+        self._lock = threading.RLock()
         self._environment = environment or EnvironmentCredentialSource()
         if secret_store is not None:
             for info in secret_store.list_all_info():
@@ -75,6 +88,52 @@ class ScopedCredentialStore:
             masked_hint=info.masked_hint,
         )
 
+    def _current(
+        self, workspace_id: str, credential_id: str
+    ) -> tuple[CredentialMetadata, SecretValue] | None:
+        """The credential's entry: re-read from a shared backend (another instance may have
+        changed it), else the one held here. ``None`` when there is none."""
+        key = (workspace_id, credential_id)
+        if not self._shared:
+            with self._lock:
+                return self._entries.get(key)
+        from nexura_runtime.secrets.errors import SecretNotFoundError
+
+        backend: Any = self._backend
+        try:
+            info = backend.get_info(workspace_id, credential_id)
+        except SecretNotFoundError:
+            with self._lock:
+                self._entries.pop(key, None)
+            return None
+        entry = (self._meta_from_info(info), SecretValue(""))
+        with self._lock:
+            self._entries[key] = entry
+        return entry
+
+    def _workspace_entries(
+        self, workspace_id: str
+    ) -> list[tuple[str, tuple[CredentialMetadata, SecretValue]]]:
+        """``(name, entry)`` for every credential of a workspace, re-read from a shared backend.
+        The map is changed in one step under the lock, so a concurrent lookup never sees the
+        workspace half refreshed."""
+        if self._shared:
+            backend: Any = self._backend
+            fresh = [
+                (info.name, (self._meta_from_info(info), SecretValue("")))
+                for info in backend.list_info(workspace_id)
+            ]
+            with self._lock:
+                for key in [key for key in self._entries if key[0] == workspace_id]:
+                    del self._entries[key]
+                for name, entry in fresh:
+                    self._entries[(workspace_id, name)] = entry
+            return fresh
+        with self._lock:
+            return [
+                (name, entry) for (ws, name), entry in self._entries.items() if ws == workspace_id
+            ]
+
     def _reveal(self, workspace_id: str, credential_id: str, held: SecretValue) -> SecretValue:
         if self._backend is None:
             return held
@@ -92,42 +151,71 @@ class ScopedCredentialStore:
         provider: str = "custom",
         status: str = "active",
         created_by: str = "",
+        mode: Literal["upsert", "create", "replace"] = "upsert",
     ) -> CredentialMetadata:
-        """Store a secret under an isolated workspace namespace."""
+        """Store a secret under an isolated workspace namespace.
+
+        ``mode="create"`` refuses an existing credential (``CredentialAlreadyExistsError``) and
+        ``mode="replace"`` a missing one (``CredentialNotFoundError``), atomically in the
+        backend, so two instances creating one name cannot both succeed. A replace never
+        lowers a ``revoked`` status.
+        """
+        key = (workspace_id, credential_id)
         if self._backend is not None:
-            info = self._backend.put(
-                workspace_id,
-                credential_id,
-                secret,
+            from nexura_runtime.secrets.errors import SecretExistsError, SecretNotFoundError
+
+            extra: dict[str, Any] = {} if mode == "upsert" else {"mode": mode}
+            try:
+                info = self._backend.put(
+                    workspace_id,
+                    credential_id,
+                    secret,
+                    credential_type=credential_type,
+                    provider=provider,
+                    description=description,
+                    environment_variable=environment_variable,
+                    status=status,
+                    created_by=created_by,
+                    **extra,
+                )
+            except SecretExistsError:
+                self._current(workspace_id, credential_id)
+                raise CredentialAlreadyExistsError(credential_id, workspace_id) from None
+            except SecretNotFoundError:
+                with self._lock:
+                    self._entries.pop(key, None)
+                raise CredentialNotFoundError(credential_id, workspace_id) from None
+            meta = self._meta_from_info(info)
+            with self._lock:
+                self._entries[key] = (meta, SecretValue(""))
+            return meta
+        with self._lock:
+            prior = self._entries.get(key)
+            if prior is not None and mode == "create":
+                raise CredentialAlreadyExistsError(credential_id, workspace_id)
+            if prior is None and mode == "replace":
+                raise CredentialNotFoundError(credential_id, workspace_id)
+            if prior is not None and prior[0].status == "revoked":
+                status = "revoked"  # as the backends: only ``revoke`` changes it
+            meta = CredentialMetadata(
+                credential_id=credential_id,
+                workspace_id=workspace_id,
                 credential_type=credential_type,
-                provider=provider,
                 description=description,
                 environment_variable=environment_variable,
+                provider=provider,
                 status=status,
-                created_by=created_by,
+                masked_hint=mask_hint(secret),
             )
-            meta = self._meta_from_info(info)
-            self._entries[(workspace_id, credential_id)] = (meta, SecretValue(""))
-            return meta
-        meta = CredentialMetadata(
-            credential_id=credential_id,
-            workspace_id=workspace_id,
-            credential_type=credential_type,
-            description=description,
-            environment_variable=environment_variable,
-            provider=provider,
-            status=status,
-            masked_hint=mask_hint(secret),
-        )
-        self._entries[(workspace_id, credential_id)] = (meta, SecretValue(secret))
+            self._entries[key] = (meta, SecretValue(secret))
         return meta
 
     def get_metadata(self, workspace_id: str, credential_id: str) -> CredentialMetadata:
         """Retrieve metadata for a credential without revealing secret."""
-        key = (workspace_id, credential_id)
-        if key not in self._entries:
+        entry = self._current(workspace_id, credential_id)
+        if entry is None:
             raise CredentialNotFoundError(credential_id, workspace_id)
-        return self._entries[key][0]
+        return entry[0]
 
     def _redaction_values(self, workspace_id: str) -> list[str]:
         """Known workspace values for review redaction, including revoked credentials.
@@ -136,10 +224,8 @@ class ScopedCredentialStore:
         a caller cannot accidentally return an unsanitised approval view.
         """
         values = []
-        for (ws, name), (meta, held) in self._entries.items():
-            if ws != workspace_id:
-                continue
-            values.append(self._reveal(ws, name, held).reveal())
+        for name, (meta, held) in self._workspace_entries(workspace_id):
+            values.append(self._reveal(workspace_id, name, held).reveal())
             if meta.environment_variable:
                 values.append(self._environment.get(meta.environment_variable) or "")
         return [value for value in values if value]
@@ -151,10 +237,10 @@ class ScopedCredentialStore:
             CredentialNotFoundError: If credential does not exist in workspace.
             CredentialAccessDeniedError: If credential has been revoked.
         """
-        key = (workspace_id, credential_id)
-        if key not in self._entries:
+        entry = self._current(workspace_id, credential_id)
+        if entry is None:
             raise CredentialNotFoundError(credential_id, workspace_id)
-        meta, secret = self._entries[key]
+        meta, secret = entry
         if meta.status == "revoked":
             raise CredentialAccessDeniedError(f"Credential '{credential_id}' has been revoked.")
         return self._reveal(workspace_id, credential_id, secret)
@@ -184,9 +270,9 @@ class ScopedCredentialStore:
             )
 
         # 1. Check scoped store
-        key = (context_workspace_id, ref.credential_id)
-        if key in self._entries:
-            meta, secret = self._entries[key]
+        entry = self._current(context_workspace_id, ref.credential_id)
+        if entry is not None:
+            meta, secret = entry
             if meta.status == "revoked":
                 raise CredentialAccessDeniedError(
                     f"Credential '{ref.credential_id}' has been revoked."
@@ -203,10 +289,10 @@ class ScopedCredentialStore:
 
     def revoke(self, workspace_id: str, credential_id: str) -> CredentialMetadata:
         """Mark a credential as revoked."""
-        key = (workspace_id, credential_id)
-        if key not in self._entries:
+        entry = self._current(workspace_id, credential_id)
+        if entry is None:
             raise CredentialNotFoundError(credential_id, workspace_id)
-        meta, _ = self._entries[key]
+        meta, _ = entry
         if self._backend is not None:
             self._backend.set_status(workspace_id, credential_id, "revoked")
         meta.status = "revoked"
@@ -218,10 +304,10 @@ class ScopedCredentialStore:
         """Update last_verified_at timestamp."""
         import time
 
-        key = (workspace_id, credential_id)
-        if key not in self._entries:
+        entry = self._current(workspace_id, credential_id)
+        if entry is None:
             raise CredentialNotFoundError(credential_id, workspace_id)
-        meta, _ = self._entries[key]
+        meta, _ = entry
         meta.last_verified_at = timestamp or time.time()
         if self._backend is not None:
             self._backend.mark_verified(workspace_id, credential_id, meta.last_verified_at)
@@ -229,17 +315,17 @@ class ScopedCredentialStore:
 
     def delete(self, workspace_id: str, credential_id: str) -> bool:
         """Remove a credential from storage."""
-        key = (workspace_id, credential_id)
-        if key in self._entries:
-            del self._entries[key]
-            if self._backend is not None:
-                self._backend.delete(workspace_id, credential_id)
-            return True
-        return False
+        if self._current(workspace_id, credential_id) is None:
+            return False
+        with self._lock:
+            self._entries.pop((workspace_id, credential_id), None)
+        if self._backend is not None:
+            self._backend.delete(workspace_id, credential_id)
+        return True
 
     def list_credentials(self, workspace_id: str) -> list[CredentialMetadata]:
         """List metadata for all credentials belonging to a workspace."""
-        return [meta for (ws, _), (meta, _) in self._entries.items() if ws == workspace_id]
+        return [meta for _, (meta, _) in self._workspace_entries(workspace_id)]
 
     def for_workspace(self, workspace_id: str) -> WorkspaceCredentialResolver:
         """Create a workspace-bound adapter implementing the CredentialResolver protocol."""

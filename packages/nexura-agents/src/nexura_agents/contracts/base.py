@@ -62,13 +62,17 @@ class BaseModule(ABC):
 
             if result.status == "success":
                 self.manifest.validate_outputs(result.outputs)
+                completed: dict[str, Any] = {
+                    "outputs": result.outputs,
+                    "status": result.status,
+                    "usage": asdict(result.usage) if result.usage is not None else None,
+                }
+                model_id = (result.metadata or {}).get("model_id")
+                if isinstance(model_id, str) and model_id:
+                    completed["model_id"] = model_id  # lets traces price the usage
                 context.emit_event(
                     ModuleEventType.INVOKE_COMPLETED,
-                    {
-                        "outputs": result.outputs,
-                        "status": result.status,
-                        "usage": asdict(result.usage) if result.usage is not None else None,
-                    },
+                    completed,
                     module_id=self.manifest.module_id,
                     version=self.manifest.version,
                 )

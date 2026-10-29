@@ -16,7 +16,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 
 from nexura_runtime.integrations.channels.models import ChannelType, OutboxReceipt
-from nexura_runtime.integrations.channels.outbox import ChannelStore, SqliteChannelStore
+from nexura_runtime.integrations.channels.outbox import ChannelStore
 from nexura_runtime.observability.run_diagnostics import redact_run_content
 from nexura_runtime.service.api.models import (
     CreateScheduleRequest,
@@ -33,6 +33,7 @@ from nexura_runtime.service.api.operator_token import (
 from nexura_runtime.service.auth.errors import PermissionDeniedError
 from nexura_runtime.service.auth.models import ActionPermission, Principal, WorkspaceRole
 from nexura_runtime.service.auth.permissions import check_permission
+from nexura_runtime.service.storage_backend import store_call
 from nexura_runtime.service.triggers.errors import (
     InvalidScheduleError,
     InvalidWebhookSignatureError,
@@ -55,7 +56,6 @@ from nexura_runtime.service.triggers.signatures import (
     compute_webhook_signature,
     is_valid_event_id,
 )
-from nexura_runtime.service.triggers.store import SqliteTriggerStore
 
 router = APIRouter(prefix="/triggers", tags=["triggers"])
 
@@ -165,23 +165,11 @@ def _dedup_storage_key(workspace_id: str, dedup_key: str) -> str:
 
 
 def _get_trigger_manager(request: Request) -> TriggerManager:
-    manager = getattr(request.app.state, "trigger_manager", None)
-    if manager is None:
-        db_file = getattr(request.app.state.store, "db_path", ":memory:")
-        store = SqliteTriggerStore(db_file)
-        manager = TriggerManager(store=store)
-        request.app.state.trigger_store = store
-        request.app.state.trigger_manager = manager
-    return manager
+    return request.app.state.trigger_manager  # type: ignore[no-any-return]
 
 
 def _get_channel_store(request: Request) -> ChannelStore:
-    store = getattr(request.app.state, "channel_store", None)
-    if store is None:
-        db_file = getattr(request.app.state.store, "db_path", ":memory:")
-        store = SqliteChannelStore(db_file)
-        request.app.state.channel_store = store
-    return store
+    return request.app.state.channel_store  # type: ignore[no-any-return]
 
 
 # ---------------------------------------------------------------------------
@@ -744,7 +732,9 @@ async def list_outbox(
     """Retrieve all simulated dry-run outbound messages. Guarantees zero real dispatch."""
     workspace_id, principal, _ = _get_caller_context(request)
     channel_store = _get_channel_store(request)
-    receipts = channel_store.list_outbox(
+    receipts = await store_call(
+        channel_store,
+        channel_store.list_outbox,
         channel=channel,
         dry_run=True,
         workspace_id=workspace_id,
@@ -776,7 +766,13 @@ async def test_dispatch_outbox(
     # 1. Deduplication check (keys are namespaced per workspace)
     is_duplicate = False
     if payload.dedup_key:
-        is_new = channel_store.record_dedup(_dedup_storage_key(workspace_id, payload.dedup_key))
+        # One insert that detects the conflict: a key recorded on any instance is a duplicate
+        # on every other (Postgres, MVP WP8).
+        is_new = await store_call(
+            channel_store,
+            channel_store.record_dedup,
+            _dedup_storage_key(workspace_id, payload.dedup_key),
+        )
         if not is_new:
             is_duplicate = True
 
@@ -799,7 +795,7 @@ async def test_dispatch_outbox(
         workspace_id=workspace_id,
     )
 
-    channel_store.record_receipt(receipt)
+    await store_call(channel_store, channel_store.record_receipt, receipt)
 
     return {
         "success": True,

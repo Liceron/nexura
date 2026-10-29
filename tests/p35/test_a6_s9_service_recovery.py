@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sqlite3
 import subprocess
 import sys
 import time
@@ -24,9 +23,14 @@ from typing import Any
 import httpx
 import pytest
 from _local_env import local_headers
+from _service_state import (
+    owner_of_process,
+    reopen_studio_store,
+    service_execution_store,
+    studio_sql,
+)
 from fastapi.testclient import TestClient
 from nexura_agents.contracts.execution import EffectClass, ExecutionId
-from nexura_agents.execution_store import SQLiteExecutionStore
 from starlette.requests import Request
 
 from nexura_runtime.service.api.app import create_api_app
@@ -39,7 +43,6 @@ from nexura_runtime.service.run_liveness import (
     SHUTDOWN_ERROR,
     reconcile_run_statuses,
 )
-from nexura_runtime.studio import store as store_module
 from nexura_runtime.studio.store import StudioStore
 from nexura_runtime.workflow import (
     ModuleRegistry,
@@ -133,22 +136,22 @@ async def _hold_lease(app: Any, run_id: str, ttl: float) -> None:
 
 
 def _studio_row(tmp_path: Path, run_id: str) -> tuple[str, str | None, str | None]:
-    db = sqlite3.connect(str(tmp_path / "svc.sqlite3"))
-    try:
-        row = db.execute(
-            "SELECT status, error, journal_workspace FROM nexura_studio_runs WHERE run_id = ?",
-            (run_id,),
-        ).fetchone()
-    finally:
-        db.close()
+    # The service's run table: the SQLite file, or Postgres under --service-backend=postgres.
+    (row,) = studio_sql(
+        tmp_path / "svc.sqlite3",
+        "SELECT status, error, journal_workspace FROM nexura_studio_runs WHERE run_id = ?",
+        run_id,
+    )
     return row[0], row[1], row[2]
 
 
 def _set_studio_status(tmp_path: Path, run_id: str, status: str) -> None:
-    db = sqlite3.connect(str(tmp_path / "svc.sqlite3"))
-    with db:
-        db.execute("UPDATE nexura_studio_runs SET status = ? WHERE run_id = ?", (status, run_id))
-    db.close()
+    studio_sql(
+        tmp_path / "svc.sqlite3",
+        "UPDATE nexura_studio_runs SET status = ? WHERE run_id = ?",
+        status,
+        run_id,
+    )
 
 
 @pytest.fixture
@@ -196,7 +199,7 @@ def test_service_run_journals_a_pure_handler_as_pure(tmp_path: Path) -> None:
     assert [e["intent"]["effect_class"] for e in effects] == ["non_idempotent"]
 
     async def journal_steps() -> list[str]:
-        journal = SQLiteExecutionStore(tmp_path / "svc.sqlite3")
+        journal = service_execution_store(tmp_path / "svc.sqlite3")
         try:
             snapshot = await journal.get(ExecutionId(WS, run_id))
         finally:
@@ -223,16 +226,12 @@ def test_open_sweep_leaves_journaled_runs_to_their_lease(
     asyncio.run(_hold_lease(app, "run-j", 60))
     legacy_spec = _spec()
     asyncio.run(app.state.store.record_run_start("run-legacy", None, legacy_spec, {}))
-    marker = store_module._process_start_marker(sleeper.pid)
-    dead = f"{store_module._host_id()}:{sleeper.pid}:{marker}"
+    dead = owner_of_process(sleeper.pid)  # this host's format for the run store in use
     sleeper.kill()
     sleeper.wait()
-    db = sqlite3.connect(str(tmp_path / "svc.sqlite3"))
-    with db:
-        db.execute("UPDATE nexura_studio_runs SET owner_process = ?", (dead,))
-    db.close()
+    studio_sql(tmp_path / "svc.sqlite3", "UPDATE nexura_studio_runs SET owner_process = ?", dead)
 
-    StudioStore(tmp_path / "svc.sqlite3")._close_sync()  # a second process opening the store
+    reopen_studio_store(tmp_path / "svc.sqlite3")  # a second process opening the store
 
     assert _studio_row(tmp_path, "run-j")[0] == "running"
     assert _studio_row(tmp_path, "run-legacy")[0] == "interrupted"

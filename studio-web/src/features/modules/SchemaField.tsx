@@ -182,6 +182,7 @@ export function SchemaField({
     };
 
     const handleRemoveItem = (index: number) => {
+      if (!window.confirm(`Remove item ${index + 1} from “${name}”?`)) return;
       onChange(list.filter((_, i) => i !== index));
     };
 

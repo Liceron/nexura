@@ -762,7 +762,9 @@ class AgentCoordinator:
                             else:
                                 raise AgentApprovalRequiredError(agent.name, action_name=tc.name)
 
-                        # Execute tool: guardrails and hooks as in the Runner.
+                        # Execute tool: guardrails and hooks as in the Runner. A workflow node
+                        # counts as started before its first tool call (internal gate).
+                        admission.before_dispatch()
                         if is_handoff:
                             tool_res = await target_tool.arun(**tc.arguments)
                         else:

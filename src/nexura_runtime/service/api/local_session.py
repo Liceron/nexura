@@ -16,6 +16,15 @@ requests carry a secret the page cannot know:
   refuses requests a browser marks cross-site or same-site (``Sec-Fetch-Site``) and requests
   whose ``Origin`` is not the server's own, and responses carry no CORS headers, so another
   site's page cannot read it.
+
+  The token is optional: ``NEXURA_REQUIRE_SESSION_TOKEN=off`` (``nexura-runtime serve
+  --no-session-token``, ``create_api_app(require_session_token=False)``) turns it off for
+  scripts and tools that send plain HTTP requests. A state-changing request is then refused
+  (403 ``CROSS_ORIGIN_REQUEST``) when the browser marks it cross-site or same-site
+  (``Sec-Fetch-Site``) or its ``Origin`` is not this server, which is what stops pages on other
+  sites and other local ports; a body without a ``Content-Type`` is refused too (415). Programs
+  on this machine that send no ``Origin`` (curl, SDKs) are accepted. The switch is refused
+  together with the unauthenticated network opt-in.
 * **Loopback clients only.** Unless the operator opted in to network access
   (``allow_unauthenticated_network`` / ``NEXURA_INSECURE_ALLOW_UNAUTHENTICATED_NETWORK``), a
   request whose peer address (ASGI ``client``) is not loopback is ``403``
@@ -55,6 +64,10 @@ from nexura_runtime.service.api.middleware import route_path
 SESSION_HEADER = "X-Nexura-Session"
 #: Environment variable that fixes the token (otherwise a random one per process start).
 SESSION_TOKEN_ENV = "NEXURA_STUDIO_TOKEN"
+#: Environment variable that turns the token check off (``off``) or on (``on``, the default).
+SESSION_TOKEN_REQUIRED_ENV = "NEXURA_REQUIRE_SESSION_TOKEN"
+_ON = frozenset({"on", "1", "true", "yes"})
+_OFF = frozenset({"off", "0", "false", "no"})
 #: Path of the same-origin endpoint Studio reads the token from.
 SESSION_TOKEN_PATH = "/api/v1/local-session"
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
@@ -87,6 +100,37 @@ def resolve_session_token(explicit: str | None = None) -> tuple[str, bool]:
         if candidate is not None and candidate.strip():
             return candidate, True
     return secrets.token_urlsafe(32), False
+
+
+def session_token_required(explicit: bool | None = None) -> bool:
+    """Whether state-changing requests need the session token: ``explicit``, else
+    ``NEXURA_REQUIRE_SESSION_TOKEN`` (``on``/``off``), else on.
+
+    Raises:
+        ValueError: ``NEXURA_REQUIRE_SESSION_TOKEN`` is set to something other than on/off.
+            The value is not repeated in the message, in case a token was put there by mistake.
+    """
+    if explicit is not None:
+        return explicit
+    raw = os.environ.get(SESSION_TOKEN_REQUIRED_ENV, "").strip().lower()
+    if not raw or raw in _ON:
+        return True
+    if raw in _OFF:
+        return False
+    raise ValueError(f"{SESSION_TOKEN_REQUIRED_ENV} must be 'on' or 'off'.")
+
+
+def check_session_token_switch(require_token: bool, allow_network: bool) -> None:
+    """Refuse the token switch off together with the unauthenticated network opt-in.
+
+    Raises:
+        ValueError: both are set.
+    """
+    if not require_token and insecure_network_opt_in(allow_network):
+        raise ValueError(
+            "The session token can only be turned off for a server that accepts connections "
+            "from this machine only; do not combine it with the unauthenticated network opt-in."
+        )
 
 
 def is_loopback_client(scope: Scope) -> bool:
@@ -124,6 +168,11 @@ def token_read_refusal(headers: Headers, scheme: str) -> str | None:
     return "Origin is not this server"
 
 
+def _has_body(headers: Headers) -> bool:
+    length = headers.get("content-length", "").strip()
+    return (length not in ("", "0")) or "transfer-encoding" in headers
+
+
 def _content_type(headers: Headers) -> str:
     return headers.get("content-type", "").split(";", 1)[0].strip().lower()
 
@@ -141,12 +190,14 @@ class LocalSessionPolicy:
     require_loopback_client: bool = True
     #: Refuse preflight-free body types on state-changing requests (REST service).
     require_json: bool = False
+    #: State-changing requests must carry the token (off: ``NEXURA_REQUIRE_SESSION_TOKEN=off``).
+    require_token: bool = True
     #: Exact paths (or prefixes ending in ``/``) that are not checked for the token.
     exempt_paths: set[str] = field(default_factory=set)
 
     def network_allowed(self) -> bool:
-        """The operator opted in to unauthenticated network access."""
-        return insecure_network_opt_in(self.allow_network)
+        """The operator opted in to unauthenticated network access (never with the token off)."""
+        return self.require_token and insecure_network_opt_in(self.allow_network)
 
     def token_matches(self, supplied: str | None) -> bool:
         """Constant-time comparison of ``supplied`` with the session token."""
@@ -229,8 +280,34 @@ class LocalSessionMiddleware:
             return
 
         headers = Headers(scope=scope)
+        if not policy.require_token:
+            # Without the token, the browser's own headers tell other pages apart: a page on
+            # another site or local port sends Sec-Fetch-Site or a foreign Origin, even for
+            # no-cors requests. A stale token is ignored, not refused.
+            refusal = token_read_refusal(headers, scope.get("scheme", "http"))
+            if refusal is not None:
+                await self._refuse(
+                    scope,
+                    receive,
+                    send,
+                    403,
+                    "CROSS_ORIGIN_REQUEST",
+                    f"With the session token off, only this server's own pages and programs "
+                    f"on this machine may change state ({refusal}).",
+                )
+                return
+            if _has_body(headers) and not _content_type(headers):
+                await self._refuse(
+                    scope,
+                    receive,
+                    send,
+                    415,
+                    "UNSUPPORTED_MEDIA_TYPE",
+                    "State-changing requests must send a Content-Type header.",
+                )
+                return
         supplied = headers.get(SESSION_HEADER)
-        if supplied is None:
+        if policy.require_token and supplied is None:
             await self._refuse(
                 scope,
                 receive,
@@ -242,7 +319,7 @@ class LocalSessionMiddleware:
                 "docs/studio-and-service.md.",
             )
             return
-        if not policy.token_matches(supplied):
+        if policy.require_token and not policy.token_matches(supplied):
             await self._refuse(
                 scope,
                 receive,
@@ -315,12 +392,15 @@ __all__ = [
     "SESSION_HEADER",
     "SESSION_TOKEN_ENV",
     "SESSION_TOKEN_PATH",
+    "SESSION_TOKEN_REQUIRED_ENV",
     "LocalSessionMiddleware",
     "LocalSessionPolicy",
     "build_session_token_router",
+    "check_session_token_switch",
     "detail_error_body",
     "is_loopback_client",
     "resolve_session_token",
+    "session_token_required",
     "studio_error_body",
     "token_read_refusal",
 ]

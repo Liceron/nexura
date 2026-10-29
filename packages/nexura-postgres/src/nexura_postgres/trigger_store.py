@@ -14,7 +14,10 @@
 - the job queue: ``claim_pending_job`` (compare-and-swap ``pending`` -> ``claimed`` with a
   lease), ``renew_job_lease`` (owner only), ``reclaim_expired_jobs`` (rows locked
   ``FOR UPDATE SKIP LOCKED``, so two reclaimers never take the same job) and an
-  owner-guarded ``complete_job``.
+  owner-guarded ``complete_job``;
+- named leases (``acquire_lease`` / ``release_lease``, MVP WP9): one row per name, taken by an
+  insert-or-take-over-if-expired statement, so the trigger tick runs one pass at a time across
+  instances.
 
 Every operation is one transaction. Lease times come from the database clock
 (``clock_timestamp()``) unless the caller passes ``now``, so workers on several hosts agree
@@ -37,6 +40,7 @@ import threading
 from collections.abc import Awaitable, Callable, Collection, Coroutine
 from typing import Any, TypeVar
 
+from nexura_postgres.db import noop_reset, normalize_url
 from nexura_runtime.service.triggers.errors import TriggerConflictError, TriggerError
 from nexura_runtime.service.triggers.models import (
     DurableTriggerJob,
@@ -115,6 +119,16 @@ MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
                 previous_run_ids_json TEXT)""",
             """CREATE INDEX IF NOT EXISTS nexura_trigger_jobs_status
                 ON nexura_trigger_jobs (status, created_at)""",
+        ),
+    ),
+    (
+        2,
+        "named leases (the trigger tick, MVP WP9)",
+        (
+            """CREATE TABLE IF NOT EXISTS nexura_trigger_leases (
+                name TEXT PRIMARY KEY,
+                holder TEXT NOT NULL,
+                expires_at DOUBLE PRECISION NOT NULL)""",
         ),
     ),
 )
@@ -305,7 +319,11 @@ class PostgresTriggerStore:
                 import asyncpg  # type: ignore[import-untyped]
 
                 self._pool = await asyncpg.create_pool(
-                    self._dsn, min_size=1, max_size=self._max_pool_size
+                    normalize_url(self._dsn, strict=False),
+                    min_size=1,
+                    max_size=self._max_pool_size,
+                    statement_cache_size=0,
+                    reset=noop_reset,
                 )
             if not self._ready:
                 async with self._pool.acquire() as conn, conn.transaction():
@@ -836,3 +854,46 @@ class PostgresTriggerStore:
 
         row = self._call(op)
         return _row_to_job(row) if row is not None else None
+
+    # ------------------------------------------------------------------ leases
+
+    def acquire_lease(
+        self, name: str, holder: str, *, ttl_seconds: float, now: float | None = None
+    ) -> bool:
+        """Take the named lease unless another holder has it unexpired (database clock).
+
+        One statement: insert, or take over a row whose lease expired. Concurrent callers on
+        any instance conflict on the primary key; Postgres re-checks the ``WHERE`` on the
+        locked, latest row, so exactly one of them gets a row back.
+        """
+        ttl = float(ttl_seconds)
+        if not ttl > 0 or ttl == float("inf"):
+            raise ValueError("ttl_seconds must be a positive finite number")
+
+        async def op(conn: Any) -> Any:
+            current = await self._clock(conn, now)
+            return await conn.fetchrow(
+                """INSERT INTO nexura_trigger_leases (name, holder, expires_at)
+                   VALUES ($1, $2, $3::float8 + $4::float8)
+                   ON CONFLICT (name) DO UPDATE SET
+                       holder = EXCLUDED.holder, expires_at = EXCLUDED.expires_at
+                   WHERE nexura_trigger_leases.expires_at <= $3::float8
+                   RETURNING holder""",
+                name,
+                holder,
+                current,
+                ttl,
+            )
+
+        return self._call(op) is not None
+
+    def release_lease(self, name: str, holder: str) -> bool:
+        """Drop the named lease if ``holder`` still holds it."""
+
+        async def op(conn: Any) -> str:
+            result: str = await conn.execute(
+                "DELETE FROM nexura_trigger_leases WHERE name = $1 AND holder = $2", name, holder
+            )
+            return result
+
+        return _affected(self._call(op)) == 1

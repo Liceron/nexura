@@ -44,3 +44,16 @@ class MemberAlreadyExistsError(WorkspaceError):
         )
         self.workspace_id = workspace_id
         self.principal_id = principal_id
+
+
+class LastAdminError(WorkspaceError):
+    """Raised when removing or demoting a member would leave the workspace with no admin."""
+
+    def __init__(self, workspace_id: str, principal_id: str) -> None:
+        super().__init__(
+            f"Principal '{principal_id}' is the last admin of workspace '{workspace_id}'; "
+            "make another member an admin first.",
+            code="LAST_ADMIN",
+        )
+        self.workspace_id = workspace_id
+        self.principal_id = principal_id

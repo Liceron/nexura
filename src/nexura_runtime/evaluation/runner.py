@@ -20,7 +20,7 @@ from nexura_agents.contracts.base import BaseModule
 from nexura_agents.contracts.context import ExecutionContext
 from nexura_agents.models.base import ModelProtocol
 from nexura_agents.types import Message, Usage
-from nexura_agents.usage.manager import BudgetManager, RunBudget
+from nexura_agents.usage.manager import BudgetManager, RunBudget, budget_call
 from nexura_agents.usage.models import BudgetConfig, TokenUsage
 from nexura_agents.usage.pricing import PricingTable
 
@@ -318,10 +318,10 @@ class EvaluationRunner:
 
         for example in dataset.examples:
             # Check budget limits before dispatching each example
-            if exec_budget is not None and exec_budget.is_exhausted():
+            if exec_budget is not None and await budget_call(exec_budget, exec_budget.is_exhausted):
                 budget_halted = True
                 if self.strict_budget:
-                    status = exec_budget.get_status()
+                    status = await budget_call(exec_budget, exec_budget.get_status)
                     raise EvaluationBudgetExceededError(
                         status.effective_cost_usd,
                         self.budget_config.max_cost_usd if self.budget_config else "limit",
@@ -338,7 +338,9 @@ class EvaluationRunner:
             )
 
             if exec_budget is not None:
-                last_spent_usd = exec_budget.get_status().total_spent_usd
+                last_spent_usd = (
+                    await budget_call(exec_budget, exec_budget.get_status)
+                ).total_spent_usd
 
             # Check if any grader was a synthetic judge
             for g in ex_result.graders:
@@ -356,7 +358,7 @@ class EvaluationRunner:
 
             results.append(ex_result)
 
-            if exec_budget is not None and exec_budget.is_exhausted():
+            if exec_budget is not None and await budget_call(exec_budget, exec_budget.is_exhausted):
                 budget_halted = True
                 break
 
@@ -440,10 +442,14 @@ class EvaluationRunner:
                     )
                 )
                 # Target usage is not settled through provider admission, so it must count.
-                exec_budget.record_usage(
-                    token_usage, model_id=call_context.get("model_id"), entry_category="direct"
+                await budget_call(
+                    exec_budget,
+                    exec_budget.record_usage,
+                    token_usage,
+                    model_id=call_context.get("model_id"),
+                    entry_category="direct",
                 )
-                status = exec_budget.get_status()
+                status = await budget_call(exec_budget, exec_budget.get_status)
                 cost_usd = status.total_spent_usd - prev_spent_usd
 
         except Exception as exc:
@@ -504,10 +510,12 @@ class EvaluationRunner:
             if isinstance(original_trace, dict):
                 call_context["trace"] = redact_trace(original_trace)
             grader_results = [
-                g.model_copy(update={
-                    "reason": redact_value(g.reason),
-                    "details": redact_value(g.details),
-                })
+                g.model_copy(
+                    update={
+                        "reason": redact_value(g.reason),
+                        "details": redact_value(g.details),
+                    }
+                )
                 for g in grader_results
             ]
         return ExampleEvaluationResult(

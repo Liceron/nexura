@@ -62,3 +62,12 @@ class SecretNotFoundError(SecretsError):
         super().__init__(
             f"Secret '{name}' not found in workspace '{workspace_id}'.", code="SECRET_NOT_FOUND"
         )
+
+
+class SecretExistsError(SecretsError):
+    """Raised by a create-only write (``put(..., mode="create")``) when the name is taken."""
+
+    def __init__(self, workspace_id: str, name: str) -> None:
+        super().__init__(
+            f"Secret '{name}' already exists in workspace '{workspace_id}'.", code="SECRET_EXISTS"
+        )

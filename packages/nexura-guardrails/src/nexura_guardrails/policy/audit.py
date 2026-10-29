@@ -2,8 +2,9 @@
 # Copyright (c) 2026 Liceron
 """Audit records of policy decisions, and where they go.
 
-One ``AuditRecord`` per decision: the run, agent, stage, tool, rule, check, action and the
-plain classification fields (categories, score, latency, source). Never the checked text,
+One ``AuditRecord`` per decision: the run, agent, stage, tool, rule, check, action, the
+mode (``enforce``, or ``shadow`` with ``applied: false`` for a decision that was only reported)
+and the plain classification fields (categories, score, latency, source). Never the checked text,
 tool arguments or results. Only decisions other than ``allow`` are written unless the policy
 sets ``audit_allows=True``.
 
@@ -57,6 +58,14 @@ class AuditRecord:
     policy: str | None = None
     policy_digest: str | None = None
     timestamp: float = field(default_factory=time.time)
+    #: ``"enforce"`` (the action was applied) or ``"shadow"`` (only reported).
+    mode: str = "enforce"
+    #: False for a shadow decision: ``action`` is what the rule would have done.
+    applied: bool = True
+    #: Tokens the deciding check's model call used (a fresh model verdict only).
+    tokens: int | None = None
+    #: Why a shadow check did not run (``"shadow_budget"``), else None.
+    skipped: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """A JSON-safe dict without ``None`` values."""

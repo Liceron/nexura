@@ -441,7 +441,7 @@ function NodeInspectorFields({ selectedNode, allNodes, allEdges, entryNode, onUp
                   </div>
                   <button
                     type="button"
-                    onClick={() => onSetBranchTransition(id, edge.data!.branch!, null)}
+                    onClick={() => { if (window.confirm(`Remove branch “${edge.data?.branch || ''}” from node “${id}”?`)) onSetBranchTransition(id, edge.data!.branch!, null); }}
                     aria-label={t('inspector.removeBranch', { branch: edge.data?.branch ?? '' })}
                     style={{
                       color: 'var(--status-danger)',

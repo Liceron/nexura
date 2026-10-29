@@ -1,0 +1,15 @@
+/* SPDX-License-Identifier: MIT
+ * Copyright (c) 2026 Liceron */
+.nexura-mark { display: inline-block; width: 28px; height: 28px; flex: none; vertical-align: middle; }
+.nexura-wordmark { display: inline-flex; align-items: center; gap: 10px; font-family: "Manrope", ui-sans-serif, system-ui, sans-serif; }
+.nexura-mark--intro .nexura-path { animation: nexura-draw 900ms ease-out both; }
+.nexura-mark--intro .nexura-path--after { animation-delay: 180ms; }
+.nexura-mark--intro .nexura-gate { transform-origin: center; animation: nexura-settle 700ms ease-out both; }
+.nexura-mark--working .nexura-gate { transform-origin: center; animation: nexura-checkpoint 3.6s ease-in-out infinite; }
+@keyframes nexura-draw { from { stroke-dasharray: 1; stroke-dashoffset: 1; } to { stroke-dasharray: 1; stroke-dashoffset: 0; } }
+@keyframes nexura-settle { from { transform: scale(.7); opacity: .5; } to { transform: scale(1); opacity: 1; } }
+/* One short checkpoint pulse, followed by a long stationary hold. */
+@keyframes nexura-checkpoint { 0%, 20%, 100% { transform: scale(1); } 10% { transform: scale(.65); } }
+@media (prefers-reduced-motion: reduce) {
+  .nexura-mark *, .nexura-mark--intro *, .nexura-mark--working * { animation: none !important; transform: none; stroke-dashoffset: 0; }
+}

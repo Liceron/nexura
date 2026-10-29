@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Liceron
 import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import {
@@ -23,6 +25,15 @@ const slack = {
 };
 
 describe('connector setup helpers (P14)', () => {
+  it('keeps a select operation list item distinct from the inspector select', () => {
+    const ops = [{ operation: 'select', write: false }];
+    render(<><OperationList operations={ops} /><OperationSelect operations={ops} value="select" onChange={() => {}} /></>);
+    expect(screen.getByTestId('operation-item-select').tagName).toBe('LI');
+    expect(screen.getByTestId('operation-item-select')).toHaveTextContent('select reads');
+    expect(screen.getByTestId('operation-select').tagName).toBe('SELECT');
+    expect(screen.getByTestId('operation-select')).toHaveValue('select');
+  });
+
   it('lists operations with write flags from display.examples, de-duplicated', () => {
     expect(connectorOperations(slack as never)).toEqual([
       { operation: 'post_message', write: true },

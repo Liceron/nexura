@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
 import logging
 import math
@@ -24,7 +25,6 @@ from nexura_agents.events import RunEvent, RunEventType
 from nexura_agents.limits import UsageLimits
 from nexura_agents.models.fake import FakeModel
 from nexura_agents.runner import Runner
-from nexura_agents.session import SQLiteSessionStore
 from nexura_agents.tools import Tool
 from nexura_agents.types import Message, ToolCall, Usage
 from pydantic import BaseModel, Field
@@ -35,11 +35,12 @@ from nexura_runtime.service.api.chat_models import (
     ChatModelRegistry,
     ChatModelUnavailableError,
 )
-from nexura_runtime.service.api.knowledge import _check_retrieval_rate, _hit_citation, _index
+from nexura_runtime.service.api.knowledge import _aindex, _check_retrieval_rate, _hit_citation
 from nexura_runtime.service.api.models import PaginatedResponse
 from nexura_runtime.service.auth.errors import PermissionDeniedError
 from nexura_runtime.service.auth.models import ActionPermission, Principal, WorkspaceRole
 from nexura_runtime.service.auth.permissions import check_permission
+from nexura_runtime.service.storage_protocols import SessionBackend
 from nexura_runtime.service.stream_adapters import (
     StreamFormat,
     select_stream_format,
@@ -373,13 +374,11 @@ def _safe_citation(citation: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _workspace_has_documents(request: Request, workspace_id: str) -> bool:
-    index = _index(request)
-    with index._lock:
-        row = index._conn.execute(
-            "SELECT 1 FROM hk_documents WHERE workspace_id = ? LIMIT 1", (workspace_id,)
-        ).fetchone()
-    return row is not None
+async def _workspace_has_documents(request: Request, workspace_id: str) -> bool:
+    index = await _aindex(request)
+    if index.blocking_io:  # Postgres (MVP WP7): a network round trip, off the event loop
+        return bool(await asyncio.to_thread(index.has_documents, workspace_id))
+    return bool(index.has_documents(workspace_id))
 
 
 def create_knowledge_search_tool(request: Request) -> Tool:
@@ -400,7 +399,7 @@ def knowledge_search_tool(
 
     async def knowledge_search(query: str) -> str:
         """Search workspace documents; returns JSON with context and Studio-shaped citations."""
-        if not _workspace_has_documents(holder, workspace_id):
+        if not await _workspace_has_documents(holder, workspace_id):
             # Nothing to search: do not consume the workspace's retrieval rate limit.
             return json.dumps({"context": "", "citations": []})
         try:
@@ -416,7 +415,7 @@ def knowledge_search_tool(
             )
         hits = []
         for collection_id in ids:
-            hits += await _index(holder).search(
+            hits += await (await _aindex(holder)).search(
                 workspace_id=workspace_id,
                 query=str(query)[:KNOWLEDGE_QUERY_MAX_CHARS],
                 collection_id=collection_id,
@@ -580,15 +579,11 @@ async def list_sessions(
 ) -> PaginatedResponse[dict[str, Any]]:
     """List conversation sessions scoped to caller's workspace."""
     ws_repo: WorkspaceRepository = request.app.state.workspace_repo
-    session_store: SQLiteSessionStore = request.app.state.session_store
+    session_store: SessionBackend = request.app.state.session_store
     caller_ws, principal, _ = _get_caller_context(request)
 
     # Find sessions owned by caller_ws
-    owned_ids: list[str] = []
-    with ws_repo._lock:
-        for (r_type, r_id), (ws_id, _) in ws_repo._ownership.items():
-            if r_type == "session" and ws_id == caller_ws:
-                owned_ids.append(r_id)
+    owned_ids = ws_repo.list_workspace_resource_ids("session", caller_ws)
 
     # Most recently active first, so clients that open items[0] resume the latest chat.
     updated = await session_store.updated_at(owned_ids)
@@ -626,7 +621,7 @@ async def create_session(
 ) -> dict[str, Any]:
     """Create a new persisted conversation session in caller's workspace."""
     ws_repo: WorkspaceRepository = request.app.state.workspace_repo
-    session_store: SQLiteSessionStore = request.app.state.session_store
+    session_store: SessionBackend = request.app.state.session_store
     caller_ws, principal, _ = _get_caller_context(request)
 
     session_id = (
@@ -667,7 +662,7 @@ async def create_session(
 async def get_session(request: Request, session_id: str) -> dict[str, Any]:
     """Retrieve full conversation snapshot and ordered message transcript."""
     _assert_session_ownership(request, session_id)
-    session_store: SQLiteSessionStore = request.app.state.session_store
+    session_store: SessionBackend = request.app.state.session_store
     snap = await session_store.get(session_id)
     if snap is None:
         raise HTTPException(
@@ -701,15 +696,10 @@ async def delete_session(request: Request, session_id: str) -> dict[str, Any]:
     """Delete a conversation session."""
     _assert_session_ownership(request, session_id)
     ws_repo: WorkspaceRepository = request.app.state.workspace_repo
-    session_store: SQLiteSessionStore = request.app.state.session_store
+    session_store: SessionBackend = request.app.state.session_store
 
-    with session_store._lock:
-        conn = session_store._ensure_open()
-        with conn:
-            conn.execute("DELETE FROM nexura_sessions WHERE session_id = ?", (session_id,))
-
-    with ws_repo._lock:
-        ws_repo._ownership.pop(("session", session_id), None)
+    await session_store.delete(session_id)
+    ws_repo.delete_resource_ownership("session", session_id)
 
     return {"deleted": True, "session_id": session_id}
 
@@ -792,9 +782,7 @@ async def list_chat_models(request: Request) -> list[dict[str, Any]]:
     return _registry(request).describe()
 
 
-async def _ensure_session(
-    request: Request, session_id: str, session_store: SQLiteSessionStore
-) -> None:
+async def _ensure_session(request: Request, session_id: str, session_store: SessionBackend) -> None:
     """Create the session on first use and record its owning workspace."""
     caller_ws, principal, _ = _get_caller_context(request)
     ws_repo: WorkspaceRepository = request.app.state.workspace_repo
@@ -837,7 +825,7 @@ def _tool_trace(events: list[RunEvent]) -> list[dict[str, Any]]:
 
 
 async def _chat_response(
-    session_store: SQLiteSessionStore,
+    session_store: SessionBackend,
     session_id: str,
     events: list[RunEvent],
     reply: str | None,
@@ -984,7 +972,7 @@ async def chat_in_session(
         model: Any = agent.model if configured else None
     else:
         model = _resolve_chat_model(request, payload)
-    session_store: SQLiteSessionStore = request.app.state.session_store
+    session_store: SessionBackend = request.app.state.session_store
     await _ensure_session(request, session_id, session_store)
 
     runner = Runner(
@@ -1000,7 +988,7 @@ async def chat_in_session(
                 payload,
                 model,
                 create_knowledge_search_tool(request),
-                _workspace_has_documents(request, _get_caller_context(request)[0]),
+                await _workspace_has_documents(request, _get_caller_context(request)[0]),
             )
         result = await runner.run_async(
             agent=agent,
@@ -1123,7 +1111,7 @@ def _sse(seq: int, event: str, payload: dict[str, Any]) -> str:
 
 
 async def _chat_event_stream(
-    session_store: SQLiteSessionStore,
+    session_store: SessionBackend,
     session_id: str,
     payload: ChatRequest,
     model: Any | None = None,
@@ -1246,7 +1234,7 @@ async def stream_chat_in_session(
         model: Any = agent.model if configured else None
     else:
         model = _resolve_chat_model(request, payload)
-    session_store: SQLiteSessionStore = request.app.state.session_store
+    session_store: SessionBackend = request.app.state.session_store
     await _ensure_session(request, session_id, session_store)
     return stream_response(
         _chat_event_stream(
@@ -1257,7 +1245,7 @@ async def stream_chat_in_session(
             _registry(request),
             _usage_limits(request),
             create_knowledge_search_tool(request),
-            _workspace_has_documents(request, _get_caller_context(request)[0]),
+            await _workspace_has_documents(request, _get_caller_context(request)[0]),
             agent=agent,
             model_name=model_name,
             guardrail_policy=getattr(request.app.state, "guardrail_policy", None),

@@ -5,9 +5,10 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from decimal import ROUND_CEILING, Decimal
 from threading import Lock
-from typing import Any
+from typing import Any, TypeVar
 
 from nexura_agents.contracts.context import BudgetInterface
 from nexura_agents.types import Usage
@@ -28,6 +29,31 @@ from nexura_agents.usage.pricing import (
 )
 
 _ZERO = Decimal("0")
+
+
+def budget_blocks(budget: Any) -> bool:
+    """True when a budget's ledger (any ledger of a combined budget) can block on network I/O
+    (``UsageLedger.blocking_io``, the Postgres ledger)."""
+    inner = getattr(budget, "budgets", None)
+    if isinstance(inner, tuple):
+        return any(budget_blocks(b) for b in inner)
+    ledger = getattr(getattr(budget, "manager", None), "ledger", None)
+    return bool(getattr(ledger, "blocking_io", False))
+
+
+_T = TypeVar("_T")
+
+
+async def budget_call(  # noqa: UP047 - keeps Python 3.11 support
+    budget: Any, fn: Callable[..., _T], /, *args: Any, **kwargs: Any
+) -> _T:
+    """Run a synchronous budget call from async code without blocking the event loop when the
+    budget's ledger can wait on the network (see :func:`budget_blocks`); inline otherwise."""
+    if budget_blocks(budget):
+        import asyncio  # not at import time: the core import must not load asyncio
+
+        return await asyncio.to_thread(fn, *args, **kwargs)
+    return fn(*args, **kwargs)
 
 
 class RunBudget(BudgetInterface):
@@ -423,8 +449,10 @@ class RunBudget(BudgetInterface):
         description: str = "",
         metadata: dict[str, Any] | None = None,
     ) -> CostEstimate:
-        """Async variant of settle_provider_call."""
-        return self.settle_provider_call(
+        """Async variant of settle_provider_call (off the event loop on a blocking ledger)."""
+        return await budget_call(
+            self,
+            self.settle_provider_call,
             reservation_id,
             usage=usage,
             model_id=model_id,
@@ -502,6 +530,30 @@ class RunBudget(BudgetInterface):
             self.run_id,
             config=self.config,
         )
+
+    async def get_status_async(self) -> BudgetStatus:
+        """:meth:`get_status` from async code (off the event loop on a blocking ledger)."""
+        return await budget_call(self, self.get_status)
+
+    async def is_exhausted_async(self) -> bool:
+        """:meth:`is_exhausted` from async code (off the event loop on a blocking ledger)."""
+        return await budget_call(self, self.is_exhausted)
+
+    async def record_usage_async(
+        self,
+        usage: Usage | TokenUsage,
+        *,
+        model_id: str | None = None,
+        entry_category: str = "module_aggregate",
+    ) -> None:
+        """:meth:`record_usage` from async code (off the event loop on a blocking ledger)."""
+        await budget_call(
+            self, self.record_usage, usage, model_id=model_id, entry_category=entry_category
+        )
+
+    async def to_dict_async(self) -> dict[str, Any]:
+        """:meth:`to_dict` from async code (off the event loop on a blocking ledger)."""
+        return await budget_call(self, self.to_dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Typed status and policy contract for Studio and external consumers."""

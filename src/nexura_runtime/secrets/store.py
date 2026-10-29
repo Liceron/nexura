@@ -14,11 +14,12 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from nexura_runtime.credentials.backends import mask_hint
 from nexura_runtime.secrets.errors import (
     MasterKeyMismatchError,
+    SecretExistsError,
     SecretNotFoundError,
 )
 from nexura_runtime.secrets.keys import MasterKeyProvider, load_aesgcm
@@ -52,6 +53,12 @@ _SCHEMA = (
         last_verified_at REAL, created_by TEXT NOT NULL,
         PRIMARY KEY (workspace_id, name))""",
 )
+#: How ``put`` treats an existing name: ``upsert`` replaces it (or creates the secret),
+#: ``create`` refuses it (``SecretExistsError``), ``replace`` requires it
+#: (``SecretNotFoundError``).
+PutMode = Literal["upsert", "create", "replace"]
+#: A revoked secret stays revoked when its value is replaced: only ``set_status`` changes it.
+REVOKED = "revoked"
 _COLS = (
     "workspace_id, name, credential_type, provider, description, environment_variable, status, "
     "masked_hint, created_at, updated_at, last_verified_at, created_by"
@@ -130,8 +137,14 @@ class EncryptedSecretStore:
         environment_variable: str | None = None,
         status: str = "active",
         created_by: str = "",
+        mode: PutMode = "upsert",
     ) -> StoredSecretInfo:
-        """Encrypt and store (or replace) a secret; replacing keeps created_at/created_by."""
+        """Encrypt and store (or replace) a secret; replacing keeps created_at/created_by.
+
+        ``mode="create"`` refuses an existing name (``SecretExistsError``) and
+        ``mode="replace"`` a missing one (``SecretNotFoundError``). A replace never lowers a
+        ``revoked`` status: a revocation is undone only through ``set_status``.
+        """
         aesgcm = load_aesgcm()
         data_key = os.urandom(32)
         nonce = os.urandom(12)
@@ -140,12 +153,19 @@ class EncryptedSecretStore:
         now = time.time()
         with self._lock:
             prior = self._run(
-                "SELECT created_at, created_by FROM nexura_secrets WHERE workspace_id=? AND name=?",
+                "SELECT created_at, created_by, status FROM nexura_secrets "
+                "WHERE workspace_id=? AND name=?",
                 (workspace_id, name),
             )
+            if prior and mode == "create":
+                raise SecretExistsError(workspace_id, name)
+            if not prior and mode == "replace":
+                raise SecretNotFoundError(workspace_id, name)
             created_at = float(prior[0][0]) if prior else now
             if prior:
                 created_by = str(prior[0][1])
+                if str(prior[0][2]) == REVOKED:
+                    status = REVOKED
             # Wrap and insert under the store lock; re-wrap if the provider was swapped meanwhile
             # (a subclass may replace ``_provider`` under this lock, for example to rotate keys).
             while True:
@@ -153,29 +173,33 @@ class EncryptedSecretStore:
                 wrapped = provider_in_use.wrap(data_key, aad)
                 if provider_in_use is self._provider:
                     break
-            self._run(
-                "INSERT OR REPLACE INTO nexura_secrets (workspace_id, name, ciphertext, nonce, "
-                "wrapped_key, key_id, credential_type, provider, description, "
-                "environment_variable, status, masked_hint, created_at, updated_at, "
-                "last_verified_at, created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?)",
-                (
-                    workspace_id,
-                    name,
-                    ciphertext,
-                    nonce,
-                    wrapped,
-                    provider_in_use.key_id,
-                    credential_type,
-                    provider,
-                    description,
-                    environment_variable,
-                    status,
-                    mask_hint(secret),
-                    created_at,
-                    now,
-                    created_by,
-                ),
-            )
+            try:
+                self._run(
+                    ("INSERT" if mode == "create" else "INSERT OR REPLACE")
+                    + " INTO nexura_secrets (workspace_id, name, ciphertext, nonce, "
+                    "wrapped_key, key_id, credential_type, provider, description, "
+                    "environment_variable, status, masked_hint, created_at, updated_at, "
+                    "last_verified_at, created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?)",
+                    (
+                        workspace_id,
+                        name,
+                        ciphertext,
+                        nonce,
+                        wrapped,
+                        provider_in_use.key_id,
+                        credential_type,
+                        provider,
+                        description,
+                        environment_variable,
+                        status,
+                        mask_hint(secret),
+                        created_at,
+                        now,
+                        created_by,
+                    ),
+                )
+            except sqlite3.IntegrityError:  # another process created it meanwhile
+                raise SecretExistsError(workspace_id, name) from None
         return self.get_info(workspace_id, name)
 
     @staticmethod

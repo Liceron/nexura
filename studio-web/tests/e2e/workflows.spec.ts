@@ -137,6 +137,8 @@ test.describe('Workflows, Templates & Lifecycle Management (F03)', () => {
     // Click "Use Template" for English and Hindi greeting
     await page.getByRole('button', { name: 'New workflow', exact: true }).click();
     await page.getByRole('dialog').getByText('English and Hindi greeting', { exact: true }).click();
+    // The name starts empty and is required.
+    await page.getByRole('dialog').getByLabel('Workflow Name').fill('Greeting fixture');
 
     // Modal opens, submit creation
     await page.getByRole('button', { name: /Validate & Create/i }).click();

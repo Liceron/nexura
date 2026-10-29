@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Liceron
 import { Icon } from '../../components/Icon';
 import { useState, useRef, useEffect, useId, KeyboardEvent } from 'react';
+import { InlineConfirm } from '../../components/InlineConfirm';
+import { formatToolResult } from './formatToolResult';
 import { useChatSession } from './useChatSession';
 import { DEFAULT_QUICK_PROMPTS, FAKE_MODEL_NAME, deliveryLabel, isTurnLimitCode } from './types';
 import type { SessionListItem } from './types';
@@ -10,11 +12,12 @@ import { extractCitations } from './citations';
 import { Button } from '../../components/Button';
 import { Modal } from '../../components/Modal';
 import { Spinner } from '../../components/Spinner';
-import { useI18n } from '../../i18n';
+import { languageChoiceEnabled, useI18n } from '../../i18n';
 import { useCompactLayout } from '../../app/useCompactLayout';
 
 /** Examples offered in an empty conversation; the full set stays in DEFAULT_QUICK_PROMPTS. */
-const EXAMPLE_PROMPTS = DEFAULT_QUICK_PROMPTS.slice(0, 3);
+const examplePrompts = () =>
+  DEFAULT_QUICK_PROMPTS.filter((qp) => qp.language === 'en' || languageChoiceEnabled()).slice(0, 3);
 
 function SessionList({
   sessions,
@@ -83,7 +86,7 @@ function SessionList({
                     .replace('{revision}', String(sess.revision))}
                 </span>
               </button>
-              <button
+              <InlineConfirm consequence={`${t('ui.deleteSession')} “${sess.session_id}”?`}><button
                 type="button"
                 className="studio-icon-button"
                 disabled={busy}
@@ -93,7 +96,7 @@ function SessionList({
                 data-testid={`delete-session-${sess.session_id}`}
               >
                 <Icon name="close" />
-              </button>
+              </button></InlineConfirm>
             </li>
           ))}
         </ul>
@@ -102,7 +105,7 @@ function SessionList({
   );
 }
 
-export function ChatPlayground() {
+export function ChatPlayground({ initialAgentId = '' }: { initialAgentId?: string } = {}) {
   const {
     sessions,
     currentSessionId,
@@ -135,7 +138,7 @@ export function ChatPlayground() {
     sendMessage,
     stopTurn,
     clearError,
-  } = useChatSession();
+  } = useChatSession(initialAgentId);
   const { t } = useI18n();
   const ids = useId();
   const compact = useCompactLayout();
@@ -221,6 +224,7 @@ export function ChatPlayground() {
           onChange={(e) => setSelectedAgentId(e.target.value)}
         >
           <option value="">{t('agents.playgroundNoAgent')}</option>
+          {selectedAgentId && !selectedAgent && <option value={selectedAgentId}>{selectedAgentId} (agent unavailable)</option>}
           {agents.map((a) => (
             <option key={a.agent_id} value={a.agent_id}>
               {a.name} ({t('agents.revision').replace('{revision}', String(a.revision))})
@@ -228,7 +232,7 @@ export function ChatPlayground() {
           ))}
         </select>
       </label>
-      {!selectedAgent && (
+      {!selectedAgentId && (
         <label className="chat-control" htmlFor={`${ids}-model`}>
           {t('ui.chatModel')}
           <select
@@ -288,7 +292,7 @@ export function ChatPlayground() {
             ({t('agents.playgroundAgentModel').replace('{name}', selectedAgent.name)})
             {isOfflineFake && <> · {t('chat.fakeModelLabel')}</>}
           </>
-        ) : isOfflineFake ? (
+        ) : selectedAgentId ? <span className="chat-model-name">Agent {selectedAgentId} · model unavailable</span> : isOfflineFake ? (
           <span className="chat-model-name">{t('chat.fakeModelLabel')}</span>
         ) : (
           <span className="chat-model-name">{effectiveModelInfo?.label ?? selectedModel}</span>
@@ -319,7 +323,7 @@ export function ChatPlayground() {
                 <div className="chat-settings-panel">
                   <div className="chat-settings-body chat-settings-body--stacked">
                     {choiceControls}
-                    {languageControl}
+                    {languageChoiceEnabled() && languageControl}
                   </div>
                   {sessionDetails}
                 </div>
@@ -332,7 +336,7 @@ export function ChatPlayground() {
             <h1 id={`${ids}-title`}>{t('nav.playground')}</h1>
             {choiceControls}
             {modelNote}
-            {languageControl}
+            {languageChoiceEnabled() && languageControl}
             {currentSessionId && (
               <details className="chat-settings">
                 <summary>{t('chat.settings')}</summary>
@@ -365,7 +369,7 @@ export function ChatPlayground() {
                 <h2>{t('chat.emptyTitle')}</h2>
                 <p className="resource-help" style={{ marginTop: 4 }}>{t('chat.emptyHelp')}</p>
                 <ul className="chat-examples studio-quick-prompts">
-                  {EXAMPLE_PROMPTS.map((qp) => (
+                  {examplePrompts().map((qp) => (
                     <li key={qp.id}>
                       <Button
                         size="sm"
@@ -398,7 +402,7 @@ export function ChatPlayground() {
                   <div key={idx} data-testid={`message-bubble-${msg.role}`} className={`chat-message chat-message--${msg.role}`}>
                     <span className="chat-message-role">{roleLabel}</span>
                     <div className="chat-message-body">
-                      {msg.content || ''}
+                      {msg.role === 'tool' ? formatToolResult(msg.content) : msg.content || ''}
                       {msg.tool_calls && msg.tool_calls.length > 0 && (
                         <code className="chat-tool-call">
                           {t('ui.invokingTool') + ' '}
@@ -464,7 +468,7 @@ export function ChatPlayground() {
                           <strong className="resource-label">{t('ui.arguments')}</strong>
                           <pre>{JSON.stringify(tr.arguments, null, 2)}</pre>
                           <strong className="resource-label">{t('ui.output2')}</strong>
-                          <pre>{typeof tr.output === 'object' ? JSON.stringify(tr.output, null, 2) : String(tr.output)}</pre>
+                          <pre>{formatToolResult(tr.output)}</pre>
                         </div>
                       )}
                     </div>

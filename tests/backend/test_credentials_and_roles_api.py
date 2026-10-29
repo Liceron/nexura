@@ -61,8 +61,10 @@ async def test_credentials_lifecycle_and_secrecy(tmp_path) -> None:
         )
         assert verify_res.status_code == 200
         verify_data = verify_res.json()
-        assert verify_data["status"] == "valid"
-        assert "verified" in verify_data["message"].lower()
+        # Live pass minor 3: a local check never claims the key works with the provider.
+        assert verify_data["status"] == "stored"
+        assert verify_data["checked_with_provider"] is False
+        assert "not checked with the provider" in verify_data["message"].lower()
 
         # 4. Revoke credential
         revoke_res = await client.post(

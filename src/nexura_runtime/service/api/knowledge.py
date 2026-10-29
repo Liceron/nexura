@@ -4,9 +4,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
+import threading
 import time
+import weakref
+from collections.abc import Callable
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
@@ -16,9 +20,9 @@ from nexura_runtime.knowledge.hybrid import (
     DocumentLimitError,
     EmbeddingLineageMismatchError,
     FileTooLargeError,
-    HybridKnowledgeIndex,
     IndexedDocument,
     KnowledgeError,
+    KnowledgeIndexBase,
     SearchHit,
     WorkspaceQuotaExceededError,
 )
@@ -126,14 +130,88 @@ def _assert_doc_ownership(request: Request, document_id: str) -> None:
         )
 
 
-def _index(request: Request) -> HybridKnowledgeIndex:
-    """Workspace-scoped hybrid index, created lazily on the service's SQLite connection."""
+#: Guards only the creation of an app's own build lock (held for a dict lookup, never a build).
+_LOCKS_GUARD = threading.Lock()
+
+
+def _build_lock(state: Any) -> threading.Lock:
+    """The app's knowledge index build lock (``app.state.knowledge_build_lock``).
+
+    One per app (MVP WP7 review R2-L2): a module-wide lock made one app's lazy Postgres build,
+    which can wait for the migration lock, block another app's build in the same process.
+    ``create_api_app`` sets it; an app state without one gets one here, once.
+    """
+    lock = getattr(state, "knowledge_build_lock", None)
+    if lock is None:
+        with _LOCKS_GUARD:
+            lock = getattr(state, "knowledge_build_lock", None)
+            if lock is None:
+                lock = threading.Lock()
+                state.knowledge_build_lock = lock
+    return lock
+
+
+def _index(request: Request) -> KnowledgeIndexBase:
+    """Workspace-scoped hybrid index, created lazily (SQLite, or Postgres with ``database_url``).
+
+    Synchronous: use ``_aindex`` from async code. A Postgres service builds its index when the
+    app is created (``create_api_app``), so this only builds on SQLite or after a test or
+    operator replaced it with ``None``.
+    """
     state = request.app.state
-    index: HybridKnowledgeIndex | None = getattr(state, "hybrid_knowledge_index", None)
+    index: KnowledgeIndexBase | None = getattr(state, "hybrid_knowledge_index", None)
     if index is None:
-        index = HybridKnowledgeIndex(state.vector_store._conn, embedder=state.knowledge_embedder)
-        state.hybrid_knowledge_index = index
+        with _build_lock(state):
+            index = getattr(state, "hybrid_knowledge_index", None)
+            if index is None:
+                index = state.service_stores.knowledge_index(
+                    getattr(state, "vector_store", None), state.knowledge_embedder
+                )
+                state.hybrid_knowledge_index = index
     return index
+
+
+def _collection_lock(request: Request, workspace_id: str, collection_id: str) -> asyncio.Lock:
+    """The app's lock for one collection, held by an upload (ingest and registration) and by
+    a collection delete (index delete and unregistration), so an upload never lands between
+    the two steps of a delete: it runs wholly before (and is deleted with the collection) or
+    wholly after (and finds a fresh collection)."""
+    state = request.app.state
+    # Weak values: a lock lives only while someone holds or waits on it, so collection ids
+    # named by uploads do not accumulate for the life of the process.
+    locks: weakref.WeakValueDictionary[tuple[str, str], asyncio.Lock] | None = getattr(
+        state, "knowledge_collection_locks", None
+    )
+    if locks is None:
+        locks = weakref.WeakValueDictionary()
+        state.knowledge_collection_locks = locks
+    key = (workspace_id, collection_id)
+    lock = locks.get(key)
+    if lock is None:
+        lock = locks[key] = asyncio.Lock()
+    return lock
+
+
+async def _aindex(request: Request) -> KnowledgeIndexBase:
+    """``_index`` for async callers. Building a Postgres index runs its migrations (the shared
+    migration lock, ``CREATE EXTENSION``) and a catalog query, so it runs in a worker thread
+    and never on the event loop (MVP WP7 review M2); concurrent first callers build it once."""
+    state = request.app.state
+    index: KnowledgeIndexBase | None = getattr(state, "hybrid_knowledge_index", None)
+    if index is not None:
+        return index
+    stores = getattr(state, "service_stores", None)
+    if stores is not None and getattr(stores, "database_url", None):
+        return await asyncio.to_thread(_index, request)
+    return _index(request)
+
+
+async def _io[T](index: KnowledgeIndexBase, fn: Callable[[], T]) -> T:
+    """Run a synchronous index call; in a worker thread when the backend waits on the network
+    or a lock (Postgres, MVP WP7), inline otherwise (SQLite, unchanged)."""
+    if index.blocking_io:
+        return await asyncio.to_thread(fn)
+    return fn()
 
 
 DEFAULT_RETRIEVAL_RATE_LIMIT = 120  # retrieve + answer requests per workspace per minute
@@ -257,14 +335,20 @@ async def list_collections(request: Request) -> dict[str, Any]:
     """List knowledge collections in the caller workspace."""
     caller_ws, _, _ = _get_caller_context(request)
     ws_repo: WorkspaceRepository = request.app.state.workspace_repo
+    index = await _aindex(request)
+    collections = _workspace_collections(ws_repo, caller_ws)
+
+    def statuses() -> tuple[dict[str, Any], dict[str, Any]]:
+        return index.embedding_status(caller_ws), {
+            cid: index.embedding_status(caller_ws, cid) for cid in collections
+        }
+
+    default_status, collection_status = await _io(index, statuses)
     return {
         "workspace_id": caller_ws,
-        "collections": _workspace_collections(ws_repo, caller_ws),
-        **_index(request).embedding_status(caller_ws),
-        "collection_status": {
-            cid: _index(request).embedding_status(caller_ws, cid)
-            for cid in _workspace_collections(ws_repo, caller_ws)
-        },
+        "collections": collections,
+        **default_status,
+        "collection_status": collection_status,
     }
 
 
@@ -274,7 +358,8 @@ async def knowledge_status(
 ) -> dict[str, Any]:
     """Configured and persisted collection embedding lineage (no provider calls)."""
     caller_ws, _, _ = _get_caller_context(request)
-    return _index(request).embedding_status(caller_ws, collection_id)
+    index = await _aindex(request)
+    return await _io(index, lambda: index.embedding_status(caller_ws, collection_id))
 
 
 @router.post("/collections/{collection_id}/reindex", dependencies=[_require("edit")])
@@ -283,7 +368,7 @@ async def reindex_collection(request: Request, collection_id: str) -> dict[str, 
     caller_ws, principal, _ = _get_caller_context(request)
     try:
         require_resource(principal, "knowledge", collection_id)
-        return await _index(request).reindex(caller_ws, collection_id)
+        return await (await _aindex(request)).reindex(caller_ws, collection_id)
     except PermissionDeniedError as exc:
         raise HTTPException(
             status_code=403, detail={"code": exc.code, "message": str(exc)}
@@ -314,15 +399,72 @@ async def create_collection(request: Request, payload: CreateCollectionRequest) 
     }
 
 
+@router.delete("/collections/{collection_id}", dependencies=[_require("edit")])
+async def delete_collection(request: Request, collection_id: str) -> dict[str, Any]:
+    """Delete a collection of the caller's workspace with its documents and index.
+
+    Removes every document of the collection (text, chunks, vectors, keyword entries) and the
+    collection's embedding lineage, then the collection itself. Needs the ``edit`` permission
+    (and, for a resource-scoped key, this collection). ``default`` always exists: deleting it
+    empties it. Agents that still name the collection find nothing in it. 404
+    ``COLLECTION_NOT_FOUND`` for a collection this workspace does not have.
+    """
+    caller_ws, principal, _ = _get_caller_context(request)
+    try:
+        require_resource(principal, "knowledge", collection_id)
+    except PermissionDeniedError as exc:
+        raise HTTPException(
+            status_code=403, detail={"code": exc.code, "message": str(exc)}
+        ) from exc
+    ws_repo: WorkspaceRepository = request.app.state.workspace_repo
+    index = await _aindex(request)
+    async with _collection_lock(request, caller_ws, collection_id):
+        return await _delete_collection_locked(request, ws_repo, index, caller_ws, collection_id)
+
+
+async def _delete_collection_locked(
+    request: Request,
+    ws_repo: WorkspaceRepository,
+    index: KnowledgeIndexBase,
+    caller_ws: str,
+    collection_id: str,
+) -> dict[str, Any]:
+    key = f"{caller_ws}{_COLLECTION_SEP}{collection_id}"
+    registered = ws_repo.get_resource_ownership(_COLLECTION_RESOURCE, key) is not None
+    has_docs = bool(await _io(index, lambda: index.list_documents(caller_ws, collection_id)))
+    if not registered and not has_docs and collection_id != "default":
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": "COLLECTION_NOT_FOUND",
+                "message": f"Collection '{collection_id}' not found.",
+            },
+        )
+    deleted = await _io(index, lambda: index.delete_collection(caller_ws, collection_id))
+    for document_id in deleted:
+        ws_repo.delete_resource_ownership("document", document_id)
+    if registered:
+        ws_repo.delete_resource_ownership(_COLLECTION_RESOURCE, key)
+    return {
+        "deleted": True,
+        "collection_id": collection_id,
+        "documents_deleted": len(deleted),
+    }
+
+
 @router.get("/limits")
 async def knowledge_limits(request: Request) -> dict[str, Any]:
     """Upload size limits and the caller workspace's current usage."""
     caller_ws, _, _ = _get_caller_context(request)
-    index = _index(request)
-    return {
-        **index.limits(), "workspace_used_bytes": index.workspace_usage(caller_ws),
-        **index.embedding_status(caller_ws),
-    }
+    index = await _aindex(request)
+
+    def read() -> dict[str, Any]:
+        return {
+            **index.limits(), "workspace_used_bytes": index.workspace_usage(caller_ws),
+            **index.embedding_status(caller_ws),
+        }
+
+    return await _io(index, read)
 
 
 @router.get("/documents")
@@ -334,7 +476,8 @@ async def list_documents(
 ) -> PaginatedResponse[dict[str, Any]]:
     """List documents in a collection scoped to caller's workspace."""
     caller_ws, _, _ = _get_caller_context(request)
-    owned = _index(request).list_documents(caller_ws, collection_id)
+    index = await _aindex(request)
+    owned = await _io(index, lambda: index.list_documents(caller_ws, collection_id))
     total = len(owned)
     items = [_doc_summary(d) for d in owned[offset : offset + limit]]
     return PaginatedResponse(
@@ -354,7 +497,7 @@ async def upload_document(
 ) -> dict[str, Any]:
     """Ingest a file (201 created/replaced; 200 when deduplicated); dedup and replace by title."""
     caller_ws, principal, _ = _get_caller_context(request)
-    index = _index(request)
+    index = await _aindex(request)
     ws_repo: WorkspaceRepository = request.app.state.workspace_repo
 
     filename = payload.filename.strip()
@@ -384,6 +527,23 @@ async def upload_document(
     else:
         raw_bytes = payload.content.encode("utf-8")
 
+    async with _collection_lock(request, caller_ws, payload.collection_id):
+        return await _ingest_locked(
+            request, response, index, ws_repo, caller_ws, principal, payload, filename, raw_bytes
+        )
+
+
+async def _ingest_locked(
+    request: Request,
+    response: Response,
+    index: KnowledgeIndexBase,
+    ws_repo: WorkspaceRepository,
+    caller_ws: str,
+    principal: Principal | None,
+    payload: IngestDocumentRequest,
+    filename: str,
+    raw_bytes: bytes,
+) -> dict[str, Any]:
     try:
         outcome = await index.ingest(
             workspace_id=caller_ws,
@@ -430,8 +590,8 @@ async def get_document(request: Request, document_id: str) -> dict[str, Any]:
     """Retrieve document details and text content."""
     _assert_doc_ownership(request, document_id)
     caller_ws, _, _ = _get_caller_context(request)
-    index = _index(request)
-    doc = index.get_document(caller_ws, document_id)
+    index = await _aindex(request)
+    doc = await _io(index, lambda: index.get_document(caller_ws, document_id))
     if doc is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -440,7 +600,8 @@ async def get_document(request: Request, document_id: str) -> dict[str, Any]:
                 "message": f"Document '{document_id}' not found.",
             },
         )
-    return {**_doc_summary(doc), "text": index.get_document_text(caller_ws, document_id)}
+    text = await _io(index, lambda: index.get_document_text(caller_ws, document_id))
+    return {**_doc_summary(doc), "text": text}
 
 
 @router.get("/documents/{document_id}/chunks/{chunk_index}")
@@ -448,7 +609,8 @@ async def get_chunk(request: Request, document_id: str, chunk_index: int) -> dic
     """Return one chunk (text, span, title, source URI): the target of citation footnote links."""
     _assert_doc_ownership(request, document_id)
     caller_ws, _, _ = _get_caller_context(request)
-    chunk = _index(request).get_chunk(caller_ws, document_id, chunk_index)
+    index = await _aindex(request)
+    chunk = await _io(index, lambda: index.get_chunk(caller_ws, document_id, chunk_index))
     if chunk is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -463,7 +625,8 @@ async def delete_document(request: Request, document_id: str) -> dict[str, Any]:
     _assert_doc_ownership(request, document_id)
     caller_ws, _, _ = _get_caller_context(request)
     ws_repo: WorkspaceRepository = request.app.state.workspace_repo
-    if not _index(request).delete_document(caller_ws, document_id):
+    index = await _aindex(request)
+    if not await _io(index, lambda: index.delete_document(caller_ws, document_id)):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={
@@ -471,14 +634,15 @@ async def delete_document(request: Request, document_id: str) -> dict[str, Any]:
                 "message": f"Document '{document_id}' not found.",
             },
         )
-    with ws_repo._lock:
-        ws_repo._ownership.pop(("document", document_id), None)
+    ws_repo.delete_resource_ownership("document", document_id)
     return {"deleted": True, "document_id": document_id}
 
 
 @router.post("/retrieve")
 async def retrieve_knowledge(request: Request, payload: RetrieveQueryRequest) -> dict[str, Any]:
-    """Hybrid (vector + FTS5, reciprocal rank fusion) search returning cited, ranked hits."""
+    """Hybrid (vector + keyword, reciprocal rank fusion) search returning cited, ranked hits.
+
+    The keyword ranker is FTS5 ``bm25`` on SQLite and ``ts_rank_cd`` on Postgres."""
     caller_ws, principal, _ = _get_caller_context(request)
     try:
         require_resource(principal, "knowledge", payload.collection_id)
@@ -487,7 +651,7 @@ async def retrieve_knowledge(request: Request, payload: RetrieveQueryRequest) ->
             status_code=403, detail={"code": exc.code, "message": str(exc)}
         ) from exc
     _check_retrieval_rate(request, caller_ws)
-    index = _index(request)
+    index = await _aindex(request)
     t0 = time.perf_counter()
     try:
         hits = await index.search(
@@ -545,7 +709,7 @@ async def answer_with_citations(request: Request, payload: AnswerQueryRequest) -
     _check_retrieval_rate(request, caller_ws)
     t0 = time.perf_counter()
     try:
-        hits = await _index(request).search(
+        hits = await (await _aindex(request)).search(
             workspace_id=caller_ws,
             query=payload.query,
             collection_id=payload.collection_id,

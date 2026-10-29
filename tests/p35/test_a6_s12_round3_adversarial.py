@@ -6,6 +6,7 @@ import time
 import httpx
 import pytest
 from _local_env import local_headers
+from _service_state import service_workflow_store
 from nexura_agents.contracts import BaseModule, ModuleManifest, ModuleResult
 from nexura_agents.contracts.execution import ExecutionId, NotApplied, Unknown
 
@@ -13,7 +14,6 @@ from nexura_runtime.service.api.app import create_api_app
 from nexura_runtime.workflow import (
     MemoryWorkflowStore,
     ModuleRegistry,
-    SQLiteWorkflowStore,
     WorkflowEngine,
     WorkflowNode,
     WorkflowSpec,
@@ -145,7 +145,7 @@ async def test_rest_all_uncertain_resolutions(tmp_path, effect, mode, resolution
     )
     db = tmp_path / "rest.db"
     app = create_api_app(db_path=str(db), registry=registry, profile="local-owner")
-    store = SQLiteWorkflowStore(db)
+    store = service_workflow_store(db)  # the service's own workflow state (either backend)
     try:
         engine = WorkflowEngine(
             # Generous enough for the first dispatch under suite load; short deadlines

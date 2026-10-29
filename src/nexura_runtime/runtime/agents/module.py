@@ -173,15 +173,27 @@ class AgentCoordinatorModule(BaseModule):
                 # Before _mark_dispatch_started: nothing ran (the workflow's marker decides).
                 return ModuleResult.failure("SKILL_INVALID", str(exc))
 
+        from nexura_agents.usage import admission
+
+        from nexura_runtime.runtime.agents.saved import _StartGate
         from nexura_runtime.workflow import _mark_dispatch_started
 
-        _mark_dispatch_started()  # internal: the coordinator's models and tools run from here
-        result = await coordinator.run_async(
-            initial_agent_name=agent_name,
-            prompt=prompt,
-            context=context,
-            shared_memory=shared_memory,
-        )
+        # Internal: the coordinator's models and tools run from here. Under a budget the node
+        # counts as started right before its first admitted model call or tool call is sent,
+        # so a budget refusal of the first call is a known "not dispatched" failure.
+        gate = _StartGate(_mark_dispatch_started)
+        if context.budget is None:
+            gate()
+        token = admission.dispatch_gate.set(gate)
+        try:
+            result = await coordinator.run_async(
+                initial_agent_name=agent_name,
+                prompt=prompt,
+                context=context,
+                shared_memory=shared_memory,
+            )
+        finally:
+            admission.dispatch_gate.reset(token)
 
         traces_data = [
             {

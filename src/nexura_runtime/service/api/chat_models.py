@@ -110,6 +110,20 @@ class ChatModelRegistry:
                     ) from None
         return entry.instance
 
+    def model_ids(self) -> dict[str, str]:
+        """Configured name -> the provider's model id (``name=provider:model`` specs, or a
+        custom model's ``model_id``); used to price a model under either id."""
+        ids: dict[str, str] = {}
+        for name, entry in self._entries.items():
+            if entry.spec is not None:
+                model = entry.spec.partition(":")[2].strip()
+            else:
+                found = getattr(entry.instance, "model_id", None) if entry.instance else None
+                model = found if isinstance(found, str) else ""
+            if model:
+                ids[name] = model
+        return ids
+
     def describe(self) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         for name, entry in self._entries.items():

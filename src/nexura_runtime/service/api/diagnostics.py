@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -11,6 +12,7 @@ from nexura_agents.usage.ledger import UsageLedger
 
 from nexura_runtime.observability.run_diagnostics import describe_run
 from nexura_runtime.service.api.runs import _assert_run_ownership
+from nexura_runtime.service.storage_backend import app_usage_ledger
 from nexura_runtime.studio.store import StudioStore
 
 router = APIRouter(prefix="/runs", tags=["Run diagnostics"])
@@ -34,13 +36,19 @@ async def run_diagnostics(
         )
 
     ledger: UsageLedger | None = getattr(request.app.state, "usage_ledger", None)
-    if ledger is None and hasattr(store, "db_path") and store.db_path:
-        ledger = UsageLedger(db_path=str(store.db_path))
-
+    stores = getattr(request.app.state, "service_stores", None)
+    if ledger is None and (
+        getattr(store, "db_path", None) or getattr(stores, "database_url", None)
+    ):
+        # One app-level ledger (shared with budgets) replaces the per-request reload. On Postgres
+        # (MVP WP5) its ``get_entries`` reads only this run's entries, without the budget lock.
+        ledger = app_usage_ledger(request.app.state)
     pricing_table = getattr(request.app.state, "pricing_table", None)
     retention_seconds = getattr(request.app.state, "diagnostic_retention_seconds", None)
 
-    return describe_run(
+    # The ledger read may wait on the database (Postgres); keep the event loop free.
+    return await asyncio.to_thread(
+        describe_run,
         run,
         ledger=ledger,
         pricing_table=pricing_table,

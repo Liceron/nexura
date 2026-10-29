@@ -629,9 +629,15 @@ export interface CreateCredentialOptions {
 
 export interface VerifyCredentialResult {
   credential_id: string;
-  status: 'valid' | 'invalid' | 'revoked';
+  /**
+   * 'stored': the secret exists, is not revoked and is readable; it was not checked with the
+   * provider (see checked_with_provider). 'valid' is what older servers answered.
+   */
+  status: 'stored' | 'valid' | 'invalid' | 'revoked';
   message: string;
   checked_at: number;
+  /** Always false: the server never calls the provider to check a credential. */
+  checked_with_provider?: boolean;
 }
 
 export interface FixtureMetadata {
@@ -1158,10 +1164,14 @@ export interface GuardrailPresetInfo {
  * The operator's guardrail policy (`GET /guardrails/policy`); read-only. Everyone gets the
  * digest and the policy file's base name (`detail: "summary"`); admins also get the name, rules,
  * checks and full path (`detail: "full"`). `exceptions` lists what the policy does not cover.
+ * `mode: "shadow"`: every decision is audited and reported, none is applied (nothing is
+ * blocked); `shadow_rules` counts the rules that only report.
  */
 export interface GuardrailPolicyView {
   configured: boolean;
   enforced: boolean;
+  mode?: "enforce" | "shadow";
+  shadow_rules?: number;
   detail?: "summary" | "full";
   exceptions?: string[];
   policy: {
@@ -1171,7 +1181,14 @@ export interface GuardrailPolicyView {
     source?: string | null;
     on_error?: string;
     default_tool_action?: string;
-    rules?: { id: string; action: string; checks: string[]; when: Record<string, any> }[];
+    rules?: {
+      id: string;
+      action: string;
+      checks: string[];
+      when: Record<string, any>;
+      /** The rule's effective enforcement: its own, else the policy's mode. */
+      enforcement?: "enforce" | "shadow";
+    }[];
     checks?: { name: string; type: string; backend: string; deterministic: boolean }[];
     [key: string]: any;
   } | null;

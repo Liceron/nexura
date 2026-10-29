@@ -109,7 +109,7 @@ describe('B39: workflow picker in the trigger forms', () => {
     await user.type(screen.getByTestId('input-new-schedule-id'), 'nightly');
     await user.click(screen.getByTestId('btn-submit-create-schedule'));
     await waitFor(() =>
-      expect(triggers.createSchedule).toHaveBeenCalledWith(expect.objectContaining({ schedule_id: 'nightly', workflow_id: 'wf-b' })),
+      expect(api.manager.client.request).toHaveBeenCalledWith('POST', '/triggers/schedules', { body: expect.objectContaining({ schedule_id: 'nightly', workflow_id: 'wf-b' }) }),
     );
   });
 

@@ -202,6 +202,10 @@ async def test_local_legacy_unowned_workflow_is_readable(tmp_path: Path) -> None
     await st.create_workflow(spec, workflow_id="legacy")
     await st.close()
     app = create_api_app(db_path=db)
+    if getattr(app.state.store, "database", None) is not None:
+        # Postgres run store (--service-backend=postgres, MVP WP3): the legacy row (no
+        # ownership record) lives in the shared database, not in the SQLite file.
+        await app.state.store.create_workflow(spec, workflow_id="legacy")
     async with _client(app) as c:
         duplicate = await c.post(
             "/api/v1/workflows", json={"workflow_id": "legacy", "spec": spec.to_dict()}

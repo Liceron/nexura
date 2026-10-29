@@ -142,6 +142,8 @@ export async function startTestCluster(): Promise<TestCluster> {
       env: {
         ...process.env,
         VITE_BACKEND_URL: backendUrl,
+        // Studio ships English-only; the switched-off Hindi support keeps its browser tests.
+        VITE_LANGUAGE_CHOICE: 'on',
       },
       stdio: 'pipe',
       detached: true,

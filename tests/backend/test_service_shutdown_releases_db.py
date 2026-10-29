@@ -52,6 +52,8 @@ def _client(app: object) -> TestClient:
     return TestClient(app, base_url="http://127.0.0.1", client=("127.0.0.1", 50000))  # type: ignore[arg-type]
 
 
+# SQLite file handles: a full Postgres service (MVP WP8) has no database file to hold or release.
+@pytest.mark.sqlite_only
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc/self/fd")
 def test_shutdown_closes_every_handle_to_the_database(tmp_path: Path) -> None:
     app = create_api_app(db_path=tmp_path / "service.sqlite3", profile="local-owner")
@@ -68,6 +70,10 @@ def test_shutdown_closes_every_handle_to_the_database(tmp_path: Path) -> None:
     assert _open_handles_under(tmp_path) == []
 
 
+# The SQLite stores reopen their file after the shutdown closed it. A Postgres-mode app object is
+# not restartable after its lifespan (its shutdown closes the shared pool every Postgres store
+# holds; true of every store since MVP WP2, a WP8 report limitation); a new app is started instead.
+@pytest.mark.sqlite_only
 def test_restarted_app_reopens_its_stores(tmp_path: Path) -> None:
     app = create_api_app(db_path=tmp_path / "service.sqlite3", profile="local-owner")
     headers = {"X-Workspace-ID": "default", "X-Nexura-Session": app.state.session_token}

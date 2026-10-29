@@ -9,6 +9,7 @@ import { Badge } from '../../components/Badge';
 import { useApi } from '../../api/context';
 import type { WorkflowSpec, ValidationIssue } from '@liceron/nexura-sdk';
 import { formatApiError } from '../../api/errors';
+import { defaultRunInput, parseRunInput } from './runInput';
 
 interface RunStartModalProps {
   open: boolean;
@@ -23,6 +24,7 @@ interface RunStartModalProps {
 
 export function RunStartModal({
   open,
+  workflowId,
   workflowName,
   serverRevision,
   currentSpec,
@@ -31,15 +33,12 @@ export function RunStartModal({
   onLaunchRun,
 }: RunStartModalProps) {
   const t = useT();
-  const { manager } = useApi();
+  const { manager, connection } = useApi();
 
-  const [initialStateText, setInitialStateText] = useState<string>(
+  // A workflow made from a template starts with that template's sample input.
+  const [initialStateText, setInitialStateText] = useState<string>(() =>
     JSON.stringify(
-      {
-        order_id: 'ORD-501',
-        ticket_id: 'TICKET-501',
-        customer_tier: 'premium',
-      },
+      defaultRunInput(connection.workspace, workflowId),
       null,
       2
     )
@@ -51,23 +50,7 @@ export function RunStartModal({
   const [launchError, setLaunchError] = useState<string | null>(null);
 
   // Parse state text
-  const { parsedState, parseError } = useMemo(() => {
-    if (!initialStateText.trim()) {
-      return { parsedState: {}, parseError: null };
-    }
-    try {
-      const parsed = JSON.parse(initialStateText);
-      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-        return { parsedState: null, parseError: t('runStart.objectError') };
-      }
-      return { parsedState: parsed as Record<string, unknown>, parseError: null };
-    } catch (err: unknown) {
-      return {
-        parsedState: null,
-        parseError: t('approvalReview.jsonError') + ': ' + formatApiError(err, t),
-      };
-    }
-  }, [initialStateText, t]);
+  const { parsedState, parseError } = useMemo(() => parseRunInput(initialStateText, t), [initialStateText, t]);
 
   if (!open) return null;
 

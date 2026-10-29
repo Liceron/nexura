@@ -247,7 +247,12 @@ _SPEC = {
 }
 
 
-async def test_service_keeps_its_trigger_queue_in_postgres(schema: Schema, tmp_path: Path) -> None:
+async def test_service_keeps_its_trigger_queue_in_postgres(
+    schema: Schema, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The A6 option (workflow state in Postgres, runs in SQLite): no service database_url,
+    # under any --service-backend (with one, workflow state must be that database: MVP WP3).
+    monkeypatch.delenv("NEXURA_DATABASE_URL", raising=False)
     db = tmp_path / "svc.sqlite3"
     applied: list[str] = []
     app = create_api_app(

@@ -102,7 +102,8 @@ test.describe('Credential References, Ownership and Role UX (F11)', () => {
 
     const verifyBadge = page.locator('[data-testid="verification-badge-openai_prod_key"]');
     await expect(verifyBadge).toBeVisible({ timeout: 10000 });
-    await expect(verifyBadge).toContainText('Valid');
+    // The service stores the key without calling the provider, and the badge says so.
+    await expect(verifyBadge).toContainText('Saved, not checked with the provider');
     await expect(verifyBadge).not.toContainText('Invalid');
 
     // 6. Test Key Revocation (fails closed)

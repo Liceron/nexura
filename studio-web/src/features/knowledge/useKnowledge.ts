@@ -282,6 +282,21 @@ export function useKnowledge() {
     createCollection,
     uploadDocument,
     deleteDocument,
+    deleteCollection: async (id: string) => {
+      setError(null);
+      try {
+        await manager.client.request('DELETE', `/knowledge/collections/${encodeURIComponent(id)}`);
+        setDocuments([]);
+        setRetrievalResult(null);
+        setAnswerResult(null);
+        setFocusedChunk(null);
+        const remaining = await refreshCollections();
+        const next = remaining?.[0] ?? 'default';
+        setSelectedCollection(next);
+        await refreshDocuments(next);
+        await refreshLimits();
+      } catch (cause) { setError(formatApiError(cause, t)); throw cause; }
+    },
     runRetrieval,
     runAnswer,
     refreshDocuments,

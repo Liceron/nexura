@@ -88,6 +88,7 @@ describe('Workflow Library, Templates & Lifecycle (F03)', () => {
             }),
         });
       }
+      if (url.includes('/workflows?')) return Promise.resolve({ ok: true, json: () => Promise.resolve({ items: [], has_more: false }) });
       if (url.includes('/workflows/validate') && opts?.method === 'POST') {
         return Promise.resolve({
           ok: true,
@@ -124,6 +125,7 @@ describe('Workflow Library, Templates & Lifecycle (F03)', () => {
       </I18nProvider>
     );
 
+    fireEvent.change(screen.getByLabelText('Workflow Name'), { target: { value: 'Incompatible validation check' } });
     const submitBtn = screen.getByRole('button', { name: /Validate & Create/i });
     fireEvent.click(submitBtn);
 

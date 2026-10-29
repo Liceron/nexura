@@ -477,3 +477,56 @@ def test_the_store_clock_is_used_when_no_time_is_given(store: TriggerStore) -> N
     assert renewed.lease_expires_at > claimed.lease_expires_at
     # A live lease is not reclaimed on the store's clock.
     assert store.reclaim_expired_jobs("w2", lease_seconds=60) == []
+
+
+# --------------------------------------------------------------------------- named leases
+
+
+def test_a_named_lease_has_one_holder_until_it_expires_or_is_released(store: TriggerStore) -> None:
+    """MVP WP9: the trigger tick's lease (one pass at a time across instances)."""
+    assert store.acquire_lease("tick", "a", ttl_seconds=30, now=100.0)
+    # Held: nobody else takes it, and the holder itself does not renew it by acquiring again.
+    assert not store.acquire_lease("tick", "b", ttl_seconds=30, now=129.9)
+    assert not store.acquire_lease("tick", "a", ttl_seconds=30, now=110.0)
+    # Other names are independent.
+    assert store.acquire_lease("other", "b", ttl_seconds=30, now=110.0)
+    # Only the holder releases it.
+    assert not store.release_lease("tick", "b")
+    assert store.release_lease("tick", "a")
+    assert not store.release_lease("tick", "a")
+    assert store.acquire_lease("tick", "b", ttl_seconds=30, now=111.0)
+    # Expired (at exactly its end): taken over, and the old holder can no longer release it.
+    assert store.acquire_lease("tick", "c", ttl_seconds=5, now=141.0)
+    assert not store.release_lease("tick", "b")
+    assert store.release_lease("tick", "c")
+
+
+def test_a_named_lease_refuses_a_bad_ttl(store: TriggerStore) -> None:
+    for ttl in (0, -1, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="ttl_seconds"):
+            store.acquire_lease("tick", "a", ttl_seconds=ttl, now=1.0)
+    assert store.acquire_lease("tick", "a", ttl_seconds=1, now=1.0)
+
+
+def test_a_named_lease_uses_the_store_clock_when_no_time_is_given(store: TriggerStore) -> None:
+    assert store.acquire_lease("tick", "a", ttl_seconds=60)
+    assert not store.acquire_lease("tick", "b", ttl_seconds=60)  # live on the store's clock
+    # Taken at a time an hour past the lease, it has expired.
+    assert store.acquire_lease("tick", "b", ttl_seconds=60, now=time.time() + 3600)
+
+
+def test_racing_lease_takers_have_one_winner(backend: Backend) -> None:
+    stores = [backend.open() for _ in range(4)]
+    for rnd in range(5):
+        now = 1000.0 + rnd * 100
+        results = _race(
+            [
+                (
+                    lambda s=s, holder=f"r{rnd}-{i}", now=now: s.acquire_lease(
+                        "tick", holder, ttl_seconds=30, now=now
+                    )
+                )
+                for i, s in enumerate(stores * 2)
+            ]
+        )
+        assert results.count(True) == 1, (rnd, results)

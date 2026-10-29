@@ -73,7 +73,10 @@ requires edit permission and scopes the operation to the caller's workspace.
 Reindex embeds the stored chunks, then atomically replaces their vectors and lineage.
 It preserves document ids, chunk ids, text, FTS entries, spans, metadata and citations.
 Provider/dimension/database failure preserves the previous collection. A concurrent
-chunk or lineage change refuses the replacement and requires a retry. Reindex takes
+chunk or lineage change refuses the replacement and requires a retry. On Postgres (a
+service with `database_url`) the check and the replacement run in one transaction under
+the collection's lock, and readers on every instance see the old vectors and lineage or
+the new ones, never a mix. Reindex takes
 an in-memory snapshot of the collection; large collections may need substantial RAM.
 It rebuilds vectors for the existing chunks, rather than changing chunking policy.
 
@@ -111,6 +114,18 @@ Measured locally on 2026-10-20 with Python 3.12.14, keyless, default top-k 5:
 | Fixture hybrid, all | 50 | 0.1400 | 0.3400 | 0.4200 | 0.2513 |
 | Fixture hybrid, English | 30 | 0.1333 | 0.3667 | 0.3667 | 0.2444 |
 | Fixture hybrid, Hindi | 20 | 0.1500 | 0.3000 | 0.5000 | 0.2617 |
+
+The Postgres index (a service with `database_url`) ranks keywords with `ts_rank_cd` per
+query term, weighted by a bm25-style inverse document frequency, instead of FTS5 `bm25`.
+Measured on 2026-10-27 on the same dataset and settings (all 50 queries, PostgreSQL 16):
+
+| Keyword ranker | Recall@1 | Recall@5 | MRR@5 | Same top hit as `bm25` |
+| --- | --- | --- | --- | --- |
+| SQLite FTS5 `bm25` | 0.7400 | 0.8800 | 0.7940 | — |
+| Postgres, IDF-weighted `ts_rank_cd` (shipped) | 0.7200 | 0.8600 | 0.7780 | 86 % |
+| Postgres, plain `ts_rank_cd` of the OR query (not used) | 0.6000 | 0.8200 | 0.6983 | 76 % |
+
+The fixture hybrid mode gives MRR@5 0.2263 on Postgres (0.2513 with `bm25`).
 
 [Raw metrics and per-query rankings](retrieval_v1_results.json) include the dataset
 SHA-256 `9121abb3cc741fdcfa17c724c18ed4a30f617feeb44735de78fc82e415cef84c`.

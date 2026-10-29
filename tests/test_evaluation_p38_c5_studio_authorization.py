@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from _service_state import store_sql
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from nexura_agents import Agent, FakeModel
@@ -184,12 +185,14 @@ async def test_capture_provenance_survives_dataset_changes_and_deleted_sources(
                     result["metadata"].pop("source_run_id")
                 import json
 
-                with store._conn:
-                    store._conn.execute(
-                        "UPDATE studio_eval_runs SET report_json=? "
-                        "WHERE workspace_id=? AND run_id=?",
-                        (json.dumps(report["report"]), "a", run_id),
-                    )
+                # The service's eval tables on either backend (MVP WP8: Postgres with a URL).
+                store_sql(
+                    store,
+                    "UPDATE studio_eval_runs SET report_json=? WHERE workspace_id=? AND run_id=?",
+                    json.dumps(report["report"]),
+                    "a",
+                    run_id,
+                )
             assert (await http.get(STUDIO + f"/runs/{run_id}")).status_code == 200
             repo.record_resource_ownership("run", "source", "b", "other")
             for method, path, body in [

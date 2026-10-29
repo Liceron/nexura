@@ -440,6 +440,14 @@ async def test_run_once_survives_lost_lease_and_keeps_sibling_outcomes(env: Env)
     worker = env.worker(lease_seconds=0.3)
     task = asyncio.create_task(worker.run_once())
     await _until(lambda: env.slow_started == 1)
+
+    def sibling_done() -> bool:
+        job = env.store.get_job("j2")
+        return job is not None and job.status == "completed"
+
+    # The thief reclaims every job whose lease looks expired; the sibling must have finished
+    # first (its run takes a few database round trips when runs live in Postgres, MVP WP3).
+    await _until(sibling_done)
     env.store.reclaim_expired_jobs("thief", lease_seconds=60, now=time.time() + 1000)
     outcomes = await asyncio.wait_for(task, 5)
     assert [o.job_id for o in outcomes] == ["j2"]

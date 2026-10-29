@@ -27,6 +27,8 @@ from nexura_agents.contracts.result import ModuleResult
 from nexura_agents.errors import WorkflowError
 from nexura_agents.runner import Runner
 from nexura_agents.types import RunInterruption, RunResult
+from nexura_agents.usage import admission
+from nexura_agents.usage.errors import UsageError
 
 from nexura_runtime.agents_spec import AgentSpecError
 from nexura_runtime.agents_store import AgentStoreError
@@ -38,6 +40,19 @@ AGENT_APPROVAL_KIND = "agent_tool_calls"
 MAX_AGENT_INPUT_CHARS = 32_000
 #: Largest paused-run snapshot (JSON characters) kept with one approval request.
 MAX_RESUME_CHARS = 400_000
+
+
+class _StartGate:
+    """Marks the workflow node started once, right before the agent first sends anything."""
+
+    def __init__(self, mark: Any) -> None:
+        self._mark = mark
+        self.started = False
+
+    def __call__(self) -> None:
+        if not self.started:
+            self._mark()  # raises (deadline, cancelled) when the step may no longer start
+            self.started = True
 
 
 @dataclass(frozen=True)
@@ -149,6 +164,7 @@ class SavedAgentModule(BaseModule):
         config: dict[str, Any] | None = None,
     ) -> ModuleResult:
         from nexura_runtime.workflow import (
+            _dispatch_already_started,
             _mark_dispatch_started,
             _note_tool_results,
             approved_request,
@@ -198,9 +214,19 @@ class SavedAgentModule(BaseModule):
             budget=context.budget,
             approval_ttl=float(context.attributes.get("approval_ttl", 3600.0)),
         )
-        # Every refusal above ran nothing. From here the agent's tools can run, so the node
-        # counts as started (internal: the workflow marker; outside a workflow a no-op).
-        _mark_dispatch_started()
+        # Every refusal above ran nothing. A resumed run runs approved tool calls first, so it
+        # counts as started now (internal: the workflow marker; outside a workflow a no-op).
+        # A fresh run under a budget counts as started right before its first model call is
+        # sent (after admission) or its first tool runs (dispatch gate): a budget refusal of
+        # the first call, raised before anything was sent, is then a known "not dispatched"
+        # failure, never an unknown effect (live pass C2). Without a budget a model call is
+        # not admitted, so the node counts as started here, as before.
+        gate = _StartGate(_mark_dispatch_started)
+        if resuming or context.budget is None or _dispatch_already_started():
+            # Also a re-run of a key an earlier attempt dispatched (after an interrupt()
+            # pause): a refusal now does not prove that nothing was sent.
+            gate()
+        token = admission.dispatch_gate.set(gate)
         try:
             if resuming and grant is not None:
                 interruption = RunInterruption.from_json(str(grant["resume"]))
@@ -223,7 +249,15 @@ class SavedAgentModule(BaseModule):
                     metadata={"agent_id": agent_id, "workflow_run_id": context.run_id},
                 )
         except Exception as exc:
+            if not gate.started and isinstance(exc, UsageError):
+                return self._refused(
+                    "AGENT_BUDGET_REFUSED",
+                    f"The run's budget refused the agent's first call; nothing was sent. "
+                    f"{type(exc).__name__}: {exc}"[:500],
+                )
             return ModuleResult.failure("AGENT_RUN_FAILED", f"{type(exc).__name__}: {exc}"[:500])
+        finally:
+            admission.dispatch_gate.reset(token)
 
         if result.status == "paused" and result.interruption is not None:
             # The node's outcome so far: each call its run answered, with how it ended.
@@ -234,10 +268,15 @@ class SavedAgentModule(BaseModule):
                 "AGENT_RUN_FAILED", f"Agent '{built.name}' ended with status '{result.status}'."
             )
         output = result.output if isinstance(built.agent.output_type, dict) else result.final_output
+        metadata: dict[str, Any] = {}
+        model_id = _model_id(built.agent.model)
+        if model_id is not None:
+            metadata["model_id"] = model_id  # traces price the node's usage with it
         return ModuleResult.success(
             outputs={output_key: output},
             usage=result.usage,
             metadata={
+                **metadata,
                 "agent_id": agent_id,
                 "agent_revision": built.revision,
                 "turns": result.turns_count,
@@ -287,6 +326,15 @@ class SavedAgentModule(BaseModule):
                 f"run can ask for: {exc}",
             )
         raise AssertionError("request_approval() returned")  # pragma: no cover
+
+
+def _model_id(model: Any) -> str | None:
+    """The id a model reports to budgets (``model_id``, ``model`` or ``model_name``)."""
+    for attr in ("model_id", "model", "model_name"):
+        value = getattr(model, attr, None)
+        if isinstance(value, str) and value:
+            return value
+    return None
 
 
 #: How a tool call of the agent run ended, from the run's events (S12 round 7, L6-4).

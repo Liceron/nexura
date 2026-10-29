@@ -21,6 +21,9 @@ import { PageHeader, PageLayout } from '../../components/PageHeader';
 import { WorkflowTabs } from '../../components/WorkflowTabs';
 import { useI18n } from '../../i18n';
 
+/** The service's credential ID rule (service/api/credentials.py). */
+const CREDENTIAL_ID = /^[a-zA-Z0-9_.-]+$/;
+
 export function CredentialsView() {
   const { t, locale } = useI18n();
   const {
@@ -75,6 +78,7 @@ export function CredentialsView() {
   const secretRef = useRef<HTMLInputElement>(null);
   const [hasSecret, setHasSecret] = useState(false);
   const [referenceTaken, setReferenceTaken] = useState(false);
+  const [idInvalid, setIdInvalid] = useState(false);
   const [formEnv, setFormEnv] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -114,6 +118,11 @@ export function CredentialsView() {
     e.preventDefault();
     const secret = secretRef.current?.value.trim() ?? '';
     if (!formId.trim() || !secret) return;
+    if (!CREDENTIAL_ID.test(formId.trim())) {
+      setActionError(t('credentials.errorBadId'));
+      setIdInvalid(true);
+      return;
+    }
 
     try {
       setSubmitting(true);
@@ -133,7 +142,10 @@ export function CredentialsView() {
     } catch (err: unknown) {
       // One plain-language error, at the top of the dialog (review minor 2).
       const code = (err as { code?: string })?.code;
-      if (code === 'CREDENTIAL_EXISTS' || (err as { statusCode?: number })?.statusCode === 409) {
+      if (code === 'INVALID_CREDENTIAL_ID') {
+        setIdInvalid(true);
+        setActionError(t('credentials.errorBadId'));
+      } else if (code === 'CREDENTIAL_EXISTS' || (err as { statusCode?: number })?.statusCode === 409) {
         setReferenceTaken(true);
         setActionError(t('credentials.errorExists'));
       } else {
@@ -161,7 +173,7 @@ export function CredentialsView() {
   };
 
   const statusVariant = (status: string) =>
-    status === 'revoked' || status === 'invalid' ? 'danger' : status === 'expired' ? 'warning' : status === 'active' || status === 'valid' ? 'success' : 'neutral';
+    status === 'revoked' || status === 'invalid' ? 'danger' : status === 'expired' ? 'warning' : status === 'active' ? 'success' : 'neutral';
   const roleLabel = (role: WorkspaceRole) => t(`credentialLabels.role.${role}`);
   const matrix: { key: string; admin: boolean; editor: boolean; viewer: boolean }[] = [
     { key: 'ui.executeWorkflowsRun', admin: true, editor: true, viewer: false },
@@ -280,10 +292,13 @@ export function CredentialsView() {
                             {verification ? (
                               <>
                                 <span className={`run-status run-status--${statusVariant(verification.status)}`} data-testid={`verification-badge-${cred.credential_id}`}>
-                                  <span aria-hidden="true">●</span> {t(`credentialLabels.status.${verification.status}`, verification.status)}
+                                  <span aria-hidden="true">●</span> {verification.status === 'stored' || verification.status === 'valid' ? t('livefixUi.savedUnverified') : t(`credentialLabels.status.${verification.status}`, verification.status)}
                                 </span>
-                                <div className="resource-help">{verification.message}</div>
+                                <div className="resource-help">{verification.status === 'stored' || verification.status === 'valid' ? t('livefixUi.providerUnchecked') : verification.message}</div>
                               </>
+                            ) : cred.status === 'revoked' ? (
+                              // Revoking clears this session's result; an earlier check time says nothing now.
+                              <span className="resource-help" data-testid={`verification-none-${cred.credential_id}`}>—</span>
                             ) : cred.last_verified_at ? (
                               <span className="resource-help">
                                 {t('ui.verified') + ' '}
@@ -496,9 +511,10 @@ export function CredentialsView() {
             onChange={(e) => {
               setFormId(e.target.value);
               setReferenceTaken(false);
+              setIdInvalid(false);
             }}
-            aria-invalid={referenceTaken || undefined}
-            aria-describedby={referenceTaken ? `${ids}-form-error` : undefined}
+            aria-invalid={referenceTaken || idInvalid || undefined}
+            aria-describedby={referenceTaken || idInvalid ? `${ids}-form-error` : undefined}
             placeholder={t('ui.eGOpenaiProdOrWhatsappApi')}
             helperText={t('ui.credentialIdHelp')}
             data-testid="cred-id-input"

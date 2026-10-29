@@ -8,6 +8,11 @@ SQLite database. Search ranks candidates with a vector ranker and a BM25 keyword
 them with weighted reciprocal rank fusion. Every hit carries a citation (document id, title, chunk
 index, character span, source URI). The default embedder is deterministic and NOT semantic, so
 keyword matching carries most of the relevance signal unless a real embedder is supplied.
+
+``KnowledgeIndexBase`` holds what does not depend on storage (limits, upload checks, parsing,
+fusion and hit building). ``nexura_postgres.PostgresHybridKnowledgeIndex`` is the Postgres
+backend of the same API (``tsvector`` with ``ts_rank_cd`` instead of FTS5 ``bm25``, pgvector
+instead of float32 blobs), used by the service when ``database_url`` is set.
 """
 
 from __future__ import annotations
@@ -21,6 +26,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from abc import ABC, abstractmethod
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -273,6 +279,106 @@ def weighted_rrf(
     return fused
 
 
+def fuse_rankings(
+    *,
+    vector_ids: list[str],
+    vector_scores: dict[str, float],
+    keyword_ids: list[str],
+    vector_weight: float,
+    keyword_weight: float,
+    rrf_k: int,
+    min_score: float,
+    top_k: int,
+) -> tuple[list[str], dict[str, float]]:
+    """Fused, normalised scores and the ``top_k`` chunk ids in result order (both backends).
+
+    ``score`` is the fused RRF score normalised to ``0..1`` (1.0 means rank 1 in every enabled
+    ranker); ids below ``min_score`` are dropped. Ties: chunks found by both rankers first, then
+    keyword matches (in keyword rank order), then vector similarity, then the chunk id.
+    """
+    fused = weighted_rrf(
+        {"vector": vector_ids, "keyword": keyword_ids},
+        {"vector": vector_weight, "keyword": keyword_weight},
+        rrf_k,
+    )
+    best = (vector_weight if vector_weight > 0 else 0.0) / (rrf_k + 1) + (
+        keyword_weight if keyword_weight > 0 else 0.0
+    ) / (rrf_k + 1)
+    if best > 0:
+        fused = {c: min(1.0, v / best) for c, v in fused.items()}
+    fused = {c: v for c, v in fused.items() if v >= min_score}
+    keyword_rank = {c: i for i, c in enumerate(keyword_ids)}
+    # Ties: chunks found by both rankers first, then keyword matches, then vector similarity.
+    ordered = sorted(
+        fused,
+        key=lambda c: (
+            -fused[c],
+            -((c in keyword_rank) + (c in vector_scores)),
+            keyword_rank.get(c, len(keyword_rank)),
+            -vector_scores.get(c, 0.0),
+            c,
+        ),
+    )[:top_k]
+    return ordered, fused
+
+
+def build_hits(
+    ordered: list[str],
+    rows: Any,
+    *,
+    terms: list[str],
+    fused: dict[str, float],
+    vector_ids: list[str],
+    keyword_ids: list[str],
+    vector_scores: dict[str, float],
+) -> list[SearchHit]:
+    """Search hits with snippet, highlights and citation, in ``ordered`` order (both backends).
+
+    ``rows``: ``(chunk_id, document_id, chunk_index, text, start_char, end_char, title,
+    source_uri, page_start, page_end)`` per found chunk; ids without a row are skipped.
+    """
+    by_id = {r[0]: r for r in rows}
+    hits: list[SearchHit] = []
+    for position, cid in enumerate(ordered, start=1):
+        r = by_id.get(cid)
+        if r is None:
+            continue
+        spans = _highlights(r[3], terms)
+        snippet, rebased = _make_snippet(r[3], spans)
+        rebased_u16 = _to_utf16_spans(snippet, rebased)
+        matched = [n for n, ids in (("vector", vector_ids), ("keyword", keyword_ids)) if cid in ids]
+        hits.append(
+            SearchHit(
+                chunk_id=cid,
+                document_id=r[1],
+                title=r[6],
+                chunk_index=r[2],
+                text=r[3],
+                snippet=snippet,
+                highlights=rebased_u16,
+                highlights_cp=rebased,
+                score=fused[cid],
+                vector_rank=vector_ids.index(cid) + 1 if cid in vector_ids else None,
+                keyword_rank=keyword_ids.index(cid) + 1 if cid in keyword_ids else None,
+                vector_score=vector_scores.get(cid),
+                matched_by=matched,
+                citation=HybridCitation(
+                    citation_id=f"[{position}]",
+                    document_id=r[1],
+                    title=r[6],
+                    chunk_index=r[2],
+                    chunk_id=cid,
+                    start_char=r[4],
+                    end_char=r[5],
+                    source_uri=r[7],
+                    page_start=r[8],
+                    page_end=r[9],
+                ),
+            )
+        )
+    return hits
+
+
 _SIZE_SQL = (
     "LENGTH(CAST(text AS BLOB)) + LENGTH(CAST(metadata AS BLOB)) + LENGTH(CAST(title AS BLOB))"
     " + COALESCE(LENGTH(CAST(source_uri AS BLOB)), 0)"
@@ -310,7 +416,211 @@ _SCHEMA = (
 )
 
 
-class HybridKnowledgeIndex:
+class KnowledgeIndexBase(ABC):
+    """Storage-independent part of the hybrid knowledge index (limits, upload checks, parsing).
+
+    Backends: ``HybridKnowledgeIndex`` (SQLite, FTS5) and
+    ``nexura_postgres.PostgresHybridKnowledgeIndex`` (Postgres, ``tsvector`` and pgvector). Both
+    keep the same API, errors, limits and embedding lineage. ``blocking_io`` is True when the
+    synchronous methods wait on the network or a lock, so async callers should run them in a
+    worker thread.
+    """
+
+    #: True when the synchronous methods wait on the network (async callers use a thread).
+    blocking_io = False
+
+    def __init__(
+        self,
+        *,
+        embedder: EmbeddingOrchestrator | None = None,
+        chunker: BaseChunker | None = None,
+        max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
+        max_workspace_bytes: int = DEFAULT_MAX_WORKSPACE_BYTES,
+        max_top_k: int = DEFAULT_MAX_TOP_K,
+        max_metadata_bytes: int = DEFAULT_MAX_METADATA_BYTES,
+        max_source_uri_chars: int = DEFAULT_MAX_SOURCE_URI_CHARS,
+        max_scan: int = DEFAULT_MAX_SCAN,
+    ) -> None:
+        self.embedder = embedder or EmbeddingOrchestrator()
+        self.chunker: BaseChunker = chunker or FixedWindowChunker(chunk_size=400, chunk_overlap=40)
+        self.max_file_bytes = max_file_bytes
+        self.max_workspace_bytes = max_workspace_bytes
+        self.max_top_k = max_top_k
+        self.max_metadata_bytes = max_metadata_bytes
+        self.max_source_uri_chars = max_source_uri_chars
+        self.max_scan = max_scan
+
+    def limits(self) -> dict[str, int]:
+        """Configured per-file, per-workspace and top_k limits."""
+        return {
+            "max_file_bytes": self.max_file_bytes,
+            "max_workspace_bytes": self.max_workspace_bytes,
+            "max_top_k": self.max_top_k,
+            "max_metadata_bytes": self.max_metadata_bytes,
+            "max_source_uri_chars": self.max_source_uri_chars,
+            "max_scan": self.max_scan,
+        }
+
+    def _status_dict(self, lineage_json: str | None, populated: bool) -> dict[str, Any]:
+        """``embedding_status`` from the stored lineage (``None``: none) and population."""
+        configured = describe_embedder(self.embedder)
+        indexed = json.loads(lineage_json) if lineage_json is not None else None
+        return {
+            "embedder": configured,
+            "indexed_embedder": indexed,
+            "is_test_fixture": configured["is_test_fixture"],
+            "requires_reindex": (indexed != configured) if lineage_json is not None else populated,
+        }
+
+    def _lineage_json(self) -> str:
+        return json.dumps(describe_embedder(self.embedder), sort_keys=True)
+
+    @staticmethod
+    def _lineage_error() -> EmbeddingLineageMismatchError:
+        return EmbeddingLineageMismatchError(
+            "Collection embedding lineage is different or unknown. Explicitly reindex "
+            "with POST /knowledge/collections/{collection_id}/reindex before use."
+        )
+
+    def _check_upload(
+        self, data: bytes, metadata: dict[str, Any] | None, source_uri: str | None
+    ) -> tuple[str, str]:
+        """Per-file, metadata and source URI limits; returns (metadata JSON, content hash)."""
+        if len(data) > self.max_file_bytes:
+            raise FileTooLargeError(
+                f"File is {len(data)} bytes; the per-file limit is {self.max_file_bytes} bytes."
+            )
+        if not data:
+            raise EmptyDocumentError("Document content cannot be empty.")
+        meta_json = json.dumps(metadata or {}, ensure_ascii=False, default=str)
+        if len(meta_json.encode("utf-8")) > self.max_metadata_bytes:
+            raise DocumentLimitError(
+                f"Metadata exceeds the per-document limit of {self.max_metadata_bytes} bytes."
+            )
+        if source_uri is not None and len(source_uri) > self.max_source_uri_chars:
+            raise DocumentLimitError(
+                f"source_uri exceeds the limit of {self.max_source_uri_chars} characters."
+            )
+        return meta_json, hashlib.sha256(data).hexdigest()
+
+    def _storable_text(self, text: str) -> str:
+        """Text as the backend stores it (identity here; Postgres replaces NUL)."""
+        return text
+
+    def _extract(
+        self, data: bytes, filename: str, mime_type: str | None
+    ) -> tuple[str, str, list[tuple[int, int, int]]]:
+        """Parse ``data``; refuse empty text and text over the per-file limit."""
+        text, mime, pages = self._parse(data, filename, mime_type)
+        text = self._storable_text(text)
+        if not text.strip():
+            raise EmptyDocumentError("Document has no extractable text.")
+        text_bytes = len(text.encode("utf-8"))
+        if text_bytes > self.max_file_bytes:
+            raise FileTooLargeError(
+                f"Extracted text is {text_bytes} bytes; the per-file limit is "
+                f"{self.max_file_bytes} bytes."
+            )
+        return text, mime, pages
+
+    def _parse(
+        self, data: bytes, filename: str, mime_type: str | None
+    ) -> tuple[str, str, list[tuple[int, int, int]]]:
+        mime = mime_type if mime_type and mime_type != "application/octet-stream" else None
+        if mime in ("text/markdown", "text/x-markdown"):
+            mime = "text/plain"
+        if mime is None or mime == "text/plain":
+            detected = detect_mime_type(data, filename)
+            mime = (
+                detected if mime is None or detected in ("text/html", "application/pdf") else mime
+            )
+        if mime in _ARCHIVE_MIMES:
+            raise DocumentParseError(
+                "Archives (zip, gzip) are not accepted; upload the individual files instead."
+            )
+        try:
+            parsed = get_parser_for_mime(mime).parse(data, filename=filename)
+        except IngestionError as exc:
+            raise DocumentParseError(str(exc)) from exc
+        pages = (
+            [(p.page_number, p.span_start, p.span_end) for p in parsed.pages]
+            if mime == "application/pdf"
+            else []
+        )
+        return parsed.text, mime, pages
+
+    # -- storage API (each backend) -------------------------------------------------------------
+
+    @abstractmethod
+    def embedding_status(
+        self, workspace_id: str, collection_id: str = "default"
+    ) -> dict[str, Any]: ...
+
+    @abstractmethod
+    async def reindex(
+        self, workspace_id: str, collection_id: str = "default"
+    ) -> dict[str, Any]: ...
+
+    @abstractmethod
+    def workspace_usage(self, workspace_id: str) -> int: ...
+
+    @abstractmethod
+    def has_documents(self, workspace_id: str) -> bool: ...
+
+    @abstractmethod
+    async def ingest(
+        self,
+        *,
+        workspace_id: str,
+        filename: str,
+        data: bytes,
+        collection_id: str = "default",
+        mime_type: str | None = None,
+        source_uri: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> IngestOutcome: ...
+
+    @abstractmethod
+    def list_documents(
+        self, workspace_id: str, collection_id: str | None = "default"
+    ) -> list[IndexedDocument]: ...
+
+    @abstractmethod
+    def get_document(self, workspace_id: str, document_id: str) -> IndexedDocument | None: ...
+
+    @abstractmethod
+    def get_document_text(self, workspace_id: str, document_id: str) -> str | None: ...
+
+    @abstractmethod
+    def get_chunk(
+        self, workspace_id: str, document_id: str, chunk_index: int
+    ) -> dict[str, Any] | None: ...
+
+    @abstractmethod
+    def delete_document(self, workspace_id: str, document_id: str) -> bool: ...
+
+    def delete_collection(self, workspace_id: str, collection_id: str) -> list[str]:
+        """Remove every document of one collection (chunks, vectors, keyword entries) and its
+        embedding lineage atomically; returns the deleted document ids."""
+        raise NotImplementedError(f"{type(self).__name__} cannot delete collections")
+
+    @abstractmethod
+    async def search(
+        self,
+        *,
+        workspace_id: str,
+        query: str,
+        collection_id: str = "default",
+        top_k: int = 5,
+        vector_weight: float = 1.0,
+        keyword_weight: float = 1.0,
+        rrf_k: int = 60,
+        min_vector_score: float = DEFAULT_MIN_VECTOR_SCORE,
+        min_score: float = 0.0,
+    ) -> list[SearchHit]: ...
+
+
+class HybridKnowledgeIndex(KnowledgeIndexBase):
     """SQLite-backed, workspace-scoped hybrid (vector + FTS5) index with citations and limits."""
 
     def __init__(
@@ -327,15 +637,17 @@ class HybridKnowledgeIndex:
         max_scan: int = DEFAULT_MAX_SCAN,
     ) -> None:
         """Create the index on ``connection`` (default: a private in-memory database)."""
+        super().__init__(
+            embedder=embedder,
+            chunker=chunker,
+            max_file_bytes=max_file_bytes,
+            max_workspace_bytes=max_workspace_bytes,
+            max_top_k=max_top_k,
+            max_metadata_bytes=max_metadata_bytes,
+            max_source_uri_chars=max_source_uri_chars,
+            max_scan=max_scan,
+        )
         self._conn = connection or sqlite3.connect(":memory:", check_same_thread=False)
-        self.embedder = embedder or EmbeddingOrchestrator()
-        self.chunker: BaseChunker = chunker or FixedWindowChunker(chunk_size=400, chunk_overlap=40)
-        self.max_file_bytes = max_file_bytes
-        self.max_workspace_bytes = max_workspace_bytes
-        self.max_top_k = max_top_k
-        self.max_metadata_bytes = max_metadata_bytes
-        self.max_source_uri_chars = max_source_uri_chars
-        self.max_scan = max_scan
         self._lock = threading.RLock()
         with self._lock:
             for stmt in _SCHEMA:
@@ -350,7 +662,6 @@ class HybridKnowledgeIndex:
 
     def embedding_status(self, workspace_id: str, collection_id: str = "default") -> dict[str, Any]:
         """Expose configured and indexed identities, including unverified legacy collections."""
-        configured = describe_embedder(self.embedder)
         with self._lock:
             row = self._conn.execute(
                 "SELECT embedder FROM hk_lineage WHERE workspace_id = ? AND collection_id = ?",
@@ -360,28 +671,16 @@ class HybridKnowledgeIndex:
                 "SELECT 1 FROM hk_documents WHERE workspace_id = ? AND collection_id = ? LIMIT 1",
                 (workspace_id, collection_id),
             ).fetchone() is not None
-        indexed = json.loads(row[0]) if row else None
-        return {
-            "embedder": configured,
-            "indexed_embedder": indexed,
-            "is_test_fixture": configured["is_test_fixture"],
-            "requires_reindex": (indexed != configured) if row else populated,
-        }
+        return self._status_dict(row[0] if row else None, populated)
 
     def _check_lineage(self, workspace_id: str, collection_id: str) -> None:
         if self.embedding_status(workspace_id, collection_id)["requires_reindex"]:
-            raise EmbeddingLineageMismatchError(
-                "Collection embedding lineage is different or unknown. Explicitly reindex "
-                "with POST /knowledge/collections/{collection_id}/reindex before use."
-            )
+            raise self._lineage_error()
 
     def _write_lineage(self, workspace_id: str, collection_id: str) -> None:
         self._conn.execute(
             "INSERT OR REPLACE INTO hk_lineage VALUES (?, ?, ?)",
-            (
-                workspace_id, collection_id,
-                json.dumps(describe_embedder(self.embedder), sort_keys=True),
-            ),
+            (workspace_id, collection_id, self._lineage_json()),
         )
 
     async def reindex(self, workspace_id: str, collection_id: str = "default") -> dict[str, Any]:
@@ -423,17 +722,6 @@ class HybridKnowledgeIndex:
             **self.embedding_status(workspace_id, collection_id),
         }
 
-    def limits(self) -> dict[str, int]:
-        """Configured per-file, per-workspace and top_k limits."""
-        return {
-            "max_file_bytes": self.max_file_bytes,
-            "max_workspace_bytes": self.max_workspace_bytes,
-            "max_top_k": self.max_top_k,
-            "max_metadata_bytes": self.max_metadata_bytes,
-            "max_source_uri_chars": self.max_source_uri_chars,
-            "max_scan": self.max_scan,
-        }
-
     def workspace_usage(self, workspace_id: str) -> int:
         """Bytes (UTF-8) stored by ``workspace_id``: text, metadata JSON, source URI and title."""
         with self._lock:
@@ -442,6 +730,14 @@ class HybridKnowledgeIndex:
                 (workspace_id,),
             ).fetchone()
         return int(row[0])
+
+    def has_documents(self, workspace_id: str) -> bool:
+        """Whether ``workspace_id`` has stored at least one document."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM hk_documents WHERE workspace_id = ? LIMIT 1", (workspace_id,)
+            ).fetchone()
+        return row is not None
 
     # -- transactions ---------------------------------------------------------------------------
 
@@ -463,32 +759,6 @@ class HybridKnowledgeIndex:
             return result
 
     # -- ingestion ------------------------------------------------------------------------------
-
-    def _parse(
-        self, data: bytes, filename: str, mime_type: str | None
-    ) -> tuple[str, str, list[tuple[int, int, int]]]:
-        mime = mime_type if mime_type and mime_type != "application/octet-stream" else None
-        if mime in ("text/markdown", "text/x-markdown"):
-            mime = "text/plain"
-        if mime is None or mime == "text/plain":
-            detected = detect_mime_type(data, filename)
-            mime = (
-                detected if mime is None or detected in ("text/html", "application/pdf") else mime
-            )
-        if mime in _ARCHIVE_MIMES:
-            raise DocumentParseError(
-                "Archives (zip, gzip) are not accepted; upload the individual files instead."
-            )
-        try:
-            parsed = get_parser_for_mime(mime).parse(data, filename=filename)
-        except IngestionError as exc:
-            raise DocumentParseError(str(exc)) from exc
-        pages = (
-            [(p.page_number, p.span_start, p.span_end) for p in parsed.pages]
-            if mime == "application/pdf"
-            else []
-        )
-        return parsed.text, mime, pages
 
     def _row_to_doc(self, row: sqlite3.Row | tuple[Any, ...]) -> IndexedDocument:
         return IndexedDocument(
@@ -526,22 +796,7 @@ class HybridKnowledgeIndex:
     ) -> IngestOutcome:
         """Parse, chunk, embed and index ``data``; dedup by hash, replace same-title documents."""
         self._check_lineage(workspace_id, collection_id)
-        if len(data) > self.max_file_bytes:
-            raise FileTooLargeError(
-                f"File is {len(data)} bytes; the per-file limit is {self.max_file_bytes} bytes."
-            )
-        if not data:
-            raise EmptyDocumentError("Document content cannot be empty.")
-        meta_json = json.dumps(metadata or {}, ensure_ascii=False, default=str)
-        if len(meta_json.encode("utf-8")) > self.max_metadata_bytes:
-            raise DocumentLimitError(
-                f"Metadata exceeds the per-document limit of {self.max_metadata_bytes} bytes."
-            )
-        if source_uri is not None and len(source_uri) > self.max_source_uri_chars:
-            raise DocumentLimitError(
-                f"source_uri exceeds the limit of {self.max_source_uri_chars} characters."
-            )
-        content_hash = hashlib.sha256(data).hexdigest()
+        meta_json, content_hash = self._check_upload(data, metadata, source_uri)
         with self._lock:
             same = self._find_duplicate(workspace_id, collection_id, filename, content_hash)
         if same is not None:
@@ -552,15 +807,7 @@ class HybridKnowledgeIndex:
             )
             return deduped
 
-        text, mime, pages = self._parse(data, filename, mime_type)
-        if not text.strip():
-            raise EmptyDocumentError("Document has no extractable text.")
-        text_bytes = len(text.encode("utf-8"))
-        if text_bytes > self.max_file_bytes:
-            raise FileTooLargeError(
-                f"Extracted text is {text_bytes} bytes; the per-file limit is "
-                f"{self.max_file_bytes} bytes."
-            )
+        text, mime, pages = self._extract(data, filename, mime_type)
         new_size = _stored_size(text, filename, source_uri, meta_json)
         self._check_quota(
             workspace_id, self._title_id(workspace_id, collection_id, filename), new_size
@@ -809,6 +1056,31 @@ class HybridKnowledgeIndex:
         deleted: bool = self._atomic(run)
         return deleted
 
+    def delete_collection(self, workspace_id: str, collection_id: str) -> list[str]:
+        """Remove every document of one collection, its chunks, vectors, keyword entries and
+        embedding lineage atomically; returns the deleted document ids."""
+
+        def run() -> list[str]:
+            ids = [
+                str(r[0])
+                for r in self._conn.execute(
+                    "SELECT document_id FROM hk_documents "
+                    "WHERE workspace_id = ? AND collection_id = ? ORDER BY document_id",
+                    (workspace_id, collection_id),
+                ).fetchall()
+            ]
+            for document_id in ids:
+                self._purge(document_id)
+                self._conn.execute("DELETE FROM hk_documents WHERE document_id = ?", (document_id,))
+            self._conn.execute(
+                "DELETE FROM hk_lineage WHERE workspace_id = ? AND collection_id = ?",
+                (workspace_id, collection_id),
+            )
+            return ids
+
+        deleted: list[str] = self._atomic(run)
+        return deleted
+
     # -- search ---------------------------------------------------------------------------------
 
     async def search(
@@ -865,29 +1137,16 @@ class HybridKnowledgeIndex:
                 vector_ids.append(cid)
                 vector_scores[cid] = sc
 
-        fused = weighted_rrf(
-            {"vector": vector_ids, "keyword": keyword_ids},
-            {"vector": vector_weight, "keyword": keyword_weight},
-            rrf_k,
+        ordered, fused = fuse_rankings(
+            vector_ids=vector_ids,
+            vector_scores=vector_scores,
+            keyword_ids=keyword_ids,
+            vector_weight=vector_weight,
+            keyword_weight=keyword_weight,
+            rrf_k=rrf_k,
+            min_score=min_score,
+            top_k=top_k,
         )
-        best = (vector_weight if vector_weight > 0 else 0.0) / (rrf_k + 1) + (
-            keyword_weight if keyword_weight > 0 else 0.0
-        ) / (rrf_k + 1)
-        if best > 0:
-            fused = {c: min(1.0, v / best) for c, v in fused.items()}
-        fused = {c: v for c, v in fused.items() if v >= min_score}
-        keyword_rank = {c: i for i, c in enumerate(keyword_ids)}
-        # Ties: chunks found by both rankers first, then keyword matches, then vector similarity.
-        ordered = sorted(
-            fused,
-            key=lambda c: (
-                -fused[c],
-                -((c in keyword_rank) + (c in vector_scores)),
-                keyword_rank.get(c, len(keyword_rank)),
-                -vector_scores.get(c, 0.0),
-                c,
-            ),
-        )[:top_k]
         if not ordered:
             return []
         with self._lock:
@@ -899,52 +1158,19 @@ class HybridKnowledgeIndex:
                 f"WHERE c.workspace_id = ? AND c.collection_id = ? AND c.chunk_id IN ({marks})",
                 [workspace_id, collection_id, *ordered],
             ).fetchall()
-        by_id = {r[0]: r for r in rows}
-        hits: list[SearchHit] = []
-        for position, cid in enumerate(ordered, start=1):
-            r = by_id.get(cid)
-            if r is None:
-                continue
-            spans = _highlights(r[3], terms)
-            snippet, rebased = _make_snippet(r[3], spans)
-            rebased_u16 = _to_utf16_spans(snippet, rebased)
-            matched = [
-                n for n, ids in (("vector", vector_ids), ("keyword", keyword_ids)) if cid in ids
-            ]
-            hits.append(
-                SearchHit(
-                    chunk_id=cid,
-                    document_id=r[1],
-                    title=r[6],
-                    chunk_index=r[2],
-                    text=r[3],
-                    snippet=snippet,
-                    highlights=rebased_u16,
-                    highlights_cp=rebased,
-                    score=fused[cid],
-                    vector_rank=vector_ids.index(cid) + 1 if cid in vector_ids else None,
-                    keyword_rank=keyword_ids.index(cid) + 1 if cid in keyword_ids else None,
-                    vector_score=vector_scores.get(cid),
-                    matched_by=matched,
-                    citation=HybridCitation(
-                        citation_id=f"[{position}]",
-                        document_id=r[1],
-                        title=r[6],
-                        chunk_index=r[2],
-                        chunk_id=cid,
-                        start_char=r[4],
-                        end_char=r[5],
-                        source_uri=r[7],
-                        page_start=r[8],
-                        page_end=r[9],
-                    ),
-                )
-            )
-        return hits
+        return build_hits(
+            ordered,
+            rows,
+            terms=terms,
+            fused=fused,
+            vector_ids=vector_ids,
+            keyword_ids=keyword_ids,
+            vector_scores=vector_scores,
+        )
 
 
 def create_hybrid_search_tool(
-    index: HybridKnowledgeIndex,
+    index: KnowledgeIndexBase,
     *,
     workspace_id: str,
     collection_id: str = "default",

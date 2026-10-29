@@ -62,6 +62,7 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(function 
       disabled={disabled || loading}
       aria-busy={loading || undefined}
       className={['studio-button', `studio-button--${variant}`, className].filter(Boolean).join(' ')}
+      data-size={size}
       style={{ ...baseStyle, ...variantStyles[variant] }}
       {...props}
     >

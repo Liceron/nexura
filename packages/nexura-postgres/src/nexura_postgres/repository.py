@@ -20,6 +20,7 @@ from nexura_agents.errors import SessionConflictError, StorageError
 from nexura_agents.session import SessionSnapshot, deserialize_session, serialize_session
 from nexura_agents.types import Message
 
+from nexura_postgres.db import noop_reset, normalize_url
 from nexura_runtime.storage.models import RunEventRecord, RunRecord
 
 #: Raised when asyncpg, a dependency of this package, cannot be imported.
@@ -47,7 +48,9 @@ class PostgresRepository:
                 raise StorageError("No PostgreSQL DSN or pool provided.")
             import asyncpg
 
-            self._pool = await asyncpg.create_pool(self.dsn)
+            self._pool = await asyncpg.create_pool(
+                normalize_url(self.dsn, strict=False), statement_cache_size=0, reset=noop_reset
+            )
         return self._pool
 
     async def init_db(self) -> None:

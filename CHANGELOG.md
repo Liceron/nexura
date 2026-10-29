@@ -2,6 +2,391 @@
 
 All notable changes to this project.
 
+## Unreleased
+
+## 0.4.1 (2026-10-29)
+
+Fixes from a live user pass of the hosted product, the workflow builder upgrade, and the
+Postgres and retention work listed below. The deprecated tracing names stay until 0.5.0.
+
+### Added (live user pass and builder)
+- Workflow builder: a collapsible module sidebar beside the canvas. Drag a module onto the
+  canvas and the step lands where it is dropped; click or Enter adds it at the visible centre
+  (next free spot, the view follows when none is free). Only `application/x-nexura-module`
+  drops of a module in the loaded catalog are accepted; viewers cannot add steps.
+- Workflow builder: a Test panel to try the saved workflow without leaving the page (Save and
+  test for unsaved edits, message or JSON input, live step progress, approvals, input pauses,
+  Stop, Open run). Each send is one normal run.
+- `POST /api/v1/runs/{id}/cancel` cancels a run that is running or paused; Studio has a Cancel
+  run action.
+- Deletes: `DELETE /api/v1/knowledge/collections/{id}`, `/evaluations/runs/{id}` and
+  `/integrations/registrations`, with Studio actions.
+- `NEXURA_MODEL_PRICING` (JSON) sets per-model prices for budget checks; a run refused by its
+  budget is `AGENT_BUDGET_REFUSED` and is not marked effect-unknown.
+
+### Changed (live user pass)
+- Studio is English-only for now. The Hindi dictionary stays and returns with a build that
+  sets `VITE_LANGUAGE_CHOICE=on`.
+- Credential verify reports `stored` ("Saved, not checked with the provider") instead of
+  `valid` when the provider was not called.
+- New workflow starts blank and needs a name; deleting a step, a mapping or a test case asks
+  first; an agent's Chat tab starts a new conversation.
+
+### Fixed (live user pass)
+- Studio: schedules send `cron_expr`; the address bar follows Studio pages; webhook test
+  results replace the previous result and a refused test delivery no longer says to sign in
+  again; a revoked credential no longer shows its old verification time; reopening a saved
+  benchmark shows its per-example results; phone focus follows the opened agent, skill,
+  integration or evaluation.
+- Trace redaction no longer hides `input_key` and `output_key`.
+
+### Added
+- The per-session token of the local server is optional: `nexura-runtime serve
+  --no-session-token`, `NEXURA_REQUIRE_SESSION_TOKEN=off`, or `create_api_app(require_session_token=False)`
+  (and `nexura_studio.create_app`) let curl and other plain HTTP scripts on this machine call the
+  API without the `X-Nexura-Session` header. The default is unchanged. With the token off, a
+  state-changing request a browser marks as coming from another page (`Sec-Fetch-Site`, or an
+  `Origin` other than the server's own) is refused with 403 `CROSS_ORIGIN_REQUEST`, and a body
+  without a `Content-Type` with 415; the loopback-client, `Host` and JSON-only rules stay. The
+  switch is refused with `--auth token` and with the unauthenticated network opt-in.
+### Added (explicit store retention)
+- Bounded, opt-in `prune` methods for memory, SQLite and Postgres channel stores and evaluation
+  trace stores, plus `nexura-runtime db prune --dedup-days N --outbox-days N --eval-trace-days N`
+  with read-only `--dry-run` counts and independent retention ages. Dedup retention refuses
+  windows below seven days or the configured delivery retry window. PostgreSQL batches use
+  `FOR UPDATE SKIP LOCKED`; additive numbered retention migrations and a SQLite trace schema
+  upgrade preserve existing rows. Trace pruning keeps summaries, datasets and blobs; run
+  `db blob-gc` separately for unreferenced blobs. Legacy traces of unknown age are retained.
+
+### Added (MVP Postgres WP0/WP1)
+- `nexura_postgres.Database` (one shared asyncpg pool per process on a private loop thread,
+  `statement_cache_size=0`, no session state), shared numbered migrations in
+  `nexura_schema_migrations` under one transaction-level advisory lock, and
+  `nexura-runtime db migrate|status`. `create_api_app(database_url=...)` /
+  `NEXURA_DATABASE_URL` opt into Postgres; a full Postgres service still refuses to start
+  until the store ports land. Unset, the service uses SQLite exactly as before.
+
+### Added (MVP Postgres WP2)
+- Workspaces and resource ownership on Postgres: `WorkspaceRepository.bind_database(db)`
+  (`nexura_postgres.PostgresWorkspaceStore`, migration component `workspaces`). A bound
+  repository caches nothing, so every service instance sees the same workspaces and ownership
+  on its next request; workspace mutations take a per-workspace transaction-level lock. The
+  service binds it when `database_url` is set. Postgres service mode still refuses to start
+  until every store is ported; `NEXURA_ALLOW_PARTIAL_POSTGRES=1` allows it for development
+  and tests only (unported stores stay SQLite). **Never set it in a deployment**: it logs a
+  warning at startup, the operator view of `/readyz` reports `"storage": "partial-postgres"`,
+  and it is refused on Cloud Run (`K_SERVICE` set). With `database_url` set, a `workspace_repo`
+  loaded from SQLite is moved to Postgres, and one without `bind_database` is refused.
+- A workspace always keeps an admin: removing or demoting its last admin raises
+  `LastAdminError` (HTTP 409 `LAST_ADMIN` on the membership routes), on SQLite (under
+  `BEGIN IMMEDIATE`) and on Postgres (under the per-workspace lock).
+
+### Added (MVP Postgres WP2b: blob storage)
+- `nexura_runtime.blobs`: a `BlobStore` protocol (`put`, `get` with a sha256 and size check on
+  every read, `delete`, `exists`, listing by prefix, a store identity), `LocalBlobStore`
+  (atomic create-only writes, mode 0600 files in 0700 directories, symlinked directories and a
+  root others can write refused) and `GCSBlobStore` (the official `google-cloud-storage`
+  client, new optional extra `nexura-runtime[gcs]`, imported only for a `gs://` store;
+  credentials from ADC only). Keys are generated as `<workspace>/<namespace>/<random id>`;
+  anything else, including traversal, is rejected.
+- Large payloads leave the database. Studio run-event payloads (`data_json`) and imported eval
+  traces (`trace_json`) above `NEXURA_BLOB_OFFLOAD_BYTES` (8 KiB by default in Postgres mode or
+  when `NEXURA_BLOB_URL` is set; off by default for plain SQLite) are stored as blobs, and the
+  row keeps a reference with a 256-character preview. Existing inline rows read as before; no
+  data migration. `create_api_app(blob_url=...)` / `NEXURA_BLOB_URL` (`gs://bucket/prefix` or
+  `file:///path`) choose the store; the default is the folder `<database file>.blobs`. On Cloud
+  Run (`K_SERVICE`/`CLOUD_RUN_JOB`) a local folder is refused in Postgres mode or when named
+  explicitly.
+- Reading offloaded payloads: verified payloads are cached in memory (keys are write-once);
+  `StudioStore.get_run(run_id, payloads=False)` reads no blob (status checks, and run routes
+  before their ownership check) and `load_payloads` reads them afterwards; live event streams
+  read only new events' payloads. A payload that cannot be read shows as `payload_unavailable`
+  with a `reason` (`missing`, `integrity`, `store_error`) instead of failing the run read;
+  integrity failures are logged at ERROR. Eval-trace import and online grading do blob I/O off
+  the event loop. The cache is bounded by UTF-8 bytes and keyed by key, sha256 and size. In
+  Postgres or `gs://` mode the store identity, permissions and database binding are checked at
+  startup (the start fails on a problem) and later write failures are logged at ERROR.
+- `nexura-runtime db blob-gc`: deletes blobs no row references once older than a grace period
+  (default 24 h, minimum 1 h) and, with `--payload-max-age-days` /
+  `NEXURA_BLOB_PAYLOAD_RETENTION_DAYS`, run and trace payload blobs older than that, except
+  those of unfinished runs (readers then get `payload_unavailable` or skip the trace). It is
+  safe while the service writes, idempotent, and has `--dry-run`. A database records the store
+  its references use in the one-row table `nexura_blob_store_binding` (SQLite on first offload;
+  Postgres migration component `blob_binding`), and every reference records the store id too.
+  Without `--force` the command refuses when a reference table is in no scanned database
+  (`--sqlite`, Postgres), when a scanned database is bound to another store, or, for unbound
+  databases, when no reference names this store or none of its blobs is referenced. A bound
+  database passes after run retention emptied it. It cannot recognise a stale copy
+  of the right database. The Postgres scan refuses a reference column that is not `TEXT`.
+  `nexura-runtime retention --apply` deletes rows only; run `db blob-gc` after it.
+
+### Added (MVP Postgres WP3: Studio runs and workflow state)
+- `nexura_postgres.PostgresStudioStore`: Studio workflows, run records and run events in the
+  shared Postgres database (migration component `studio`), with the same API, table and column
+  names and results as the SQLite `StudioStore`. `event_seq` is appended under a per-run
+  transaction-level advisory lock (unique and gap-free across instances; `UNIQUE (run_id,
+  event_seq)` as a backstop); a run read is one `REPEATABLE READ READ ONLY` snapshot;
+  `data_json` stays `TEXT` holding the blob codec's text. With `database_url` /
+  `NEXURA_DATABASE_URL` the service uses it, with workflow state and the trigger queue in the
+  same database (`workflow_state_url` defaults to `database_url`). Postgres mode refuses an
+  empty `workflow_state_url` and a caller's SQLite `StudioStore` (`create_api_app(store=...)`),
+  before connecting. The partial-Postgres switch and its Cloud Run refusal are unchanged.
+- `Database.run`/`arun` take `isolation=` and `readonly=` (per transaction, never per session).
+- Blob binding is two-way: the Postgres service database has a random id
+  (`nexura_database_identity`, `blob_binding` migration v2), and the blob store records the id
+  of the database that owns it (`_nexura/store-owner`, or `<prefix>.nexura-store-owner` on GCS,
+  create-only). Startup refuses a second database against an owned store (`BlobOwnerError`),
+  and `db blob-gc` refuses unless the owning database is among the scanned ones. A database
+  restored with `pg_dump`/`pg_restore` keeps its id, so a copy used as a separate deployment
+  must run `nexura-runtime db reset-identity --this-is-a-copy` and use its own prefix. A
+  database claims a store on its own only when the store is empty or its rows already reference
+  it; `nexura-runtime db blob-claim --i-own-this-store` is the deliberate first claim of a store
+  that already holds blobs, and `db blob-gc` never deletes unreferenced blobs written before
+  the claim without `--force`. `db blob-gc` also refuses an idle copy (unreferenced blobs newer
+  than the scanned database's newest run activity); a copy that is still serving runs passes
+  this check, so `reset-identity` is the only safe path for copies. A SQLite service refuses an owned store.
+- Run owners on the Postgres run store are process identities (the durable lease-owner format:
+  hashed host name, boot id and pid namespace, pid, start time and a per-process id). Another
+  instance never treats a run as interrupted because of a host name; a run the journal cannot
+  judge is recoverable after three lease periods without a row update. In Postgres mode
+  `workflow_state_url` must be unset or the same database as `database_url`.
+- A plain SQLite service with offloading on binds its database when the codec is attached, not
+  inside the first offload. `/readyz` (operator view) shows `blob_payloads` counters
+  (`inline_fallbacks`, `omitted_payloads`) when offloading is on. In Postgres or `gs://` mode a
+  run-event payload that the blob store cannot take is stored inline only up to
+  `NEXURA_BLOB_MAX_INLINE_BYTES` (default 1 MiB); above it only a preview is kept
+  (`payload_unavailable`, reason `not_stored`). Alert on the ERROR log line; the counters are
+  per instance. The run's state columns are not offloaded or capped.
+
+### Added (MVP Postgres WP4: chat sessions, agents and skills)
+- `nexura_postgres.PostgresSessionStore`: chat sessions in the shared Postgres database
+  (migration component `sessions`; tables `nexura_sessions` and `nexura_session_tombstones`, the
+  SQLite names), implementing the `SessionStore` protocol plus `delete`, `list_sessions` and
+  `updated_at`. A save is compare-and-swap on the revision (`UPDATE … WHERE revision = $n`; a
+  first save takes a per-session transaction lock, shared with delete, then
+  `INSERT … ON CONFLICT DO NOTHING`), so of two instances saving the same revision
+  one wins and the other gets `SessionConflictError`. A deleted session keeps its last revision
+  as a tombstone, and a re-created one continues the count. `nexura-agents` stays stdlib-only.
+- `nexura_postgres.PostgresAgentStore` and `PostgresSkillStore` (components `agents` and
+  `skills`): the API, errors and limits of the SQLite `AgentStore` and `SkillStore`. Every
+  mutation of a workspace takes a transaction-level advisory lock on it, so the per-workspace
+  limits (100 agents, 200 skills) and the duplicate agent-name rule hold under concurrent
+  creates on several instances; `UNIQUE (workspace_id, name)` is the backstop for names, and
+  agent updates and deletes are compare-and-set on the revision. Lists are ordered by name in
+  byte order, as on SQLite. The skill rules (limits, labels, version numbering) are now module
+  functions of `nexura_runtime.skills_store` shared by both stores; the SQLite store's
+  behaviour is unchanged.
+- With `database_url` / `NEXURA_DATABASE_URL` the service uses these three stores on its shared
+  database; without it, SQLite as before. Postgres service mode still needs
+  `NEXURA_ALLOW_PARTIAL_POSTGRES=1` (development and tests only) until WP5–WP8 land.
+- Difference: a NUL character in a session id, agent id, skill name or workspace id cannot be
+  stored in Postgres text, so such an id reads as missing there and a write with it is refused
+  (`StorageError`, `AgentStoreError`, `SkillError`); `create(agent_id=...)` with an id that
+  already exists raises `AgentStoreError` on Postgres, where SQLite lets its `IntegrityError`
+  through.
+
+### Added (MVP Postgres WP5: secrets, usage ledger and readiness)
+- `nexura_postgres.PostgresSecretStore` (migration component `secrets`, table `nexura_secrets`
+  with `BYTEA` ciphertext, nonce and wrapped key): the API and errors of
+  `EncryptedSecretStore` and the same envelope format, so a row copied between SQLite and
+  Postgres decrypts with the same master key and another key fails closed with
+  `MasterKeyMismatchError` when the store opens. A replace is one atomic
+  `INSERT … ON CONFLICT DO UPDATE` that keeps `created_at` and `created_by`. The plaintext is
+  never sent to the database. Master-key rotation (`RotatingSecretStore`, closed edition) is
+  SQLite-only for now.
+- `nexura_postgres.PostgresUsageLedger` (component `usage`; tables `nexura_usage_entries`,
+  `nexura_usage_reservations`, `nexura_usage_budget_policies`): a subclass of
+  `nexura_agents.usage.UsageLedger` that keeps every budget rule of the base class. Each
+  operation takes `pg_advisory_xact_lock(734658120)` (one global scope, as SQLite's
+  `BEGIN IMMEDIATE`), reloads only the rows changed since its last look (a `change_seq` taken
+  under that lock), runs the check and writes before it commits, so concurrent reservations
+  from several processes or instances never exceed a cap. `get_entries` is one indexed query
+  without the lock, and `reserve_async` runs off the event loop. `nexura-agents` stays
+  stdlib-only; its row conversion is now shared module functions (`entry_from_row`,
+  `entry_values`, …), with the SQLite ledger's behaviour unchanged.
+- `Database.submit(fn)` starts a transaction and returns its future (for a caller that keeps
+  a transaction open while it computes, as the ledger does).
+- With `database_url` / `NEXURA_DATABASE_URL` the service keeps credentials (with
+  `NEXURA_MASTER_KEY`) and the usage ledger in Postgres. Run diagnostics read only the run's
+  ledger entries there, off the event loop. A credential created, revoked or deleted through
+  one instance is seen at once by the others: `ScopedCredentialStore` reads a backend marked
+  `shared` through on every lookup (the SQLite store is unchanged). Postgres service mode
+  still needs `NEXURA_ALLOW_PARTIAL_POSTGRES=1` (development and tests only) until WP6–WP8 land.
+- Differences on Postgres: a NUL character in a workspace, secret name, other secret text field
+  or secret value is refused (`SecretsError`, code `SECRET_INVALID`), and such a name reads as
+  missing; ledger entries are listed in commit order (SQLite: by timestamp, the same order
+  unless instance clocks disagree).
+- Credential writes are atomic across instances (review fix round): `EncryptedSecretStore.put`
+  and `PostgresSecretStore.put` take `mode="upsert"` (default, as before), `"create"` (refuses an
+  existing name with the new `SecretExistsError`, code `SECRET_EXISTS`) or `"replace"` (refuses
+  a missing one with `SecretNotFoundError`); `ScopedCredentialStore.store(mode=...)` maps them
+  to the new `CredentialAlreadyExistsError` and `CredentialNotFoundError`. `POST
+  /api/v1/credentials` creates with `mode="create"`, so of two instances creating one name at
+  once exactly one gets 201 and the other 409 `CREDENTIAL_ALREADY_EXISTS` (before, both got 201
+  and the last value won). No write lowers a `revoked` status any more, on either backend and in
+  the in-memory store: only `revoke`/`set_status` change it, so a replace racing a revoke on
+  another instance never un-revokes the credential. `ScopedCredentialStore` guards its metadata
+  map with a lock.
+- Async callers never wait on the Postgres ledger's lock on the event loop:
+  `UsageLedger.blocking_io` (true for `PostgresUsageLedger`) makes `ledger_call` and
+  `budget_call` run ledger operations in a worker thread. `RunBudget` gains
+  `get_status_async`, `is_exhausted_async`, `record_usage_async` and `to_dict_async`;
+  `settle_provider_call_async`, the usage module, the workflow engine's checkpoint budget
+  state, the run routes' budget status and the evaluation runner use them. SQLite and in-memory
+  ledgers still run inline. An instance's first ledger load reads the history in a read-only
+  snapshot before it takes the lock.
+- Postgres mode without `NEXURA_MASTER_KEY` (local profiles only; the shared profile refuses to
+  start) logs a warning: credentials then stay in the process, per instance.
+
+### Added (MVP Postgres WP7: knowledge index)
+- `nexura_postgres.PostgresHybridKnowledgeIndex` (migration component `knowledge`; tables
+  `hk_documents`, `hk_chunks`, `hk_lineage`; the migration runs
+  `CREATE EXTENSION IF NOT EXISTS vector`): the API, errors, limits and embedding lineage of the
+  SQLite `HybridKnowledgeIndex`. Embeddings are pgvector `vector` values, searched by an exact
+  cosine (`<=>`) scan of the newest `max_scan` chunks of a workspace and collection (no ANN
+  index yet). Keywords are a `tsvector` column (`'simple'` configuration) with a GIN index.
+  Query terms reach SQL only as an array parameter; no query text becomes SQL or `tsquery`
+  syntax. Byte accounting uses `octet_length`.
+- **Ranking difference:** the Postgres keyword ranker is `ts_rank_cd` per matched query term
+  (length-normalised), weighted by the term's bm25-style inverse document frequency in the
+  collection, where SQLite uses FTS5 `bm25`. The same documents match; the order of similar
+  hits can differ. On the offline `synthetic-en-hi-v1` dataset, keyword-only MRR@5 is 0.778
+  (`bm25`: 0.794) and the top hit agrees for 86 % of the queries. No existing ranking assertion
+  needed a change.
+- Consistency across instances: every write is one transaction; an ingest takes the workspace
+  lock (quota) and then the collection lock, a reindex and a delete the collection lock. Uploads
+  on several instances never lose a document, never leave two documents with one title, and
+  never exceed the workspace quota. A reindex checks, under the lock, that the collection did
+  not change since its snapshot and replaces every vector and the lineage in one commit; a
+  search reads in one `REPEATABLE READ` snapshot, so other instances see the old index or the
+  new one, never a mix. Searches take no lock.
+- With `database_url` / `NEXURA_DATABASE_URL` every `/knowledge/*` route and chat retrieval use
+  it, through `ServiceStores.knowledge_index`. No `SqliteVectorStore` (or its tables) is
+  created in that mode: `app.state.vector_store` and `app.state.rag_pipeline` are `None` (no
+  route used them). The routes run the index's synchronous calls in a worker thread when the
+  backend blocks (`KnowledgeIndexBase.blocking_io`), so waiting for a lock never blocks the
+  event loop. The partial-mode refusal now names only WP8 (evaluations, channels and
+  integrations).
+- `nexura_runtime.knowledge.hybrid.KnowledgeIndexBase`: the storage-independent part of the
+  index (limits, upload checks, parsing) shared by both backends, with `fuse_rankings` and
+  `build_hits`. `HybridKnowledgeIndex` behaves exactly as before.
+- Differences on Postgres: NUL in document text, title or source URI is stored as U+FFFD
+  (offsets unchanged); a workspace or collection id with NUL, or a collection id over 512
+  characters, is refused on upload and reindex with 400 `INVALID_COLLECTION_ID`; non-finite
+  embedding values are refused.
+- Cost and startup (review fixes): the keyword query scores each matching chunk once, counts
+  every term's document frequency in one pass and needs no temporary files (at most 32 distinct
+  terms; time grows with matching chunks times terms). A reindex checks for concurrent changes
+  through a per-collection version (migration 2, `hk_collection_versions`, bumped by every
+  ingest, delete and reindex) instead of hashing every vector under the lock, and writes the
+  vectors in batches of 500 in one transaction. In Postgres mode the service builds the
+  knowledge index (its migration, `CREATE EXTENSION IF NOT EXISTS vector`) when the app is
+  created, so no request runs it on the event loop and a missing permission stops the start; a
+  later rebuild runs in a worker thread.
+
+### Added (MVP Postgres WP9: Cloud Run statelessness)
+- `nexura_runtime.service.triggers.tick.run_trigger_tick(app_state, budget_seconds=45)`: one
+  bounded trigger pass on demand (due schedules, expired-job reclaim, pending jobs until the
+  budget ends; jobs still running then keep running under their heartbeat), for a service
+  scaled to zero that an external scheduler wakes. It runs under the trigger store's named
+  lease `trigger-tick`, so one pass runs at a time across instances; a call that finds the
+  lease held returns `{"status": "busy"}`. The closed edition mounts it as
+  `POST /internal/triggers/tick`. New `TriggerWorker.run_pass(budget_seconds)` and `drain()`.
+- Trigger stores have named leases: `acquire_lease(name, holder, ttl_seconds=...)` and
+  `release_lease(name, holder)` (memory; SQLite table `trigger_leases`; Postgres migration 2 of
+  `PostgresTriggerStore`, table `nexura_trigger_leases`), one atomic
+  insert-or-take-over-if-expired statement, so of any number of racers exactly one wins.
+
+### Changed (MVP Postgres WP9)
+- **A Postgres service refuses to start without `NEXURA_MASTER_KEY` and
+  `NEXURA_TRIGGER_SECRET_KEY`** (`SharedKeyMissingError`, naming each missing variable), before
+  any connection or file: a key made up per instance would leave the shared credentials and
+  webhook secrets unreadable on every other instance. This includes the local profiles (which
+  used to run Postgres mode without a master key, credentials in process memory) and is not
+  lifted by `NEXURA_INSECURE_ALLOW_PLAINTEXT_SECRETS`. SQLite mode is unchanged.
+- In Postgres mode webhook secrets use only `NEXURA_TRIGGER_SECRET_KEY`: the
+  `<db_path>.trigger.key` file fallback is gone there (WP8 review M1), so no per-instance key
+  file is ever written. A service with only `workflow_state_url` keeps the file fallback.
+- A Postgres-mode app object started again after its shutdown raises `ServiceShutDownError`
+  ("create a new app") instead of a closed-pool error inside a store (WP8 review L3).
+- The test database fixtures (`service_database_url`, `second_service_database_url`) set both
+  keys (test values) unless a test sets its own.
+
+### Added (MVP Postgres WP8: evaluations, channels, integrations; full Postgres mode)
+- The last service stores on Postgres: `nexura_postgres.PostgresEvaluationStore` (component
+  `evaluations`: `eval_datasets`, `eval_runs`, `eval_traces`), `PostgresStudioEvalStore`
+  (`studio_evaluations`), `PostgresChannelStore` (`channels`: `channel_dedup`,
+  `channel_outbox`) and `PostgresIntegrationRegistrations` (`integrations`:
+  `nexura_service_integration_registrations`, created by the migration, never by the route).
+  SQLite table names are kept; a `seq` identity column replaces `rowid` as every list's
+  tie-break. `eval_traces.trace_json` is `TEXT` holding the blob codec's text, so large traces
+  go to the blob store and `db blob-gc` finds them.
+- Across instances: a channel dedup key is recorded by one `INSERT … ON CONFLICT DO NOTHING`, so
+  a key delivered through one instance is a duplicate through every other; outbox receipts are
+  shared; a Studio eval dataset save is a compare-and-set on its revision; Studio eval runs are
+  stamped by the database clock under their workspace's lock, so they list in save order on
+  every instance and retention keeps exactly the newest; a tool id is registered for one
+  workspace only (two instances racing give one success).
+- **Full Postgres mode.** A Postgres `database_url` runs the whole service with no SQLite file
+  and no `NEXURA_ALLOW_PARTIAL_POSTGRES`. The switch is now needed only for the two optional
+  SQLite-only features (remote single-operator delivery tokens, failed-run repro capture), which
+  are refused in Postgres mode without it. `/readyz` (operator view) reports
+  `"storage": "postgres"`, or `"partial-postgres"` when such a feature runs under the switch.
+  The no-SQLite guard is a hard test for a full OSS and enterprise lifecycle.
+- Evaluation, Studio eval, channel and registration calls of the routes run off the event loop
+  when the store waits on the network (`blocking_io`).
+
+### Changed (MVP Postgres WP8)
+- Integration registrations are stored before the tools are registered in memory, in one
+  transaction; a storage error now fails the request (it was suppressed) and leaves nothing
+  registered, and an id another workspace claimed meanwhile gets 409
+  `INTEGRATION_TOOL_ID_CONFLICT`. On startup a storage error stops the start (it was
+  suppressed); a row that cannot be rebuilt is logged and skipped.
+- Restored registrations: MCP tools get the fixture's own tool definition (a stand-in definition
+  was restored before, which the manifest-digest check refused at the first call), OpenAPI
+  operations are restored too (they were not), and an existing ownership row keeps its principal.
+- Ties in `created_at` now list in insertion order on SQLite too (evaluation datasets and runs
+  newest first, outbox receipts oldest first).
+- The knowledge index build lock is per app instead of per process (WP7 review R2-L2).
+
+### Fixed (MVP Postgres WP8)
+- `SqliteChannelStore.record_dedup` rolls back after a duplicate key, so its connection no
+  longer keeps the file's write lock until the next commit.
+
+### Changed (MVP Postgres WP6: organisations and publications, closed edition)
+- The closed edition keeps organisations (members, org workspaces, hashed invites and the org
+  audit) and publications (promotions, credential-map changes, audit, daily spend and
+  reservations, public runs and visitor history) in Postgres when the service has a
+  `database_url`; the code is in `nexura-enterprise`. In the open-source service only the
+  partial-mode messages change: the refusal now says WP7–WP8 are pending (knowledge,
+  evaluations, channels and integrations), and the partial-mode warning lists organisations and
+  publications on the Postgres side.
+
+### Fixed (MVP Postgres WP5)
+- The SQLite readiness probe reads the schema page (`SELECT count(*) FROM sqlite_master`,
+  read-only) instead of `SELECT 1`, which never touches the file: a corrupt database file is
+  now reported unhealthy, as the WP0/WP1 entry below says. One more case is now unhealthy: a WAL
+  database whose `-wal` file is present but whose `-shm` file is missing, in a read-only
+  *directory* (SQLite cannot create the shared-memory file there, and the service could not
+  write there either). A read-only database *file*, or a read-only directory without a pending
+  `-wal`, stays healthy (checked for both journal modes).
+
+### Changed (MVP Postgres WP0/WP1)
+- `/readyz` and `HealthChecker.check_database` run a read-only `SELECT 1` instead of writing a
+  row to `_nexura_health_ping`. A read-only database file or a full disk is therefore no
+  longer reported as unhealthy (a corrupt or unreadable file still is). The standalone
+  `HealthChecker(db_path=...)` no longer creates a missing parent directory: a missing
+  directory reports `unhealthy`, a missing file in an existing directory reports healthy
+  without creating it. The details status is `read_verified` (was `read_write_verified`).
+  Readiness probes now run off the event loop.
+- Deleting a chat session goes through the session store, which keeps a revision tombstone:
+  a session re-created with the same id continues at the old revision plus one instead of 1.
+- Deleting a session or knowledge document removes its workspace-ownership row durably; before,
+  only the in-memory map was cleared and the row came back after a restart.
+- All `nexura-postgres` pools disable asyncpg's statement cache and use a no-op reset, so they
+  work behind transaction poolers (PgBouncer, Neon's pooler). `channel_binding` is dropped from
+  URLs (asyncpg cannot use it).
+
 ## 0.4.0 (2026-10-25)
 
 ### Removed (P35 A6 S12: legacy durable-execution paths)

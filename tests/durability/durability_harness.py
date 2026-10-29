@@ -359,9 +359,17 @@ class Harness:
         log_path = self.workdir / f"{name}.log"
         result_path = self.workdir / f"{name}.result.json"
         with log_path.open("wb") as log:
+            # The harness's own backend parameter decides where state lives; the service
+            # backend option of the parent test run (NEXURA_DATABASE_URL) is not inherited.
+            env = {
+                key: value
+                for key, value in os.environ.items()
+                if key not in ("NEXURA_DATABASE_URL", "NEXURA_ALLOW_PARTIAL_POSTGRES")
+            }
             proc = subprocess.Popen(
                 [sys.executable, str(CHILD_SCRIPT), str(config_path)],
                 cwd=str(self.workdir),
+                env=env,
                 stdin=subprocess.DEVNULL,
                 stdout=log,
                 stderr=subprocess.STDOUT,

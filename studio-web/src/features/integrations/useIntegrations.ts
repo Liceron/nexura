@@ -12,6 +12,13 @@ import type {
 } from '@liceron/nexura-sdk';
 import { formatApiError } from '../../api/errors';
 
+export interface PaletteRegistration {
+  module_id: string;
+  kind: 'mcp' | 'openapi';
+  fixture_id: string;
+  server_name_or_prefix: string;
+}
+
 export function useIntegrations() {
   const t = useLatestT();
   const { manager, connection } = useApi();
@@ -20,6 +27,22 @@ export function useIntegrations() {
   const [status, setStatus] = useState<IntegrationStatus | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
+  const [registrations, setRegistrations] = useState<PaletteRegistration[]>([]);
+  const [registrationsError, setRegistrationsError] = useState<string | null>(null);
+  const [registrationsLoading, setRegistrationsLoading] = useState(false);
+  const refreshRegistrations = useCallback(async () => {
+    setRegistrationsLoading(true); setRegistrationsError(null);
+    try {
+      const result = await client.request<{ registrations: PaletteRegistration[] }>('GET', '/integrations/registrations');
+      setRegistrations(result.registrations);
+    } catch (cause) { setRegistrationsError(formatApiError(cause, t)); }
+    finally { setRegistrationsLoading(false); }
+  }, [client, t]);
+  useEffect(() => {
+    setRegistrations([]);
+    setMcpRegistered({}); setOpenapiRegistered({});
+    void refreshRegistrations();
+  }, [refreshRegistrations, connection.workspace]);
 
   // MCP State
   const [mcpServerName, setMcpServerName] = useState<string>('calc');
@@ -91,14 +114,15 @@ export function useIntegrations() {
 
   const testRunMcp = useCallback(
     async (toolName: string, argsJson: string) => {
+      setMcpRunResult(null);
       try {
         setMcpRunning(true);
         setError(null);
         let parsedArgs: Record<string, any> = {};
         try {
           parsedArgs = JSON.parse(argsJson);
-        } catch {
-          throw new Error(t('validationMessages.toolArgumentsJson'));
+        } catch (cause) {
+          throw new Error(`${t('validationMessages.toolArgumentsJson')} ${cause instanceof Error ? cause.message : String(cause)}`);
         }
 
         const res = await client.integrations.testRunMcp({
@@ -129,11 +153,12 @@ export function useIntegrations() {
           tools: [toolName],
         });
         setMcpRegistered((prev) => ({ ...prev, [toolName]: true }));
+        await refreshRegistrations();
       } catch (err: unknown) {
         setError(formatApiError(err, t));
       }
     },
-    [client, mcpServerName, mcpFixtureId, t]
+    [client, mcpServerName, mcpFixtureId, t, refreshRegistrations]
   );
 
   // OpenAPI Actions
@@ -216,11 +241,12 @@ export function useIntegrations() {
           tools: [operationId],
         });
         setOpenapiRegistered((prev) => ({ ...prev, [operationId]: true }));
+        await refreshRegistrations();
       } catch (err: unknown) {
         setError(formatApiError(err, t));
       }
     },
-    [client, openapiPrefix, openapiFixtureId, t]
+    [client, openapiPrefix, openapiFixtureId, t, refreshRegistrations]
   );
 
   // Auto-discover default fixtures upon first load
@@ -238,6 +264,19 @@ export function useIntegrations() {
     loading,
     error,
     refreshStatus,
+    registrations,
+    registrationsError,
+    registrationsLoading,
+    refreshRegistrations,
+    removeRegistration: async (moduleId: string) => {
+      setRegistrationsError(null);
+      try {
+        await client.request('DELETE', `/integrations/registrations?module_id=${encodeURIComponent(moduleId)}`);
+        setRegistrations(current => current.filter(row => row.module_id !== moduleId));
+        setMcpRegistered({}); setOpenapiRegistered({});
+        manager.clearCache();
+      } catch (cause) { setRegistrationsError(formatApiError(cause, t)); throw cause; }
+    },
 
     // MCP
     mcpServerName,

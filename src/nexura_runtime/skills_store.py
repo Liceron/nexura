@@ -14,7 +14,7 @@ import json
 import sqlite3
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import closing
 from pathlib import Path
 from typing import Any
@@ -53,6 +53,184 @@ class SkillNotFoundError(SkillError):
     """The skill (or version) does not exist in the caller's workspace."""
 
 
+# ---- Rules shared by the SQLite store and nexura_postgres.PostgresSkillStore ----------------
+# They do no I/O: each store reads the rows in its own transaction, applies these, and writes
+# the result, so both backends refuse the same things with the same errors and limits.
+
+
+def library_from_data(data: str) -> SkillLibrary:
+    """The one-skill library stored in a row's ``data`` column."""
+    library = SkillLibrary()
+    library.import_versions(json.loads(data))
+    return library
+
+
+def skill_summaries(rows: Iterable[tuple[str, str]], label: str | None) -> list[dict[str, Any]]:
+    """``list_skills`` from ``(name, data)`` rows in name order, read from the stored export
+    without rebuilding every version (rows are validated when written)."""
+    out = []
+    for name, data in rows:
+        versions = json.loads(data).get("skills", {}).get(name, {}).get("versions") or []
+        if not versions:
+            continue
+        labels = {lab: v["version"] for v in versions for lab in v.get("labels", ())}
+        if label is not None and label not in labels:
+            continue
+        out.append(
+            {
+                "name": name,
+                "description": versions[-1]["skill"].get("description", ""),
+                "latest_version": versions[-1]["version"],
+                "version_count": len(versions),
+                "labels": labels,
+            }
+        )
+    return out
+
+
+def skill_summary(library: SkillLibrary, name: str) -> dict[str, Any]:
+    versions = library.versions(name)
+    newest = versions[-1]
+    return {
+        "name": name,
+        "description": newest.skill.description,
+        "latest_version": newest.version,
+        "version_count": len(versions),
+        "labels": {label: v.version for v in versions for label in v.labels},
+    }
+
+
+def version_view(library: SkillLibrary, name: str, version: int) -> dict[str, Any]:
+    for item in library.versions(name):
+        if item.version == version:
+            skill = item.skill
+            return {
+                "name": name,
+                "version": item.version,
+                "labels": list(item.labels),
+                "description": skill.description,
+                "instructions": skill.instructions,
+                "tools": list(skill.tools),
+                "resources": dict(skill.resources),
+                "sha256": skill.sha256,
+            }
+    raise SkillNotFoundError(f"Skill {name!r} has no version {version}.")
+
+
+def pick_version(
+    library: SkillLibrary | None, name: str, version: int | None, label: str | None
+) -> dict[str, Any]:
+    """``get``: one version (by number, else by label, else the newest) with its full text."""
+    if library is None:
+        raise SkillNotFoundError(f"Unknown skill {name!r}.")
+    if version is None:
+        found = library.versions(name)
+        if label is None:
+            version = found[-1].version
+        else:
+            carrying = [v.version for v in found if label in v.labels]
+            if not carrying:
+                raise SkillNotFoundError(f"Skill {name!r} has no label {label!r}.")
+            version = carrying[0]
+    return version_view(library, name, version)
+
+
+def versions_view(library: SkillLibrary | None, name: str) -> dict[str, Any]:
+    """``versions``: the summary plus every version with its full text."""
+    if library is None:
+        raise SkillNotFoundError(f"Unknown skill {name!r}.")
+    return {
+        **skill_summary(library, name),
+        "versions": [version_view(library, name, v.version) for v in library.versions(name)],
+    }
+
+
+def apply_create(
+    library: SkillLibrary | None,
+    skill: Skill,
+    labels: Sequence[str],
+    *,
+    count: Callable[[], int],
+    counter: Callable[[], int | None],
+) -> tuple[SkillLibrary, int]:
+    """``create`` on the stored library (``None``: a new skill); returns the library to store
+    and the added version. ``count`` (skills in the workspace) and ``counter`` (the kept next
+    version of a removed skill) are called only for a new skill."""
+    if library is None:
+        if count() >= MAX_SKILLS_PER_WORKSPACE:
+            raise SkillError(f"A workspace may hold at most {MAX_SKILLS_PER_WORKSPACE} skills.")
+        library = SkillLibrary()
+        next_version = counter()
+        if next_version is not None:
+            library.continue_numbering(skill.name, int(next_version))
+    elif len(library.versions(skill.name)) >= MAX_VERSIONS_PER_SKILL and (
+        library.versions(skill.name)[-1].skill.sha256 != skill.sha256
+    ):
+        raise SkillError(
+            f"Skill {skill.name!r} already has {MAX_VERSIONS_PER_SKILL} versions; "
+            "remove old versions first."
+        )
+    if len(set(labels)) >= MAX_LABELS_PER_SKILL:
+        raise SkillError(f"At most {MAX_LABELS_PER_SKILL - 1} labels per request.")
+    held = (
+        {lab for v in library.versions(skill.name) for lab in v.labels}
+        if skill.name in library.names()
+        else set()
+    )
+    if len(held | set(labels) | {"latest"}) > MAX_LABELS_PER_SKILL:
+        raise SkillError(
+            f"Skill {skill.name!r} may carry at most {MAX_LABELS_PER_SKILL} labels; "
+            "reuse one (labels move between versions) instead of adding more."
+        )
+    added = library.add(skill, labels=labels)
+    return library, added.version
+
+
+def apply_set_label(
+    library: SkillLibrary | None, name: str, label: str, version: int
+) -> SkillLibrary:
+    """``set_label`` on the stored library; returns the library to store."""
+    if library is None:
+        raise SkillNotFoundError(f"Unknown skill {name!r}.")
+    if not any(v.version == version for v in library.versions(name)):
+        raise SkillNotFoundError(f"Skill {name!r} has no version {version}.")
+    labels = {lab for v in library.versions(name) for lab in v.labels}
+    if label not in labels and len(labels) >= MAX_LABELS_PER_SKILL:
+        raise SkillError(
+            f"Skill {name!r} already has {MAX_LABELS_PER_SKILL} labels; "
+            "reuse one (labels move between versions) instead of adding more."
+        )
+    library.set_label(name, label, version)
+    return library
+
+
+def apply_remove(library: SkillLibrary | None, name: str, version: int | None) -> int:
+    """``remove`` on the stored library (changed in place); returns how many were removed."""
+    if library is None:
+        raise SkillNotFoundError(f"Unknown skill {name!r}.")
+    if version is not None and not any(v.version == version for v in library.versions(name)):
+        raise SkillNotFoundError(f"Skill {name!r} has no version {version}.")
+    return library.remove(name, version)
+
+
+def stored_form(library: SkillLibrary, name: str) -> tuple[str | None, int]:
+    """What to write for ``name``: ``(data, 0)`` to upsert the row, or ``(None, next_version)``
+    when the skill is gone (delete the row and keep its counter)."""
+    if name not in library.names():
+        return None, library.next_version(name)
+    return json.dumps(library.export(), ensure_ascii=False), 0
+
+
+def add_for_run(library: SkillLibrary, stored: SkillLibrary | None, name: str, label: str) -> None:
+    """``library_for``: copy ``name`` from its stored library, refusing a missing name or label."""
+    if stored is None:
+        raise SkillNotFoundError(f"Unknown skill {name!r} in this workspace.")
+    if name not in stored.names_with_label(label):
+        raise SkillNotFoundError(f"Skill {name!r} has no label {label!r}.")
+    data = stored.export()
+    library.import_versions({"format": data["format"], "skills": {name: data["skills"][name]}})
+
+
 class SkillStore:
     """SQLite-backed skills store; every call names the workspace it acts for."""
 
@@ -75,9 +253,7 @@ class SkillStore:
         ).fetchone()
         if row is None:
             return None
-        library = SkillLibrary()
-        library.import_versions(json.loads(row[0]))
-        return library
+        return library_from_data(row[0])
 
     def _save(
         self,
@@ -87,7 +263,8 @@ class SkillStore:
         library: SkillLibrary,
         actor: str,
     ) -> None:
-        if name not in library.names():
+        data, next_version = stored_form(library, name)
+        if data is None:
             conn.execute(
                 "DELETE FROM nexura_service_skills WHERE workspace_id=? AND name=?",
                 (workspace_id, name),
@@ -96,10 +273,9 @@ class SkillStore:
                 "INSERT INTO nexura_service_skill_counters (workspace_id, name, next_version) "
                 "VALUES (?,?,?) ON CONFLICT(workspace_id, name) DO UPDATE SET "
                 "next_version=MAX(next_version, excluded.next_version)",
-                (workspace_id, name, library.next_version(name)),
+                (workspace_id, name, next_version),
             )
             return
-        data = json.dumps(library.export(), ensure_ascii=False)
         conn.execute(
             "INSERT INTO nexura_service_skills (workspace_id, name, data, updated_at, updated_by) "
             "VALUES (?,?,?,?,?) ON CONFLICT(workspace_id, name) DO UPDATE SET "
@@ -107,34 +283,8 @@ class SkillStore:
             (workspace_id, name, data, time.time(), actor),
         )
 
-    @staticmethod
-    def _summary(library: SkillLibrary, name: str) -> dict[str, Any]:
-        versions = library.versions(name)
-        newest = versions[-1]
-        return {
-            "name": name,
-            "description": newest.skill.description,
-            "latest_version": newest.version,
-            "version_count": len(versions),
-            "labels": {label: v.version for v in versions for label in v.labels},
-        }
-
-    @staticmethod
-    def _version_view(library: SkillLibrary, name: str, version: int) -> dict[str, Any]:
-        for item in library.versions(name):
-            if item.version == version:
-                skill = item.skill
-                return {
-                    "name": name,
-                    "version": item.version,
-                    "labels": list(item.labels),
-                    "description": skill.description,
-                    "instructions": skill.instructions,
-                    "tools": list(skill.tools),
-                    "resources": dict(skill.resources),
-                    "sha256": skill.sha256,
-                }
-        raise SkillNotFoundError(f"Skill {name!r} has no version {version}.")
+    _summary = staticmethod(skill_summary)
+    _version_view = staticmethod(version_view)
 
     def list_skills(self, workspace_id: str, label: str | None = None) -> list[dict[str, Any]]:
         """Summaries of the workspace's skills, optionally only those carrying ``label``.
@@ -147,24 +297,7 @@ class SkillStore:
                 "SELECT name, data FROM nexura_service_skills WHERE workspace_id=? ORDER BY name",
                 (workspace_id,),
             ).fetchall()
-        out = []
-        for name, data in rows:
-            versions = json.loads(data).get("skills", {}).get(name, {}).get("versions") or []
-            if not versions:
-                continue
-            labels = {lab: v["version"] for v in versions for lab in v.get("labels", ())}
-            if label is not None and label not in labels:
-                continue
-            out.append(
-                {
-                    "name": name,
-                    "description": versions[-1]["skill"].get("description", ""),
-                    "latest_version": versions[-1]["version"],
-                    "version_count": len(versions),
-                    "labels": labels,
-                }
-            )
-        return out
+        return skill_summaries(rows, label)
 
     def get(
         self,
@@ -176,32 +309,12 @@ class SkillStore:
     ) -> dict[str, Any]:
         """One version (by number, else by label, else the newest) with its full text."""
         with self._lock, closing(self._connect()) as conn:
-            library = self._load(conn, workspace_id, name)
-            if library is None:
-                raise SkillNotFoundError(f"Unknown skill {name!r}.")
-            if version is None:
-                found = library.versions(name)
-                if label is None:
-                    version = found[-1].version
-                else:
-                    carrying = [v.version for v in found if label in v.labels]
-                    if not carrying:
-                        raise SkillNotFoundError(f"Skill {name!r} has no label {label!r}.")
-                    version = carrying[0]
-            return self._version_view(library, name, version)
+            return pick_version(self._load(conn, workspace_id, name), name, version, label)
 
     def versions(self, workspace_id: str, name: str) -> dict[str, Any]:
         """Summary plus every version (with full text) of one skill."""
         with self._lock, closing(self._connect()) as conn:
-            library = self._load(conn, workspace_id, name)
-            if library is None:
-                raise SkillNotFoundError(f"Unknown skill {name!r}.")
-            return {
-                **self._summary(library, name),
-                "versions": [
-                    self._version_view(library, name, v.version) for v in library.versions(name)
-                ],
-            }
+            return versions_view(self._load(conn, workspace_id, name), name)
 
     def create(
         self,
@@ -217,46 +330,32 @@ class SkillStore:
         with self._lock, closing(self._connect()) as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
-                library = self._load(conn, workspace_id, skill.name)
-                if library is None:
-                    count = conn.execute(
-                        "SELECT COUNT(*) FROM nexura_service_skills WHERE workspace_id=?",
-                        (workspace_id,),
-                    ).fetchone()[0]
-                    if count >= MAX_SKILLS_PER_WORKSPACE:
-                        raise SkillError(
-                            f"A workspace may hold at most {MAX_SKILLS_PER_WORKSPACE} skills."
-                        )
-                    library = SkillLibrary()
-                    counter = conn.execute(
+
+                def count() -> int:
+                    return int(
+                        conn.execute(
+                            "SELECT COUNT(*) FROM nexura_service_skills WHERE workspace_id=?",
+                            (workspace_id,),
+                        ).fetchone()[0]
+                    )
+
+                def counter() -> int | None:
+                    row = conn.execute(
                         "SELECT next_version FROM nexura_service_skill_counters "
                         "WHERE workspace_id=? AND name=?",
                         (workspace_id, skill.name),
                     ).fetchone()
-                    if counter is not None:
-                        library.continue_numbering(skill.name, int(counter[0]))
-                elif len(library.versions(skill.name)) >= MAX_VERSIONS_PER_SKILL and (
-                    library.versions(skill.name)[-1].skill.sha256 != skill.sha256
-                ):
-                    raise SkillError(
-                        f"Skill {skill.name!r} already has {MAX_VERSIONS_PER_SKILL} versions; "
-                        "remove old versions first."
-                    )
-                if len(set(labels)) >= MAX_LABELS_PER_SKILL:
-                    raise SkillError(f"At most {MAX_LABELS_PER_SKILL - 1} labels per request.")
-                held = (
-                    {lab for v in library.versions(skill.name) for lab in v.labels}
-                    if skill.name in library.names()
-                    else set()
+                    return None if row is None else int(row[0])
+
+                library, added = apply_create(
+                    self._load(conn, workspace_id, skill.name),
+                    skill,
+                    labels,
+                    count=count,
+                    counter=counter,
                 )
-                if len(held | set(labels) | {"latest"}) > MAX_LABELS_PER_SKILL:
-                    raise SkillError(
-                        f"Skill {skill.name!r} may carry at most {MAX_LABELS_PER_SKILL} labels; "
-                        "reuse one (labels move between versions) instead of adding more."
-                    )
-                added = library.add(skill, labels=labels)
                 self._save(conn, workspace_id, skill.name, library, actor)
-                result = self._version_view(library, skill.name, added.version)
+                result = version_view(library, skill.name, added)
                 conn.execute("COMMIT")
             except BaseException:
                 conn.execute("ROLLBACK")
@@ -270,20 +369,11 @@ class SkillStore:
         with self._lock, closing(self._connect()) as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
-                library = self._load(conn, workspace_id, name)
-                if library is None:
-                    raise SkillNotFoundError(f"Unknown skill {name!r}.")
-                if not any(v.version == version for v in library.versions(name)):
-                    raise SkillNotFoundError(f"Skill {name!r} has no version {version}.")
-                labels = {lab for v in library.versions(name) for lab in v.labels}
-                if label not in labels and len(labels) >= MAX_LABELS_PER_SKILL:
-                    raise SkillError(
-                        f"Skill {name!r} already has {MAX_LABELS_PER_SKILL} labels; "
-                        "reuse one (labels move between versions) instead of adding more."
-                    )
-                library.set_label(name, label, version)
+                library = apply_set_label(
+                    self._load(conn, workspace_id, name), name, label, version
+                )
                 self._save(conn, workspace_id, name, library, actor)
-                result = self._summary(library, name)
+                result = skill_summary(library, name)
                 conn.execute("COMMIT")
             except BaseException:
                 conn.execute("ROLLBACK")
@@ -298,13 +388,8 @@ class SkillStore:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 library = self._load(conn, workspace_id, name)
-                if library is None:
-                    raise SkillNotFoundError(f"Unknown skill {name!r}.")
-                if version is not None and not any(
-                    v.version == version for v in library.versions(name)
-                ):
-                    raise SkillNotFoundError(f"Skill {name!r} has no version {version}.")
-                removed = library.remove(name, version)
+                removed = apply_remove(library, name, version)
+                assert library is not None  # apply_remove refuses a missing skill
                 self._save(conn, workspace_id, name, library, actor)
                 conn.execute("COMMIT")
             except BaseException:
@@ -317,15 +402,7 @@ class SkillStore:
         library = SkillLibrary()
         with self._lock, closing(self._connect()) as conn:
             for name in names:
-                stored = self._load(conn, workspace_id, name)
-                if stored is None:
-                    raise SkillNotFoundError(f"Unknown skill {name!r} in this workspace.")
-                if name not in stored.names_with_label(label):
-                    raise SkillNotFoundError(f"Skill {name!r} has no label {label!r}.")
-                data = stored.export()
-                library.import_versions(
-                    {"format": data["format"], "skills": {name: data["skills"][name]}}
-                )
+                add_for_run(library, self._load(conn, workspace_id, name), name, label)
         return library
 
 
@@ -335,4 +412,15 @@ __all__ = [
     "MAX_VERSIONS_PER_SKILL",
     "SkillNotFoundError",
     "SkillStore",
+    "add_for_run",
+    "apply_create",
+    "apply_remove",
+    "apply_set_label",
+    "library_from_data",
+    "pick_version",
+    "skill_summaries",
+    "skill_summary",
+    "stored_form",
+    "version_view",
+    "versions_view",
 ]

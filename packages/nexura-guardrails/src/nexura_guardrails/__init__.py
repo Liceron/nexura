@@ -25,7 +25,7 @@ from __future__ import annotations
 import importlib
 from typing import TYPE_CHECKING, Any
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 _EXPORTS: dict[str, str] = {
     # Verdicts and taxonomy
@@ -88,6 +88,7 @@ _EXPORTS: dict[str, str] = {
     "JsonlAuditSink": "nexura_guardrails.policy",
     "CallbackAuditSink": "nexura_guardrails.policy",
     "MemoryAuditSink": "nexura_guardrails.policy",
+    "ShadowBudget": "nexura_guardrails.policy",
     "load_policy": "nexura_guardrails.policy",
     # Benchmark
     "run_benchmark": "nexura_guardrails.bench",
@@ -104,6 +105,7 @@ __all__ = [
     "MemoryAuditSink",
     "PolicyError",
     "Rule",
+    "ShadowBudget",
     "When",
     "load_policy",
     "Cached",
@@ -216,6 +218,7 @@ if TYPE_CHECKING:
         MemoryAuditSink,
         PolicyError,
         Rule,
+        ShadowBudget,
         When,
         load_policy,
     )

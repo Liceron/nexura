@@ -20,6 +20,7 @@ import { PageHeader } from '../components/PageHeader';
 import { useCompactLayout } from './useCompactLayout';
 import { AccessRefused, OperatorLogin } from './OperatorLogin';
 import { confirmNavigation } from './navigationGuard';
+import { useStudioHost } from './host';
 
 const WorkflowDetail = lazyWithRetry(() => import('../features/workflows/WorkflowDetail').then(m => ({ default: m.WorkflowDetail })));
 const ApprovalInbox = lazyWithRetry(() => import('../features/approvals/ApprovalInbox').then(m => ({ default: m.ApprovalInbox })));
@@ -42,10 +43,13 @@ export function Shell() {
   const { t } = useI18n();
   const extensions = useStudioExtensions();
   const compact = useCompactLayout();
+  // Inside a host's frame the host draws the navigation; Studio renders the page only.
+  const { embedded } = useStudioHost();
   const [navigationOpen, setNavigationOpen] = useState(false);
   useEffect(() => { if (!compact) setNavigationOpen(false); }, [compact]);
 
   const [currentTab, setCurrentTab] = useState<NavTab>('workflows');
+  const [agentId, setAgentId] = useState('');
   const [selectedWorkflowId, setSelectedWorkflowId] = useState<string | null>(null);
   const [selectedTraceRunId, setSelectedTraceRunId] = useState<string | null>(null);
   // P25: #/runs/{id} (standalone run page) and #/workflows/{id}/runs/{runId} (Run Console tab).
@@ -61,6 +65,7 @@ export function Shell() {
   const parseRoute = useCallback(() => {
     setNavigationOpen(false);
     const route = parseHash(window.location.hash, extensions);
+    setAgentId(new URLSearchParams(window.location.hash.split('?')[1] || '').get('agent') || '');
     setCurrentTab(route.tab);
     setSelectedWorkflowId(route.workflowId);
     setSelectedWorkflowRunId(route.workflowRunId);
@@ -116,16 +121,16 @@ export function Shell() {
   };
 
   return (
-    <div className="studio-shell">
-      <Header onOpenNavigation={() => setNavigationOpen(true)} navigationOpen={navigationOpen} />
+    <div className={embedded ? 'studio-shell studio-shell-embedded' : 'studio-shell'}>
+      {!embedded && <Header onOpenNavigation={() => setNavigationOpen(true)} navigationOpen={navigationOpen} />}
 
       <div className="studio-shell-workspace">
-        {!compact && <Sidebar
+        {!compact && !embedded && <Sidebar
           currentTab={currentTab}
           onSelectTab={handleSelectTab}
           pendingApprovalsCount={connection.status === 'connected' ? pendingApprovalsCount : 0}
         />}
-        <Modal open={compact && navigationOpen} onClose={() => setNavigationOpen(false)}
+        <Modal open={compact && navigationOpen && !embedded} onClose={() => setNavigationOpen(false)}
           title={t('ui.studioNavigation')} variant="drawer">
           <Sidebar currentTab={currentTab} onSelectTab={handleSelectTab}
             pendingApprovalsCount={connection.status === 'connected' ? pendingApprovalsCount : 0} />
@@ -193,13 +198,13 @@ export function Shell() {
               {currentTab === 'approvals' && (
                 <ApprovalInbox onOpenWorkflow={handleOpenWorkflow} />
               )}
-              {currentTab === 'playground' && <ChatPlayground />}
+              {currentTab === 'playground' && <ChatPlayground initialAgentId={agentId} />}
               {currentTab === 'knowledge' && <KnowledgeView />}
               {currentTab === 'skills' && <SkillsView />}
               {currentTab === 'agents' && <AgentsView />}
               {currentTab === 'credentials' && <CredentialsView />}
               {currentTab === 'tools' && <IntegrationsView />}
-              {currentTab === 'evaluations' && <EvaluationsView />}
+              {currentTab === 'evaluations' && <EvaluationsView key={agentId} agentId={agentId} />}
               {currentTab === 'triggers' && (
                 // Not keyed on the workflow: the in-view "Show all triggers" link only lifts the
                 // filter, and a remount would drop a one-time webhook secret still on screen.

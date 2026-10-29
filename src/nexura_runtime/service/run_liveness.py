@@ -20,14 +20,21 @@ A run whose lease is live (another ``serve`` or ``worker`` executes it, on this 
 another) is never shown interrupted; an ``interrupted`` row whose lease is live again (a
 recover in progress elsewhere) is shown ``running``. When the journal cannot tell (no
 journal row yet, or the journal already moved on while the run row still says
-``running``) the B46 owner-process rule applies, as it does for legacy rows without a
-journal, which ``StudioStore`` still sweeps when it opens.
+``running``) the store's owner rule applies (``StudioStore.owner_is_gone``):
+
+- SQLite (one host per file): the B46 owner-process rule, as for legacy rows without a
+  journal, which ``StudioStore`` still sweeps when it opens.
+- Postgres (several instances share the rows, MVP WP3 review M1): the owner is gone only when
+  it is a process of this pid namespace that has exited; host names never decide. A row of
+  another instance whose journal cannot tell is recoverable once the row has been idle for
+  ``STALE_LEASE_PERIODS`` lease periods, so a killed instance's run never stays ``running``.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+import time
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from nexura_agents.contracts.execution import ExecutionId
@@ -53,6 +60,9 @@ RECOVERABLE = "recoverable"
 
 #: Default seconds of a workflow run lease in the service (renewed every third of it).
 DEFAULT_WORKFLOW_LEASE_TTL = 30.0
+#: Shared (Postgres) run rows whose journal cannot tell: recoverable after this many lease
+#: periods without a row update.
+STALE_LEASE_PERIODS = 3.0
 
 
 def workflow_lease_ttl(app_state: Any) -> float:
@@ -75,6 +85,18 @@ def journal_workspace(app_state: Any, workspace_id: str | None) -> str | None:
     return (workspace_id or "default") if journal_capable(checkpoints) else None
 
 
+def liveness_options(app_state: Any) -> dict[str, Any]:
+    """The store-specific owner rule for :func:`run_liveness` (see the module doc)."""
+    store = getattr(app_state, "store", None)
+    options: dict[str, Any] = {
+        "owner_gone": getattr(store, "owner_is_gone", owner_process_is_gone),
+        "this_owner": getattr(store, "this_owner", this_process_owner)(),
+    }
+    if getattr(store, "shared_across_instances", False):
+        options["stale_after"] = STALE_LEASE_PERIODS * workflow_lease_ttl(app_state)
+    return options
+
+
 async def journal_decides(app_state: Any, run_id: str) -> bool:
     """True when ``run_id`` is a journaled run (its lease decides whether it is interrupted)."""
     rows = await app_state.store.list_journaled_runs(("running",), run_ids=[run_id])
@@ -82,13 +104,22 @@ async def journal_decides(app_state: Any, run_id: str) -> bool:
 
 
 async def run_liveness(
-    journal: Any, rows: Sequence[dict[str, Any]], *, stopped_here: bool = False
+    journal: Any,
+    rows: Sequence[dict[str, Any]],
+    *,
+    stopped_here: bool = False,
+    owner_gone: Callable[[str | None], bool] = owner_process_is_gone,
+    this_owner: str | None = None,
+    stale_after: float | None = None,
 ) -> dict[str, str]:
     """``{run_id: "live" | "recoverable"}`` for journaled run rows (see the module doc).
 
-    Each row needs ``run_id``, ``journal_workspace`` and ``owner_process``. ``stopped_here``:
-    this process has just stopped executing these runs (shutdown), so a row it owns counts
-    as stopped when the journal cannot tell (cancelled before its first journal write).
+    Each row needs ``run_id``, ``journal_workspace`` and ``owner_process`` (and
+    ``updated_at`` for ``stale_after``). ``stopped_here``: this process has just stopped
+    executing these runs (shutdown), so a row it owns counts as stopped when the journal cannot
+    tell (cancelled before its first journal write). ``owner_gone``/``this_owner``: the store's
+    owner rule (:func:`liveness_options`). ``stale_after``: seconds after which a row the journal
+    cannot judge counts as recoverable (shared stores only).
     """
     from nexura_agents.durable import lease_owner_is_dead
 
@@ -115,7 +146,13 @@ async def run_liveness(
         # (paused/finished) while the run row says running: the process that would write
         # the row decides, as for legacy rows (B46).
         owner = row.get("owner_process")
-        gone = owner_process_is_gone(owner) or (stopped_here and owner == this_process_owner())
+        mine = this_owner if this_owner is not None else this_process_owner()
+        gone = owner_gone(owner) or (stopped_here and owner == mine)
+        updated_at = row.get("updated_at")
+        if not gone and stale_after is not None and owner != mine and updated_at is not None:
+            # Another instance's row that nothing has touched for several lease periods: its
+            # process stopped before its first journal write or before it settled the row.
+            gone = time.time() - float(updated_at) > stale_after
         verdicts[run_id] = RECOVERABLE if gone else LIVE
     return verdicts
 
@@ -145,7 +182,9 @@ async def reconcile_run_statuses(
     journal = await run_journal(app_state)
     if journal is None:
         return set()
-    verdicts = await run_liveness(journal, rows, stopped_here=stopped_here)
+    verdicts = await run_liveness(
+        journal, rows, stopped_here=stopped_here, **liveness_options(app_state)
+    )
     live_again: set[str] = set()
     for row in rows:
         run_id = str(row["run_id"])

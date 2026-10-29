@@ -10,6 +10,7 @@ import { ActionDisclosure } from '../../components/ActionDisclosure';
 import { Input } from '../../components/Input';
 import { Spinner } from '../../components/Spinner';
 import { useI18n } from '../../i18n';
+import { DeleteWorkflowDialog } from './DeleteWorkflowDialog';
 import { CreateWorkflowModal } from './CreateWorkflowModal';
 import type { WorkflowRecord } from '@liceron/nexura-sdk';
 import { formatApiError } from '../../api/errors';
@@ -34,6 +35,9 @@ export function WorkflowList({ onSelectWorkflow }: WorkflowListProps) {
   const [offset, setOffset] = useState(0);
 
   // Create Modal
+  const [deleteTarget, setDeleteTarget] = useState<WorkflowRecord | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [templateToInstantiate, setTemplateToInstantiate] = useState<string | null>(null);
 
@@ -82,15 +86,19 @@ export function WorkflowList({ onSelectWorkflow }: WorkflowListProps) {
     setOffset(0);
   };
 
-  const handleDelete = async (workflowId: string, e: React.MouseEvent) => {
-    e.preventDefault();
-    if (!window.confirm(t('workflows.confirmDelete'))) return;
+  const handleDelete = async () => {
+    if (!deleteTarget) return;
+    setDeleteError(null);
+    setDeleting(true);
     try {
+      const workflowId = deleteTarget.workflow_id;
       await manager.client.workflows.delete(workflowId);
+      setDeleteTarget(null);
       fetchWorkflows();
     } catch (err: unknown) {
-      setError(formatApiError(err, t));
+      setDeleteError(formatApiError(err, t));
     }
+    finally { setDeleting(false); }
   };
 
   const handleQuickCopy = async (wf: WorkflowRecord, e: React.MouseEvent) => {
@@ -137,7 +145,7 @@ export function WorkflowList({ onSelectWorkflow }: WorkflowListProps) {
             <span style={{ color: 'var(--text-secondary)' }}>{t('common.loading')}</span>
           </div>
         ) : workflows.length === 0 ? (
-          <div style={{ textAlign: 'center', padding: '32px 16px' }}>
+          <div className="studio-empty-state" style={{ textAlign: 'center', padding: '32px 16px' }}>
             <div style={{ fontSize: 28, marginBottom: 8 }}><Icon name="folder" /></div>
             <h4 style={{ fontSize: 15, fontWeight: 600, marginBottom: 4 }}>
               {searchQuery ? `${t('workflows.noMatches')} "${searchQuery}"` : t('workflows.empty')}
@@ -203,7 +211,7 @@ export function WorkflowList({ onSelectWorkflow }: WorkflowListProps) {
                       <td style={{ padding: '12px', textAlign: 'right' }}>
                         <ActionDisclosure label={t('workflowDesign.more')}>
                           <Button variant="ghost" onClick={(e) => handleQuickCopy(wf, e)}>{t('workflowDesign.duplicate')}</Button>
-                          <Button variant="ghost" className="workflow-danger-action" onClick={(e) => handleDelete(wf.workflow_id, e)}>{t('ui.delete')}</Button>
+                          <Button variant="ghost" className="workflow-danger-action" onClick={(e) => { e.preventDefault(); setDeleteError(null); setDeleteTarget(wf); }}>{t('ui.delete')}</Button>
                         </ActionDisclosure>
                       </td>
                     </tr>
@@ -241,6 +249,7 @@ export function WorkflowList({ onSelectWorkflow }: WorkflowListProps) {
       </Card>
 
       {/* Create Workflow Modal */}
+      <DeleteWorkflowDialog open={!!deleteTarget} name={deleteTarget?.name || deleteTarget?.workflow_id || ''} busy={deleting} error={deleteError} onClose={() => setDeleteTarget(null)} onConfirm={handleDelete} />
       <CreateWorkflowModal
         open={createModalOpen}
         onClose={() => setCreateModalOpen(false)}

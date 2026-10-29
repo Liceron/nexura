@@ -1,39 +1,44 @@
-"""Hybrid knowledge index tests (fake deterministic embedder; no network, no model calls)."""
+"""Hybrid knowledge index tests (fake deterministic embedder; no network, no model calls).
+
+They run on the SQLite index by default and on the Postgres index under
+``--service-backend=postgres`` (MVP WP7, see ``tests/_knowledge_backend.py``).
+"""
 
 from __future__ import annotations
 
 import base64
 import json
-import sqlite3
 
+import _knowledge_backend as kb
 import pytest
 
 from nexura_runtime.knowledge import (
     EmbeddingOrchestrator,
     FileTooLargeError,
-    HybridKnowledgeIndex,
     WorkspaceQuotaExceededError,
     create_hybrid_search_tool,
     weighted_rrf,
 )
 from nexura_runtime.knowledge.embeddings import DeterministicEmbeddingProvider
-from nexura_runtime.knowledge.hybrid import EmptyDocumentError, extract_query_terms
+from nexura_runtime.knowledge.hybrid import (
+    EmptyDocumentError,
+    KnowledgeIndexBase,
+    extract_query_terms,
+)
 
 
-def make_index(**kw: object) -> HybridKnowledgeIndex:
-    """Index on an in-memory DB with the labelled deterministic (non-semantic) fake embedder."""
+def make_index(**kw: object) -> KnowledgeIndexBase:
+    """Index on an in-memory DB (or the test's Postgres schema) with the labelled
+    deterministic (non-semantic) fake embedder."""
     embedder = EmbeddingOrchestrator(DeterministicEmbeddingProvider())
-    return HybridKnowledgeIndex(embedder=embedder, **kw)  # type: ignore[arg-type]
+    return kb.new_index(embedder=embedder, **kw)
 
 
-def fts_count(index: HybridKnowledgeIndex, needle: str) -> int:
-    row = index._conn.execute(
-        "SELECT COUNT(*) FROM hk_fts WHERE hk_fts MATCH ?", (f'"{needle}"',)
-    ).fetchone()
-    return int(row[0])
+def fts_count(index: KnowledgeIndexBase, needle: str) -> int:
+    return kb.fts_count(index, needle)
 
 
-async def ingest(index: HybridKnowledgeIndex, name: str, text: str, ws: str = "w1", **kw: object):
+async def ingest(index: KnowledgeIndexBase, name: str, text: str, ws: str = "w1", **kw: object):
     return await index.ingest(workspace_id=ws, filename=name, data=text.encode(), **kw)  # type: ignore[arg-type]
 
 
@@ -152,7 +157,7 @@ async def test_reingest_replaces_chunks_without_stale_hits() -> None:
     assert await idx.search(workspace_id="w1", query="oldmarker", vector_weight=0) == []
     assert fts_count(idx, "oldmarker") == 0
     assert await idx.search(workspace_id="w1", query="newmarker")
-    n = idx._conn.execute("SELECT COUNT(*) FROM hk_chunks").fetchone()[0]
+    n = kb.count_chunks(idx)
     assert n == second.document.chunk_count
 
 
@@ -174,18 +179,12 @@ async def test_reingest_failure_keeps_old_version() -> None:
 async def test_atomic_rollback_on_db_failure() -> None:
     idx = make_index()
     first = await ingest(idx, "doc.txt", "stable original text")
-    idx._conn.execute("DROP TABLE hk_documents")
-    idx._conn.execute(
-        "CREATE TABLE hk_documents (document_id TEXT PRIMARY KEY, workspace_id TEXT, "
-        "collection_id TEXT, title TEXT, source_uri TEXT, mime_type TEXT, content_hash TEXT, "
-        "byte_size INTEGER, text TEXT, chunk_count INTEGER, status TEXT, created_at REAL, "
-        "updated_at REAL, metadata TEXT, bogus_not_null TEXT NOT NULL)"
-    )
-    before = idx._conn.execute("SELECT COUNT(*) FROM hk_chunks").fetchone()[0]
+    kb.break_document_inserts(idx)
+    before = kb.count_chunks(idx)
     assert first.document.chunk_count == before
-    with pytest.raises(sqlite3.Error):
+    with pytest.raises(kb.database_error(idx)):
         await ingest(idx, "other.txt", "failing insert text")
-    after = idx._conn.execute("SELECT COUNT(*) FROM hk_chunks").fetchone()[0]
+    after = kb.count_chunks(idx)
     assert after == before
     assert fts_count(idx, "failing") == 0
 
@@ -196,7 +195,7 @@ async def test_delete_removes_vectors_and_keyword_entries() -> None:
     assert fts_count(idx, "zeppelin") == 1
     assert idx.delete_document("w1", out.document.document_id)
     assert fts_count(idx, "zeppelin") == 0
-    assert idx._conn.execute("SELECT COUNT(*) FROM hk_chunks").fetchone()[0] == 0
+    assert kb.count_chunks(idx) == 0
     assert await idx.search(workspace_id="w1", query="zeppelin") == []
     assert not idx.delete_document("w1", out.document.document_id)
 
@@ -224,7 +223,7 @@ async def test_query_injection_is_inert(query: str) -> None:
     await ingest(idx, "a.txt", "ordinary content about hello world")
     hits = await idx.search(workspace_id="w1", query=query)
     assert isinstance(hits, list)
-    assert idx._conn.execute("SELECT COUNT(*) FROM hk_chunks").fetchone()[0] >= 1
+    assert kb.count_chunks(idx) >= 1
     assert all(re_ok(t) for t in extract_query_terms(query))
 
 
@@ -476,6 +475,7 @@ async def test_vector_scan_is_bounded_by_max_scan_newest_first() -> None:
     assert {h.title for h in hits} <= {"d2.txt", "d3.txt"}
 
 
+@pytest.mark.sqlite_only  # legacy SQLite storage format (JSON text vectors); Postgres never had it
 async def test_legacy_json_embeddings_still_score() -> None:
     idx = make_index()
     await idx.ingest(workspace_id="w", filename="a.txt", data=b"heron marsh")
@@ -501,10 +501,7 @@ async def test_reingest_same_content_updates_uri_and_metadata_without_new_chunks
     assert out.deduplicated and out.metadata_updated
     assert out.document.source_uri == "https://n" and out.document.metadata == {"v": 2}
     assert out.document.document_id == first.document.document_id
-    assert (
-        idx._conn.execute("SELECT COUNT(*) FROM hk_chunks").fetchone()[0]
-        == first.document.chunk_count
-    )
+    assert kb.count_chunks(idx) == first.document.chunk_count
     again = await idx.ingest(
         workspace_id="w", filename="a.txt", data=b"hello world", source_uri="https://n"
     )
@@ -526,21 +523,28 @@ async def test_fused_tie_prefers_the_keyword_match(
     has the same fused score (seen in Studio: a Hindi guide ranked above 'quokka.html').
 
     Chunk ids are random, so several attempts guard against a lucky id-order tie-break.
+    On Postgres the similarity is computed in SQL, so the same vector ranking is set up with
+    stored vectors instead of a patched scorer (cosine 1 for the Hindi chunk, 0 for quokka).
     """
     import nexura_runtime.knowledge.hybrid as hybrid
 
     index = make_index()
     await ingest(index, "hindi_guide.txt", "नेक्सुरा एजेंटकिट एक स्वतंत्र एसडीके है", ws="w1")
     await ingest(index, "quokka.html", "Quokka habitat notes for fusion.", ws="w1")
-    hindi_blob = index._conn.execute(
-        "SELECT c.embedding FROM hk_chunks c JOIN hk_documents d "
-        "ON d.document_id = c.document_id WHERE d.title = 'hindi_guide.txt'"
-    ).fetchone()[0]
+    if kb.on_postgres(index):
+        await kb.pin_vector_scores(
+            index, query="quokka", similar="hindi_guide.txt", dissimilar=["quokka.html"]
+        )
+    else:
+        hindi_blob = index._conn.execute(  # type: ignore[attr-defined]
+            "SELECT c.embedding FROM hk_chunks c JOIN hk_documents d "
+            "ON d.document_id = c.document_id WHERE d.title = 'hindi_guide.txt'"
+        ).fetchone()[0]
 
-    # Vector ranker: only the Hindi chunk is similar; the quokka chunk is below the floor.
-    def scores(qvec: list[float], blobs: list[bytes | str]) -> list[float]:
-        return [0.9 if b == hindi_blob else 0.0 for b in blobs]
+        # Vector ranker: only the Hindi chunk is similar; the quokka chunk is below the floor.
+        def scores(qvec: list[float], blobs: list[bytes | str]) -> list[float]:
+            return [0.9 if b == hindi_blob else 0.0 for b in blobs]
 
-    monkeypatch.setattr(hybrid, "_cosine_scores", scores)
+        monkeypatch.setattr(hybrid, "_cosine_scores", scores)
     hits = await index.search(workspace_id="w1", query="quokka", top_k=5)
     assert [h.title for h in hits][0] == "quokka.html", [h.title for h in hits]

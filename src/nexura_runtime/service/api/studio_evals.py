@@ -30,7 +30,6 @@ from pydantic import BaseModel, Field
 from nexura_runtime.evaluation import studio_engine as engine
 from nexura_runtime.evaluation._service_access import registered_agents
 from nexura_runtime.evaluation.studio_engine import StudioEvalError
-from nexura_runtime.evaluation.studio_store import StudioEvalStore
 from nexura_runtime.observability.run_diagnostics import is_secret_key, redact_run_content
 from nexura_runtime.service.api.chat_models import DEFAULT_CHAT_MODEL
 from nexura_runtime.service.api.ratelimit import SlidingWindowRateLimiter
@@ -38,6 +37,8 @@ from nexura_runtime.service.api.runs import _assert_run_ownership, _assert_run_r
 from nexura_runtime.service.auth.errors import CrossWorkspaceAccessError, PermissionDeniedError
 from nexura_runtime.service.auth.models import ActionPermission, Principal, WorkspaceRole
 from nexura_runtime.service.auth.permissions import check_permission
+from nexura_runtime.service.storage_backend import store_call
+from nexura_runtime.service.storage_protocols import StudioEvaluationBackend
 from nexura_runtime.workflow import WorkflowEngine, WorkflowSpec
 
 router = APIRouter(prefix="/studio", tags=["studio-evals"])
@@ -129,12 +130,18 @@ def _require(permission: ActionPermission) -> Any:
     return Depends(dependency)
 
 
-def _store(request: Request) -> StudioEvalStore:
+def _store(request: Request) -> StudioEvaluationBackend:
     store = getattr(request.app.state, "studio_eval_store", None)
     if store is None:
-        store = StudioEvalStore(getattr(request.app.state.store, "db_path", ":memory:"))
+        store = request.app.state.service_stores.studio_evaluations()
         request.app.state.studio_eval_store = store
     return store  # type: ignore[no-any-return,unused-ignore]
+
+
+async def _sio(store: Any, method: str, /, *args: Any, **kwargs: Any) -> Any:
+    """A Studio eval store call from a route: in a worker thread on Postgres (MVP WP8), inline on
+    SQLite (``store_call``)."""
+    return await store_call(store, getattr(store, method), *args, **kwargs)
 
 
 def _fail(exc: StudioEvalError) -> HTTPException:
@@ -181,9 +188,9 @@ async def list_datasets(
 ) -> dict[str, Any]:
     """All datasets, or only the test datasets bound to ``workflow_id``."""
     workspace, _, _ = _ctx(request)
-    items = _store(request).list_datasets(workspace, workflow_id)
+    items = await _sio(_store(request), "list_datasets", workspace, workflow_id)
     for item in items:
-        dataset = _store(request).get_dataset(workspace, item["dataset_id"])
+        dataset = await _sio(_store(request), "get_dataset", workspace, item["dataset_id"])
         if dataset is not None:
             await _assert_cases_access(request, dataset["cases"])
     return {"datasets": items, "total": len(items)}
@@ -216,11 +223,14 @@ async def put_dataset(request: Request, dataset_id: str, body: DatasetBody) -> d
         )
     except StudioEvalError as exc:
         raise _fail(exc) from exc
-    existing = store.get_dataset(workspace, dataset_id)
+    existing = await _sio(store, "get_dataset", workspace, dataset_id)
     if existing is not None:
         await _assert_cases_access(request, existing["cases"])
     await _assert_cases_access(request, cases)
-    if existing is None and store.count_datasets(workspace) >= MAX_DATASETS_PER_WORKSPACE:
+    if (
+        existing is None
+        and await _sio(store, "count_datasets", workspace) >= MAX_DATASETS_PER_WORKSPACE
+    ):
         raise _too_many_datasets()
     binding = existing.get("workflow_id") if existing else None
     if body.workflow_id == "":
@@ -235,7 +245,9 @@ async def put_dataset(request: Request, dataset_id: str, body: DatasetBody) -> d
         else:
             raise _not_found("WORKFLOW_NOT_FOUND", f"Workflow '{body.workflow_id}'")
     try:
-        saved = store.save_dataset(
+        saved = await _sio(
+            store,
+            "save_dataset",
             workspace,
             dataset_id,
             name=meta["name"] or dataset_id,
@@ -253,7 +265,7 @@ async def put_dataset(request: Request, dataset_id: str, body: DatasetBody) -> d
 @router.get("/datasets/{dataset_id}", summary="Get a dataset with its cases")
 async def get_dataset(request: Request, dataset_id: str) -> dict[str, Any]:
     workspace, _, _ = _ctx(request)
-    found = _store(request).get_dataset(workspace, dataset_id)
+    found: dict[str, Any] | None = await _sio(_store(request), "get_dataset", workspace, dataset_id)
     if found is None:
         raise _not_found("DATASET_NOT_FOUND", f"Dataset '{dataset_id}'")
     await _assert_cases_access(request, found["cases"])
@@ -263,7 +275,7 @@ async def get_dataset(request: Request, dataset_id: str) -> dict[str, Any]:
 @router.get("/datasets/{dataset_id}/export", summary="Export a dataset as portable JSON")
 async def export_dataset(request: Request, dataset_id: str) -> dict[str, Any]:
     workspace, _, _ = _ctx(request)
-    found = _store(request).get_dataset(workspace, dataset_id)
+    found = await _sio(_store(request), "get_dataset", workspace, dataset_id)
     if found is None:
         raise _not_found("DATASET_NOT_FOUND", f"Dataset '{dataset_id}'")
     await _assert_cases_access(request, found["cases"])
@@ -330,7 +342,7 @@ async def import_openai_dataset(body: OpenAIImportBody) -> dict[str, Any]:
 )
 async def delete_dataset(request: Request, dataset_id: str) -> dict[str, Any]:
     workspace, _, _ = _ctx(request)
-    if not _store(request).delete_dataset(workspace, dataset_id):
+    if not await _sio(_store(request), "delete_dataset", workspace, dataset_id):
         raise _not_found("DATASET_NOT_FOUND", f"Dataset '{dataset_id}'")
     return {"deleted": True, "dataset_id": dataset_id}
 
@@ -391,7 +403,7 @@ async def _assert_report_access(request: Request, saved: dict[str, Any]) -> None
     # Historical reports omitted provenance. Only the original, unchanged dataset
     # can establish their sources; an edited/deleted dataset cannot declassify a copy.
     workspace, _, _ = _ctx(request)
-    dataset = _store(request).get_dataset(workspace, saved["dataset_id"])
+    dataset = await _sio(_store(request), "get_dataset", workspace, saved["dataset_id"])
     if dataset is None or dataset["content_hash"] != saved["dataset_hash"]:
         raise HTTPException(403, detail={"code": "SOURCE_PROVENANCE_UNAVAILABLE"})
     await _assert_cases_access(request, dataset["cases"])
@@ -568,7 +580,7 @@ async def add_case_from_run(request: Request, dataset_id: str, body: FromRunBody
             413,
         )
 
-    dataset = store.get_dataset(workspace, dataset_id)
+    dataset = await _sio(store, "get_dataset", workspace, dataset_id)
     if dataset is not None:
         await _assert_cases_access(request, dataset["cases"])
     if dataset is None:
@@ -577,7 +589,7 @@ async def add_case_from_run(request: Request, dataset_id: str, body: FromRunBody
                 "DATASET_NAME_REQUIRED",
                 f"Dataset '{dataset_id}' does not exist; give a dataset_name to create it.",
             )
-        if store.count_datasets(workspace) >= MAX_DATASETS_PER_WORKSPACE:
+        if await _sio(store, "count_datasets", workspace) >= MAX_DATASETS_PER_WORKSPACE:
             raise _too_many_datasets()
         name, description, cases, revision = str(body.dataset_name).strip(), "", [], 0
     else:
@@ -643,7 +655,9 @@ async def add_case_from_run(request: Request, dataset_id: str, body: FromRunBody
         raise _fail(exc) from exc
     await _assert_cases_access(request, new_cases)
     try:
-        saved = store.save_dataset(
+        saved = await _sio(
+            store,
+            "save_dataset",
             workspace,
             dataset_id,
             name=meta["name"] or dataset_id,
@@ -771,7 +785,7 @@ def _saved_agent_factory(request: Request, agent_id: str) -> tuple[Any, int]:
 async def create_run(request: Request, body: RunBody) -> dict[str, Any]:
     workspace, principal, _ = _ctx(request)
     store = _store(request)
-    dataset = store.get_dataset(workspace, body.dataset_id)
+    dataset = await _sio(store, "get_dataset", workspace, body.dataset_id)
     if dataset is None:
         raise _not_found("DATASET_NOT_FOUND", f"Dataset '{body.dataset_id}'")
     cases = dataset["cases"]
@@ -861,7 +875,9 @@ async def create_run(request: Request, body: RunBody) -> dict[str, Any]:
     captured_report["source_run_ids"] = source_ids
     summary = engine.summarize(report)
     summary["source_run_ids"] = source_ids
-    return store.save_run(
+    return await _sio(  # type: ignore[no-any-return]
+        store,
+        "save_run",
         workspace,
         run_id=engine.new_run_id(),
         dataset_id=dataset["dataset_id"],
@@ -882,9 +898,9 @@ async def list_runs(
     limit: int = Query(50, ge=1, le=200),
 ) -> dict[str, Any]:
     workspace, _, _ = _ctx(request)
-    runs = _store(request).list_runs(workspace, dataset_id, limit)
+    runs = await _sio(_store(request), "list_runs", workspace, dataset_id, limit)
     for row in runs:
-        saved = _store(request).get_run(workspace, row["run_id"])
+        saved = await _sio(_store(request), "get_run", workspace, row["run_id"])
         if saved is not None:
             await _assert_report_access(request, saved)
     return {"runs": runs, "total": len(runs)}
@@ -893,7 +909,7 @@ async def list_runs(
 @router.get("/runs/{run_id}", summary="Get a run with per-case scores and reasons")
 async def get_run(request: Request, run_id: str) -> dict[str, Any]:
     workspace, _, _ = _ctx(request)
-    found = _store(request).get_run(workspace, run_id)
+    found: dict[str, Any] | None = await _sio(_store(request), "get_run", workspace, run_id)
     if found is None:
         raise _not_found("RUN_NOT_FOUND", f"Run '{run_id}'")
     await _assert_report_access(request, found)
@@ -903,7 +919,7 @@ async def get_run(request: Request, run_id: str) -> dict[str, Any]:
 @router.delete("/runs/{run_id}", summary="Delete a run", dependencies=[_require("edit")])
 async def delete_run(request: Request, run_id: str) -> dict[str, Any]:
     workspace, _, _ = _ctx(request)
-    if not _store(request).delete_run(workspace, run_id):
+    if not await _sio(_store(request), "delete_run", workspace, run_id):
         raise _not_found("RUN_NOT_FOUND", f"Run '{run_id}'")
     return {"deleted": True, "run_id": run_id}
 
@@ -912,8 +928,8 @@ async def delete_run(request: Request, run_id: str) -> dict[str, Any]:
 async def compare(request: Request, body: CompareBody) -> dict[str, Any]:
     workspace, _, _ = _ctx(request)
     store = _store(request)
-    base = store.get_run(workspace, body.baseline_run_id)
-    cand = store.get_run(workspace, body.candidate_run_id)
+    base = await _sio(store, "get_run", workspace, body.baseline_run_id)
+    cand = await _sio(store, "get_run", workspace, body.candidate_run_id)
     if base is None:
         raise _not_found("RUN_NOT_FOUND", f"Baseline run '{body.baseline_run_id}'")
     if cand is None:

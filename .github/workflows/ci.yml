@@ -9,6 +9,81 @@ permissions:
   contents: read
 
 jobs:
+  postgres-backend:
+    # Every service store is on Postgres since WP8, so the service suites run unconditionally.
+    # WP11 adds the PgBouncer service (transaction mode, prepared statements off) and its
+    # pooled smoke step. No CI job was executed by this change.
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: nexura-ci-only
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-retries 20
+    env:
+      NEXURA_TEST_POSTGRES_URI: postgresql://postgres:nexura-ci-only@127.0.0.1:5432/postgres
+      # Fail instead of skipping when the URI is missing or no Postgres test passes.
+      NEXURA_REQUIRE_POSTGRES_TESTS: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          python-version: "3.12"
+      - run: uv sync --frozen --all-extras
+      # The knowledge index (WP7) needs pgvector. Create it once, in public, before the tests:
+      # a per-test schema's search_path holds only that schema, so a first migration there
+      # would install the extension into a schema that the test then drops.
+      - run: |
+          uv run --frozen python - <<'PY'
+          import asyncio, os, asyncpg
+          async def main():
+              conn = await asyncpg.connect(os.environ["NEXURA_TEST_POSTGRES_URI"])
+              try:
+                  await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+              finally:
+                  await conn.close()
+          asyncio.run(main())
+          PY
+      - run: >-
+          uv run --frozen pytest -rs -n auto --dist loadfile tests/postgres
+          tests/service/test_workspace_repository_contract.py
+          tests/service/test_blob_call_sites.py tests/service/test_blob_retention.py
+          tests/service/test_studio_store_contract.py tests/service/test_studio_two_instances.py
+          tests/service/test_studio_postgres_wiring.py
+          tests/service/test_chat_stores_contract.py
+          tests/service/test_chat_stores_postgres_wiring.py
+          tests/service/test_secrets_usage_contract.py
+          tests/service/test_wp5_postgres_wiring.py
+          tests/service/test_knowledge_index_contract.py
+          tests/service/test_knowledge_postgres_wiring.py
+          tests/service/test_wp8_stores_contract.py
+          tests/service/test_wp8_postgres_wiring.py
+          tests/service/test_wp9_cloud_run.py
+      - name: Knowledge suites on Postgres (WP7)
+        run: >-
+          uv run --frozen pytest -rs -n auto --dist loadfile --service-backend=postgres
+          -m "not sqlite_only" tests/test_knowledge_hybrid.py tests/test_p35a3_embeddings.py
+          tests/backend/test_p35a3_knowledge_api.py tests/test_playground_knowledge.py
+          tests/backend/test_knowledge_api.py tests/backend/test_security_b7_sessions_knowledge.py
+      - name: Evaluations, channels and integrations on Postgres (WP8)
+        run: >-
+          uv run --frozen pytest -rs -n auto --dist loadfile --service-backend=postgres
+          -m "not sqlite_only" tests/test_evaluation_p38_c5.py
+          tests/test_evaluation_p38_c5_review.py tests/test_evaluation_p38_c5_round2.py
+          tests/test_evaluation_p38_c5_studio_authorization.py
+          tests/test_evaluation_p38_c5_studio_recheck.py tests/test_studio_evals_api.py
+          tests/backend/b26/test_channels.py tests/backend/test_export_and_tools_api.py
+          tests/backend/test_security_b8_sessions_integrations.py
+      # Full Postgres mode (WP8): the whole service on one database, no SQLite file.
+      - name: Service suites on Postgres (WP2–WP8)
+        run: >-
+          uv run --frozen pytest -rs -n auto --dist loadfile --service-backend=postgres
+          -m "not sqlite_only" tests/postgres tests/service tests/backend tests/workflows
+          tests/p28_seams tests/p35 tests/test_knowledge_hybrid.py tests/test_p35a3_embeddings.py
+          tests/test_playground_knowledge.py tests/test_evaluation_p38_c5.py
+
   python:
     runs-on: ubuntu-24.04
     steps:
@@ -39,6 +114,20 @@ jobs:
       # Files run in parallel, each file on one worker (pytest-xdist); see CONTRIBUTING.md.
       - run: uv run --frozen pytest -n auto --dist loadfile --deselect tests/backend/b22
       - run: uv run --frozen python examples/oss/o07.py
+
+  crossframework:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: experiments/crossframework
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          python-version: "3.12"
+      - run: uv sync --frozen
+      - run: uv run --frozen pytest -q
+      - run: uv run --frozen python -m crossframework.demo
 
   agents-python-versions:
     # nexura-agents supports 3.11-3.13; the platform package is 3.12-only.

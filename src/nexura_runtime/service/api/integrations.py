@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import re
 import time
 from collections.abc import Awaitable, Callable
@@ -24,6 +25,7 @@ from nexura_agents.mcp.server import McpServerSession
 from nexura_agents.mcp.transports import (
     McpInMemoryTransport,
 )
+from nexura_agents.mcp.types import McpToolDefinition
 from nexura_agents.openapi.module import (
     OpenAPIOperationModule,
     import_openapi_operations,
@@ -37,6 +39,7 @@ from nexura_runtime.integrations.http.errors import (
     DuplicateOperationIdError,
     UnsupportedOpenAPIFeatureError,
 )
+from nexura_runtime.service.storage_backend import IntegrationToolTakenError
 
 router = APIRouter(prefix="/integrations", tags=["integrations"])
 
@@ -144,6 +147,113 @@ _WORKSPACE_TAG_ATTR = "_workspace_id"
 def tag_module_workspace(module: BaseModule, workspace_id: str) -> None:
     """Tag a registered module instance with the workspace that owns it."""
     setattr(module, _WORKSPACE_TAG_ATTR, workspace_id)
+
+
+logger = logging.getLogger("nexura_runtime.service.integrations")
+
+
+def fixture_session_factory(fixture_id: str) -> McpSessionFactory:
+    """A factory of fresh in-memory sessions to the MCP fixture ``fixture_id`` (one per call)."""
+
+    async def _factory() -> tuple[McpClientSession, McpSessionCleanup]:
+        c_pair, s_pair = McpInMemoryTransport.create_pair()
+        srv = _create_mcp_fixture_server(fixture_id, s_pair)
+        srv_loop = asyncio.create_task(srv.serve_loop())
+        cli = McpClientSession(c_pair)
+        await cli.initialize()
+
+        async def _cleanup() -> None:
+            await cli.close()
+            await srv.close()
+            srv_loop.cancel()
+
+        return cli, _cleanup
+
+    return _factory
+
+
+def _fixture_tool_definition(fixture_id: str, tool_name: str) -> McpToolDefinition | None:
+    """The definition the MCP fixture ``fixture_id`` serves for ``tool_name`` (no I/O: the
+    in-memory server is built and read, never started)."""
+    _, s_pair = McpInMemoryTransport.create_pair()
+    return _create_mcp_fixture_server(fixture_id, s_pair).tool_definition(tool_name)
+
+
+def _openapi_fixture_spec(fixture_id: str | None) -> dict[str, Any]:
+    return WEATHER_FIXTURE_SPEC if fixture_id == "weather_fixture" else PETSTORE_FIXTURE_SPEC
+
+
+def restore_integration_registrations(
+    rows: list[tuple[str, str, str, str | None, str]], ws_repo: Any, registry: Any
+) -> int:
+    """Register persisted fixture tools in ``registry`` when a service instance starts.
+
+    ``rows`` come from the app's ``integration_registrations`` store (the SQLite file, or the
+    shared Postgres database in Postgres mode, MVP WP8), so every instance restores every
+    registration. MCP tools get the fixture's own tool definition and a fresh fixture session
+    per call (before WP8 a stand-in definition was restored, which the module's manifest-digest
+    check refused at the first call); OpenAPI operations are
+    imported again from their fixture spec with the stored prefix. The workspace ownership row
+    is recorded only when it is missing (the register route wrote it with its principal). A row
+    that cannot be rebuilt (unknown kind, an operation the fixture no longer has) is logged and
+    skipped; any other error propagates and stops the start. Returns the number registered.
+    """
+    restored = 0
+    openapi_modules: dict[tuple[str | None, str], dict[str, Any]] = {}
+    v_reg = getattr(registry, "versioned_registry", None)
+    for ws_id, mod_id, kind, fid, srv_pfx in rows:
+        module: Any
+        if kind == "mcp":
+            fixture = fid or "math_fixture"
+            t_name = mod_id.split(".")[-1]
+            # The fixture's own definition: the module checks the tool's manifest digest on
+            # every call, so a stand-in definition would be refused as a replaced tool.
+            t_def = _fixture_tool_definition(fixture, t_name)
+            if t_def is None:
+                logger.error(
+                    "Integration tool %s (workspace %s) is not in MCP fixture %r any more; "
+                    "not restored",
+                    mod_id,
+                    ws_id,
+                    fixture,
+                )
+                continue
+            module = McpToolModule(
+                client=None,
+                tool_def=t_def,
+                server_name=srv_pfx,
+                session_factory=fixture_session_factory(fixture),
+            )
+        elif kind == "openapi":
+            key = (fid, srv_pfx)
+            if key not in openapi_modules:
+                imported = import_openapi_operations(_openapi_fixture_spec(fid), prefix=srv_pfx)
+                openapi_modules[key] = {m.manifest.module_id: m for m in imported}
+            module = openapi_modules[key].get(mod_id)
+            if module is None:
+                logger.error(
+                    "Integration tool %s (workspace %s) is not in its OpenAPI fixture any more; "
+                    "not restored",
+                    mod_id,
+                    ws_id,
+                )
+                continue
+        else:
+            logger.error("Integration tool %s has an unknown kind %r; not restored", mod_id, kind)
+            continue
+        if (
+            ws_repo is not None
+            and ws_repo.get_resource_workspace("integration_tool", mod_id) is None
+        ):
+            ws_repo.record_resource_ownership("integration_tool", mod_id, ws_id, "local-owner")
+        tag_module_workspace(module, ws_id)
+        registry.register(mod_id, module)
+        if v_reg is not None and not v_reg.has(mod_id, module.manifest.version):
+            # A shared versioned registry may already hold it (another app in this process).
+            with contextlib.suppress(Exception):
+                v_reg.register(module)
+        restored += 1
+    return restored
 
 
 def _create_mcp_fixture_server(fixture_id: str, s_trans: McpInMemoryTransport) -> McpServerSession:
@@ -875,23 +985,6 @@ async def register_integration_tools(
             await server.close()
             server_task.cancel()
 
-        def make_fixture_session_factory(fid: str) -> McpSessionFactory:
-            async def _session_factory() -> tuple[McpClientSession, McpSessionCleanup]:
-                c_pair, s_pair = McpInMemoryTransport.create_pair()
-                srv = _create_mcp_fixture_server(fid, s_pair)
-                srv_loop_task = asyncio.create_task(srv.serve_loop())
-                cli = McpClientSession(c_pair)
-                await cli.initialize()
-
-                async def _cleanup() -> None:
-                    await cli.close()
-                    await srv.close()
-                    srv_loop_task.cancel()
-
-                return cli, _cleanup
-
-            return _session_factory
-
         for t in tools:
             if payload.tools and t.name not in payload.tools:
                 continue
@@ -908,17 +1001,13 @@ async def register_integration_tools(
                 client=None,
                 tool_def=t,
                 server_name=payload.server_name_or_prefix,
-                session_factory=make_fixture_session_factory(fixture_id),
+                session_factory=fixture_session_factory(fixture_id),
             )
             tag_module_workspace(mod, caller_ws)
             pending.append((mod_id, mod))
 
     elif payload.kind == "openapi":
-        spec_data = (
-            WEATHER_FIXTURE_SPEC
-            if payload.fixture_id == "weather_fixture"
-            else PETSTORE_FIXTURE_SPEC
-        )
+        spec_data = _openapi_fixture_spec(payload.fixture_id)
         modules = import_openapi_operations(
             spec_data,
             prefix=payload.server_name_or_prefix,
@@ -935,6 +1024,27 @@ async def register_integration_tools(
     _assert_tool_ids_available(
         request, ws_repo, app_registry, v_reg, caller_ws, [mid for mid, _ in pending]
     )
+    # Persist first, in one transaction (MVP WP8): a storage error fails the request with
+    # nothing registered, and an id another workspace claimed meanwhile (on any instance) is
+    # refused with the same 409 as above.
+    store = request.app.state.integration_registrations
+    save_args = (
+        caller_ws,
+        [mid for mid, _ in pending],
+        payload.kind,
+        payload.fixture_id,
+        payload.server_name_or_prefix,
+    )
+    try:
+        if getattr(store, "blocking_io", False):
+            await asyncio.to_thread(store.save, *save_args)
+        else:
+            store.save(*save_args)
+    except IntegrationToolTakenError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "INTEGRATION_TOOL_ID_CONFLICT", "message": str(exc)},
+        ) from exc
     for mod_id, mod_obj in pending:
         if ws_repo is not None:
             ws_repo.record_resource_ownership("integration_tool", mod_id, caller_ws, principal_id)
@@ -944,48 +1054,135 @@ async def register_integration_tools(
                 v_reg.register(mod_obj)
         registered_ids.append(mod_id)
 
-    # Durably persist registration in SQLite if db exists
-    store = getattr(request.app.state, "store", None)
-    if store and hasattr(store, "db_path") and store.db_path and store.db_path != ":memory:":
-        import sqlite3
-
-        with (
-            contextlib.suppress(Exception),
-            sqlite3.connect(str(store.db_path), timeout=5.0) as conn,
-        ):
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS nexura_service_integration_registrations (
-                    workspace_id TEXT NOT NULL,
-                    module_id TEXT NOT NULL,
-                    kind TEXT NOT NULL,
-                    fixture_id TEXT,
-                    server_name_or_prefix TEXT NOT NULL,
-                    created_at REAL NOT NULL,
-                    PRIMARY KEY (workspace_id, module_id)
-                )
-                """
-            )
-            for mid in registered_ids:
-                conn.execute(
-                    """
-                    INSERT OR REPLACE INTO nexura_service_integration_registrations
-                    (workspace_id, module_id, kind, fixture_id,
-                     server_name_or_prefix, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        caller_ws,
-                        mid,
-                        payload.kind,
-                        payload.fixture_id,
-                        payload.server_name_or_prefix,
-                        time.time(),
-                    ),
-                )
-            conn.commit()
-
     return IntegrationRegisterResponse(
         registered_modules=registered_ids,
         count=len(registered_ids),
     )
+
+
+def _edit_caller(request: Request) -> tuple[str, str]:
+    """(workspace, principal id) of a caller with the ``edit`` permission (else 403)."""
+    caller_ws = getattr(request.state, "workspace_id", "default")
+    principal = getattr(request.state, "principal", None)
+    principal_id = str(getattr(principal, "principal_id", None) or "local-owner")
+    if principal:
+        from nexura_runtime.service.auth.errors import PermissionDeniedError
+        from nexura_runtime.service.auth.models import WorkspaceRole
+        from nexura_runtime.service.auth.permissions import check_permission
+
+        raw_role = getattr(request.state, "role", None)
+        role: WorkspaceRole = (
+            "admin" if raw_role == "admin" else ("editor" if raw_role == "editor" else "viewer")
+        )
+        try:
+            check_permission(principal, role, "edit")
+        except PermissionDeniedError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": exc.code, "message": str(exc)},
+            ) from exc
+    return caller_ws, principal_id
+
+
+async def _registration_rows(request: Request, workspace_id: str) -> list[dict[str, Any]]:
+    store = request.app.state.integration_registrations
+    rows = (
+        await asyncio.to_thread(store.list)
+        if getattr(store, "blocking_io", False)
+        else store.list()
+    )
+    return [
+        {
+            "module_id": mod_id,
+            "kind": kind,
+            "fixture_id": fixture_id,
+            "server_name_or_prefix": prefix,
+        }
+        for ws_id, mod_id, kind, fixture_id, prefix in rows
+        if ws_id == workspace_id
+    ]
+
+
+@router.get("/registrations")
+async def list_integration_registrations(request: Request) -> dict[str, Any]:
+    """The caller workspace's "Add to palette" tool registrations (MCP and OpenAPI)."""
+    caller_ws = getattr(request.state, "workspace_id", "default")
+    return {"registrations": await _registration_rows(request, caller_ws)}
+
+
+@router.delete("/registrations")
+async def delete_integration_registrations(
+    request: Request,
+    module_id: str | None = None,
+    server_name_or_prefix: str | None = None,
+) -> dict[str, Any]:
+    """Remove "Add to palette" tools of the caller's workspace from the palette.
+
+    Name one tool (``?module_id=``) or every tool registered under one server name or
+    prefix (``?server_name_or_prefix=``). Needs the ``edit`` permission. The tools leave this
+    instance's module registry at once and are no longer restored when a service instance
+    starts; another running instance drops them at its next start. The tool ids stay owned by
+    the workspace (another workspace cannot take them over); registering them again works.
+    Workflows or agents that still name a removed tool fail validation. 404
+    ``REGISTRATION_NOT_FOUND`` when nothing matched.
+    """
+    caller_ws, principal_id = _edit_caller(request)
+    if (module_id is None) == (server_name_or_prefix is None):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "INVALID_REGISTRATION_SELECTOR",
+                "message": "Give exactly one of module_id or server_name_or_prefix.",
+            },
+        )
+    rows = await _registration_rows(request, caller_ws)
+    targets = [
+        r["module_id"]
+        for r in rows
+        if r["module_id"] == module_id
+        or (
+            server_name_or_prefix is not None
+            and r["server_name_or_prefix"] == server_name_or_prefix
+        )
+    ]
+    store = request.app.state.integration_registrations
+    deleted: list[str] = []
+    if targets:
+        deleted = (
+            await asyncio.to_thread(store.delete, caller_ws, targets)
+            if getattr(store, "blocking_io", False)
+            else store.delete(caller_ws, targets)
+        )
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "code": "REGISTRATION_NOT_FOUND",
+                "message": "No such tool registration in this workspace.",
+            },
+        )
+    app_registry = getattr(request.app.state, "registry", None)
+    v_reg = getattr(app_registry, "versioned_registry", None)
+    for mod_id in deleted:
+        module = app_registry.unregister(mod_id) if app_registry is not None else None
+        manifest = getattr(module, "manifest", None)
+        if v_reg is not None and manifest is not None and hasattr(v_reg, "unregister"):
+            try:
+                entry = v_reg.get_entry(mod_id, manifest.version)
+            except Exception:
+                entry = None
+            target = getattr(entry, "target", None)
+            # A tool registered again keeps its first module object in the versioned
+            # registry: remove that entry too when it is this workspace's integration tool
+            # (an entry of another app or workspace in a shared registry is left alone).
+            if target is module or (
+                target is not None and getattr(target, _WORKSPACE_TAG_ATTR, None) == caller_ws
+            ):
+                v_reg.unregister(mod_id, manifest.version, target=target)
+    logger.info(
+        "Integration tools %s removed from workspace %s by %s",
+        ", ".join(deleted),
+        caller_ws,
+        principal_id,
+    )
+    return {"deleted": True, "module_ids": deleted, "count": len(deleted)}

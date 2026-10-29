@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -90,7 +91,13 @@ def test_readyz_details_follow_is_operator(tmp_path: Path) -> None:
     assert "probes" in operator
 
 
-def test_local_readyz_details_also_ask_the_provider(tmp_path: Path) -> None:
+def test_local_readyz_details_also_ask_the_provider(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if os.environ.get("NEXURA_DATABASE_URL"):
+        # Both apps share this test's Postgres database, which is bound to one blob store
+        # (MVP WP3), so they share one blob folder too, as two instances of one deployment do.
+        monkeypatch.setenv("NEXURA_BLOB_URL", (tmp_path / "blobs").as_uri())
     app = create_api_app(db_path=_db(tmp_path), auth_provider=QuietLocalProvider())
     with TestClient(app) as client:
         assert set(client.get("/readyz").json()) == {"status"}

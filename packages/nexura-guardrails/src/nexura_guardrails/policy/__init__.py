@@ -16,7 +16,12 @@ from nexura_guardrails.policy.audit import (
     JsonlAuditSink,
     MemoryAuditSink,
 )
-from nexura_guardrails.policy.core import GuardrailPolicy, PolicyAuditError, StageOutcome
+from nexura_guardrails.policy.core import (
+    GuardrailPolicy,
+    PolicyAuditError,
+    ShadowBudget,
+    StageOutcome,
+)
 from nexura_guardrails.policy.loader import (
     CHECK_TYPES,
     load_policy,
@@ -47,6 +52,7 @@ __all__ = [
     "PolicyAuditError",
     "PolicyError",
     "Rule",
+    "ShadowBudget",
     "StageOutcome",
     "When",
     "load_policy",

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 import logging
 import math
@@ -206,12 +207,73 @@ class TriggerWorker:
                     raise result
         return outcomes
 
+    async def run_pass(self, budget_seconds: float) -> dict[str, int]:
+        """One bounded pass: tick schedules, reclaim expired jobs, run what is due (MVP WP9).
+
+        For a caller that wakes the worker from outside (the Cloud Run trigger tick, while the
+        service may be scaled to zero), not for a worker that ``run_forever`` drives. Due
+        schedules are enqueued (the schedule compare-and-swap keeps one fire per due time on
+        every instance), expired jobs are reclaimed, then pending jobs are claimed (at most
+        ``max_jobs_per_tick`` per pass, ``max_concurrent_jobs`` at a time; a freed slot takes
+        the next job while time remains) and awaited until ``budget_seconds`` have passed.
+        Jobs still running then keep running in the background under their heartbeat; they
+        count as ``running``. Never raises for a job's failure (it is logged and counted).
+
+        Returns counts: ``enqueued`` (schedule jobs created), ``reclaimed``, ``started``,
+        ``completed``, ``failed`` and ``running``.
+        """
+        if not math.isfinite(budget_seconds) or budget_seconds <= 0:
+            raise ValueError("budget_seconds must be a positive finite number")
+        if self._background:
+            raise RuntimeError("run_pass is for a worker that run_forever does not drive")
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + budget_seconds
+        # Store calls of the schedule tick may wait on the network: off the event loop.
+        # So do the claims and reclaims (one short transaction each, but a round trip each).
+        enqueued = await asyncio.to_thread(self.manager.tick_schedules, self._now())
+        reclaimed = await self._reclaim_expired(offload=True)
+        started: list[asyncio.Task[JobOutcome]] = []
+        while True:
+            room = self.max_jobs_per_tick - len(started)
+            if room > 0 and loop.time() < deadline:
+                started.extend(await self._claim_and_spawn_offloaded(room))
+            waiting = [task for task in started if not task.done()]
+            remaining = deadline - loop.time()
+            if not waiting or remaining <= 0:
+                break
+            await asyncio.wait(waiting, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
+        counts = {"completed": 0, "failed": 0, "running": 0}
+        for task in started:
+            if not task.done():
+                counts["running"] += 1
+            elif task.cancelled():
+                continue  # lost its lease: the outcome belongs to another worker
+            elif task.exception() is not None:
+                counts["failed"] += 1  # logged by the task's done callback
+            elif task.result().status == "completed":
+                counts["completed"] += 1
+            else:
+                counts["failed"] += 1
+        return {
+            "enqueued": len(enqueued),
+            "reclaimed": len(reclaimed),
+            "started": len(started),
+            **counts,
+        }
+
+    async def drain(self) -> None:
+        """Wait up to ``shutdown_grace_seconds`` for running jobs, then cancel what is left."""
+        await self._drain()
+
     async def _housekeeping(self, now: float | None) -> list[DurableTriggerJob]:
         self.manager.tick_schedules(now)
         return await self._reclaim_expired()
 
-    async def _reclaim_expired(self) -> list[DurableTriggerJob]:
-        """Take over jobs whose queue lease expired (to continue their runs, or retry them)."""
+    async def _reclaim_expired(self, *, offload: bool = False) -> list[DurableTriggerJob]:
+        """Take over jobs whose queue lease expired (to continue their runs, or retry them).
+
+        ``offload`` runs the store call in a worker thread (``run_pass``).
+        """
         store = self.manager.store
         slots = max(0, self.max_concurrent_jobs - len(self._active))
         # Reclaimed retries get no heartbeat until spawned, so never reclaim more than the next
@@ -219,7 +281,8 @@ class TriggerWorker:
         budget = min(self.max_jobs_per_tick, slots) - len(self._reclaimed_backlog)
         if budget <= 0:
             return []
-        reclaimed = store.reclaim_expired_jobs(
+        reclaim = functools.partial(
+            store.reclaim_expired_jobs,
             self.worker_id,
             lease_seconds=self.lease_seconds,
             max_attempts=self.max_attempts,
@@ -227,6 +290,7 @@ class TriggerWorker:
             now=self._now(),
             exclude_job_ids=set(self._active),
         )
+        reclaimed = await asyncio.to_thread(reclaim) if offload else reclaim()
         retries: list[DurableTriggerJob] = []
         for job in reclaimed:
             if job.status == "failed":
@@ -258,7 +322,7 @@ class TriggerWorker:
 
         try:
             store = self.app_state.store
-            run = await store.get_run(run_id)
+            run = await store.get_run(run_id, payloads=False)  # status only
             if run is None or run.get("status") != "running":
                 return
             if await journal_decides(self.app_state, run_id):
@@ -278,26 +342,47 @@ class TriggerWorker:
 
     def _claim_and_spawn(self, limit: int) -> list[asyncio.Task[JobOutcome]]:
         """Claim up to ``limit`` jobs (bounded by free slots) and start one task per job."""
-        store = self.manager.store
-        slots = self.max_concurrent_jobs - len(self._active)
-        budget = min(limit, slots)
+        budget, claimed, reclaimed = self._take_backlog(limit)
+        if len(claimed) < budget:
+            claimed.extend(self._claim_pending(budget - len(claimed)))
+        return self._spawn(claimed, reclaimed)
+
+    async def _claim_and_spawn_offloaded(self, limit: int) -> list[asyncio.Task[JobOutcome]]:
+        """``_claim_and_spawn`` with the claim's store calls in a worker thread."""
+        budget, claimed, reclaimed = self._take_backlog(limit)
+        if len(claimed) < budget:
+            claimed.extend(await asyncio.to_thread(self._claim_pending, budget - len(claimed)))
+        return self._spawn(claimed, reclaimed)
+
+    def _take_backlog(self, limit: int) -> tuple[int, list[DurableTriggerJob], set[str]]:
+        """The claim budget (bounded by free slots) and the reclaimed jobs that fill it first."""
+        budget = min(limit, self.max_concurrent_jobs - len(self._active))
         claimed: list[DurableTriggerJob] = []
         reclaimed: set[str] = set()
         while self._reclaimed_backlog and len(claimed) < budget:
             backlogged = self._reclaimed_backlog.pop(0)
             reclaimed.add(backlogged.job_id)
             claimed.append(backlogged)
-        if len(claimed) < budget:
-            for pending in store.list_pending_jobs(limit=budget - len(claimed)):
-                job = store.claim_pending_job(
-                    pending.job_id,
-                    self.worker_id,
-                    lease_seconds=self.lease_seconds,
-                    now=self._now(),
-                )
-                if job is None:
-                    continue  # another worker won the claim
+        return budget, claimed, reclaimed
+
+    def _claim_pending(self, limit: int) -> list[DurableTriggerJob]:
+        """Claim up to ``limit`` pending jobs (store calls only; safe in a worker thread)."""
+        store = self.manager.store
+        claimed: list[DurableTriggerJob] = []
+        for pending in store.list_pending_jobs(limit=limit):
+            job = store.claim_pending_job(
+                pending.job_id,
+                self.worker_id,
+                lease_seconds=self.lease_seconds,
+                now=self._now(),
+            )
+            if job is not None:  # else another worker won the claim
                 claimed.append(job)
+        return claimed
+
+    def _spawn(
+        self, claimed: list[DurableTriggerJob], reclaimed: set[str]
+    ) -> list[asyncio.Task[JobOutcome]]:
         tasks: list[asyncio.Task[JobOutcome]] = []
         for job in claimed:
             task = asyncio.create_task(
@@ -464,7 +549,7 @@ class TriggerWorker:
         run_id = str(job.run_id)
         started.append(run_id)
         state = self.app_state
-        run = await state.store.get_run(run_id)
+        run = await state.store.get_run(run_id, payloads=False)  # status only
         if run is None:
             raise _JobRefused(f"Run '{run_id}' of job '{job.job_id}' was not found.")
         unfinished_recoveries = 0
@@ -514,7 +599,7 @@ class TriggerWorker:
                         )
             # The run lease is live: another process executes the run. Wait for it.
             await asyncio.sleep(self._lease_wait)
-            fresh = await state.store.get_run(run_id)
+            fresh = await state.store.get_run(run_id, payloads=False)
             if fresh is None:
                 raise _JobRefused(f"Run '{run_id}' of job '{job.job_id}' was not found.")
             run = fresh
@@ -527,7 +612,11 @@ class TriggerWorker:
         """``"live"`` / ``"recoverable"`` from the run's lease; None without a journal."""
         from nexura_agents.contracts.execution import ExecutionId
 
-        from nexura_runtime.service.run_liveness import run_journal, run_liveness
+        from nexura_runtime.service.run_liveness import (
+            liveness_options,
+            run_journal,
+            run_liveness,
+        )
 
         state = self.app_state
         journal = await run_journal(state)
@@ -545,7 +634,9 @@ class TriggerWorker:
             return "recoverable"
         if not rows:
             rows = [{"run_id": run_id, "journal_workspace": workspace, "owner_process": None}]
-        verdict: str = (await run_liveness(journal, rows)).get(run_id, "live")
+        verdict: str = (await run_liveness(journal, rows, **liveness_options(self.app_state))).get(
+            run_id, "live"
+        )
         return verdict
 
     async def run_forever(self, stop: asyncio.Event) -> None:

@@ -24,6 +24,17 @@ class CredentialNotFoundError(CredentialError):
         )
 
 
+class CredentialAlreadyExistsError(CredentialError):
+    """Raised by a create-only store when the workspace already has the credential."""
+
+    def __init__(self, credential_id: str, workspace_id: str) -> None:
+        super().__init__(
+            f"Credential '{credential_id}' already exists in workspace '{workspace_id}'.",
+            code=ContractErrorCode.POLICY_DENIED,
+            details={"credential_id": credential_id, "workspace_id": workspace_id},
+        )
+
+
 class CredentialAccessDeniedError(CredentialError):
     """Raised on cross-workspace access or unauthorized credential retrieval."""
 

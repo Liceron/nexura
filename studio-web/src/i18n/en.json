@@ -1,4 +1,60 @@
 {
+  "builderTest": {
+    "addStep": "Add step: {title}",
+    "changedDuringSave": "The canvas changed while saving. Save again before testing.",
+    "title": "Test",
+    "modules": "Modules",
+    "collapse": "Collapse",
+    "dragHint": "Drag a module onto the canvas, or use Add node.",
+    "dropHere": "Drop to add a step",
+    "input": "Input",
+    "output": "Output",
+    "openRun": "Open run",
+    "eventDetails": "Event details · model and usage when reported",
+    "reviewApproval": "Waiting for approval · Review approval",
+    "newConversation": "New conversation",
+    "costNote": "Tests run the saved workflow and may call real models with real costs. Model and usage details appear when reported by run events.",
+    "independentRuns": "Each send starts a separate run. Conversation history is kept here only.",
+    "conversation": "Test conversation",
+    "stop": "Stop",
+    "savePrompt": "Save your changes before testing this workflow.",
+    "resolveDraft": "Restore or discard the recovered draft before testing.",
+    "jsonMode": "Edit input as JSON",
+    "message": "Message",
+    "mappedTo": "Workflow input key:",
+    "saveAndTest": "Save and test",
+    "send": "Send",
+    "stream": {
+      "connecting": "Connecting to run…",
+      "connected": "Receiving run events",
+      "reconnecting": "Reconnecting to run…",
+      "closed": "Event stream closed",
+      "error": "Could not load run events"
+    }
+  },
+  "livefixUi": {
+    "cancelRun": "Cancel run",
+    "cancelRunTitle": "Cancel run {id}",
+    "cancelRunConfirm": "Cancel run “{id}”? It cannot be resumed. Cancelling does not resolve an unknown external effect.",
+    "reason": "Reason (optional)",
+    "keepRun": "Keep run",
+    "confirmCancellation": "Confirm cancellation",
+    "deleteCollection": "Delete collection",
+    "deleteCollectionConfirm": "Delete collection “{id}” and all its documents and index?",
+    "defaultCollectionEmptied": "The default collection will be emptied.",
+    "deleteEval": "Delete evaluation run",
+    "deleteBenchmarkConfirm": "Delete benchmark evaluation run “{id}”?",
+    "deleteStudioEvalConfirm": "Delete Studio evaluation run “{name}” ({id})?",
+    "savedBenchmarks": "Saved benchmark runs",
+    "registrations": "Palette registrations",
+    "registrationsHelp": "Tools added from OpenAPI and MCP. Removing a tool makes workflows and agents that use it fail validation.",
+    "refreshRegistrations": "Refresh registrations",
+    "noRegistrations": "No palette registrations.",
+    "removeRegistrationConfirm": "Remove palette registration “{id}” from {server}? Workflows and agents using it will fail validation.",
+    "remove": "Remove",
+    "savedUnverified": "Saved, not checked with the provider",
+    "providerUnchecked": "Not checked with the provider"
+  },
   "shell": {
     "openNavigation": "Open navigation",
     "settings": "Studio settings",
@@ -183,7 +239,7 @@
     "clearSearch": "Clear search",
     "noMatches": "No workflows matching",
     "empty": "No workflows found in this workspace.",
-    "emptyAction": "Create your first workflow or pick a ready-to-run template below.",
+    "emptyAction": "Create your first workflow or browse the Templates page.",
     "runsCount": "runs",
     "lastModified": "Updated",
     "revision": "Revision",
@@ -282,7 +338,8 @@
     "viewerHelp": "Viewers can see this page, but only admins and editors can add, revoke or delete credentials.",
     "tabsLabel": "Credential views",
     "optional": "optional",
-    "errorExists": "A credential with this reference already exists. Choose another reference."
+    "errorExists": "A credential with this reference already exists. Choose another reference.",
+    "errorBadId": "Use only letters, digits, \"_\", \".\" or \"-\" in the credential ID (no spaces)."
   },
   "integrations": {
     "title": "Tools",
@@ -969,6 +1026,9 @@
     "guardrailsPolicyUnnamed": "(unnamed)",
     "guardrailsPolicyRules": "{rules} rules.",
     "guardrailsPolicyExceptions": "Coordinator agents are refused while the policy checks model input or output.",
+    "guardrailsShadow": "Shadow mode: reporting only, nothing is blocked",
+    "guardrailsPolicyShadow": "Operator policy {name} (digest {digest}) runs in shadow mode: its decisions are written to the audit log and run events, but nothing is blocked, changed or sent for approval.",
+    "guardrailsShadowRules": "{count} rules run in shadow mode: they are reported, not applied.",
     "guardrailsStreamChecked": "Show at once is not available: this agent's answers are checked before they are shown."
   },
   "ui": {
@@ -1657,7 +1717,7 @@
     "workspaceHelp": "Changing workspace automatically aborts any active requests and purges scoped cache.",
     "endpointHelp": "Default loopback service uses /api with local proxy or http://127.0.0.1:8765",
     "authHelp": "Stored strictly in-memory during this session; never committed to persistent storage or bundles.",
-    "credentialIdHelp": "Unique identifier referenced by workflow tasks and models",
+    "credentialIdHelp": "Unique identifier referenced by workflow tasks and models. Letters, digits, \"_\", \".\" or \"-\".",
     "secretHelp": "Enter the secret to store on this service. Workflows use its reference.",
     "envHelp": "Optional host environment variable name to resolve if present",
     "mappingFor": "Input mapping for {port}",
@@ -1851,6 +1911,8 @@
     "authenticated-shared-service": "authenticated-shared-service"
   },
   "eventTitles": {
+    "RUN_WAITING_FOR_INPUT": "Waiting for input",
+    "RUN_PAUSED_EFFECT_UNKNOWN": "Paused: action outcome unknown",
     "NODE_STARTED": "Node Started",
     "NODE_COMPLETED": "Node Completed",
     "NODE_FAILED": "Node Execution Failed",

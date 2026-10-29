@@ -10,9 +10,9 @@ import sqlite3
 import threading
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Mapping
 from decimal import ROUND_CEILING, ROUND_HALF_UP, Decimal
-from typing import Any
+from typing import Any, TypeVar
 
 from nexura_agents.usage.errors import (
     BudgetExceededError,
@@ -32,6 +32,159 @@ from nexura_agents.usage.models import (
 _ZERO = Decimal("0")
 _MICRO_CENT = Decimal("0.00000001")
 
+#: Column order of ``entry_values`` (the ``usage_entries`` columns, shared with the Postgres
+#: ledger in ``nexura_postgres.usage``).
+ENTRY_COLUMNS = (
+    "entry_id",
+    "timestamp",
+    "workspace_id",
+    "run_id",
+    "parent_run_id",
+    "node_id",
+    "entry_type",
+    "entry_category",
+    "amount_usd",
+    "tokens",
+    "prompt_tokens",
+    "completion_tokens",
+    "usage_state",
+    "model_id",
+    "turns",
+    "tool_calls",
+    "reservation_id",
+    "provider_call_id",
+    "pricing_version",
+    "description",
+    "metadata_json",
+)
+#: Column order of ``reservation_values`` (the ``reservations`` columns).
+RESERVATION_COLUMNS = (
+    "reservation_id",
+    "workspace_id",
+    "run_id",
+    "parent_run_id",
+    "node_id",
+    "model_id",
+    "estimated_tokens",
+    "estimated_cost_usd",
+    "status",
+    "created_at",
+    "timeout_seconds",
+    "provider_call_id",
+    "pricing_version",
+    "metadata_json",
+)
+
+
+def entry_values(entry: LedgerEntry) -> tuple[Any, ...]:
+    """A ledger entry as stored: ``ENTRY_COLUMNS`` order, Decimal as text, metadata as JSON."""
+    return (
+        entry.entry_id,
+        entry.timestamp,
+        entry.workspace_id,
+        entry.run_id,
+        entry.parent_run_id,
+        entry.node_id,
+        entry.entry_type,
+        entry.entry_category,
+        str(entry.amount_usd),
+        entry.tokens,
+        entry.prompt_tokens,
+        entry.completion_tokens,
+        entry.usage_state,
+        entry.model_id,
+        entry.turns,
+        entry.tool_calls,
+        entry.reservation_id,
+        entry.provider_call_id,
+        entry.pricing_version,
+        entry.description,
+        json.dumps(entry.metadata),
+    )
+
+
+def reservation_values(res: Reservation) -> tuple[Any, ...]:
+    """A reservation as stored, in ``RESERVATION_COLUMNS`` order."""
+    return (
+        res.reservation_id,
+        res.workspace_id,
+        res.run_id,
+        res.parent_run_id,
+        res.node_id,
+        res.model_id,
+        res.estimated_tokens,
+        str(res.estimated_cost_usd),
+        res.status,
+        res.created_at,
+        res.timeout_seconds,
+        res.provider_call_id,
+        res.pricing_version,
+        json.dumps(res.metadata),
+    )
+
+
+def entry_from_row(r: Mapping[str, Any]) -> LedgerEntry:
+    """A stored ``usage_entries`` row (as a mapping) back as a ``LedgerEntry``."""
+    return LedgerEntry(
+        entry_id=r["entry_id"],
+        timestamp=r["timestamp"],
+        workspace_id=r["workspace_id"],
+        run_id=r["run_id"],
+        parent_run_id=r["parent_run_id"],
+        node_id=r["node_id"],
+        entry_type=r["entry_type"],
+        entry_category=r.get("entry_category", "provider_call"),
+        amount_usd=Decimal(r["amount_usd"]),
+        tokens=r["tokens"],
+        prompt_tokens=r["prompt_tokens"],
+        completion_tokens=r["completion_tokens"],
+        usage_state=r["usage_state"],
+        model_id=r["model_id"],
+        turns=r["turns"],
+        tool_calls=r["tool_calls"],
+        reservation_id=r["reservation_id"],
+        provider_call_id=r.get("provider_call_id"),
+        pricing_version=r.get("pricing_version"),
+        description=r["description"],
+        metadata=json.loads(r["metadata_json"]),
+    )
+
+
+def reservation_from_row(r: Mapping[str, Any]) -> Reservation:
+    """A stored ``reservations`` row (as a mapping) back as a ``Reservation``."""
+    return Reservation(
+        reservation_id=r["reservation_id"],
+        workspace_id=r["workspace_id"],
+        run_id=r["run_id"],
+        parent_run_id=r["parent_run_id"],
+        node_id=r["node_id"],
+        model_id=r["model_id"],
+        estimated_tokens=r["estimated_tokens"],
+        estimated_cost_usd=Decimal(r["estimated_cost_usd"]),
+        status=r["status"],
+        created_at=r["created_at"],
+        timeout_seconds=r["timeout_seconds"],
+        provider_call_id=r.get("provider_call_id"),
+        pricing_version=r.get("pricing_version"),
+        metadata=json.loads(r["metadata_json"]),
+    )
+
+
+_T = TypeVar("_T")
+
+
+async def ledger_call(  # noqa: UP047 - keeps Python 3.11 support
+    ledger: Any, fn: Callable[..., _T], /, *args: Any, **kwargs: Any
+) -> _T:
+    """Run ``fn(*args, **kwargs)`` (a ledger operation, or a budget call that makes one) from
+    async code: in a worker thread when ``ledger.blocking_io`` (context variables are copied),
+    inline otherwise."""
+    if getattr(ledger, "blocking_io", False):
+        import asyncio  # not at import time: the core import must not load asyncio
+
+        return await asyncio.to_thread(fn, *args, **kwargs)
+    return fn(*args, **kwargs)
+
 
 class UsageLedger:
     """Thread-safe and asyncio-safe usage ledger.
@@ -39,6 +192,12 @@ class UsageLedger:
     Supports in-memory tracking or persistent SQLite storage with WAL mode.
     Guarantees atomic reservations preventing overspend under concurrent execution.
     """
+
+    #: True when an operation may wait on other processes or instances over the network (the
+    #: Postgres ledger's database-wide lock). Async callers then run ledger operations in a
+    #: worker thread (:func:`ledger_call`), so the event loop never waits on that lock. The
+    #: SQLite and in-memory ledgers keep running inline, as before.
+    blocking_io = False
 
     def __init__(self, db_path: str | None = None) -> None:
         self.db_path = db_path
@@ -193,55 +352,13 @@ class UsageLedger:
         with self._connection() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute("SELECT * FROM usage_entries ORDER BY timestamp ASC").fetchall()
-            self._entries = []
-            for row in rows:
-                r = dict(row)
-                self._entries.append(
-                    LedgerEntry(
-                        entry_id=r["entry_id"],
-                        timestamp=r["timestamp"],
-                        workspace_id=r["workspace_id"],
-                        run_id=r["run_id"],
-                        parent_run_id=r["parent_run_id"],
-                        node_id=r["node_id"],
-                        entry_type=r["entry_type"],
-                        entry_category=r.get("entry_category", "provider_call"),
-                        amount_usd=Decimal(r["amount_usd"]),
-                        tokens=r["tokens"],
-                        prompt_tokens=r["prompt_tokens"],
-                        completion_tokens=r["completion_tokens"],
-                        usage_state=r["usage_state"],
-                        model_id=r["model_id"],
-                        turns=r["turns"],
-                        tool_calls=r["tool_calls"],
-                        reservation_id=r["reservation_id"],
-                        provider_call_id=r.get("provider_call_id"),
-                        pricing_version=r.get("pricing_version"),
-                        description=r["description"],
-                        metadata=json.loads(r["metadata_json"]),
-                    )
-                )
+            self._entries = [entry_from_row(dict(row)) for row in rows]
 
             res_rows = conn.execute("SELECT * FROM reservations").fetchall()
             self._reservations = {}
             for row in res_rows:
-                r = dict(row)
-                self._reservations[r["reservation_id"]] = Reservation(
-                    reservation_id=r["reservation_id"],
-                    workspace_id=r["workspace_id"],
-                    run_id=r["run_id"],
-                    parent_run_id=r["parent_run_id"],
-                    node_id=r["node_id"],
-                    model_id=r["model_id"],
-                    estimated_tokens=r["estimated_tokens"],
-                    estimated_cost_usd=Decimal(r["estimated_cost_usd"]),
-                    status=r["status"],
-                    created_at=r["created_at"],
-                    timeout_seconds=r["timeout_seconds"],
-                    provider_call_id=r.get("provider_call_id"),
-                    pricing_version=r.get("pricing_version"),
-                    metadata=json.loads(r["metadata_json"]),
-                )
+                res = reservation_from_row(dict(row))
+                self._reservations[res.reservation_id] = res
 
     def _save_entry_to_sqlite(self, entry: LedgerEntry) -> None:
         if not self.db_path:
@@ -257,29 +374,7 @@ class UsageLedger:
                     provider_call_id, pricing_version, description, metadata_json
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """,
-                (
-                    entry.entry_id,
-                    entry.timestamp,
-                    entry.workspace_id,
-                    entry.run_id,
-                    entry.parent_run_id,
-                    entry.node_id,
-                    entry.entry_type,
-                    entry.entry_category,
-                    str(entry.amount_usd),
-                    entry.tokens,
-                    entry.prompt_tokens,
-                    entry.completion_tokens,
-                    entry.usage_state,
-                    entry.model_id,
-                    entry.turns,
-                    entry.tool_calls,
-                    entry.reservation_id,
-                    entry.provider_call_id,
-                    entry.pricing_version,
-                    entry.description,
-                    json.dumps(entry.metadata),
-                ),
+                entry_values(entry),
             )
 
     def _save_reservation_to_sqlite(self, res: Reservation) -> None:
@@ -294,22 +389,7 @@ class UsageLedger:
                     created_at, timeout_seconds, provider_call_id, pricing_version, metadata_json
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """,
-                (
-                    res.reservation_id,
-                    res.workspace_id,
-                    res.run_id,
-                    res.parent_run_id,
-                    res.node_id,
-                    res.model_id,
-                    res.estimated_tokens,
-                    str(res.estimated_cost_usd),
-                    res.status,
-                    res.created_at,
-                    res.timeout_seconds,
-                    res.provider_call_id,
-                    res.pricing_version,
-                    json.dumps(res.metadata),
-                ),
+                reservation_values(res),
             )
 
     def get_status(

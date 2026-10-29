@@ -5,6 +5,7 @@ import { useState, useId, useRef } from 'react';
 import { Card } from '../../components/Card';
 import { Button } from '../../components/Button';
 import { RunStatus } from './RunStatus';
+import { CancelRunButton } from './CancelRunButton';
 import { WorkflowTabs } from '../../components/WorkflowTabs';
 import { useApi } from '../../api/context';
 import type { PendingApprovalItem } from '../approvals/types';
@@ -53,7 +54,6 @@ export function RunVisualizer({
     error,
     nodeStatuses,
     replaySteps,
-    cancelRun,
     decideApproval,
     provideInput,
     refetchSnapshot,
@@ -62,7 +62,6 @@ export function RunVisualizer({
   const { t } = useI18n();
   const [activeTab, setActiveTab] = useState<'timeline' | 'replay' | 'snapshot' | 'diagnostics' | 'history' | 'subruns' | 'traces'>('timeline');
   const [currentStepIndex, setCurrentStepIndex] = useState<number>(0);
-  const [isCancelling, setIsCancelling] = useState(false);
   const [reviewItem, setReviewItem] = useState<PendingApprovalItem | null>(null);
   const { connection } = useApi();
   const panelId = useId();
@@ -81,18 +80,6 @@ export function RunVisualizer({
         nodeStatuses,
         activeNodeId: step.nodeId || null,
       });
-    }
-  };
-
-  const handleCancel = async () => {
-    if (!window.confirm(t('runConsole.confirmCancel'))) {
-      return;
-    }
-    setIsCancelling(true);
-    try {
-      await cancelRun('Cancelled from Studio Run Console');
-    } finally {
-      setIsCancelling(false);
     }
   };
 
@@ -125,10 +112,6 @@ export function RunVisualizer({
 
   if (!run) return null;
 
-  const isActive = run.status === 'running' ||
-    run.status === 'pending_approval' ||
-    run.status === 'waiting_for_input';
-
   const getStreamBadge = () => {
     switch (streamStatus) {
       case 'connected':
@@ -159,8 +142,7 @@ export function RunVisualizer({
         <div className="inspection-actions">
           {getStreamBadge()}
           {!forkedFrom && <SaveAsTestButton runId={run.run_id} workflowId={run.workflow_id} status={run.status} />}
-          {isActive && <Button variant="ghost" className="workflow-danger-action" size="sm" loading={isCancelling}
-            onClick={handleCancel} title={t('ui.haltActiveWorkflowRunOnServer')}>{t('ui.cancelRun')}</Button>}
+          <CancelRunButton key={run.run_id} runId={run.run_id} status={run.status} onCancelled={refetchSnapshot} />
           <Button variant="ghost" size="sm" onClick={refetchSnapshot} title={t('ui.fetchLatestDatabaseSnapshot')}>{t('ui.refresh')}</Button>
           <Button variant="ghost" size="sm" onClick={onClose} aria-label={t('ui.closeRunConsole')}><Icon name="close" /></Button>
         </div>

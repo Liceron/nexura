@@ -59,9 +59,9 @@ function inputText(v: unknown): string {
   return typeof v === 'string' ? v : JSON.stringify(v ?? '');
 }
 
-export function StudioEvalsPanel() {
+export function StudioEvalsPanel({ agentId = '' }: { agentId?: string } = {}) {
   const { t } = useI18n();
-  const api = useStudioEvals();
+  const api = useStudioEvals(agentId);
   const [section, setSection] = useState<Section>('datasets');
   const sectionPanelId = `${useId()}-section`;
 
@@ -85,7 +85,7 @@ export function StudioEvalsPanel() {
 
   // ---- run state
   const [runDatasetId, setRunDatasetId] = useState('');
-  const [targetKey, setTargetKey] = useState('');
+  const [targetKey, setTargetKey] = useState(agentId ? `agent:agent:${agentId}` : '');
   const [outputKey, setOutputKey] = useState('');
   const [repeats, setRepeats] = useState(1);
   const [label, setLabel] = useState('');
@@ -164,6 +164,7 @@ export function StudioEvalsPanel() {
   const saveDataset = async () => {
     setNotice(null);
     const errors = validateCases(cases, t);
+    if (!cases.length) errors.unshift('Add at least one test case before saving the dataset.');
     if (!datasetId.trim()) errors.unshift('Dataset id is required.');
     if (errors.length) {
       setFormErrors(errors);
@@ -513,9 +514,9 @@ export function StudioEvalsPanel() {
                         <Button size="sm" data-testid={`studio-evals-edit-${c.name}`} onClick={() => setEditing({ index: i, draft: draftOf(c) })}>
                           {t('evalsStudio.editCase')}
                         </Button>{' '}
-                        <Button size="sm" variant="danger" data-testid={`studio-evals-delete-${c.name}`} onClick={() => setCases(cases.filter((_, j) => j !== i))}>
+                        <InlineConfirm consequence={`Delete test case “${c.name}”?`}><Button size="sm" variant="danger" data-testid={`studio-evals-delete-${c.name}`} onClick={() => setCases(cases.filter((_, j) => j !== i))}>
                           {t('common.delete')}
-                        </Button>
+                        </Button></InlineConfirm>
                       </td>
                     </tr>
                   ))}
@@ -607,6 +608,15 @@ export function StudioEvalsPanel() {
               ))}
             </select>
           </label>
+          {api.run && <InlineConfirm key={api.run.run_id} consequence={t('livefixUi.deleteStudioEvalConfirm').replace('{name}', api.run.label || api.run.run_id).replace('{id}', api.run.run_id)}>
+            <Button variant="danger" size="sm" disabled={api.busy} onClick={async () => {
+              const id = api.run!.run_id;
+              if (await api.deleteRun(id)) {
+                if (baseId === id) setBaseId('');
+                if (candId === id) setCandId('');
+              }
+            }}>{t('livefixUi.deleteEval')}</Button>
+          </InlineConfirm>}
           {!api.run?.report && <span style={{ fontSize: 13 }}>{t('evalsStudio.noRuns')}</span>}
           {api.run?.report && (
             <>

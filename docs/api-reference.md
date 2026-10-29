@@ -1391,7 +1391,7 @@ Args:
 
 ### `AgentMCPServer`
 
-class `AgentMCPServer(name: 'str', *, agents: 'Sequence[Agent | Team]' = (), tools: 'Sequence[Tool]' = (), deps: 'Any' = None, runner: 'Any' = None, version: 'str' = '0.4.0', list_ttl_ms: 'int' = 60000, instructions: 'str | None' = None) -> 'None'`
+class `AgentMCPServer(name: 'str', *, agents: 'Sequence[Agent | Team]' = (), tools: 'Sequence[Tool]' = (), deps: 'Any' = None, runner: 'Any' = None, version: 'str' = '0.4.1', list_ttl_ms: 'int' = 60000, instructions: 'str | None' = None) -> 'None'`
 
 ~~~text
 Expose agents and tools as an MCP server.
@@ -2969,6 +2969,8 @@ remain caller-owned. DSNs must name an explicitly configured database.
 
 - `close(self) -> 'None'`
   Close only a pool created by this store; supplied pools remain caller-owned.
+- `get(self, execution_id: 'ExecutionId') -> 'ExecutionSnapshot'`
+  The run and its journals, read in one statement (one snapshot).
 
 ## Execution Contract v1 (`nexura_agents.contracts`, being implemented)
 
@@ -4046,6 +4048,8 @@ Binds named identifiers to trusted Python handler functions or BaseModules.
   Register a Python callable or BaseModule by name.
 - `register_handler(self, name: 'str', *, effect: 'EffectClass | str | None' = None, reconcile: 'Callable[..., Any] | None' = None) -> 'Callable[[Callable[..., Any]], Callable[..., Any]]'`
   Decorator to register a handler callable (``effect=`` as in :meth:`register`).
+- `unregister(self, name: 'str') -> 'Callable[..., Any] | BaseModule | None'`
+  Remove the handler or module registered as ``name``; returns it (None if absent).
 
 ### `WorkflowEngine`
 

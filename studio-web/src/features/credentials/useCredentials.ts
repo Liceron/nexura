@@ -110,10 +110,11 @@ export function useCredentials() {
   const verifyCredential = useCallback(
     async (credentialId: string): Promise<VerificationResult> => {
       try {
-        const res = await manager.client.credentials.verify(credentialId);
+        const res: VerificationResult = await manager.client.credentials.verify(credentialId);
         const result: VerificationResult = {
           credential_id: res.credential_id,
-          status: res.status,
+          status: res.status === 'valid' ? 'stored' : res.status,
+          checked_with_provider: res.checked_with_provider ?? false,
           message: res.message,
           checked_at: res.checked_at,
         };
@@ -140,6 +141,7 @@ export function useCredentials() {
       setError(null);
       try {
         await manager.client.credentials.revoke(credentialId);
+        setVerificationMap(prev => { const next = { ...prev }; delete next[credentialId]; return next; });
         await loadCredentials();
       } catch (err: any) {
         setError(err?.message || t('validationMessages.credentialRevoke'));

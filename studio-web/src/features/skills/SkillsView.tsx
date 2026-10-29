@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Liceron
+import { useAfterRender } from '../../app/useAfterRender';
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useApi } from '../../api/context';
 import { Alert } from '../../components/Alert';
@@ -44,6 +45,7 @@ export function SkillsView() {
   const ids = useId();
   const listRef = useRef<HTMLUListElement>(null);
   const detailHeadingRef = useRef<HTMLHeadingElement>(null);
+  const afterRender = useAfterRender();
   // On phones the list is hidden once a row opens, so focus follows into the detail pane.
   const compact = useCompactLayout();
   const compactRef = useRef(compact);
@@ -73,12 +75,12 @@ export function SkillsView() {
         const d = await versions(name);
         setDetail(d);
         setVersion(keepVersion ?? d.latest_version);
-        if (compactRef.current && keepVersion === undefined) requestAnimationFrame(() => detailHeadingRef.current?.focus());
+        if (compactRef.current && keepVersion === undefined) afterRender(() => detailHeadingRef.current?.focus());
       } catch (err: unknown) {
         setActionError(formatApiError(err, t));
       }
     },
-    [versions],
+    [versions, afterRender],
   );
 
   const shown: SkillVersionView | undefined = detail?.versions.find((v) => v.version === version);
@@ -134,7 +136,7 @@ export function SkillsView() {
 
   const backToList = () => {
     setPhonePane('list');
-    requestAnimationFrame(() => listRef.current?.querySelector<HTMLButtonElement>('[aria-pressed="true"]')?.focus());
+    afterRender(() => listRef.current?.querySelector<HTMLButtonElement>('[aria-pressed="true"]')?.focus());
   };
   const viewing = Boolean(detail && shown);
 

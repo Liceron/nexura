@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from _service_state import service_usage_ledger
 from nexura_agents import (
     Agent,
     AgentHooks,
@@ -792,7 +793,7 @@ async def test_a_reclaimed_trigger_job_settles_its_run_reservations(tmp_path: Pa
             trigger={"job_id": "j1", "attempt": 1},
         )
     run_id = holder["run_id"]
-    ledger = UsageLedger(str(tmp_path / "svc.sqlite3"))
+    ledger = service_usage_ledger(tmp_path / "svc.sqlite3")
     (left,) = ledger.open_reservations("default", run_id)
     assert left.metadata["step_key"] == "b#2"
 
@@ -801,7 +802,7 @@ async def test_a_reclaimed_trigger_job_settles_its_run_reservations(tmp_path: Pa
     outcomes = await TriggerWorker(state, worker_id="w2").run_once()
     assert [(o.status, o.run_id) for o in outcomes] == [("completed", run_id)]
     assert calls["pay"] == 1  # non_idempotent: paused effect_unknown, not repeated
-    ledger = UsageLedger(str(tmp_path / "svc.sqlite3"))
+    ledger = service_usage_ledger(tmp_path / "svc.sqlite3")
     assert ledger.open_reservations("default", run_id, include_unlinked=True) == []
     entry = next(
         e

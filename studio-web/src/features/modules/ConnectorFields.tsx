@@ -31,7 +31,7 @@ export function OperationList({ operations }: { operations: ConnectorOperation[]
       <div style={{ fontWeight: 600, color: 'var(--text-secondary)' }}>{t('connectors.operationsHeading')}</div>
       <ul style={{ margin: '2px 0 0 0', padding: 0, listStyle: 'none' }}>
         {operations.map((op) => (
-          <li key={op.operation} data-testid={`operation-${op.operation}`}>
+          <li key={op.operation} data-testid={`operation-item-${op.operation}`}>
             <code>{op.operation}</code>{' '}
             <span
               data-testid={`operation-marker-${op.operation}`}

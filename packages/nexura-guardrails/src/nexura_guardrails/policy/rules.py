@@ -29,6 +29,7 @@ __all__ = [
     "ACTIONS",
     "AGENT_STAGES",
     "EFFECTS",
+    "ENFORCEMENT_MODES",
     "LOCAL_ORIGINS",
     "POLICY_STAGES",
     "SEVERITY",
@@ -41,6 +42,7 @@ __all__ = [
 
 PolicyStage = Literal["input", "model_input", "model_output", "tool_input", "tool_output", "output"]
 Action = Literal["allow", "block", "scrub", "require_approval", "fail"]
+Enforcement = Literal["enforce", "shadow"]
 
 POLICY_STAGES: tuple[str, ...] = (
     "input",
@@ -54,6 +56,8 @@ TOOL_STAGES = frozenset({"tool_input", "tool_output"})
 AGENT_STAGES = frozenset({"input", "output"})
 SCRUB_STAGES = frozenset({"model_output", "tool_output", "output"})
 ACTIONS: tuple[str, ...] = ("allow", "block", "scrub", "require_approval", "fail")
+#: ``enforce`` applies a rule's action; ``shadow`` evaluates and reports it, never applies it.
+ENFORCEMENT_MODES: tuple[str, ...] = ("enforce", "shadow")
 SEVERITY: Mapping[str, int] = {
     "allow": 0,
     "scrub": 1,
@@ -407,7 +411,10 @@ class Rule:
     every matching item; with checks it applies when they do not allow the text (``mode``
     ``"tiered"``, the default, runs them in order and stops at the first finding;
     ``"parallel"`` runs them together). ``on_error`` (``"block"`` or ``"allow"``) overrides
-    the policy's for this rule's checks.
+    the policy's for this rule's checks. ``enforcement`` (``"enforce"`` or ``"shadow"``)
+    overrides the policy's ``mode`` for this rule: a shadow rule is evaluated and reported
+    (audit, decision events) but its action is never applied. ``None`` (the default) follows
+    the policy. (``mode`` is taken: it says how a rule's checks run.)
 
     Constraints, checked here: ``scrub`` needs checks and only applies to
     ``model_output``, ``tool_output`` and ``output``; ``require_approval`` applies only to
@@ -421,6 +428,7 @@ class Rule:
     checks: tuple[str, ...]
     mode: str
     on_error: str | None
+    enforcement: str | None
 
     def __init__(
         self,
@@ -432,6 +440,7 @@ class Rule:
         checks: str | Iterable[str] | None = None,
         mode: Literal["tiered", "parallel"] = "tiered",
         on_error: Literal["block", "allow"] | None = None,
+        enforcement: Enforcement | None = None,
     ) -> None:
         if not isinstance(id, str) or not _RULE_ID.fullmatch(id):
             raise PolicyError(
@@ -451,8 +460,18 @@ class Rule:
         names = _strings(checks if checks is not None else check, "check name", where)
         if len(set(names)) != len(names):
             raise PolicyError("a check is named twice.", where)
+        if mode in ENFORCEMENT_MODES:
+            raise PolicyError(
+                f"a rule's mode says how its checks run ('tiered' or 'parallel'); for a "
+                f"{mode} rule use enforcement: {mode} (Rule(..., enforcement={mode!r})).",
+                where,
+            )
         if mode not in ("tiered", "parallel"):
             raise PolicyError("mode must be 'tiered' or 'parallel'.", where)
+        if enforcement is not None and enforcement not in ENFORCEMENT_MODES:
+            raise PolicyError(
+                f"unknown enforcement {enforcement!r}; use 'enforce' or 'shadow'.", where
+            )
         if on_error not in (None, "block", "allow"):
             raise PolicyError("on_error must be 'block' or 'allow'.", where)
         stages = set(when.stage)
@@ -489,6 +508,7 @@ class Rule:
             ("checks", names),
             ("mode", mode),
             ("on_error", on_error),
+            ("enforcement", enforcement),
         ):
             object.__setattr__(self, key, value)
 
@@ -509,4 +529,6 @@ class Rule:
             out["mode"] = self.mode
         if self.on_error is not None:
             out["on_error"] = self.on_error
+        if self.enforcement is not None:
+            out["enforcement"] = self.enforcement  # only when set: older digests stay the same
         return out

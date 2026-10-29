@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Liceron
 import { test, expect, type Page } from '@playwright/test';
 import { startTestCluster, TestCluster } from './harness';
 import { REGISTRY_TEMPLATES } from '../../src/features/workflows/templates';
@@ -87,7 +89,7 @@ test.describe('Graph Editor with Runtime-Faithful Serialization (F04)', () => {
     await expect(page.getByTestId('node-approval_gate').getByText('Needs approval')).toBeVisible();
 
     // Click "Validate" button on canvas toolbar
-    const validateBtn = page.getByRole('button', { name: 'Validate' });
+    const validateBtn = page.getByRole('button', { name: 'Validate', exact: true });
     await validateBtn.click();
 
     // Expect authoritative validation passed banner
@@ -107,7 +109,7 @@ test.describe('Graph Editor with Runtime-Faithful Serialization (F04)', () => {
     await expect(revBadge).toContainText('Revision: 1');
 
     // 1. Open Module Drawer to add step without drag-only requirement
-    const addStepBtn = page.getByRole('button', { name: /Add step/i });
+    const addStepBtn = page.getByRole('button', { name: 'Add step', exact: true });
     await addStepBtn.click();
     await page.getByRole('button', { name: 'Standard', exact: true }).click();
 
@@ -150,7 +152,7 @@ test.describe('Graph Editor with Runtime-Faithful Serialization (F04)', () => {
     await defaultTransitionSelect.selectOption('agent_assist');
 
     // Validate the updated graph
-    const validateBtn = page.getByRole('button', { name: 'Validate' });
+    const validateBtn = page.getByRole('button', { name: 'Validate', exact: true });
     await validateBtn.click();
     await expect(page.getByText(/Workflow is valid/i)).toBeVisible();
 
@@ -214,13 +216,16 @@ test.describe('Graph Editor with Runtime-Faithful Serialization (F04)', () => {
 
     // Click "Delete Node" button inside inspector
     const deleteBtn = inspector.getByRole('button', { name: 'Delete Node' });
+    // Deleting a step asks first (live-pass fix); accept it.
+    const confirmed = page.waitForEvent('dialog').then(async dialog => { expect(dialog.message()).toContain('manual_review_step'); await dialog.accept(); });
     await deleteBtn.click();
+    await confirmed;
 
     // Node is removed from canvas
     await expect(page.getByTestId('node-manual_review_step')).not.toBeVisible();
 
     // Validate graph - should pass cleanly with zero dangling transitions
-    const validateBtn = page.getByRole('button', { name: 'Validate' });
+    const validateBtn = page.getByRole('button', { name: 'Validate', exact: true });
     await validateBtn.click();
     await expect(page.getByText(/Workflow is valid/i)).toBeVisible();
 

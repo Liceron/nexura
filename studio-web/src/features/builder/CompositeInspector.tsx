@@ -387,6 +387,7 @@ export function CompositeInspector({ nodeId, data, onUpdate }: Props) {
                   type="button"
                   aria-label={t('builder.reducerRemove', { key })}
                   onClick={() => {
+                    if (!window.confirm(`Remove reducer “${key}”?`)) return;
                     const next = { ...(data.reducers || {}) };
                     delete next[key];
                     setReducers(next);

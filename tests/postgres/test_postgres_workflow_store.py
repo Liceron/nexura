@@ -327,7 +327,12 @@ def test_a_store_moves_to_a_new_event_loop(schema: Schema) -> None:
 # ------------------------------------------------------------------ the service
 
 
-def test_service_keeps_workflow_state_in_postgres(schema: Schema, tmp_path: Path) -> None:
+def test_service_keeps_workflow_state_in_postgres(
+    schema: Schema, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The A6 option (workflow state in Postgres, runs in SQLite): no service database_url,
+    # under any --service-backend (with one, workflow state must be that database: MVP WP3).
+    monkeypatch.delenv("NEXURA_DATABASE_URL", raising=False)
     db = tmp_path / "svc.sqlite3"
     repo = WorkspaceRepository()
     repo.create_workspace("wsA", "A", owner_id="local-owner")

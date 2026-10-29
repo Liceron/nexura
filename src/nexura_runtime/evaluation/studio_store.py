@@ -23,7 +23,13 @@ MAX_RUNS_PER_WORKSPACE = 500
 
 
 class StudioEvalStore:
-    """Datasets (cases with expected output/trajectory) and run reports."""
+    """Datasets (cases with expected output/trajectory) and run reports.
+
+    ``nexura_postgres.PostgresStudioEvalStore`` is the Postgres twin (MVP WP8).
+    """
+
+    #: Local file I/O: async callers may run calls inline (Postgres: a network round trip).
+    blocking_io = False
 
     def __init__(self, db_path: str = ":memory:") -> None:
         self._lock = threading.Lock()

@@ -97,6 +97,8 @@ test.describe('Accessibility, Bilingual UX & Performance (F14)', () => {
     await expect(createBtn).toBeVisible();
     await createBtn.click();
 
+    // New workflow starts blank; this test checks the order-support template's nodes.
+    await page.locator('input[name="template"][value="order-triage-support"]').check();
     const nameInput = page.getByLabel(/Workflow Name/i);
     await nameInput.fill('अभिगम्यता परीक्षण कार्यप्रवाह');
     const submitBtn = page.getByTestId('create-workflow-submit-btn');

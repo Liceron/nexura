@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Liceron
 import { test, expect, Page } from '@playwright/test';
 import { startTestCluster, TestCluster } from './harness';
 
@@ -80,7 +82,7 @@ test('parallel step: create, edit, save, reload', async ({ page }) => {
   await inspector(page).getByRole('button', { name: 'Add reducer' }).click();
   await expect(inspector(page).getByLabel('Remove reducer results')).toBeVisible();
 
-  await page.getByRole('button', { name: 'Validate' }).click();
+  await page.getByRole('button', { name: 'Validate', exact: true }).click();
   await expect(page.getByText(/Workflow is valid/i)).toBeVisible();
   await save(page, 2);
 

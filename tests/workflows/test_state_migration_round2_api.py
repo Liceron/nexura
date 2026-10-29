@@ -507,7 +507,8 @@ def test_run_list_without_batch_identity_reads(
         workflow, run_id = start_saved(tc)
         update_saved(tc, workflow, definition(2))
         assert tc.post(f"/api/v1/runs/{run_id}/migrate", json={}).status_code == 200
-        monkeypatch.delattr(SQLiteWorkflowStore, "run_identities")
+        # The service's checkpoint store class (SQLite, or Postgres under --service-backend).
+        monkeypatch.delattr(type(app.state.store.checkpoint_store), "run_identities")
         assert not hasattr(app.state.store.checkpoint_store, "run_identities")
         listed = tc.get("/api/v1/runs")
         assert listed.status_code == 200, listed.text

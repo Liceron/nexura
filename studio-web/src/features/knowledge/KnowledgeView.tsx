@@ -10,7 +10,7 @@ import type { HybridCitationItem } from './types';
 import { HighlightedSnippet } from './HighlightedSnippet';
 import { safeHref } from './highlight';
 import { formatBytes, ALLOWED_EXTENSIONS } from './fileUpload';
-import { useI18n } from '../../i18n';
+import { useI18n, languageChoiceEnabled } from '../../i18n';
 import { Button } from '../../components/Button';
 import { Spinner } from '../../components/Spinner';
 import { PageHeader, PageLayout } from '../../components/PageHeader';
@@ -39,6 +39,7 @@ export function KnowledgeView() {
     createCollection,
     uploadDocument,
     deleteDocument,
+    deleteCollection,
     runRetrieval,
     runAnswer,
     clearError,
@@ -157,6 +158,9 @@ export function KnowledgeView() {
                 ))}
               </select>
             </div>
+            <InlineConfirm key={selectedCollection} consequence={`${t('livefixUi.deleteCollectionConfirm').replace('{id}', selectedCollection)}${selectedCollection === 'default' ? ` ${t('livefixUi.defaultCollectionEmptied')}` : ''}`}>
+              <Button variant="danger" size="sm" onClick={() => deleteCollection(selectedCollection)}>{t('livefixUi.deleteCollection')}</Button>
+            </InlineConfirm>
             <Button
               ref={newCollectionRef}
               variant="ghost"
@@ -181,6 +185,7 @@ export function KnowledgeView() {
                   onChange={(e) => setNewCollectionName(e.target.value)}
                 />
               </div>
+              {newCollectionName.trim() && <p role="status" className="resource-help">Collection ID: <code>{newCollectionName.toLowerCase().replace(/[^a-z0-9_-]/g, '-')}</code></p>}
               <Button type="submit" disabled={!newCollectionName.trim()}>
                 {t('knowledge.createCollection')}
               </Button>
@@ -316,9 +321,9 @@ export function KnowledgeView() {
                     <Button type="button" size="sm" variant="ghost" onClick={() => handleSelectSample('sample-en-arch')} data-testid="sample-en-btn">
                       {t('ui.englishSdk')}
                     </Button>
-                    <Button type="button" size="sm" variant="ghost" onClick={() => handleSelectSample('sample-hi-guide')} data-testid="sample-hi-btn">
+                    {languageChoiceEnabled() && <Button type="button" size="sm" variant="ghost" onClick={() => handleSelectSample('sample-hi-guide')} data-testid="sample-hi-btn">
                       {t('ui.guide')}
-                    </Button>
+                    </Button>}
                   </div>
                 </div>
 

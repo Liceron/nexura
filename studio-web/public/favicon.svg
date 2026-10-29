@@ -1,0 +1,2 @@
+<!-- SPDX-License-Identifier: MIT; Copyright (c) 2026 Liceron -->
+<svg xmlns="http://www.w3.org/2000/svg" color="#175d45" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="Nexura"><rect width="24" height="24" rx="4" fill="#f2f7f5" stroke="none"/><path class="nexura-path nexura-path--before" pathLength="1" d="M4 19V5L9 10"/><path class="nexura-gate" pathLength="1" d="M10 10H14V14H10Z"/><path class="nexura-path nexura-path--after" pathLength="1" d="M15 14L20 19V5"/></svg>

@@ -21,8 +21,10 @@ from nexura_runtime.service.api.local_session import (
     LocalSessionMiddleware,
     LocalSessionPolicy,
     build_session_token_router,
+    check_session_token_switch,
     is_loopback_client,
     resolve_session_token,
+    session_token_required,
     studio_error_body,
     token_read_refusal,
 )
@@ -59,6 +61,7 @@ def create_app(
     allow_unauthenticated_network: bool = False,
     max_request_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
     max_import_body_bytes: int | None = None,
+    require_session_token: bool | None = None,
 ) -> FastAPI:
     """Create a configured FastAPI application for Nexura Studio.
 
@@ -82,6 +85,13 @@ def create_app(
         max_request_body_bytes: request-body cap (default 10 MiB) answered with 413.
         max_import_body_bytes: cap for workflow import. Default: 40 MiB when the general cap is
             left at its default, otherwise the smaller of the general cap and 40 MiB.
+        require_session_token: ``False`` turns the session token check off for programs on
+            this machine that send plain HTTP requests. State-changing requests from another
+            page (``Sec-Fetch-Site`` cross-site/same-site, or a foreign ``Origin``) are then
+            refused with 403 ``CROSS_ORIGIN_REQUEST``; the ``Host`` rule stays, and so does the
+            loopback-client rule when there is no ``api_token``. Default:
+            ``NEXURA_REQUIRE_SESSION_TOKEN`` (``on``/``off``), else on. Refused (ValueError) with
+            ``allow_unauthenticated_network``.
 
     Returns:
         Configured FastAPI application instance.
@@ -121,6 +131,8 @@ def create_app(
     app.state.registry = effective_registry
     app.state.store = store
     session_token, _ = resolve_session_token(token)
+    require_token = session_token_required(require_session_token)
+    check_session_token_switch(require_token, allow_unauthenticated_network)
     app.state.session_token = session_token
     app.state.local_session = LocalSessionPolicy(
         token=session_token,
@@ -129,6 +141,7 @@ def create_app(
         # With an API token every API request is authenticated, so remote browsers may connect.
         require_loopback_client=token is None,
         require_json=False,  # StudioSecurityMiddleware already answers 415 for non-JSON bodies
+        require_token=require_token,
     )
 
     # Security middleware & safe error handlers

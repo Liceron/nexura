@@ -247,6 +247,17 @@ def _mark_dispatch_started() -> None:
         mark()
 
 
+def _dispatch_already_started() -> bool:
+    """Internal: the current step's invocation counts as started from the outset (an earlier
+    attempt of the same key dispatched it, e.g. the re-run after an ``interrupt()`` pause), so
+    a refusal now can never prove that nothing was sent."""
+    journal, identity = _JOURNAL.get(), _STEP_IDENTITY.get()
+    if journal is None or identity is None:
+        return False
+    call = journal.invocations.get(str(identity.step_key))
+    return bool(call is not None and call.started)
+
+
 def _mark_current_started() -> None:
     """Record that the current step's handler is running (conservative, never refuses)."""
     journal, identity = _JOURNAL.get(), _STEP_IDENTITY.get()
@@ -1123,6 +1134,12 @@ class ModuleRegistry:
             self._effects.pop(key, None)
         else:
             self._effects[key] = (declared, reconcile)
+
+    def unregister(self, name: str) -> Callable[..., Any] | BaseModule | None:
+        """Remove the handler or module registered as ``name``; returns it (None if absent)."""
+        key = name.strip()
+        self._effects.pop(key, None)
+        return self._handlers.pop(key, None)
 
     def register_handler(
         self,
@@ -3579,11 +3596,7 @@ class WorkflowEngine:
                 checkpoint.pending_approval = None
                 checkpoint.error = f"Approval rejected for node '{cursor}'."
                 await self._save(checkpoint)
-                budget_status = (
-                    self.budget.to_dict().get("status")
-                    if self.budget is not None and hasattr(self.budget, "to_dict")
-                    else None
-                )
+                budget_status = (await self._budget_state_async() or {}).get("status")
                 rejected_span = self._start_workflow_span(workflow_run_id, "resume")
                 # Nothing ran under this decision (a node that asked ran before it asked):
                 # no invoke_workflow.duration.
@@ -4468,6 +4481,16 @@ class WorkflowEngine:
             return state
         return None
 
+    async def _budget_state_async(self) -> dict[str, Any] | None:
+        """:meth:`_budget_state` from the engine's async paths: the status read may wait on the
+        usage ledger's database-wide lock (Postgres), so it runs off the event loop there."""
+        if self.budget is None or not hasattr(self.budget, "to_dict"):
+            return None
+        from nexura_agents.usage.manager import budget_call
+
+        state: dict[str, Any] = await budget_call(self.budget, self.budget.to_dict)
+        return state
+
     async def get_result(self, workflow_run_id: str) -> WorkflowRunResult:
         """Inspect a run's latest checkpoint without dispatching or claiming approval."""
         if self.store is None:
@@ -4813,14 +4836,19 @@ class WorkflowEngine:
 
         In allowlist mode (``default_tool_action="block"``) a step the policy cannot match
         (a plain Python handler or a parallel step) is refused rather than run unchecked;
-        a sub-workflow step is checked node by node by its own engine.
+        a sub-workflow step is checked node by node by its own engine. A policy in shadow
+        mode (P40) refuses nothing: its allowlist only reports.
         """
         policy = self.guardrail_policy
         if policy is None:
             return None
         guard = self._node_guard(node, state, run_id)
         if guard is None:
-            if getattr(policy, "default_tool_action", "allow") == "block" and node.subgraph is None:
+            if (
+                getattr(policy, "default_tool_action", "allow") == "block"
+                and getattr(policy, "mode", "enforce") != "shadow"
+                and node.subgraph is None
+            ):
                 return "Blocked by guardrail policy rule 'default_tool_action'."
             return None
         ctx, info, calls = guard
@@ -4992,7 +5020,7 @@ class WorkflowEngine:
             state=copy.deepcopy(state),
             step_count=step,
             status="completed" if terminal else "running",
-            budget_state=self._budget_state(),
+            budget_state=await self._budget_state_async(),
         )
         await self._save(checkpoint)
         if terminal:
@@ -5248,7 +5276,7 @@ class WorkflowEngine:
             step_count=step_count - 1,
             status="running",
             error=f"{type(error).__name__}: {error}",
-            budget_state=self._budget_state(),
+            budget_state=await self._budget_state_async(),
         )
         if reconcile and record.intent.effect_class == EffectClass.RECONCILABLE:
             probe = await self._reconcile(node, record.intent, state)
@@ -6341,11 +6369,7 @@ class WorkflowEngine:
                 "workspace_id": self.workspace_id,
                 "approved_binding": (self._binding_digest(node, state) if node_approved else None),
             }
-        budget_state = (
-            self.budget.to_dict()
-            if self.budget is not None and hasattr(self.budget, "to_dict")
-            else None
-        )
+        budget_state = await self._budget_state_async()
         if self.store is not None:
             await self._save(
                 WorkflowCheckpoint(
@@ -6443,11 +6467,7 @@ class WorkflowEngine:
         tracing.approval_requested(
             None, pending.approval_id, kind="workflow_node", reason="node_request", node_id=node.id
         )
-        budget_state = (
-            self.budget.to_dict()
-            if self.budget is not None and hasattr(self.budget, "to_dict")
-            else None
-        )
+        budget_state = await self._budget_state_async()
         if self.store is not None:
             await self._save(
                 WorkflowCheckpoint(
@@ -6505,7 +6525,7 @@ class WorkflowEngine:
                     state=copy.deepcopy(state),
                     step_count=step_count,
                     status="running",
-                    budget_state=self._budget_state(),
+                    budget_state=await self._budget_state_async(),
                 )
                 return await self._continue_from(journal, cp, approved=False)
         if failure is None and _ON_UNCERTAIN.get() == "fail":
@@ -6514,7 +6534,7 @@ class WorkflowEngine:
                 "before the process stopped and its outcome is unknown (on_uncertain='fail')."
             )
             doubtful = []  # retain the explicit caller-selected recovery policy
-        budget_state = self._budget_state()
+        budget_state = await self._budget_state_async()
         if failure is not None and not doubtful:
             self._progress(
                 RunEventType.NODE_FAILED, node_id=node.id, step=step_count + 1, error=failure
@@ -6886,11 +6906,7 @@ class WorkflowEngine:
                     canonical_payload_json=canonical_json(current_state),
                     **_take_regate_provenance(node.id),
                 )
-                budget_state = (
-                    self.budget.to_dict()
-                    if self.budget is not None and hasattr(self.budget, "to_dict")
-                    else None
-                )
+                budget_state = await self._budget_state_async()
                 checkpoint = WorkflowCheckpoint(
                     workflow_run_id=workflow_run_id,
                     spec_version=self.spec.spec_version,
@@ -7251,11 +7267,7 @@ class WorkflowEngine:
                     ),
                     "approved_request": copy.deepcopy(node_grant),
                 }
-                budget_state = (
-                    self.budget.to_dict()
-                    if self.budget is not None and hasattr(self.budget, "to_dict")
-                    else None
-                )
+                budget_state = await self._budget_state_async()
                 # The node did not finish: keep the pre-node state and step count.
                 paused_cp = WorkflowCheckpoint(
                     workflow_run_id=workflow_run_id,
@@ -7313,11 +7325,7 @@ class WorkflowEngine:
             is_terminal = cursor_ref[0] is None or (
                 cursor_ref[0] in self.spec.terminal_nodes and cursor_ref[0] not in self.spec.nodes
             )
-            budget_state = (
-                self.budget.to_dict()
-                if self.budget is not None and hasattr(self.budget, "to_dict")
-                else None
-            )
+            budget_state = await self._budget_state_async()
             checkpoint = WorkflowCheckpoint(
                 workflow_run_id=workflow_run_id,
                 spec_version=self.spec.spec_version,
@@ -7346,11 +7354,7 @@ class WorkflowEngine:
             if self.store is not None:
                 await self._save(checkpoint)
 
-        budget_status = (
-            self.budget.to_dict().get("status")
-            if self.budget is not None and hasattr(self.budget, "to_dict")
-            else None
-        )
+        budget_status = (await self._budget_state_async() or {}).get("status")
         return WorkflowRunResult(
             workflow_run_id=workflow_run_id,
             status="completed",

@@ -1,6 +1,6 @@
 [project]
 name = "nexura-postgres"
-version = "0.4.0"
+version = "0.4.1"
 description = "PostgreSQL backends for nexura-runtime: durable run and session storage, and a pgvector vector store."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
@@ -20,8 +20,8 @@ classifiers = [
 # runtime returns this package's PostgresRepository when it is installed.
 # The old `nexura-runtime[postgres]` extra also listed sqlalchemy, which no code imported.
 dependencies = [
-    "nexura-runtime==0.4.0",
-    "nexura-agents==0.4.0",
+    "nexura-runtime==0.4.1",
+    "nexura-agents==0.4.1",
     "asyncpg>=0.30.0,<1.0.0",
 ]
 

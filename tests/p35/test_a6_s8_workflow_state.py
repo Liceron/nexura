@@ -59,6 +59,8 @@ def test_missing_package_names_pip_install(monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_default_stays_sqlite(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(WORKFLOW_STATE_URL_ENV, raising=False)
+    # The SQLite default (no service database_url) under any --service-backend option.
+    monkeypatch.delenv("NEXURA_DATABASE_URL", raising=False)
     app = create_api_app(db_path=tmp_path / "svc.sqlite3", profile="local-owner")
     try:
         assert isinstance(app.state.store.checkpoint_store, SQLiteWorkflowStore)
@@ -73,6 +75,9 @@ def test_default_stays_sqlite(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
 def test_postgres_url_selects_the_postgres_store_and_its_journal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str
 ) -> None:
+    # Workflow state in Postgres with runs in SQLite: the A6 option without a service
+    # database_url (with one, runs move to Postgres too: MVP WP3).
+    monkeypatch.delenv("NEXURA_DATABASE_URL", raising=False)
     if source == "environment":
         monkeypatch.setenv(WORKFLOW_STATE_URL_ENV, URI)
         app = create_api_app(db_path=tmp_path / "svc.sqlite3", profile="local-owner")
@@ -98,6 +103,8 @@ def test_postgres_url_selects_the_postgres_store_and_its_journal(
 def test_explicit_empty_url_overrides_the_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Without a service database_url (Postgres mode refuses SQLite workflow state: MVP WP3).
+    monkeypatch.delenv("NEXURA_DATABASE_URL", raising=False)
     monkeypatch.setenv(WORKFLOW_STATE_URL_ENV, URI)
     app = create_api_app(
         db_path=tmp_path / "svc.sqlite3", profile="local-owner", workflow_state_url=""

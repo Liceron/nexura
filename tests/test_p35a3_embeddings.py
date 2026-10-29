@@ -1,14 +1,18 @@
-"""P35 A3: local fixtures and mock HTTP only; no service/TestClient execution."""
+"""P35 A3: local fixtures and mock HTTP only; no service/TestClient execution.
+
+The index tests run on SQLite by default and on Postgres under ``--service-backend=postgres``
+(MVP WP7, see ``tests/_knowledge_backend.py``).
+"""
 
 from __future__ import annotations
 
 import importlib.util
 import json
-import sqlite3
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+import _knowledge_backend as kb
 import httpx
 import pytest
 
@@ -17,7 +21,7 @@ from nexura_runtime.knowledge.embeddings.embedder import EmbeddingOrchestrator
 from nexura_runtime.knowledge.embeddings.errors import DimensionMismatchError
 from nexura_runtime.knowledge.embeddings.models import BatchEmbeddingResult
 from nexura_runtime.knowledge.embeddings.provider import DeterministicEmbeddingProvider
-from nexura_runtime.knowledge.hybrid import EmbeddingLineageMismatchError, HybridKnowledgeIndex
+from nexura_runtime.knowledge.hybrid import EmbeddingLineageMismatchError, KnowledgeIndexBase
 
 # Load the example by path: the repository root is not on sys.path in every checkout
 # (the public tree has no root conftest.py), so ``import examples...`` is not portable.
@@ -171,19 +175,16 @@ async def test_vertex_config_uses_existing_provider_with_mock_adc(
         await close_provider(embedder)
 
 
-async def populate(index: HybridKnowledgeIndex) -> str:
+async def populate(index: KnowledgeIndexBase) -> str:
     result = await index.ingest(workspace_id="w", filename="guide.txt", data=b"alpacas eat grass")
     return result.document.document_id
 
 
 @pytest.mark.parametrize("change", ["model", "dimension", "revision", "provider"])
 async def test_lineage_persists_and_refuses_read_write(change: str, tmp_path: Path) -> None:
-    db = tmp_path / "knowledge.sqlite"
-    conn = sqlite3.connect(db)
-    original = HybridKnowledgeIndex(conn)
+    original = kb.persistent_index(tmp_path)
     await populate(original)
-    conn.close()
-    conn = sqlite3.connect(db)
+    kb.close(original)
     if change == "provider":
         embedder = mock_embedder()
         embedder.lineage = original.embedder.lineage.model_copy()
@@ -194,24 +195,22 @@ async def test_lineage_persists_and_refuses_read_write(change: str, tmp_path: Pa
             revision="v2" if change == "revision" else "v1",
         )
         embedder = EmbeddingOrchestrator(provider)
-    changed = HybridKnowledgeIndex(conn, embedder=embedder)
+    changed = kb.persistent_index(tmp_path, embedder=embedder)
     assert changed.embedding_status("w")["requires_reindex"]
     assert not changed.embedding_status("other")["requires_reindex"]
     with pytest.raises(EmbeddingLineageMismatchError, match="Explicitly reindex"):
         await changed.search(workspace_id="w", query="grass", vector_weight=0)
     with pytest.raises(EmbeddingLineageMismatchError):
         await populate(changed)  # Even deduplicated uploads refuse a changed vector space.
-    conn.close()
+    kb.close(changed)
 
 
 async def test_reindex_preserves_documents_citations_and_scope() -> None:
-    conn = sqlite3.connect(":memory:")
-    old = HybridKnowledgeIndex(conn)
+    old = kb.new_index()
     doc_id = await populate(old)
     await old.ingest(workspace_id="other", filename="other.txt", data=b"other collection")
-    chunk_sql = "SELECT chunk_id, text, start_char, end_char FROM hk_chunks WHERE workspace_id='w'"
-    before = conn.execute(chunk_sql).fetchall()
-    new = HybridKnowledgeIndex(conn, embedder=mock_embedder())
+    before = kb.citation_rows(old, "w")
+    new = kb.sibling(old, embedder=mock_embedder())
     try:
         result = await new.reindex("w")
         assert result["reindexed_chunks"] == 1
@@ -219,20 +218,20 @@ async def test_reindex_preserves_documents_citations_and_scope() -> None:
         assert result["is_test_fixture"] is False
         assert result["requires_reindex"] is False
         assert new.get_document("w", doc_id) == old.get_document("w", doc_id)
-        assert conn.execute(chunk_sql).fetchall() == before
+        assert kb.citation_rows(old, "w") == before
         assert (await new.search(workspace_id="w", query="grass"))[0].citation.document_id == doc_id
         assert not old.embedding_status("other")["requires_reindex"]
         with pytest.raises(EmbeddingLineageMismatchError):
             await old.search(workspace_id="w", query="grass")
     finally:
         await close_provider(new.embedder)
-        conn.close()
+        kb.close(old)
 
 
 async def test_legacy_unknown_requires_reindex() -> None:
-    index = HybridKnowledgeIndex()
+    index = kb.new_index()
     await populate(index)
-    index._conn.execute("DELETE FROM hk_lineage")
+    kb.delete_lineage(index)
     assert index.embedding_status("w")["indexed_embedder"] is None
     with pytest.raises(EmbeddingLineageMismatchError):
         await index.search(workspace_id="w", query="grass")
@@ -241,24 +240,24 @@ async def test_legacy_unknown_requires_reindex() -> None:
 
 
 async def test_failed_reindex_retains_old_vectors_and_lineage() -> None:
-    old = HybridKnowledgeIndex()
+    old = kb.new_index()
     await populate(old)
-    before = old._conn.execute("SELECT * FROM hk_chunks").fetchall()
-    broken = HybridKnowledgeIndex(
-        old._conn,
+    before = kb.all_chunk_rows(old)
+    broken = kb.sibling(
+        old,
         embedder=EmbeddingOrchestrator(
             DeterministicEmbeddingProvider(dimensions=8, dimension_override=7),
         ),
     )
     with pytest.raises(DimensionMismatchError):
         await broken.reindex("w")
-    assert old._conn.execute("SELECT * FROM hk_chunks").fetchall() == before
+    assert kb.all_chunk_rows(old) == before
     assert not old.embedding_status("w")["requires_reindex"]
     assert await old.search(workspace_id="w", query="grass")
 
 
 async def test_concurrent_change_refuses_reindex(monkeypatch: pytest.MonkeyPatch) -> None:
-    index = HybridKnowledgeIndex()
+    index = kb.new_index()
     doc_id = await populate(index)
     original = index.embedder.embed_texts
 
@@ -273,25 +272,22 @@ async def test_concurrent_change_refuses_reindex(monkeypatch: pytest.MonkeyPatch
 
 
 async def test_reindex_database_failure_rolls_back_every_vector() -> None:
-    old = HybridKnowledgeIndex()
+    old = kb.new_index()
     await populate(old)
     await old.ingest(workspace_id="w", filename="second.txt", data=b"another document")
-    before = old._conn.execute("SELECT * FROM hk_chunks ORDER BY document_id").fetchall()
-    # Abort on the second update, after the first vector has already been replaced.
-    old._conn.execute(
-        "CREATE TRIGGER fail_reindex BEFORE UPDATE OF embedding ON hk_chunks "
-        "WHEN OLD.document_id = '" + before[1][1] + "' "
-        "BEGIN SELECT RAISE(ABORT, 'local test write failure'); END"
-    )
-    new = HybridKnowledgeIndex(
-        old._conn,
+    before = kb.all_chunk_rows(old)
+    # Abort on the second update, after the first vector has already been replaced (SQLite;
+    # Postgres replaces every vector in one statement, which aborts as a whole).
+    write_error = kb.fail_embedding_updates(old, kb.chunk_document_ids(old)[1])
+    new = kb.sibling(
+        old,
         embedder=EmbeddingOrchestrator(
             DeterministicEmbeddingProvider(model_id="changed", dimensions=16),
         ),
     )
-    with pytest.raises(sqlite3.IntegrityError, match="local test write failure"):
+    with pytest.raises(write_error, match="local test write failure"):
         await new.reindex("w")
-    assert old._conn.execute("SELECT * FROM hk_chunks ORDER BY document_id").fetchall() == before
+    assert kb.all_chunk_rows(old) == before
     assert not old.embedding_status("w")["requires_reindex"]
     assert new.embedding_status("w")["requires_reindex"]
 
@@ -299,9 +295,9 @@ async def test_reindex_database_failure_rolls_back_every_vector() -> None:
 async def test_concurrent_embedder_change_refuses_inflight_ingest(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    old = HybridKnowledgeIndex()
-    new = HybridKnowledgeIndex(
-        old._conn,
+    old = kb.new_index()
+    new = kb.sibling(
+        old,
         embedder=EmbeddingOrchestrator(
             DeterministicEmbeddingProvider(model_id="changed"),
         ),
@@ -317,12 +313,12 @@ async def test_concurrent_embedder_change_refuses_inflight_ingest(
     with pytest.raises(EmbeddingLineageMismatchError):
         await populate(old)
     assert old.list_documents("w") == []
-    assert old._conn.execute("SELECT COUNT(*) FROM hk_chunks").fetchone()[0] == 0
+    assert kb.count_chunks(old) == 0
 
 
 async def test_empty_reindex_and_status_do_not_call_provider() -> None:
     provider = DeterministicEmbeddingProvider()
-    index = HybridKnowledgeIndex(embedder=EmbeddingOrchestrator(provider))
+    index = kb.new_index(embedder=EmbeddingOrchestrator(provider))
     assert index.embedding_status("w")["is_test_fixture"] is True
     assert (await index.reindex("w"))["reindexed_chunks"] == 0
     assert provider.call_count == 0

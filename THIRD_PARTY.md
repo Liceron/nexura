@@ -116,6 +116,22 @@ The rest of the bundled Studio page (`nexura_studio/static/app.js`) is first-par
 third-party runtime libraries. (The embeddable chat widget moved to the closed edition with
 publishing.)
 
+
+### Manrope variable Latin font
+
+- File: `studio-web/public/fonts/manrope-latin-wght-normal.woff2`.
+- Source: Fontsource's `@fontsource-variable/manrope` 5.3.0 distribution,
+  `files/manrope-latin-wght-normal.woff2`
+  (https://www.npmjs.com/package/@fontsource-variable/manrope/v/5.3.0).
+  Upstream font project: https://github.com/sharanda/manrope.
+- Copyright 2019 The Manrope Project Authors.
+- Licence: SIL Open Font License 1.1, retained in `OFL-Manrope.txt` beside the font.
+- Copied unmodified from the existing enterprise web asset for the Studio
+  wordmark in Round 2 (2026-10-27); no download or font modification in Round 3.
+- SHA-256: `a30ddcd349703aff7464c34bef3fffdff405ee50c113440d7c8693c02d210972`.
+- Served locally from `/fonts/`; no external font service is contacted. This
+  asset belongs to the Studio web distribution, not the Python Studio wheel.
+
 ## TypeScript client: `@liceron/nexura-sdk`
 
 No runtime dependencies. `typescript` (Apache-2.0, Microsoft Corporation) is a development
@@ -141,7 +157,7 @@ ESLint, Playwright, Testing Library, TypeScript, type packages) are not bundled 
 | `classcat` | 5.0.5 | MIT | Jorge Bucaran | https://github.com/jorgebucaran/classcat |
 | `d3-color`, `d3-dispatch`, `d3-drag`, `d3-interpolate`, `d3-selection`, `d3-timer`, `d3-transition`, `d3-zoom` | 3.x | ISC | Mike Bostock | https://github.com/d3 |
 | `d3-ease` | 3.0.1 | BSD-3-Clause | Mike Bostock; Robert Penner (easing equations) | https://github.com/d3/d3-ease |
-| `@liceron/nexura-sdk` | 0.4.0 | MIT | Liceron (first party, `clients/typescript`) | this repository |
+| `@liceron/nexura-sdk` | 0.4.1 | MIT | Liceron (first party, `clients/typescript`) | this repository |
 
 ---
 

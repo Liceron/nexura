@@ -19,6 +19,7 @@ def _build_app(args: argparse.Namespace, create_app: Any) -> Any:
         allowed_hosts={args.host, "127.0.0.1", "localhost", "::1", "[::1]"},
         listen_host=args.host,
         allow_unauthenticated_network=args.insecure_allow_unauthenticated_network,
+        require_session_token=False if getattr(args, "no_session_token", False) else None,
     )
 
 
@@ -81,15 +82,31 @@ def _run(argv: list[str] | None) -> int:
         ),
     )
 
+    parser.add_argument(
+        "--no-session-token",
+        action="store_true",
+        help=(
+            "Do not require the per-session X-Nexura-Session header (for curl and other "
+            "programs on this machine; pages from other sites and ports are still refused). "
+            "Also NEXURA_REQUIRE_SESSION_TOKEN=off."
+        ),
+    )
+
     args = parser.parse_args(argv)
 
     from nexura_runtime.service.auth.errors import UnauthenticatedNetworkError
 
     try:
         app = _build_app(args, create_app)
-    except UnauthenticatedNetworkError as exc:
+    except (UnauthenticatedNetworkError, ValueError) as exc:
         sys.stderr.write(f"\nError: {exc}\n\n")
         return 2
+    session = (
+        "  Session:   the page reads its per-session token itself; with NEXURA_STUDIO_TOKEN,\n"
+        "             open the URL as .../#token=<your token>\n"
+        if app.state.local_session.require_token
+        else "  Session:   token check off; programs on this machine need no header\n"
+    )
     url = f"http://{args.host}:{args.port}"
     sys.stdout.write(
         "\n"
@@ -98,8 +115,7 @@ def _run(argv: list[str] | None) -> int:
         f"  URL:       {url}\n"
         f"  Database:  {args.db}\n"
         "  Mode:      Synthetic Mock Data (No Paid APIs or Network Calls)\n"
-        "  Session:   the page reads its per-session token itself; with NEXURA_STUDIO_TOKEN,\n"
-        "             open the URL as .../#token=<your token>\n"
+        f"{session}"
         "======================================================================\n\n"
     )
     sys.stdout.flush()

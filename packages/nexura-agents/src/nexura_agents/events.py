@@ -52,8 +52,11 @@ class RunEventType(StrEnum):
     # "stage" ("input", "output", "tool_input" or "tool_output"), "guardrail", "action",
     # "agent", "latency_ms"; on tool stages "tool_name" and "tool_call_id"; and, only when
     # the guardrail's info holds them as plain values, "categories", "score", "backend",
-    # "cached", "rule", "decision" and "error_type". Never the checked content, the
-    # rejection message or other info. Precedes RUN_FAILED when the run stops.
+    # "cached", "rule", "decision" and "error_type", and for a guardrail policy "mode"
+    # ("enforce" or "shadow"), "applied" (false for a shadow decision: reported, not
+    # applied), "tokens" (the check's model usage) and "skipped" ("shadow_budget"). Never
+    # the checked content, the rejection message or other info. Precedes RUN_FAILED when
+    # the run stops.
     GUARDRAIL_DECISION = "guardrail_decision"
     # An output guardrail stopped the reply (P39 G4). data "stage" ("output"), "guardrail",
     # "agent", "turn", "phase" ("chunk": a streamed window or text written before tool

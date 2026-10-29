@@ -13,6 +13,7 @@ import type {
   WorkflowRecord,
 } from '@liceron/nexura-sdk';
 import { formatApiError } from '../../api/errors';
+import { NexuraApiError } from '@liceron/nexura-sdk';
 import { deriveEndpoint } from '../../api/endpoint';
 import { webhookDeliveryUrl } from './webhookSnippet';
 import { getMyMembership } from '../../api/membership';
@@ -99,6 +100,7 @@ export function useTriggers(initialWorkflowId: string | null = null) {
   const [testEventId, setTestEventId] = useState<string>('');
   const [testPayloadJson, setTestPayloadJson] = useState<string>('{\n  "order_id": "ord_1001",\n  "status": "shipped"\n}');
   const [webhookTestResult, setWebhookTestResult] = useState<TestWebhookResult | null>(null);
+  const [webhookTestError, setWebhookTestError] = useState<string | null>(null);
 
   // Outbox test dispatch state
   const [outboxChannel, setOutboxChannel] = useState<'email' | 'whatsapp'>('email');
@@ -252,14 +254,15 @@ export function useTriggers(initialWorkflowId: string | null = null) {
 
     setActionLoading(true);
     try {
-      await client.triggers.createSchedule({
+      // The SDK's legacy schedule DTO uses `cron`; the HTTP contract uses `cron_expr`.
+      await client.request<ScheduleConfig>('POST', '/triggers/schedules', { body: {
         schedule_id: newScheduleId.trim(),
         workflow_id: newScheduleWfId.trim(),
         timezone: newTimezone.trim() || 'UTC',
         interval_seconds: newScheduleType === 'interval' ? Number(newIntervalSeconds) : undefined,
-        cron: newScheduleType === 'cron' ? newCronExpr.trim() : undefined,
-        missed_run_policy: newMissedPolicy,
-      });
+        cron_expr: newScheduleType === 'cron' ? newCronExpr.trim() : undefined,
+        missed_run_policy: newMissedPolicy === 'burst' ? 'fire_all' : newMissedPolicy,
+      } });
       await fetchSchedules();
       setNewScheduleId('');
       return true;
@@ -373,8 +376,10 @@ export function useTriggers(initialWorkflowId: string | null = null) {
     expired_timestamp?: boolean;
     useExistingEventId?: boolean;
   } = {}) => {
+    setWebhookTestResult(null);
+    setWebhookTestError(null);
     if (!testEndpointId) {
-      setError(t('validationMessages.selectWebhook'));
+      setWebhookTestError(t('validationMessages.selectWebhook'));
       return;
     }
 
@@ -382,7 +387,7 @@ export function useTriggers(initialWorkflowId: string | null = null) {
     try {
       parsedPayload = JSON.parse(testPayloadJson);
     } catch {
-      setError(t('validationMessages.webhookJson'));
+      setWebhookTestError(t('validationMessages.webhookJson'));
       return;
     }
 
@@ -406,7 +411,10 @@ export function useTriggers(initialWorkflowId: string | null = null) {
       setWebhookTestResult(res);
       await fetchJobs();
     } catch (err: unknown) {
-      setError(formatApiError(err, t));
+      // A refused simulated delivery is the expected result of a negative test, not a sign-in
+      // problem; any other 401 from this call still says to sign in again.
+      const refused = err instanceof NexuraApiError && (err.code === 'INVALID_SIGNATURE' || err.code === 'MISSING_SIGNATURE_HEADERS');
+      setWebhookTestError(refused ? `${err.message.replace(/^\[\d+\]\s+[A-Za-z0-9_]+:\s*/, '')} (${err.code})` : formatApiError(err, t));
     } finally {
       setActionLoading(false);
     }
@@ -518,6 +526,7 @@ export function useTriggers(initialWorkflowId: string | null = null) {
     testPayloadJson,
     setTestPayloadJson,
     webhookTestResult,
+    webhookTestError,
     handleRegisterWebhook,
     handleDeleteWebhook,
     handleTestWebhook,

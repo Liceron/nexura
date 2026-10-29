@@ -11,7 +11,7 @@ from __future__ import annotations
 import inspect
 import json
 import uuid
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
@@ -21,6 +21,21 @@ from nexura_agents.types import Message, ModelResponse, Usage
 from nexura_agents.usage.errors import UsageError
 
 active_budget: ContextVar[Any] = ContextVar("nexura_active_budget", default=None)
+
+#: Internal: called right before a run sends anything (once a model call is admitted under
+#: a budget, and before each tool call). A workflow node uses it to mark its step started
+#: only when something is about to happen, so a budget refusal of the first call proves
+#: that nothing was sent. Raising refuses that call (an admitted reservation is released).
+dispatch_gate: ContextVar[Callable[[], None] | None] = ContextVar(
+    "nexura_dispatch_gate", default=None
+)
+
+
+def before_dispatch() -> None:
+    """Run the :data:`dispatch_gate` of the current context, if any."""
+    gate = dispatch_gate.get()
+    if gate is not None:
+        gate()
 
 
 def effective_budget(context: Any = None) -> Any:
@@ -83,7 +98,9 @@ class _CombinedBudget:
         held: list[tuple[Any, str]] = []
         try:
             for budget in self.budgets:
-                reservation = await admit(budget, model_id, estimated_tokens, metadata["method"])
+                reservation = await _admit_scope(
+                    budget, model_id, estimated_tokens, metadata["method"]
+                )
                 assert reservation is not None
                 held.append((budget, reservation))
         except BaseException:
@@ -171,6 +188,18 @@ async def budget_stream(stream: Any, budget: Any) -> AsyncGenerator[Any, None]:
 
 
 async def admit(budget: Any, model_id: str, tokens: int, method: str) -> str | None:
+    """Reserve allowance for one model call, then run the :data:`dispatch_gate`."""
+    reservation = await _admit_scope(budget, model_id, tokens, method)
+    if reservation is not None and dispatch_gate.get() is not None:
+        try:
+            before_dispatch()
+        except BaseException:
+            await settle(budget, reservation, model_id, None, failed=True, pre_dispatch=True)
+            raise
+    return reservation
+
+
+async def _admit_scope(budget: Any, model_id: str, tokens: int, method: str) -> str | None:
     if budget is None:
         return None
     try:

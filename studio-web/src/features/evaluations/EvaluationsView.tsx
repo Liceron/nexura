@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Liceron
+import { useAfterRender } from '../../app/useAfterRender';
 import { InlineConfirm } from '../../components/InlineConfirm';
 import { useId, useRef, useState } from 'react';
 import { useEvaluations } from './useEvaluations';
@@ -11,7 +12,7 @@ import { useI18n } from '../../i18n';
 import { useCompactLayout } from '../../app/useCompactLayout';
 import { StudioEvalsPanel } from './StudioEvalsPanel';
 
-export function EvaluationsView() {
+export function EvaluationsView({ agentId = '' }: { agentId?: string } = {}) {
   const { t } = useI18n();
   const {
     datasets,
@@ -20,6 +21,8 @@ export function EvaluationsView() {
     selectedDataset,
     runs,
     selectedRun,
+    runLoading,
+    handleOpenRun,
     comparison,
     loading,
     actionLoading,
@@ -46,6 +49,7 @@ export function EvaluationsView() {
     setNewExamplesJson,
     handleCreateDataset,
     handleDeleteDataset,
+    handleDeleteRun,
     handleRunEvaluation,
     handleCompareRuns,
     refreshAll,
@@ -65,6 +69,7 @@ export function EvaluationsView() {
   const compact = useCompactLayout();
   const [phonePane, setPhonePane] = useState<'list' | 'detail'>('list');
   const detailHeadingRef = useRef<HTMLHeadingElement>(null);
+  const afterRender = useAfterRender();
   const listRef = useRef<HTMLUListElement>(null);
 
   const tabs = [
@@ -78,6 +83,9 @@ export function EvaluationsView() {
     ? selectedRun.mean_latency_ms ??
       (selectedRun.total_examples ? (selectedRun as any).total_latency_ms / selectedRun.total_examples : null)
     : null;
+
+  // Benchmark evaluations have model targets; saved-agent evaluations use Studio tests.
+  if (agentId) return <PageLayout data-testid="agent-evaluations-view"><PageHeader title={`Evaluations for ${agentId}`} description="Studio tests for this saved agent. Benchmark datasets are shared across the workspace." /><StudioEvalsPanel key={agentId} agentId={agentId} /></PageLayout>;
 
   return (
     <PageLayout data-testid="evaluations-view">
@@ -129,7 +137,7 @@ export function EvaluationsView() {
                         onClick={() => {
                           setSelectedDatasetId(ds.dataset_id);
                           setPhonePane('detail');
-                          if (compact) requestAnimationFrame(() => detailHeadingRef.current?.focus());
+                          if (compact) afterRender(() => detailHeadingRef.current?.focus());
                         }}
                       >
                         <code className="resource-row-name">{ds.dataset_id}</code>
@@ -153,7 +161,7 @@ export function EvaluationsView() {
                       className="resource-back"
                       onClick={() => {
                         setPhonePane('list');
-                        requestAnimationFrame(() => listRef.current?.querySelector<HTMLButtonElement>('[aria-pressed="true"]')?.focus());
+                        afterRender(() => listRef.current?.querySelector<HTMLButtonElement>('[aria-pressed="true"]')?.focus());
                       }}
                     >
                       {t('evaluations.back')}
@@ -219,6 +227,7 @@ export function EvaluationsView() {
 
         {activeTab === 'run' && (
           <>
+            {runLoading && <p role="status">{t('common.loading')}</p>}
             <form
               className="resource-form"
               aria-label={t('ui.configureExecuteBenchmark')}
@@ -271,7 +280,7 @@ export function EvaluationsView() {
                 </div>
               </fieldset>
               <div className="resource-actions" style={{ justifyContent: 'flex-start' }}>
-                <Button type="submit" variant="primary" data-testid="btn-run-eval" loading={actionLoading} disabled={!evalDatasetId}>
+                <Button type="submit" variant="primary" data-testid="btn-run-eval" loading={actionLoading} disabled={!evalDatasetId || runLoading}>
                   {t('ui.runEvaluation')}
                 </Button>
               </div>
@@ -282,6 +291,9 @@ export function EvaluationsView() {
                 <h2 id={`${ids}-results`} style={{ marginBottom: 8 }}>
                   {t('ui.evaluationResults') + ' '}<code>{selectedRun.run_id}</code>
                 </h2>
+                <InlineConfirm key={selectedRun.run_id} consequence={t('livefixUi.deleteBenchmarkConfirm').replace('{id}', selectedRun.run_id)}>
+                  <Button variant="danger" size="sm" disabled={actionLoading} onClick={() => handleDeleteRun(selectedRun.run_id)}>{t('livefixUi.deleteEval')}</Button>
+                </InlineConfirm>
                 <dl className="settings-metrics">
                   <div>
                     <dt>{t('ui.passRate')}</dt>
@@ -338,6 +350,14 @@ export function EvaluationsView() {
 
         {activeTab === 'compare' && (
           <>
+            {runs.length > 0 && <section aria-label={t('livefixUi.savedBenchmarks')} className="resource-list">
+              {runs.map(run => <div key={run.run_id} className="resource-actions">
+                <Button variant="ghost" size="sm" disabled={actionLoading || runLoading} onClick={() => { setActiveTab('run'); void handleOpenRun(run.run_id); }}>{run.run_id}</Button>
+                <InlineConfirm consequence={t('livefixUi.deleteBenchmarkConfirm').replace('{id}', run.run_id)}>
+                  <Button variant="danger" size="sm" disabled={actionLoading || runLoading} onClick={() => handleDeleteRun(run.run_id)}>{t('livefixUi.deleteEval')}</Button>
+                </InlineConfirm>
+              </div>)}
+            </section>}
             {runs.length === 0 && (
               <div className="inspection-empty" data-testid="compare-empty">
                 <p>{t('evaluations.compareEmpty')}</p>

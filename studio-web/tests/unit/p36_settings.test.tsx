@@ -41,7 +41,7 @@ const fixture = vi.hoisted(() => {
       rotateDeliveryToken: vi.fn(),
       deleteWebhook: vi.fn(async () => ({ deleted: true })),
     },
-    request: vi.fn(async () => ({})),
+    request: vi.fn(async () => ({ registrations: [] })),
   };
   const api = {
     manager: { client, clearCache: vi.fn(), baseUrl: 'http://127.0.0.1:8765' },

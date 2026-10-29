@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Liceron
 // P39 G6: the agent editor's Guardrails section (presets only, no code) and the effect class
-// badge of a tool. The operator's service policy is shown read-only above the presets.
+// badge of a tool. The operator's service policy is shown read-only above the presets; a policy
+// in shadow mode (P40) gets a "reporting only" badge instead of the enforced one.
 import { useId } from 'react';
 import type { Dispatch, ReactNode, SetStateAction } from 'react';
-import type { AgentGuardrailOptions, ChatModelInfo, GuardrailPresetName } from '@liceron/nexura-sdk';
+import type { AgentGuardrailOptions, ChatModelInfo, GuardrailPolicyView, GuardrailPresetName } from '@liceron/nexura-sdk';
 import { Badge } from '../../components/Badge';
 import type { BadgeVariant } from '../../components/Badge';
 import { useI18n } from '../../i18n';
@@ -42,6 +43,9 @@ export function EffectClassBadge({ effectClass, testId }: { effectClass?: string
   );
 }
 
+/** The policy view with its P40 mode fields (optional: older servers do not send them). */
+type PolicyViewWithMode = GuardrailPolicyView & { mode?: string; shadow_rules?: number };
+
 interface Props {
   draft: AgentDraft;
   setDraft: Dispatch<SetStateAction<AgentDraft>>;
@@ -56,8 +60,11 @@ export function AgentGuardrailsSection({ draft, setDraft, options, models, error
   const infos = new Map((options?.presets ?? []).map((p) => [p.name, p]));
   const names = options?.presets?.length ? options.presets.map((p) => p.name) : GUARDRAIL_PRESET_NAMES;
   // Only what the server says is enforced (locked for every run) gets the badge (M2).
-  const view = options?.policy;
+  const view = options?.policy as PolicyViewWithMode | undefined;
   const policy = view?.enforced ? view.policy : null;
+  // Shadow mode: the server reports every decision of the policy and applies none.
+  const shadow = view?.mode === 'shadow';
+  const shadowRules = typeof view?.shadow_rules === 'number' ? view.shadow_rules : 0;
   const chosen = new Set(draft.guardrail_presets);
   // Streaming past checked answers is not offered: an output preset or an enforced policy.
   const noPassthrough = OUTPUT_PRESETS.some((p) => chosen.has(p)) || Boolean(policy);
@@ -81,10 +88,21 @@ export function AgentGuardrailsSection({ draft, setDraft, options, models, error
       <span className="resource-help">{t('agents.guardrailsHelp')}</span>
       {policy && (
         <div className="resource-help" data-testid="agent-guardrails-policy" role="note">
-          <Badge variant="info">{t('agents.guardrailsEnforced')}</Badge>{' '}
-          {t('agents.guardrailsPolicy')
+          {shadow ? (
+            <Badge variant="warning" data-testid="agent-guardrails-policy-shadow" data-mode="shadow">
+              {t('agents.guardrailsShadow')}
+            </Badge>
+          ) : (
+            <Badge variant="info">{t('agents.guardrailsEnforced')}</Badge>
+          )}{' '}
+          {t(shadow ? 'agents.guardrailsPolicyShadow' : 'agents.guardrailsPolicy')
             .replace('{name}', policy.name ?? policy.file ?? t('agents.guardrailsPolicyUnnamed'))
             .replace('{digest}', policy.digest.slice(0, 12))}{' '}
+          {!shadow && shadowRules > 0 && (
+            <span data-testid="agent-guardrails-policy-shadow-rules">
+              {t('agents.guardrailsShadowRules').replace('{count}', String(shadowRules))}{' '}
+            </span>
+          )}
           {policy.rules && (
             <span data-testid="agent-guardrails-policy-rules">
               {t('agents.guardrailsPolicyRules').replace('{rules}', String(policy.rules.length))}

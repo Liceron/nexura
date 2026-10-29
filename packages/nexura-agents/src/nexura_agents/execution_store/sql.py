@@ -58,6 +58,14 @@ def _run(row: dict[str, Any]) -> ExecutionRun:
     return result
 
 
+_INSERT_RUN = """INSERT INTO nexura_exec_runs (
+    workspace_id, run_id, definition_digest, journal_schema_version, state_version,
+    status, lease_owner, lease_expires_at, fencing_token, revision, run_json)
+    VALUES (:workspace, :run, :definition_digest, :journal_schema_version,
+    :state_version, :status, :lease_owner, :lease_expires_at, :fencing_token,
+    :revision, :run_json)"""
+
+
 class _SQLStore(_Store):
     _lock_suffix = ""
     _clock_sql = ""
@@ -106,15 +114,7 @@ class _SQLStore(_Store):
             now = await self._now(db)
             run = replace(run, created_at=now, updated_at=now, lease_expires_at=now + ttl)
             params = self._run_params(run)
-            await db.execute(
-                """INSERT INTO nexura_exec_runs (
-                workspace_id, run_id, definition_digest, journal_schema_version, state_version,
-                status, lease_owner, lease_expires_at, fencing_token, revision, run_json)
-                VALUES (:workspace, :run, :definition_digest, :journal_schema_version,
-                :state_version, :status, :lease_owner, :lease_expires_at, :fencing_token,
-                :revision, :run_json)""",
-                params,
-            )
+            await db.execute(_INSERT_RUN, params)
             return run
 
     @staticmethod
@@ -148,7 +148,6 @@ class _SQLStore(_Store):
         )
         if not rows:
             raise KeyError(identity)
-        run = _run(rows[0])
 
         async def selected(
             table: str, column: str, keys: Sequence[str] | None
@@ -164,6 +163,24 @@ class _SQLStore(_Store):
             return await db.fetch(query, binds)
 
         step_rows = await selected("nexura_exec_steps", "step_key", step_keys)
+        effect_rows = await selected("nexura_exec_effects", "effect_id", effect_ids)
+        event_rows = await db.fetch(
+            "SELECT * FROM nexura_exec_events WHERE workspace_id=:workspace "
+            "AND run_id=:run ORDER BY sequence"
+            + (" DESC LIMIT 1" if step_keys is not None else ""),
+            params,
+        )
+        return self._snapshot(rows[0], step_rows, effect_rows, event_rows)
+
+    @staticmethod
+    def _snapshot(
+        run_row: dict[str, Any],
+        step_rows: Sequence[dict[str, Any]],
+        effect_rows: Sequence[dict[str, Any]],
+        event_rows: Sequence[dict[str, Any]],
+    ) -> ExecutionSnapshot:
+        """A snapshot from table rows (``SELECT *`` shaped dictionaries)."""
+        run = _run(run_row)
         steps = {
             row["step_key"]: ExecutionStep(
                 StepIntent(**json.loads(row["intent_json"])) if row["intent_json"] else None,
@@ -172,8 +189,7 @@ class _SQLStore(_Store):
             for row in step_rows
         }
         effects = {
-            row["effect_id"]: EffectRecord(**json.loads(row["record_json"]))
-            for row in await selected("nexura_exec_effects", "effect_id", effect_ids)
+            row["effect_id"]: EffectRecord(**json.loads(row["record_json"])) for row in effect_rows
         }
         events = [
             ExecutionEvent(
@@ -182,14 +198,22 @@ class _SQLStore(_Store):
                 json.loads(row["payload_json"]),
                 row["timestamp"],
             )
-            for row in await db.fetch(
-                "SELECT * FROM nexura_exec_events WHERE workspace_id=:workspace "
-                "AND run_id=:run ORDER BY sequence"
-                + (" DESC LIMIT 1" if step_keys is not None else ""),
-                params,
-            )
+            for row in event_rows
         ]
         return ExecutionSnapshot(run, steps, effects, events)
+
+    async def _load_locked(
+        self,
+        db: _Connection,
+        identity: ExecutionId,
+        *,
+        step_keys: Sequence[str] | None = None,
+        effect_ids: Sequence[str] | None = None,
+    ) -> tuple[ExecutionSnapshot, float]:
+        """``_load`` (the run row locked) and then the database time, read after the lock so a
+        lock wait cannot revive an expired lease. Backends may combine the reads."""
+        snapshot = await self._load(db, identity, step_keys=step_keys, effect_ids=effect_ids)
+        return snapshot, await self._now(db)
 
     @asynccontextmanager
     async def _edit(
@@ -200,8 +224,10 @@ class _SQLStore(_Store):
         effect_ids: Sequence[str] | None = None,
     ) -> AsyncIterator[_Transaction]:
         async with self._connection() as db:
-            before = await self._load(db, execution_id, step_keys=step_keys, effect_ids=effect_ids)
-            # Fetch time AFTER obtaining the row lock, so lock wait cannot revive expiry.
+            # Time is fetched AFTER obtaining the row lock, so lock wait cannot revive expiry.
+            before, now = await self._load_locked(
+                db, execution_id, step_keys=step_keys, effect_ids=effect_ids
+            )
             tx = _Transaction(
                 replace(
                     before,
@@ -209,7 +235,7 @@ class _SQLStore(_Store):
                     effects=dict(before.effects),
                     events=list(before.events),
                 ),
-                await self._now(db),
+                now,
             )
             yield tx
             if tx.snapshot != before:

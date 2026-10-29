@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Liceron
 import { test, expect, type Page } from '@playwright/test';
 import { startTestCluster, TestCluster } from './harness';
 import { REGISTRY_TEMPLATES } from '../../src/features/workflows/templates';
@@ -75,7 +77,7 @@ test.describe('Schema-Driven Module Configuration & Inspector (F05)', () => {
     await expect(page.getByRole('heading', { name: 'F05 Schema Configured Multi-Instance Spec', level: 1, exact: true })).toBeVisible();
 
     // 1. Add Instance A: Prompt Template
-    const addStepBtn = page.getByRole('button', { name: /Add step/i });
+    const addStepBtn = page.getByRole('button', { name: 'Add step', exact: true });
     await addStepBtn.click();
     await page.getByRole('button', { name: 'Standard', exact: true }).click();
 
@@ -135,7 +137,7 @@ test.describe('Schema-Driven Module Configuration & Inspector (F05)', () => {
     await defaultTransSelect.selectOption('prompt_followup');
 
     // Validate graph against backend
-    const validateBtn = page.getByRole('button', { name: 'Validate' });
+    const validateBtn = page.getByRole('button', { name: 'Validate', exact: true });
     await validateBtn.click();
     await expect(page.getByText(/Workflow is valid/i)).toBeVisible();
 
@@ -193,7 +195,7 @@ test.describe('Schema-Driven Module Configuration & Inspector (F05)', () => {
     await mapBtn.click();
 
     // Run authoritative validation
-    const validateBtn = page.getByRole('button', { name: 'Validate' });
+    const validateBtn = page.getByRole('button', { name: 'Validate', exact: true });
     await validateBtn.click();
 
     // Expect server validation error identifying field and node
@@ -205,7 +207,10 @@ test.describe('Schema-Driven Module Configuration & Inspector (F05)', () => {
 
     // Remove the invalid mapping to restore validity
     const removeBtn = inspector.getByRole('button', { name: 'Remove mapping completely_invalid_port_xyz' });
+    // Removing a mapping asks first (live-pass fix); accept it.
+    const confirmed = page.waitForEvent('dialog').then(async dialog => { expect(dialog.message()).toContain('completely_invalid_port_xyz'); await dialog.accept(); });
     await removeBtn.click();
+    await confirmed;
 
     await validateBtn.click();
     await expect(page.getByText(/Workflow is valid/i)).toBeVisible();
@@ -292,7 +297,7 @@ test.describe('Schema-Driven Module Configuration & Inspector (F05)', () => {
     page,
   }) => {
     await openWorkflow(page, 'Palette');
-    await page.getByRole('button', { name: /Add step/i }).click();
+    await page.getByRole('button', { name: 'Add step', exact: true }).click();
     await page.getByRole('button', { name: 'Standard', exact: true }).click();
 
     const palette = page.getByRole('dialog', { name: 'Available modules drawer' });

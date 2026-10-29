@@ -43,6 +43,7 @@ export function InputMappingForm({ inputSchema, mapping, onChange, portOverrides
   };
 
   const handleRemove = (port: string) => {
+    if (!window.confirm(`Remove mapping “${port}”?`)) return;
     const next = { ...mapping };
     delete next[port];
     onChange(next);

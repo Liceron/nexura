@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from nexura_runtime.service.workspaces.errors import (
+    LastAdminError,
     MemberAlreadyExistsError,
     MemberNotFoundError,
     WorkspaceError,
@@ -18,6 +19,7 @@ from nexura_runtime.service.workspaces.repository import WorkspaceRepository
 from nexura_runtime.service.workspaces.scoping import ResourceScopeEnforcer
 
 __all__ = [
+    "LastAdminError",
     "MemberAlreadyExistsError",
     "MemberNotFoundError",
     "ResourceScopeEnforcer",

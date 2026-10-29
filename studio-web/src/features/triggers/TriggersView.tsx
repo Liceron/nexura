@@ -61,6 +61,7 @@ export function TriggersView({ initialWorkflowId = null }: TriggersViewProps = {
     testPayloadJson,
     setTestPayloadJson,
     webhookTestResult,
+    webhookTestError,
     handleRegisterWebhook,
     handleDeleteWebhook,
     handleTestWebhook,
@@ -234,8 +235,8 @@ export function TriggersView({ initialWorkflowId = null }: TriggersViewProps = {
                           <td role="cell" data-label={t('triggers.colSchedule')}><code>{s.schedule_id}</code></td>
                           <td role="cell" data-label={t('ui.workflow2')}><code>{s.workflow_id}</code></td>
                           <td role="cell" data-label={t('triggers.colPattern')}>
-                            {s.cron
-                              ? t('triggers.cronPattern').replace('{value}', String(s.cron))
+                            {(s as typeof s & { cron_expr?: string }).cron_expr || s.cron
+                              ? t('triggers.cronPattern').replace('{value}', String((s as typeof s & { cron_expr?: string }).cron_expr || s.cron))
                               : t('triggers.intervalPattern').replace('{value}', String(s.interval_seconds))}
                             {s.next_run_at && (
                               <div className="resource-help">
@@ -511,6 +512,7 @@ export function TriggersView({ initialWorkflowId = null }: TriggersViewProps = {
                     </Button>
                   </div>
                 </details>
+                {webhookTestError && <div data-testid="webhook-test-error" role="alert" className="inline-notice inline-notice--danger">{webhookTestError}</div>}
                 {webhookTestResult && (
                   <div data-testid="webhook-test-result" className="inline-notice" role="status">
                     <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 4 }}>

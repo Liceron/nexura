@@ -17,6 +17,7 @@ import type {
 import { formatApiError } from '../../api/errors';
 import { useLatestT, type Translate } from '../../i18n';
 import { importFieldErrors } from './evals_dataset_json';
+import { savedAgentIdOfTarget } from '../agents/agentForm';
 
 const BASE = '/evaluations/studio';
 
@@ -24,7 +25,7 @@ function message(err: unknown, t: Translate): string {
   return formatApiError(err, t);
 }
 
-export function useStudioEvals() {
+export function useStudioEvals(agentId = '') {
   const t = useLatestT();
   const { manager, connection } = useApi();
   const client = manager.client;
@@ -49,12 +50,12 @@ export function useStudioEvals() {
         client.request<{ runs: StudioRun[] }>('GET', `${BASE}/runs`),
       ]);
       setDatasets(d.datasets);
-      setTargets(t.targets);
-      setRuns(r.runs);
+      setTargets(t.targets.filter(target => !agentId || (target.kind === 'agent' && savedAgentIdOfTarget(target.id) === agentId)));
+      setRuns(r.runs.filter(run => !agentId || (run.target.kind === 'agent' && savedAgentIdOfTarget(run.target.id) === agentId)));
     } catch (err) {
       setError(message(err, t));
     }
-  }, [client, t]);
+  }, [client, t, agentId]);
 
   useEffect(() => {
     setDataset(null);
@@ -212,6 +213,15 @@ export function useStudioEvals() {
     saveDataset,
     importOpenAi,
     deleteDataset,
+    deleteRun: (id: string) => guard(async () => {
+      await client.request('DELETE', `${BASE}/runs/${encodeURIComponent(id)}`);
+      setRun(current => current?.run_id === id ? null : current);
+      setRuns(current => current.filter(item => item.run_id !== id));
+      setComparison(null);
+      setBaselineRun(null);
+      setCandidateRun(null);
+      return true;
+    }),
     runDataset,
     openRun,
     compareRuns,

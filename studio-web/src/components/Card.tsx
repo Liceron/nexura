@@ -6,9 +6,10 @@ interface CardProps extends React.HTMLAttributes<HTMLDivElement> {
   elevated?: boolean;
 }
 
-export function Card({ elevated = false, children, style, ...props }: CardProps) {
+export function Card({ elevated = false, children, style, className, ...props }: CardProps) {
   return (
     <div
+      className={['studio-card', className].filter(Boolean).join(' ')}
       style={{
         backgroundColor: elevated ? 'var(--bg-surface-elevated)' : 'var(--bg-surface)',
         border: '1px solid var(--border-subtle)',

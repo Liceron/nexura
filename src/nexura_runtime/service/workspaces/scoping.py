@@ -255,7 +255,32 @@ class ResourceScopeEnforcer:
     ) -> None:
         """Recursively scan data structures for cross-resource references
         and reject foreign ownership.
+
+        The owners of every reference are read first in one batch when the repository offers
+        ``get_resource_workspaces`` (MVP WP11a: one query instead of one or two per
+        reference); the references are then checked in document order, so the first
+        violation found is the same as before.
         """
+        keys: list[tuple[str, str]] = []
+        _collect_reference_keys(data, keys)
+        batch = getattr(self.workspace_repo, "get_resource_workspaces", None)
+        known: dict[tuple[str, str], str | None] = batch(keys) if keys and callable(batch) else {}
+        self._scan_references(caller_workspace_id, data, known)
+
+    def _owner(
+        self, known: dict[tuple[str, str], str | None], resource_type: str, ref_id: str
+    ) -> str | None:
+        key = (resource_type, ref_id)
+        if key in known:
+            return known[key]
+        return self.workspace_repo.get_resource_workspace(resource_type, ref_id)
+
+    def _scan_references(
+        self,
+        caller_workspace_id: str,
+        data: Any,
+        known: dict[tuple[str, str], str | None],
+    ) -> None:
         if isinstance(data, dict):
             for key, val in data.items():
                 k_lower = key.lower()
@@ -263,7 +288,7 @@ class ResourceScopeEnforcer:
                 if k_lower in ("credential_id", "credential_ref", "credential"):
                     ref_id = val.get("ref") if isinstance(val, dict) else val
                     if isinstance(ref_id, str):
-                        owner = self.workspace_repo.get_resource_workspace("credential", ref_id)
+                        owner = self._owner(known, "credential", ref_id)
                         if owner and owner != caller_workspace_id:
                             raise CrossWorkspaceAccessError(
                                 f"Cross-workspace access denied: credential '{ref_id}' "
@@ -283,7 +308,7 @@ class ResourceScopeEnforcer:
                                     f"not '{caller_workspace_id}'."
                                 )
                         else:
-                            owner = self.workspace_repo.get_resource_workspace("artifact", ref_id)
+                            owner = self._owner(known, "artifact", ref_id)
                             if owner and owner != caller_workspace_id:
                                 raise CrossWorkspaceAccessError(
                                     f"Cross-workspace access denied: artifact '{ref_id}' "
@@ -294,9 +319,9 @@ class ResourceScopeEnforcer:
                 elif k_lower in ("index_id", "collection_id", "collection_name", "index"):
                     ref_id = val.get("id") if isinstance(val, dict) else val
                     if isinstance(ref_id, str):
-                        owner = self.workspace_repo.get_resource_workspace(
-                            "index", ref_id
-                        ) or self.workspace_repo.get_resource_workspace("vector_collection", ref_id)
+                        owner = self._owner(known, "index", ref_id) or self._owner(
+                            known, "vector_collection", ref_id
+                        )
                         if owner and owner != caller_workspace_id:
                             raise CrossWorkspaceAccessError(
                                 f"Cross-workspace access denied: index '{ref_id}' "
@@ -307,10 +332,8 @@ class ResourceScopeEnforcer:
                 elif k_lower in ("dataset_id", "evaluation_dataset_id", "dataset"):
                     ref_id = val.get("id") if isinstance(val, dict) else val
                     if isinstance(ref_id, str):
-                        owner = self.workspace_repo.get_resource_workspace(
-                            "dataset", ref_id
-                        ) or self.workspace_repo.get_resource_workspace(
-                            "evaluation_dataset", ref_id
+                        owner = self._owner(known, "dataset", ref_id) or self._owner(
+                            known, "evaluation_dataset", ref_id
                         )
                         if owner and owner != caller_workspace_id:
                             raise CrossWorkspaceAccessError(
@@ -322,7 +345,7 @@ class ResourceScopeEnforcer:
                 elif k_lower in ("schedule_id", "schedule"):
                     ref_id = val.get("id") if isinstance(val, dict) else val
                     if isinstance(ref_id, str):
-                        owner = self.workspace_repo.get_resource_workspace("schedule", ref_id)
+                        owner = self._owner(known, "schedule", ref_id)
                         if owner and owner != caller_workspace_id:
                             raise CrossWorkspaceAccessError(
                                 f"Cross-workspace access denied: schedule '{ref_id}' "
@@ -333,9 +356,9 @@ class ResourceScopeEnforcer:
                 elif k_lower in ("module_id", "module", "handler"):
                     ref_id = val.get("id") if isinstance(val, dict) else val
                     if isinstance(ref_id, str):
-                        owner = self.workspace_repo.get_resource_workspace(
-                            "integration_tool", ref_id
-                        ) or self.workspace_repo.get_resource_workspace("module", ref_id)
+                        owner = self._owner(known, "integration_tool", ref_id) or self._owner(
+                            known, "module", ref_id
+                        )
                         if owner and owner != caller_workspace_id:
                             raise CrossWorkspaceAccessError(
                                 f"Cross-workspace access denied: module '{ref_id}' "
@@ -343,10 +366,10 @@ class ResourceScopeEnforcer:
                             )
 
                 # Recurse
-                self.scan_and_validate_references(caller_workspace_id, val)
+                self._scan_references(caller_workspace_id, val, known)
         elif isinstance(data, list):
             for item in data:
-                self.scan_and_validate_references(caller_workspace_id, item)
+                self._scan_references(caller_workspace_id, item, known)
         elif isinstance(data, str) and data.startswith("artifact://"):
             parts = data[len("artifact://") :].split("/")
             if parts and parts[0] != caller_workspace_id:
@@ -354,3 +377,35 @@ class ResourceScopeEnforcer:
                     f"Cross-workspace access denied: artifact URI '{data}' "
                     f"references workspace '{parts[0]}', not '{caller_workspace_id}'."
                 )
+
+
+def _collect_reference_keys(data: Any, keys: list[tuple[str, str]]) -> None:
+    """The ``(resource_type, resource_id)`` lookups ``scan_and_validate_references`` may make,
+    in document order (both alternatives of the ``or`` pairs). Keep in step with it: a key
+    missing here is still looked up, one query at a time."""
+    if isinstance(data, dict):
+        for key, val in data.items():
+            k_lower = key.lower()
+            types: tuple[str, ...] = ()
+            if k_lower in ("credential_id", "credential_ref", "credential"):
+                ref_id = val.get("ref") if isinstance(val, dict) else val
+                types = ("credential",)
+            else:
+                ref_id = val.get("id") if isinstance(val, dict) else val
+                if k_lower in ("artifact_id", "artifact_ref", "artifact"):
+                    is_uri = isinstance(ref_id, str) and ref_id.startswith("artifact://")
+                    types = () if is_uri else ("artifact",)
+                elif k_lower in ("index_id", "collection_id", "collection_name", "index"):
+                    types = ("index", "vector_collection")
+                elif k_lower in ("dataset_id", "evaluation_dataset_id", "dataset"):
+                    types = ("dataset", "evaluation_dataset")
+                elif k_lower in ("schedule_id", "schedule"):
+                    types = ("schedule",)
+                elif k_lower in ("module_id", "module", "handler"):
+                    types = ("integration_tool", "module")
+            if isinstance(ref_id, str):
+                keys.extend((resource_type, ref_id) for resource_type in types)
+            _collect_reference_keys(val, keys)
+    elif isinstance(data, list):
+        for item in data:
+            _collect_reference_keys(item, keys)

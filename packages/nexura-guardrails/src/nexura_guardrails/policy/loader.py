@@ -15,6 +15,8 @@ Example::
 
     version: 1
     name: acme-default
+    mode: enforce            # or shadow: report every decision, apply none
+    shadow_budget: {max_tokens: 200000}   # per run, for shadow judges and safety models
     on_error: block
     default_tool_action: allow
     timeouts: {check_seconds: 5, stage_seconds: 8}
@@ -33,6 +35,10 @@ Example::
         when: {stage: [model_output, output]}
         checks: [pii]
         action: scrub
+      - id: big-payments
+        when: {stage: tool_input, args: {$.amount: {gt: 500}}}
+        action: block
+        enforcement: shadow    # this rule only reports, whatever the policy's mode
     audit: {sink: jsonl, path: audit/guardrails.jsonl}
 """
 
@@ -46,10 +52,10 @@ import os
 import stat
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from nexura_guardrails.policy.audit import JsonlAuditSink
-from nexura_guardrails.policy.core import GuardrailPolicy
+from nexura_guardrails.policy.core import GuardrailPolicy, ShadowBudget
 from nexura_guardrails.policy.rules import PolicyError, Rule, When
 
 __all__ = [
@@ -71,6 +77,8 @@ _TOP_KEYS = frozenset(
     {
         "version",
         "name",
+        "mode",
+        "shadow_budget",
         "on_error",
         "default_tool_action",
         "timeouts",
@@ -79,7 +87,9 @@ _TOP_KEYS = frozenset(
         "audit",
     }
 )
-_RULE_KEYS = frozenset({"id", "when", "action", "check", "checks", "mode", "on_error"})
+_RULE_KEYS = frozenset(
+    {"id", "when", "action", "check", "checks", "mode", "on_error", "enforcement"}
+)
 _WHEN_KEYS = frozenset({"stage", "tools", "origin", "toolset", "effect", "agents", "args"})
 _AUDIT_KEYS = frozenset({"sink", "path", "audit_allows", "required", "capture_content"})
 _TIMEOUT_KEYS = frozenset({"check_seconds", "stage_seconds"})
@@ -173,6 +183,7 @@ def rule_from_dict(data: Any, index: int = 0) -> Rule:
             checks=data.get("checks"),
             mode=data.get("mode", "tiered"),
             on_error=data.get("on_error"),
+            enforcement=data.get("enforcement"),
         )
     except PolicyError as exc:
         raise PolicyError(exc.message, f"{path}.{exc.path}" if exc.path else path) from None
@@ -299,6 +310,11 @@ def policy_from_dict(
         raise PolicyError("version must be 1.", "version")
     base = Path(base_dir) if base_dir is not None else None
     name = data.get("name", "policy")
+    raw_mode = data.get("mode", "enforce")
+    if raw_mode not in ("enforce", "shadow") or not isinstance(raw_mode, str):
+        raise PolicyError(f"unknown mode {raw_mode!r}; use 'enforce' or 'shadow'.", "mode")
+    mode: Literal["enforce", "shadow"] = "shadow" if raw_mode == "shadow" else "enforce"
+    shadow_budget = ShadowBudget.coerce(data.get("shadow_budget"))
     timeouts = _mapping(data.get("timeouts", {}), "timeouts")
     _only(timeouts, _TIMEOUT_KEYS, "timeouts")
     check_timeout = (
@@ -371,6 +387,8 @@ def policy_from_dict(
             digest=hashlib.sha256(document).hexdigest(),
             source=source,
             resolved_source=resolved_source,
+            mode=mode,
+            shadow_budget=shadow_budget,
         )
     except PolicyError:
         raise

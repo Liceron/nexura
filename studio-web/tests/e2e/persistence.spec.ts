@@ -43,7 +43,7 @@ test.describe('Revision-Safe Persistence and Import/Export (F06)', () => {
     await expect(page.getByLabel('Workflow revision')).toHaveText('Revision: 1');
 
     // Make an edit: add a new node
-    await page.getByRole('button', { name: 'Add step' }).click();
+    await page.getByRole('button', { name: 'Add step', exact: true }).click();
     await page.getByRole('button', { name: 'Standard', exact: true }).click();
     const palette = page.getByRole('dialog', { name: 'Available modules drawer' });
     await expect(palette).toBeVisible();
@@ -101,7 +101,7 @@ test.describe('Revision-Safe Persistence and Import/Export (F06)', () => {
     expect(updatedWf.revision).toBe(2);
 
     // Now in our frontend editor (which still expects revision 1), make a local edit
-    await page.getByRole('button', { name: 'Add step' }).click();
+    await page.getByRole('button', { name: 'Add step', exact: true }).click();
     await page.getByRole('button', { name: 'Standard', exact: true }).click();
     const palette = page.getByRole('dialog', { name: 'Available modules drawer' });
     await expect(palette).toBeVisible();
@@ -154,7 +154,7 @@ test.describe('Revision-Safe Persistence and Import/Export (F06)', () => {
     await expect(page).toHaveURL(/#\/workflows\/wf-/);
 
     // Add a step
-    await page.getByRole('button', { name: 'Add step' }).click();
+    await page.getByRole('button', { name: 'Add step', exact: true }).click();
     await page.getByRole('button', { name: 'Standard', exact: true }).click();
     const palette = page.getByRole('dialog', { name: 'Available modules drawer' });
     await expect(palette).toBeVisible();

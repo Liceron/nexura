@@ -2,7 +2,9 @@
 
 `HybridKnowledgeIndex` (in `nexura_runtime.knowledge`) is the workspace-scoped knowledge store
 behind the Studio **Knowledge Base** page and the `/api/v1/knowledge` routes. It keeps chunks,
-vectors and an SQLite FTS5 keyword index in one database.
+vectors and an SQLite FTS5 keyword index in one database. A service started with a Postgres
+`database_url` uses `nexura_postgres.PostgresHybridKnowledgeIndex` instead, with the same API (see
+[On Postgres](#on-postgres-several-service-instances)).
 
 ## Quick start
 
@@ -79,8 +81,8 @@ may be up to 256 characters; indexing does not truncate tokens.
   collection returns that document (`deduplicated: true`), unless a document with the same title
   exists: then the same-title document is the one compared (and replaced when content differs).
 * **Re-ingest**: a changed file with the same name replaces the old document in one SQLite
-  savepoint. The document id is kept, old chunks, vectors and keyword entries are removed, and a
-  failure leaves the previous version untouched.
+  savepoint (one transaction on Postgres). The document id is kept, old chunks, vectors and
+  keyword entries are removed, and a failure leaves the previous version untouched.
 * **Delete**: removes chunks, vectors and FTS5 rows together.
 
 ## HTTP routes
@@ -116,6 +118,58 @@ output and shows numbered footnotes under the reply that link to the source chun
 * The default embedder is non-semantic. No live embedding provider was exercised in tests.
 * The routes read the workspace from the request, so isolation is as strong as the service's
   workspace authentication (see `SECURITY_MODEL.md`).
+
+## On Postgres (several service instances)
+
+With `database_url` (or `NEXURA_DATABASE_URL`) the service keeps the index in Postgres
+(`nexura_postgres.PostgresHybridKnowledgeIndex`, migration component `knowledge`), and every
+`/knowledge/*` route and chat retrieval use it. The tables keep their names (`hk_documents`,
+`hk_chunks`, `hk_lineage`); no SQLite vector store or table is created. The same API, errors,
+limits and lineage rules apply. What differs:
+
+* **Keyword ranking.** Each chunk has a `tsvector` column (`'simple'` configuration, GIN index)
+  instead of the FTS5 table. A chunk matches when it contains any query term (each term is
+  matched as a phrase, as FTS5 does). The rank is `ts_rank_cd` (cover density, length-normalised)
+  per matched term, weighted by the term's bm25-style inverse document frequency in the
+  collection, where SQLite uses FTS5 `bm25`. The same documents are found, but the order of
+  similar chunks can differ. On the offline dataset below, keyword-only MRR@5 is 0.778 on
+  Postgres and 0.794 with `bm25`; recall@5 is 0.86 and 0.88; the top hit agrees for 86 % of
+  queries.
+* **Keyword query cost.** A query uses at most 32 distinct terms (longer queries are cut, as on
+  SQLite). The chunks matching any term are found through the GIN index; one pass over them
+  counts each term's document frequency, a second scores each matching chunk once and keeps
+  only the best candidates. The query needs no temporary files and its memory does not grow
+  with the collection; its time grows with the number of matching chunks times the number of
+  terms. Measured on PostgreSQL 16 with 32 very common terms: about 0.3 s for 8,000 chunks and
+  0.6 s for 16,000; a collection at the default 50 MB quota (about 140,000 chunks of 400
+  characters) needs a few seconds for such a query. Questions made of rarer words match fewer
+  chunks and are proportionally faster.
+* **Tokens.** Both sides are tokenised the same way (letters, digits, underscore, Devanagari;
+  punctuation splits words, so `report.txt` is found by `txt`; Latin diacritics fold, so `cafe`
+  finds `café`, as with FTS5's `unicode61`).
+* **Vectors.** Embeddings are pgvector `vector` values. Search is an exact cosine (`<=>`) scan of
+  the newest `max_scan` chunks of the workspace and collection; there is no ANN index yet. The
+  database needs the `vector` extension. `nexura-runtime db migrate` creates it
+  (`CREATE EXTENSION IF NOT EXISTS vector`); if migrate was not run, the service creates it when
+  it starts (the knowledge index is built at startup), so a role without that right stops the
+  start with a clear error rather than failing a later request. The database owner role may
+  create it on Neon and Cloud SQL; self-hosted Postgres needs the pgvector package installed.
+* **Concurrency.** Every write is one transaction. An ingest takes the workspace lock (the quota
+  is per workspace) and then the collection lock; reindex and delete take the collection lock.
+  Concurrent uploads on several instances never lose a document, never leave two documents with
+  one name, and never let the quota be exceeded. A reindex replaces every vector and the lineage
+  in one commit after checking that nothing changed since its snapshot (every write bumps a
+  per-collection version, so the check is one row read); a search reads in one snapshot, so
+  another instance sees the old index or the new one, never a mix. Searches never wait for
+  writers. The locks are transaction-level advisory locks, which are database-wide: run one
+  deployment per database (several deployments in different schemas of one database would
+  share lock keys and wait for each other).
+* **NUL.** Postgres text cannot hold NUL: a NUL in document text, title or source URI is stored
+  as U+FFFD (offsets unchanged). A workspace or collection id containing NUL, or a collection id
+  longer than 512 characters, is refused on upload and reindex with 400 `INVALID_COLLECTION_ID`;
+  reads with such an id find nothing.
+* The synchronous index calls of the routes run in a worker thread, so a request waiting for a
+  lock never blocks the event loop.
 
 ## In the chat playground
 

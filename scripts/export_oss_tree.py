@@ -60,6 +60,7 @@ ALLOW: tuple[str, ...] = (
     "experiments/release-gate/**",
     "experiments/benchmark/**",
     "experiments/interop/**",
+    "experiments/crossframework/**",
     "deployment/**",
     "packaging/**",
     # Project files
@@ -88,6 +89,7 @@ NEVER: tuple[str, ...] = (
     "**/*.key",
     "**/.env*",
     "experiments/benchmark/.venv/**",
+    "experiments/crossframework/.venv/**",
     "experiments/interop/.venv/**",
     "experiments/interop/legacy/.venv/**",
     "studio-web/dist/**",

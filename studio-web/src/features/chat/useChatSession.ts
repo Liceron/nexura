@@ -17,7 +17,7 @@ import { FAKE_MODEL_NAME, normalizeChatModels, defaultChatModel, chatFailureCode
 import type { AgentSummary } from '@liceron/nexura-sdk';
 import { formatApiError } from '../../api/errors';
 
-export function useChatSession() {
+export function useChatSession(initialAgentId = '') {
   const t = useLatestT();
   const { manager, connection } = useApi();
   const [sessions, setSessions] = useState<SessionListItem[]>([]);
@@ -32,7 +32,13 @@ export function useChatSession() {
   const [delivery, setDelivery] = useState<string | null>(null);
   // P26: chat with a saved agent instead of the demo (it runs on its own model).
   const [agents, setAgents] = useState<AgentSummary[]>([]);
-  const [selectedAgentId, setSelectedAgentId] = useState<string>('');
+  const [selectedAgentId, updateAgentId] = useState<string>(initialAgentId);
+  useEffect(() => { updateAgentId(initialAgentId); }, [initialAgentId]);
+  const setSelectedAgentId = (id: string) => {
+    updateAgentId(id);
+    const hash = `#/playground${id ? `?agent=${encodeURIComponent(id)}` : ''}`;
+    if (window.location.hash !== hash) window.location.replace(hash);
+  };
   const [refusedToolCalls, setRefusedToolCalls] = useState<RefusedToolCall[]>([]);
 
   const [loadingSessions, setLoadingSessions] = useState<boolean>(true);
@@ -302,21 +308,21 @@ export function useChatSession() {
   // Saved agents of the workspace for the agent selector (none: the demo only).
   useEffect(() => {
     let cancelled = false;
-    setSelectedAgentId(''); // never send one workspace's agent to another
+    // Keep an explicitly routed agent even if listing fails: never silently run the demo.
+    updateAgentId(initialAgentId);
     setAgents([]);
     manager.client.agents
       .list()
       .then((res) => {
         if (cancelled) return;
         setAgents(res.items || []);
-        setSelectedAgentId((cur) => (cur && !(res.items || []).some((a) => a.agent_id === cur) ? '' : cur));
       })
       .catch(() => undefined);
     return () => {
       cancelled = true;
     };
     // Reload on a workspace switch too: an agent of the previous workspace must not be sent.
-  }, [manager, connection.workspace]);
+  }, [manager, connection.workspace, initialAgentId]);
 
   // Models the operator allowed; falls back to the offline fixture if unavailable.
   useEffect(() => {
@@ -335,10 +341,11 @@ export function useChatSession() {
     };
   }, [manager]);
 
-  // Initial load
+  // Initial load. Sessions do not record which agent they talked to, so an agent's Chat tab
+  // starts a new conversation instead of reopening the workspace's latest one.
   useEffect(() => {
     refreshSessions().then((items) => {
-      if (items && items.length > 0 && !currentSessionId) {
+      if (items && items.length > 0 && !currentSessionId && !initialAgentId) {
         selectSession(items[0].session_id);
       }
     });

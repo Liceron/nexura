@@ -44,6 +44,13 @@ export class NexuraApiManager {
   private _workspace: string;
   private _principal: string = 'default';
   private _authToken: string | null = null;
+  /**
+   * The host page supplies the credential (embedded Studio). Against a local-owner service the
+   * host's credential is that service's session token (the enterprise web app's local mode), so
+   * it is sent as X-Nexura-Session: the token endpoint refuses this page, which is on another
+   * origin than the service.
+   */
+  public hostSuppliesCredential = false;
   private _sessionToken: string | undefined = undefined;
   private _client: NexuraClient;
   private _abortController: AbortController = new AbortController();
@@ -120,6 +127,15 @@ export class NexuraApiManager {
     this._client = this._createClient();
   }
 
+  /**
+   * A refreshed credential for the same identity: later requests use it, while in-flight
+   * requests and cached data stay (a different identity uses `setAuthToken`).
+   */
+  public rotateAuthToken(token: string): void {
+    this._authToken = token;
+    this._client = this._createClient();
+  }
+
   public abortAllRequests(reason: string = 'Aborted by user'): void {
     this._abortController.abort(reason);
     this._abortController = new AbortController();
@@ -162,7 +178,9 @@ export class NexuraApiManager {
       // it instead of being refused and retried. Best effort: the refusal path still applies.
       // With an operator token the client sends it on this probe too, so a server in remote
       // single-operator mode answers 404 instead of counting a failed sign-in (P38 C4 m3).
-      if (!this._client.sessionToken) {
+      if (caps.active_profile === 'local-owner' && this.hostSuppliesCredential && this._authToken) {
+        this._client.sessionToken = this._authToken;
+      } else if (caps.active_profile !== 'authenticated-shared-service' && !this._client.sessionToken) {
         await this._client.fetchSessionToken().catch(() => undefined);
       }
       return {

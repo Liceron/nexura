@@ -77,3 +77,4 @@ studio-web/playwright-report/
 /codex reviews/
 # Demo-video recorder (local only; videos go to .autopilot)
 studio-web/demos/
+.gstack/

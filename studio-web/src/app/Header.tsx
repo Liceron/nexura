@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Liceron
+import { NexuraMark } from '../components/NexuraMark';
 import { Icon } from '../components/Icon';
 import { useEffect, useState } from 'react';
 import { ConnectionIndicator } from './ConnectionIndicator';
 import { WorkspaceSelector } from './WorkspaceSelector';
-import { useI18n } from '../i18n';
+import { useI18n, languageChoiceEnabled } from '../i18n';
 import { Modal } from '../components/Modal';
 import { useCompactLayout } from './useCompactLayout';
 import { useApi } from '../api/context';
@@ -45,7 +46,7 @@ export function Header({ onOpenNavigation, navigationOpen = false }: {
   };
 
   const preferences = <>
-        <button
+        {languageChoiceEnabled() && <button
           onClick={() => setLanguage(language === 'en' ? 'hi' : 'en')}
           title={t(`header.language.${language}`)}
           aria-label={t(`header.language.${language}`)}
@@ -54,7 +55,7 @@ export function Header({ onOpenNavigation, navigationOpen = false }: {
           className="studio-utility-button"
         >
           {language === 'en' ? 'हिन्दी' : 'EN'}
-        </button>
+        </button>}
 
         <button
           onClick={toggleTheme}
@@ -77,7 +78,7 @@ export function Header({ onOpenNavigation, navigationOpen = false }: {
         </button>
       ) : (
         <a className="studio-brand" href="#/workflows" aria-label={t('app.title')}>
-          <span className="studio-brand-mark" aria-hidden="true">N</span>
+          <NexuraMark />
           <span>{t('app.title')}</span>
         </a>
       )}

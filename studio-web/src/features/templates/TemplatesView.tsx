@@ -9,6 +9,7 @@ import { Modal } from '../../components/Modal';
 import { Spinner } from '../../components/Spinner';
 import { useI18n } from '../../i18n';
 import { TemplateGraph } from './TemplateGraph';
+import { rememberSampleInput } from './sampleInput';
 import type { InstantiateResult, TemplateDetail, TemplateList, TemplateSummary } from './types';
 
 const selectStyle = {
@@ -33,6 +34,24 @@ export function TemplatesView() {
   const [creatingId, setCreatingId] = useState<string | null>(null);
   const [created, setCreated] = useState<InstantiateResult | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
+  const [previewId, setPreviewId] = useState(() => new URLSearchParams(window.location.hash.split('?')[1] || '').get('template'));
+  const [previewAttempt, setPreviewAttempt] = useState(0);
+  useEffect(() => {
+    const select = () => setPreviewId(new URLSearchParams(window.location.hash.split('?')[1] || '').get('template'));
+    window.addEventListener('hashchange', select);
+    return () => window.removeEventListener('hashchange', select);
+  }, []);
+  useEffect(() => {
+    if (!previewId) { setPreview(null); return; }
+    let active = true;
+    setCreateError(null);
+    setError(null);
+    setPreview(null);
+    void manager.client.request<TemplateDetail>('GET', `/templates/${encodeURIComponent(previewId)}`)
+      .then(detail => { if (active) setPreview(detail); })
+      .catch(() => { if (active) setError(t('templates.loadError')); });
+    return () => { active = false; };
+  }, [previewId, previewAttempt, manager, t]);
 
   useEffect(() => {
     if (connection.status !== 'connected') return;
@@ -69,15 +88,14 @@ export function TemplatesView() {
   }, [catalog, search]);
 
   const openPreview = useCallback(
-    async (tpl: TemplateSummary) => {
-      setCreateError(null);
-      try {
-        setPreview(await manager.client.request<TemplateDetail>('GET', `/templates/${tpl.id}`));
-      } catch {
-        setError(t('templates.loadError'));
-      }
+    (tpl: TemplateSummary) => {
+      const hash = `#/templates?template=${encodeURIComponent(tpl.id)}`;
+      if (window.location.hash === hash) {
+        setPreviewId(tpl.id);
+        setPreviewAttempt(attempt => attempt + 1);
+      } else window.location.hash = hash;
     },
-    [manager, t]
+    []
   );
 
   const useTemplate = useCallback(
@@ -91,21 +109,29 @@ export function TemplatesView() {
           `/templates/${tpl.id}/instantiate`,
           { body: { name: tpl.title } }
         );
+        // The Run dialog of the new workflow starts with the template's sample input.
+        try {
+          const detail = await manager.client.request<TemplateDetail>('GET', `/templates/${tpl.id}`);
+          rememberSampleInput(connection.workspace, res.workflow_id, detail.sample_input);
+        } catch {
+          // Best effort: without it the Run dialog shows its generic example.
+        }
         setCreated(res);
         setPreview(null);
+        window.location.replace('#/templates');
       } catch (err: unknown) {
         setCreateError(err instanceof Error ? err.message : t('templates.createError'));
       } finally {
         setCreatingId(null);
       }
     },
-    [manager, t]
+    [manager, connection.workspace, t]
   );
 
   return (
     <PageLayout>
       <PageHeader title={t('templates.title')} />
-      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center', marginBottom: 16 }}>
+      <div className="studio-template-toolbar" style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center', marginBottom: 16 }}>
         <input
           type="search"
           aria-label={t('templates.search')}
@@ -174,7 +200,7 @@ export function TemplatesView() {
       {loading && !catalog && <Spinner size={20} />}
       {error && <div role="alert" style={{ color: 'var(--status-danger)' }}>{error}</div>}
       {catalog && items.length === 0 && !loading && (
-        <p data-testid="templates-empty" style={{ color: 'var(--text-secondary)' }}>{t('templates.empty')}</p>
+        <p className="studio-empty-state" data-testid="templates-empty" style={{ color: 'var(--text-secondary)' }}>{t('templates.empty')}</p>
       )}
 
       <ul data-testid="template-grid" className="workflow-template-list">
@@ -198,7 +224,7 @@ export function TemplatesView() {
       </ul>
 
       {preview && (
-        <Modal open onClose={() => setPreview(null)} title={preview.title} maxWidth={760}>
+        <Modal open onClose={() => { setPreview(null); window.location.hash = '#/templates'; }} title={preview.title} maxWidth={760}>
           <div data-testid="template-preview" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             {createError && <div role="alert" style={{ color: 'var(--status-danger)' }}>{createError}</div>}
             <p style={{ fontSize: 13, color: 'var(--text-secondary)', margin: 0 }}>{preview.description}</p>
@@ -216,7 +242,7 @@ export function TemplatesView() {
               <pre style={{ fontSize: 12, overflow: 'auto' }}>{preview.mermaid}</pre>
             </details>
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-              <Button onClick={() => setPreview(null)}>{t('templates.close')}</Button>
+              <Button onClick={() => { setPreview(null); window.location.hash = '#/templates'; }}>{t('templates.close')}</Button>
               <Button
                 variant="primary"
                 data-testid="template-preview-use"

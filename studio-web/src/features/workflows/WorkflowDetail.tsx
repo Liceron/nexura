@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Liceron
+import { DeleteWorkflowDialog } from './DeleteWorkflowDialog';
 import { Icon } from '../../components/Icon';
 import { useState, useEffect, useCallback } from 'react';
 import { useApi } from '../../api/context';
@@ -47,6 +48,7 @@ export function WorkflowDetail({ workflowId, runId, onRunChange, onBack, onOpenW
   const [actionHost, setActionHost] = useState<HTMLDivElement | null>(null);
   const [feedbackHost, setFeedbackHost] = useState<HTMLDivElement | null>(null);
   const [editorDirty, setEditorDirty] = useState(false);
+  const [editorLoad, setEditorLoad] = useState(0);
 
   const [workflow, setWorkflow] = useState<WorkflowRecord | null>(null);
   const [loading, setLoading] = useState(true);
@@ -62,6 +64,7 @@ export function WorkflowDetail({ workflowId, runId, onRunChange, onBack, onOpenW
   // Delete modal
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
 
   // Run modal & execution visualizer states
@@ -99,6 +102,7 @@ export function WorkflowDetail({ workflowId, runId, onRunChange, onBack, onOpenW
     try {
       const data = await manager.client.workflows.get(workflowId);
       setWorkflow(data);
+      setEditorLoad(value => value + 1);
       setCopyName(t('workflows.copyName').replace('{name}', data.name));
     } catch (err: unknown) {
       const raw = err instanceof Error ? err.message : String(err); // keeps "[404] CODE"
@@ -138,13 +142,15 @@ export function WorkflowDetail({ workflowId, runId, onRunChange, onBack, onOpenW
   };
 
   const handleDelete = async () => {
+    setDeleteError(null);
     setIsDeleting(true);
     try {
       await manager.client.workflows.delete(workflowId);
       setDeleteModalOpen(false);
       onBack();
     } catch (err: unknown) {
-      setError(formatApiError(err, t));
+      setDeleteError(formatApiError(err, t));
+    } finally {
       setIsDeleting(false);
     }
   };
@@ -262,7 +268,7 @@ export function WorkflowDetail({ workflowId, runId, onRunChange, onBack, onOpenW
       {/* Keep the editor mounted across tabs: drafts and undo history have one owner. */}
       <div hidden={activeTab !== 'canvas' && activeTab !== 'nodes'} className="workflow-editor">
           <WorkflowCanvas
-            key={`${workflow.workflow_id}-${workflow.revision}`}
+            key={`${workflow.workflow_id}-${editorLoad}`}
             initialSpec={spec}
             actionHost={actionHost}
             feedbackHost={feedbackHost}
@@ -274,7 +280,7 @@ export function WorkflowDetail({ workflowId, runId, onRunChange, onBack, onOpenW
               <Button variant="ghost" onClick={() => setCopyModalOpen(true)}>{t('workflows.saveAsCopy')}</Button>
               <Button variant="ghost" onClick={handleDownloadExport}>{t('workflows.downloadExport')}</Button>
               <Button variant="ghost" data-testid="workflow-open-triggers" onClick={() => { window.location.hash = triggersHref(workflow.workflow_id); }}>{t('workflows.openTriggers')}</Button>
-              <Button variant="ghost" className="workflow-danger-action" onClick={() => setDeleteModalOpen(true)}>{t('workflows.deleteWorkflow')}</Button>
+              <Button variant="ghost" className="workflow-danger-action" onClick={() => { setDeleteError(null); setDeleteModalOpen(true); }}>{t('workflows.deleteWorkflow')}</Button>
             </>}
             onImportedPython={(record) => onOpenWorkflow(record.workflow_id)}
             workflowId={workflow.workflow_id}
@@ -372,21 +378,7 @@ export function WorkflowDetail({ workflowId, runId, onRunChange, onBack, onOpenW
       </Modal>
 
       {/* Delete Confirmation Modal */}
-      <Modal open={deleteModalOpen} onClose={() => setDeleteModalOpen(false)} title={t('workflows.deleteWorkflow')}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-          <p style={{ color: 'var(--text-secondary)', fontSize: 14 }}>
-            {t('workflows.confirmDelete')}
-          </p>
-          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
-            <Button type="button" variant="secondary" onClick={() => setDeleteModalOpen(false)}>
-              {t('common.cancel')}
-            </Button>
-            <Button type="button" variant="danger" loading={isDeleting} onClick={handleDelete}>
-              {t('common.delete')}
-            </Button>
-          </div>
-        </div>
-      </Modal>
+      <DeleteWorkflowDialog open={deleteModalOpen} onClose={() => setDeleteModalOpen(false)} name={workflow?.name || workflowId} busy={isDeleting} error={deleteError} onConfirm={handleDelete} />
 
       {/* Run Start Modal */}
       <RunStartModal

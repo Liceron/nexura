@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Liceron
+import { useAfterRender } from '../../app/useAfterRender';
 import { useEffect, useId, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useIntegrations } from './useIntegrations';
 import { Button } from '../../components/Button';
+import { InlineConfirm } from '../../components/InlineConfirm';
 import { PageHeader, PageLayout } from '../../components/PageHeader';
 import { WorkflowTabs } from '../../components/WorkflowTabs';
 import { useI18n } from '../../i18n';
@@ -43,6 +45,11 @@ export function IntegrationsView() {
     status,
     loading,
     error,
+    registrations,
+    registrationsError,
+    registrationsLoading,
+    refreshRegistrations,
+    removeRegistration,
 
     // MCP
     mcpServerName,
@@ -89,6 +96,7 @@ export function IntegrationsView() {
   // Phones show the source list, then the operation and its result, one at a time.
   const [phonePane, setPhonePane] = useState<'list' | 'detail'>('list');
   const detailHeadingRef = useRef<HTMLHeadingElement>(null);
+  const afterRender = useAfterRender();
   const listRef = useRef<HTMLUListElement>(null);
   useEffect(() => setPhonePane('list'), [activeTab]);
 
@@ -99,11 +107,11 @@ export function IntegrationsView() {
   const openDetail = (select: () => void) => {
     select();
     setPhonePane('detail');
-    if (compact) requestAnimationFrame(() => detailHeadingRef.current?.focus());
+    if (compact) afterRender(() => detailHeadingRef.current?.focus());
   };
   const backToList = () => {
     setPhonePane('list');
-    requestAnimationFrame(() => listRef.current?.querySelector<HTMLButtonElement>('[aria-pressed="true"]')?.focus());
+    afterRender(() => listRef.current?.querySelector<HTMLButtonElement>('[aria-pressed="true"]')?.focus());
   };
 
   const tabs = [
@@ -144,6 +152,19 @@ export function IntegrationsView() {
   return (
     <PageLayout data-testid="integrations-view">
       <PageHeader title={t('integrations.title')} description={t('integrations.subtitle')} />
+      <section aria-label={t('livefixUi.registrations')} style={{ marginBottom: 24 }}>
+        <h2>{t('livefixUi.registrations')}</h2>
+        <p className="resource-help">{t('livefixUi.registrationsHelp')}</p>
+        <Button variant="ghost" size="sm" loading={registrationsLoading} onClick={refreshRegistrations}>{t('livefixUi.refreshRegistrations')}</Button>
+        {registrationsError && <p role="alert">{registrationsError}</p>}
+        {!registrationsLoading && !registrationsError && registrations.length === 0 && <p>{t('livefixUi.noRegistrations')}</p>}
+        {registrations.map(row => <div key={row.module_id} className="resource-actions">
+          <code>{row.module_id}</code><span>{row.kind} · {row.server_name_or_prefix}</span>
+          <InlineConfirm consequence={t('livefixUi.removeRegistrationConfirm').replace('{id}', row.module_id).replace('{server}', row.server_name_or_prefix)}>
+            <Button variant="danger" size="sm" onClick={() => removeRegistration(row.module_id)}>{t('livefixUi.remove')}</Button>
+          </InlineConfirm>
+        </div>)}
+      </section>
 
       {error && (
         <div role="alert" className="inline-notice inline-notice--danger" style={{ marginBottom: 16 }}>

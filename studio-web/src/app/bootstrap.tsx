@@ -6,6 +6,7 @@ import ReactDOM from 'react-dom/client';
 import { App } from '../App';
 import { setMembershipSource } from '../api/membership';
 import { BUILTIN_STUDIO_EXTENSIONS } from './builtinExtensions';
+import { StudioHostContext, type StudioHostOptions } from './host';
 import {
   StudioExtensionError,
   StudioExtensionRegistry,
@@ -42,20 +43,24 @@ export function registerStudioExtensions(
 
 /**
  * Register the in-tree extensions and `extensions` into `registry` (a new one by default) and
- * render Studio into `element` with that registry.
+ * render Studio into `element` with that registry. `host` configures Studio inside another
+ * page's frame (see `host.ts`); omitted, Studio is the standalone app.
  */
 export function mountStudio(
   element: HTMLElement,
   extensions: readonly StudioExtension[] = [],
   registry: StudioExtensionRegistry = new StudioExtensionRegistry(),
+  host: StudioHostOptions = {},
 ): ReactDOM.Root {
   registerStudioExtensions(extensions, registry);
   const root = ReactDOM.createRoot(element);
   root.render(
     <React.StrictMode>
-      <StudioExtensionsContext.Provider value={registry}>
-        <App />
-      </StudioExtensionsContext.Provider>
+      <StudioHostContext.Provider value={{ embedded: Boolean(host.embedded) }}>
+        <StudioExtensionsContext.Provider value={registry}>
+          <App apiBaseUrl={host.apiBaseUrl} workspace={host.workspace} credentials={host.credentials} />
+        </StudioExtensionsContext.Provider>
+      </StudioHostContext.Provider>
     </React.StrictMode>,
   );
   return root;

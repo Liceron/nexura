@@ -138,7 +138,9 @@ def test_kill_after_run_completed_before_complete_job_does_not_rerun(
     assert job["run_id"] == first_run
 
 
-def test_service_start_spares_a_live_owner_and_interrupts_a_dead_one(harness: Harness) -> None:
+def test_service_start_spares_a_live_owner_and_interrupts_a_dead_one(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Starting another service on the database (as ``nexura-runtime worker`` does next to
     a live ``serve``) leaves a live process's running run alone; once that process is
     killed, the next start marks it interrupted.
@@ -151,6 +153,9 @@ def test_service_start_spares_a_live_owner_and_interrupts_a_dead_one(harness: Ha
     from fastapi.testclient import TestClient
 
     from nexura_runtime.service.api.app import create_api_app
+
+    # SQLite only, like the harness's children: no service database_url from the test run.
+    monkeypatch.delenv("NEXURA_DATABASE_URL", raising=False)
 
     def status(run_id: str) -> str | None:
         app = create_api_app(db_path=harness.db_path, profile="local-owner")

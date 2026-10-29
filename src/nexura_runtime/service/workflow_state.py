@@ -52,8 +52,10 @@ def open_workflow_state_store(url: str) -> Any:
     return postgres.PostgresWorkflowStore(url)
 
 
-def open_trigger_state_store(url: str, *, secret_key_file: str | os.PathLike[str]) -> Any:
+def open_trigger_state_store(url: str, *, secret_key_file: str | os.PathLike[str] | None) -> Any:
     """A ``PostgresTriggerStore`` for ``url``; webhook secrets are encrypted with
-    ``NEXURA_TRIGGER_SECRET_KEY`` or else the key in ``secret_key_file``."""
+    ``NEXURA_TRIGGER_SECRET_KEY`` or else the key in ``secret_key_file``. With
+    ``secret_key_file=None`` (Postgres mode, MVP WP9) only the variable is used: without it,
+    storing or reading a webhook secret raises and no key file is ever written."""
     postgres = require_package(POSTGRES_PACKAGE, "PostgreSQL trigger state")
     return postgres.PostgresTriggerStore(url, secret_key_file=secret_key_file)

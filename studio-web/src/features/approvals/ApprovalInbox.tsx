@@ -12,6 +12,7 @@ import { useI18n } from '../../i18n';
 import { runHref } from '../../app/routes';
 import { describeAgentToolCalls } from './agentToolCalls';
 import { RunStatus } from '../runs/RunStatus';
+import { CancelRunButton } from '../runs/CancelRunButton';
 
 export function ApprovalInbox({ onOpenWorkflow }: { onOpenWorkflow?: (workflowId: string) => void }) {
   const { approvals, count, loading, error, refresh, decideApproval } = usePendingApprovals();
@@ -61,6 +62,7 @@ export function ApprovalInbox({ onOpenWorkflow }: { onOpenWorkflow?: (workflowId
           <td>{date(item.createdAt)}</td><td>{date(request?.expires_at)}</td>
           <td><div className="inspection-actions">
             <Button variant="secondary" onClick={() => setSelectedItem(item)}>{t('approvalReview.review')}</Button>
+            <CancelRunButton runId={item.runId} status={item.runRecord.status} onCancelled={refresh} />
             <a href={runHref(item.runId)} data-testid="approval-open-run">{t('runs.open')}<span className="studio-sr-only"> {item.runId}</span></a>
             {onOpenWorkflow && <Button variant="ghost" onClick={() => onOpenWorkflow(item.workflowId)}>{t('approvalReview.workflow')}</Button>}
           </div><code className="inspection-meta">{item.runId}</code></td>

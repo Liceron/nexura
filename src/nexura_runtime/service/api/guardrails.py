@@ -377,8 +377,10 @@ POLICY_EXCEPTIONS = (
 def policy_view(policy: Any, *, admin: bool = False) -> dict[str, Any]:
     """The ``GET /guardrails/policy`` body for ``policy`` (or None).
 
-    Everyone sees whether a policy is configured and enforced, the policy file's base name,
-    the digest and what it does not cover. The rules, checks, name and the file's full path
+    Everyone sees whether a policy is configured and enforced, its ``mode`` (``enforce``, or
+    ``shadow``: decisions are reported, nothing is blocked), how many rules run in shadow mode
+    (``shadow_rules``), the policy file's base name, the digest and what it does not cover.
+    The rules (each with its effective ``enforcement``), checks, name and the file's full path
     are shown to admins only (``admin=True``): a viewer must not learn the exact blocklist
     or the server's file layout.
     """
@@ -387,6 +389,8 @@ def policy_view(policy: Any, *, admin: bool = False) -> dict[str, Any]:
     from nexura_agents.policy import default_hooks, default_hooks_locked
 
     source = getattr(policy, "source", None)
+    mode = getattr(policy, "mode", "enforce")
+    shadow_rules = getattr(policy, "shadow_rule_count", 0)
     summary: dict[str, Any] = {
         "digest": str(getattr(policy, "digest", "")),
         "file": Path(source).name if isinstance(source, str) and source else None,
@@ -397,6 +401,9 @@ def policy_view(policy: Any, *, admin: bool = False) -> dict[str, Any]:
     return {
         "configured": True,
         "enforced": default_hooks() is policy and default_hooks_locked(),
+        # shadow: every decision is audited and reported, none is applied (P40).
+        "mode": mode if mode in ("enforce", "shadow") else "enforce",
+        "shadow_rules": shadow_rules if isinstance(shadow_rules, int) else 0,
         "detail": "full" if admin else "summary",
         "policy": summary,
         "exceptions": list(POLICY_EXCEPTIONS),

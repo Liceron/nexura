@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 import uuid
 from typing import Any
@@ -34,7 +35,7 @@ from nexura_runtime.evaluation.models import (
     TrajectoryMode,
 )
 from nexura_runtime.evaluation.runner import EvaluationRunner, redact_trace, simulate_user
-from nexura_runtime.evaluation.store import EvaluationStore, SqliteEvaluationStore
+from nexura_runtime.evaluation.store import EvaluationStore
 from nexura_runtime.service.api.models import (
     CompareEvaluationsRequest,
     CreateDatasetRequest,
@@ -43,6 +44,7 @@ from nexura_runtime.service.api.models import (
 from nexura_runtime.service.auth.errors import PermissionDeniedError
 from nexura_runtime.service.auth.models import ActionPermission, Principal, WorkspaceRole
 from nexura_runtime.service.auth.permissions import check_permission
+from nexura_runtime.service.storage_backend import store_call
 from nexura_runtime.service.workspaces.repository import WorkspaceRepository
 
 _SAFE_ID_REGEX = re.compile(r"^[a-zA-Z0-9_\-\.]+$")
@@ -128,12 +130,7 @@ def _require(permission: ActionPermission) -> Any:
 
 
 def _get_eval_store(request: Request) -> EvaluationStore:
-    eval_store = getattr(request.app.state, "eval_store", None)
-    if eval_store is None:
-        db_file = getattr(request.app.state.store, "db_path", ":memory:")
-        eval_store = SqliteEvaluationStore(db_file)
-        request.app.state.eval_store = eval_store
-    return eval_store
+    return request.app.state.eval_store  # type: ignore[no-any-return]
 
 
 class TraceGraderSpec(BaseModel):
@@ -229,7 +226,8 @@ async def import_trace(request: Request, payload: StoredTrace) -> dict[str, Any]
         cleaned = StoredTrace.model_validate(redact_trace(payload.model_dump()))
     except (ValueError, TypeError) as exc:
         raise HTTPException(422, detail={"code": "INVALID_TRACE"}) from exc
-    _get_eval_store(request).save_trace(cleaned, workspace_id)
+    # Off the event loop: a large trace is uploaded to the blob store (WP2b).
+    await asyncio.to_thread(_get_eval_store(request).save_trace, cleaned, workspace_id)
     return {"run_id": payload.run_id, "source": "imported_trace"}
 
 
@@ -238,7 +236,9 @@ async def evaluate_online(request: Request, payload: TraceEvaluationRequest) -> 
     workspace_id, principal, _ = _get_caller_context(request)
     eval_store = _get_eval_store(request)
     graders = _trace_graders(payload.graders)
-    traces = {t.run_id: t for t in eval_store.list_traces(workspace_id)}
+    # Off the event loop: offloaded traces are read from the blob store (WP2b).
+    stored_traces = await asyncio.to_thread(eval_store.list_traces, workspace_id)
+    traces = {t.run_id: t for t in stored_traces}
     app_store = getattr(request.app.state, "store", None)
     repo: WorkspaceRepository = request.app.state.workspace_repo
     if app_store is not None:
@@ -273,7 +273,7 @@ async def evaluate_online(request: Request, payload: TraceEvaluationRequest) -> 
     summary = await EvaluationRunner(graders).evaluate_traces(
         traces.values(), payload.example, config=payload.config
     )
-    eval_store.save_run(summary, workspace_id)
+    await store_call(eval_store, eval_store.save_run, summary, workspace_id)
     return _summary_payload(summary)
 
 
@@ -288,7 +288,9 @@ async def evaluate_simulation(
     workspace_id, principal, _ = _get_caller_context(request)
     store = _get_eval_store(request)
     try:
-        dataset = store.get_dataset(payload.dataset_id, payload.dataset_version, workspace_id)
+        dataset = await store_call(
+            store, store.get_dataset, payload.dataset_id, payload.dataset_version, workspace_id
+        )
     except DatasetNotFoundError as exc:
         raise HTTPException(404, detail={"code": "DATASET_NOT_FOUND", "message": str(exc)}) from exc
     if any(e.simulation is None for e in dataset.examples):
@@ -331,7 +333,7 @@ async def evaluate_simulation(
     summary.dataset_digest = summary.dataset_hash = dataset.content_hash
     summary.metadata.update({"source": "user_simulation", "agent_id": payload.agent_id})
     summary.is_synthetic_evidence = True
-    store.save_run(summary, workspace_id)
+    await store_call(store, store.save_run, summary, workspace_id)
     return _summary_payload(summary)
 
 
@@ -340,7 +342,7 @@ async def list_datasets(request: Request) -> dict[str, Any]:
     """List registered and built-in evaluation datasets in the active workspace."""
     workspace_id, _, _ = _get_caller_context(request)
     store = _get_eval_store(request)
-    datasets = store.list_datasets(workspace_id)
+    datasets = await store_call(store, store.list_datasets, workspace_id)
     return {"datasets": datasets, "total": len(datasets)}
 
 
@@ -434,7 +436,7 @@ async def create_dataset(request: Request, payload: CreateDatasetRequest) -> dic
         examples=parsed_examples,
         metadata=payload.metadata,
     )
-    store.save_dataset(dataset, workspace_id)
+    await store_call(store, store.save_dataset, dataset, workspace_id)
 
     return {
         "success": True,
@@ -455,7 +457,9 @@ async def get_dataset(
     workspace_id, _, _ = _get_caller_context(request)
     store = _get_eval_store(request)
     try:
-        ds = store.get_dataset(dataset_id, version=version, workspace_id=workspace_id)
+        ds = await store_call(
+            store, store.get_dataset, dataset_id, version=version, workspace_id=workspace_id
+        )
         return ds.model_dump(mode="json")
     except DatasetNotFoundError as exc:
         raise HTTPException(
@@ -473,7 +477,7 @@ async def delete_dataset(request: Request, dataset_id: str) -> dict[str, Any]:
     """Remove a custom dataset. Built-in benchmark datasets cannot be deleted."""
     workspace_id, _, _ = _get_caller_context(request)
     store = _get_eval_store(request)
-    deleted = store.delete_dataset(dataset_id, workspace_id=workspace_id)
+    deleted = await store_call(store, store.delete_dataset, dataset_id, workspace_id=workspace_id)
     if not deleted:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -496,7 +500,9 @@ async def run_evaluation(request: Request, payload: RunEvaluationRequest) -> dic
 
     # 1. Load dataset
     try:
-        dataset = store.get_dataset(
+        dataset = await store_call(
+            store,
+            store.get_dataset,
             payload.dataset_id,
             version=payload.dataset_version,
             workspace_id=workspace_id,
@@ -593,7 +599,7 @@ async def run_evaluation(request: Request, payload: RunEvaluationRequest) -> dic
     )
 
     # Persist summary
-    store.save_run(summary, workspace_id)
+    await store_call(store, store.save_run, summary, workspace_id)
 
     res_data = summary.model_dump(mode="json")
     res_data["mean_latency_ms"] = round(
@@ -611,9 +617,11 @@ async def list_runs(
     """List past evaluation runs in active workspace."""
     workspace_id, _, _ = _get_caller_context(request)
     store = _get_eval_store(request)
-    runs = store.list_runs(workspace_id=workspace_id, limit=limit, offset=offset)
+    runs = await store_call(
+        store, store.list_runs, workspace_id=workspace_id, limit=limit, offset=offset
+    )
     for row in runs:
-        summary = store.get_run(row["run_id"], workspace_id=workspace_id)
+        summary = await store_call(store, store.get_run, row["run_id"], workspace_id=workspace_id)
         if summary is not None:
             await _assert_summary_access(request, summary)
     return {"runs": runs, "total": len(runs)}
@@ -624,7 +632,7 @@ async def get_run_details(request: Request, eval_id: str) -> dict[str, Any]:
     """Retrieve full evaluation run details including example results and grader outputs."""
     workspace_id, _, _ = _get_caller_context(request)
     store = _get_eval_store(request)
-    run = store.get_run(eval_id, workspace_id=workspace_id)
+    run = await store_call(store, store.get_run, eval_id, workspace_id=workspace_id)
     if not run:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -636,6 +644,29 @@ async def get_run_details(request: Request, eval_id: str) -> dict[str, Any]:
     return res_data
 
 
+@router.delete(
+    "/runs/{eval_id}", summary="Delete an evaluation run", dependencies=[_require("edit")]
+)
+async def delete_eval_run(request: Request, eval_id: str) -> dict[str, Any]:
+    """Delete one benchmark evaluation run (summary and per-example results) of the caller's
+    workspace. Needs the ``edit`` permission; 404 ``RUN_NOT_FOUND`` otherwise."""
+    workspace_id, _, _ = _get_caller_context(request)
+    store = _get_eval_store(request)
+    run = await store_call(store, store.get_run, eval_id, workspace_id=workspace_id)
+    if run is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "RUN_NOT_FOUND", "message": f"Evaluation run '{eval_id}' not found."},
+        )
+    await _assert_summary_access(request, run)
+    if not await store_call(store, store.delete_run, eval_id, workspace_id=workspace_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "RUN_NOT_FOUND", "message": f"Evaluation run '{eval_id}' not found."},
+        )
+    return {"deleted": True, "run_id": eval_id}
+
+
 @router.post("/compare", summary="Compare two evaluation runs")
 async def compare_runs(request: Request, payload: CompareEvaluationsRequest) -> dict[str, Any]:
     """Compare baseline and candidate runs side by side, identifying regressions and
@@ -643,7 +674,7 @@ async def compare_runs(request: Request, payload: CompareEvaluationsRequest) -> 
     workspace_id, _, _ = _get_caller_context(request)
     store = _get_eval_store(request)
 
-    run_a = store.get_run(payload.run_id_a, workspace_id=workspace_id)
+    run_a = await store_call(store, store.get_run, payload.run_id_a, workspace_id=workspace_id)
     if not run_a:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -653,7 +684,7 @@ async def compare_runs(request: Request, payload: CompareEvaluationsRequest) -> 
             },
         )
 
-    run_b = store.get_run(payload.run_id_b, workspace_id=workspace_id)
+    run_b = await store_call(store, store.get_run, payload.run_id_b, workspace_id=workspace_id)
     if not run_b:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

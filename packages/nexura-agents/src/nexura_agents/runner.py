@@ -3861,6 +3861,10 @@ class Runner:
         channel = state.ctx._events
         for custom in _pending_custom(state):
             yield custom
+        if batch:
+            # A workflow node counts as started before its first tool call runs (internal
+            # dispatch gate; outside a workflow node a no-op).
+            admission.before_dispatch()
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         channel.attach(queue.put_nowait, asyncio.get_running_loop())
         batch_task = asyncio.ensure_future(

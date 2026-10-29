@@ -104,12 +104,14 @@ _KEY_SHAPED = re.compile(
     r"(?i)(?:^|[^a-z0-9])(?:sk|pk|rk|ghp|gho|ghu|ghs|ghr|github_pat|xox[abpr]|akia|asia)[-_]?"
     r"[a-z0-9]{8,}"
 )
-_TOKEN_KEYS = ("backend", "rule", "check", "error_type", "source")
+_TOKEN_KEYS = ("backend", "rule", "check", "error_type", "source", "skipped")
 # A policy digest (prefix) is hex: checked on its own, so the digit-run filter for tokens
 # (which keeps detected values out) never drops it (P39 G6 round 2, L1).
 _DIGEST = re.compile(r"[0-9a-f]{16,64}")
 # ``decision`` is copied only from this vocabulary (the nexura-guardrails verdicts).
 _DECISIONS = frozenset({"allow", "block", "review", "error", "rewrite"})
+# ``mode`` is copied only from this vocabulary (a guardrail policy's enforce or shadow mode).
+_MODES = frozenset({"enforce", "shadow"})
 _MAX_CATEGORIES = 32
 
 
@@ -159,7 +161,10 @@ def decision_record(
     ``score`` (a finite number), ``cached``/``review`` (booleans), ``decision`` (one of
     ``allow``, ``block``, ``review``, ``error``, ``rewrite``) and ``backend``, ``rule``,
     ``check``, ``error_type``, ``policy_digest`` (a short digest prefix) and ``source``
-    (``live``, ``cache`` or ``journal``) (tokens; ``info["error"]`` counts as ``error_type``).
+    (``live``, ``cache`` or ``journal``) (tokens; ``info["error"]`` counts as ``error_type``),
+    ``mode`` (``enforce`` or ``shadow``) and ``applied`` (a boolean; false for a policy's shadow
+    decision, which was reported, not applied), ``tokens`` (a whole number: what the check's
+    model call used) and ``skipped`` (a token: why a shadow check did not run).
     A token is an identifier: letters, digits and ``_ . : / + -``, at most 128
     characters, with no ``@``, no run of 6 or more digits, no 9 or more digits joined only
     by ``-``, ``.`` or spaces, no unbroken run of 33 or more
@@ -187,6 +192,8 @@ def decision_record(
                 record[key] = value
         if info.get("decision") in _DECISIONS:
             record["decision"] = info["decision"]
+        if info.get("mode") in _MODES:
+            record["mode"] = info["mode"]
         digest = info.get("policy_digest")
         if isinstance(digest, str) and _DIGEST.fullmatch(digest):
             record["policy_digest"] = digest
@@ -200,7 +207,10 @@ def decision_record(
         score = info.get("score")
         if isinstance(score, (int, float)) and not isinstance(score, bool) and math.isfinite(score):
             record["score"] = float(score)
-        for flag in ("cached", "review"):
+        tokens = info.get("tokens")
+        if isinstance(tokens, int) and not isinstance(tokens, bool) and tokens >= 0:
+            record["tokens"] = tokens
+        for flag in ("cached", "review", "applied"):
             if isinstance(info.get(flag), bool):
                 record[flag] = info[flag]
     if error_type is not None:

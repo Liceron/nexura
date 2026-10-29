@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Liceron
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useApi } from '../../api/context';
 import { Modal } from '../../components/Modal';
 import { Input } from '../../components/Input';
@@ -35,15 +35,16 @@ export function CreateWorkflowModal({
   const { manager } = useApi();
   const { t } = useI18n();
 
-  const [selectedTemplateId, setSelectedTemplateId] = useState<string>(
-    initialTemplateId || 'order-triage-support'
-  );
-  const [name, setName] = useState<string>(t('workflows.defaultName'));
-  const [nameTouched, setNameTouched] = useState<boolean>(false);
+  // "New workflow" starts blank; a template is preselected only when one was picked to open this.
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string>(initialTemplateId || 'blank');
+  const [name, setName] = useState<string>('');
   const [isValidating, setIsValidating] = useState<boolean>(false);
   const [validationErrors, setValidationErrors] = useState<ValidationIssue[]>([]);
   const [generalError, setGeneralError] = useState<string | null>(null);
   const [describing, setDescribing] = useState<boolean>(false);
+  useEffect(() => {
+    if (open) { setName(''); setGeneralError(null); setSelectedTemplateId(initialTemplateId || 'blank'); }
+  }, [open, initialTemplateId]);
 
   const allTemplates = [...REGISTRY_TEMPLATES, ...(extraTemplates ?? [])];
 
@@ -51,14 +52,6 @@ export function CreateWorkflowModal({
     setSelectedTemplateId(templateId);
     setValidationErrors([]);
     setGeneralError(null);
-    if (!nameTouched) {
-      if (templateId === 'blank') {
-        setName(t('workflows.blankName'));
-      } else {
-        const tmpl = allTemplates.find((t) => t.id === templateId);
-        if (tmpl) setName(tmpl.name);
-      }
-    }
   };
 
   const getSpecToCreate = (): WorkflowSpec => {
@@ -93,6 +86,16 @@ export function CreateWorkflowModal({
     setGeneralError(null);
 
     try {
+      if (!name.trim()) { setGeneralError('Workflow name is required.'); return; }
+      for (let offset = 0; ; offset += 100) {
+        const existing = await manager.client.workflows.list({ query: name.trim(), limit: 100, offset });
+        if (existing.items.some(workflow => workflow.name.trim().toLowerCase() === name.trim().toLowerCase())) {
+          setGeneralError(`A workflow named “${name.trim()}” already exists. Choose a different name.`);
+          return;
+        }
+        if (!existing.has_more) break;
+        if (!existing.items.length) throw new Error('Could not check workflow names. Please try again.');
+      }
       const spec = getSpecToCreate();
 
       // Authoritative pre-validation against installed module registry
@@ -103,7 +106,7 @@ export function CreateWorkflowModal({
       }
 
       // Create workflow
-      const created = await manager.client.workflows.create(spec, { name });
+      const created = await manager.client.workflows.create({ ...spec, name: name.trim() }, { name: name.trim() });
       onCreated(created.workflow_id);
       onClose();
     } catch (err: unknown) {
@@ -149,7 +152,6 @@ export function CreateWorkflowModal({
           value={name}
           onChange={(e) => {
             setName(e.target.value);
-            setNameTouched(true);
           }}
           required
         />

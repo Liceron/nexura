@@ -120,7 +120,7 @@ test.describe('Connectors pack in the module registry (P10)', () => {
     await page.getByLabel('Workflow Name').fill('P10 Connectors Palette');
     await page.getByRole('button', { name: /Validate & Create/i }).click();
     await expect(page).toHaveURL(/#\/workflows\/wf-/);
-    await page.getByRole('button', { name: /Add step/i }).click();
+    await page.getByRole('button', { name: 'Add step', exact: true }).click();
     await page.getByRole('button', { name: 'Standard', exact: true }).click();
 
     const palette = page.getByRole('dialog', { name: 'Available modules drawer' });
@@ -217,7 +217,7 @@ test.describe('Connectors pack in the module registry (P10)', () => {
     await page.getByLabel('Workflow Name').fill('P14 Connector Setup');
     await page.getByRole('button', { name: /Validate & Create/i }).click();
     await expect(page).toHaveURL(/#\/workflows\/wf-/);
-    await page.getByRole('button', { name: /Add step/i }).click();
+    await page.getByRole('button', { name: 'Add step', exact: true }).click();
     await page.getByRole('button', { name: 'Standard', exact: true }).click();
 
     const palette = page.getByRole('dialog', { name: 'Available modules drawer' });
@@ -249,7 +249,7 @@ test.describe('Connectors pack in the module registry (P10)', () => {
     await expect(op).toHaveValue('post_message');
 
     // A connector with no credential of its type shows the empty state with a link to Credentials.
-    await page.getByRole('button', { name: /Add step/i }).click();
+    await page.getByRole('button', { name: 'Add step', exact: true }).click();
     await page.getByRole('button', { name: 'Standard', exact: true }).click();
     await palette.getByPlaceholder(/Search modules/i).fill('nexura.connectors.airtable');
     await palette.locator('div').filter({ has: page.locator('code', { hasText: /^nexura\.connectors\.airtable$/ }) }).filter({ has: page.getByRole('button', { name: '+ Add Node', exact: true }) }).last().getByRole('button', { name: '+ Add Node', exact: true }).click();

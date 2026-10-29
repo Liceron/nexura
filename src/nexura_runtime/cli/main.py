@@ -258,9 +258,16 @@ def serve_command(args: argparse.Namespace) -> int:
         return 1
 
     from nexura_runtime.service.api.chat_models import chat_models_from_environment
+    from nexura_runtime.service.api.model_pricing import (
+        check_model_pricing,
+        model_pricing_from_environment,
+    )
 
     try:
         chat_models = chat_models_from_environment(args.chat_model)
+        # NEXURA_MODEL_PRICING: operator model prices (JSON keyed by model id).
+        model_pricing = model_pricing_from_environment()
+        check_model_pricing(model_pricing, chat_models)
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
@@ -286,6 +293,23 @@ def serve_command(args: argparse.Namespace) -> int:
             "variable. Unset it, or start with --auth token.",
             file=sys.stderr,
         )
+    from nexura_runtime.service.api.local_session import (
+        SESSION_TOKEN_REQUIRED_ENV,
+        session_token_required,
+    )
+
+    try:
+        token_off = getattr(args, "no_session_token", False) or not session_token_required()
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+    if remote and token_off:
+        print(
+            f"Error: --no-session-token and {SESSION_TOKEN_REQUIRED_ENV}=off only apply without "
+            "--auth token (the operator token authenticates every request).",
+            file=sys.stderr,
+        )
+        return 2
     if not remote and (token_file or plain_http):
         print(
             "Error: --token-file and --insecure-plain-http only apply with --auth token.",
@@ -315,6 +339,7 @@ def serve_command(args: argparse.Namespace) -> int:
             db_path=args.db,
             workflow_state_url=getattr(args, "workflow_state_url", None),
             chat_models=chat_models,
+            model_pricing=model_pricing,
             profile="local-owner",
             run_trigger_worker=bool(args.worker),
             trigger_poll_interval=args.poll_interval,
@@ -323,6 +348,7 @@ def serve_command(args: argparse.Namespace) -> int:
             allow_unauthenticated_network=insecure_network,
             auth_provider=auth_provider,
             allow_plain_http=plain_http,
+            require_session_token=False if getattr(args, "no_session_token", False) else None,
             guardrail_policy=getattr(args, "guardrail_policy", None),
         )
     except (UnauthenticatedNetworkError, ValueError, MissingDependencyError) as exc:
@@ -330,8 +356,13 @@ def serve_command(args: argparse.Namespace) -> int:
         return 2
     policy = app.state.guardrail_policy
     if policy is not None:
+        state = (
+            "in shadow mode: reporting only, nothing is blocked"
+            if getattr(policy, "mode", "enforce") == "shadow"
+            else "enforced"
+        )
         print(
-            f"Guardrail policy '{policy.name}' enforced (digest {policy.digest[:16]}, "
+            f"Guardrail policy '{policy.name}' {state} (digest {policy.digest[:16]}, "
             f"{len(policy.rules)} rules) from {policy.source or 'code'}."
         )
     if remote:
@@ -349,6 +380,15 @@ def serve_command(args: argparse.Namespace) -> int:
                 "front of this port.",
                 file=sys.stderr,
             )
+        uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+        return 0
+    if not app.state.local_session.require_token:
+        print(
+            "Session token check off: programs on this machine need no X-Nexura-Session "
+            "header. Only connections from this machine are accepted, and state-changing "
+            "requests from pages on other sites or other local ports are refused (Origin and "
+            "Sec-Fetch-Site checks)."
+        )
         uvicorn.run(app, host=args.host, port=args.port, log_level="info")
         return 0
     # The token itself is not printed: Studio reads it from its own origin.
@@ -913,6 +953,136 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="subcommand", required=True)
 
+    from nexura_runtime.cli.database import (
+        blob_claim_command,
+        blob_gc_command,
+        database_command,
+        prune_command,
+        reset_identity_command,
+    )
+
+    database = subparsers.add_parser(
+        "db", help="Manage shared Postgres service migrations and blob retention"
+    )
+    database_subs = database.add_subparsers(dest="db_action", required=True)
+    for action in ("migrate", "status"):
+        command = database_subs.add_parser(action)
+        command.add_argument(
+            "--database-url",
+            default=None,
+            help="PostgreSQL URL; prefer NEXURA_DATABASE_URL so the password stays out of argv",
+        )
+        command.set_defaults(func=database_command)
+    prune = database_subs.add_parser(
+        "prune",
+        help="Expire channel dedup keys, outbox receipts and eval trace rows (explicit only)",
+    )
+    prune.add_argument(
+        "--database-url", default=None, help="Postgres URL; prefer NEXURA_DATABASE_URL"
+    )
+    prune.add_argument(
+        "--sqlite", action="append", metavar="PATH", help="Service SQLite file (repeatable)"
+    )
+    prune.add_argument(
+        "--dedup-days", type=float, required=True, help="Dedup retention (minimum 7 days)"
+    )
+    prune.add_argument("--outbox-days", type=float, required=True, help="Outbox receipt retention")
+    prune.add_argument(
+        "--eval-trace-days", type=float, required=True, help="Evaluation trace retention"
+    )
+    prune.add_argument(
+        "--delivery-retry-days",
+        type=float,
+        default=7.0,
+        help="Longest delivery retry/replay window (default/minimum 7); dedup-days must cover it",
+    )
+    prune.add_argument(
+        "--limit",
+        type=int,
+        default=1000,
+        help="Rows per category per database (1–10000; default 1000)",
+    )
+    prune.add_argument(
+        "--dry-run", action="store_true", help="Count a bounded batch; delete nothing"
+    )
+    prune.set_defaults(func=prune_command)
+    blob_gc = database_subs.add_parser(
+        "blob-gc",
+        help="Delete blobs no database row references (older than a grace period) and, "
+        "optionally, run/trace payload blobs older than a maximum age",
+    )
+    blob_gc.add_argument(
+        "--blob-url",
+        default=None,
+        help="gs://bucket/prefix or file:///path (default: NEXURA_BLOB_URL, else the folder "
+        "next to a single --sqlite database)",
+    )
+    blob_gc.add_argument(
+        "--sqlite",
+        action="append",
+        metavar="PATH",
+        help="A service SQLite database whose rows reference blobs (repeatable)",
+    )
+    blob_gc.add_argument(
+        "--database-url",
+        default=None,
+        help="Postgres database to scan for references; prefer NEXURA_DATABASE_URL",
+    )
+    blob_gc.add_argument(
+        "--grace-hours",
+        type=float,
+        default=24.0,
+        help="Keep unreferenced blobs younger than this (default 24, minimum 1)",
+    )
+    blob_gc.add_argument(
+        "--payload-max-age-days",
+        type=float,
+        default=None,
+        help="Also delete run-event and eval-trace payload blobs older than this, even when "
+        "referenced (default: NEXURA_BLOB_PAYLOAD_RETENTION_DAYS, else never)",
+    )
+    blob_gc.add_argument("--dry-run", action="store_true", help="Report only; delete nothing")
+    blob_gc.add_argument(
+        "--force",
+        action="store_true",
+        help="Skip the wrong-database checks (store identity not referenced, or no blob "
+        "referenced at all); the grace period still applies",
+    )
+    blob_gc.set_defaults(func=blob_gc_command)
+    blob_claim = database_subs.add_parser(
+        "blob-claim",
+        help="Record this Postgres database as the owner of a blob store that already holds "
+        "blobs (the deliberate first claim of a store written before owners existed)",
+    )
+    blob_claim.add_argument(
+        "--blob-url", default=None, help="gs://bucket/prefix or file:///path (or NEXURA_BLOB_URL)"
+    )
+    blob_claim.add_argument(
+        "--database-url",
+        default=None,
+        help="The owning Postgres database; prefer NEXURA_DATABASE_URL",
+    )
+    blob_claim.add_argument(
+        "--i-own-this-store",
+        action="store_true",
+        help="Confirm that this database's deployment wrote the blobs in this store",
+    )
+    blob_claim.set_defaults(func=blob_claim_command)
+    reset_identity = database_subs.add_parser(
+        "reset-identity",
+        help="Give a copied, restored or branched Postgres database a new id and clear its blob "
+        "store binding (before starting it as a separate deployment)",
+    )
+    reset_identity.add_argument(
+        "--database-url", default=None, help="The copy's Postgres URL; prefer NEXURA_DATABASE_URL"
+    )
+    reset_identity.add_argument(
+        "--this-is-a-copy",
+        action="store_true",
+        help="Confirm the database is a copy that becomes a separate deployment",
+    )
+    reset_identity.set_defaults(func=reset_identity_command)
+
     sandbox = subparsers.add_parser("sandbox", help="Manage operator-owned sandbox runtimes")
     sandbox_subs = sandbox.add_subparsers(dest="sandbox_action", required=True)
     install = sandbox_subs.add_parser("install-runtime", help="Install a pinned offline runtime")
@@ -1046,7 +1216,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Allow a chat model in the playground (repeatable), e.g. "
             "gem=gemini:gemini-2.5-flash. Keys come from the server environment. "
-            "Also NEXURA_CHAT_MODELS=name=provider:model,... (flags win)."
+            "Also NEXURA_CHAT_MODELS=name=provider:model,... (flags win). Prices for runs "
+            "with a cost cap: NEXURA_MODEL_PRICING (JSON keyed by model id)."
         ),
     )
     serve_p.add_argument(
@@ -1064,6 +1235,16 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "UNSAFE: allow a non-loopback --host without authentication "
             "(the local-owner profile has full authority). Throwaway development only."
+        ),
+    )
+    serve_p.add_argument(
+        "--no-session-token",
+        action="store_true",
+        help=(
+            "Do not require the per-session X-Nexura-Session header (for curl and other "
+            "programs on this machine; pages from other sites and ports are still refused). "
+            "Also NEXURA_REQUIRE_SESSION_TOKEN=off. Refused with --auth token and with "
+            "--insecure-allow-unauthenticated-network."
         ),
     )
     serve_p.add_argument(

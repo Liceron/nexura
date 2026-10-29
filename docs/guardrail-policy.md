@@ -291,6 +291,213 @@ assert len(policy.digest) == 64
 # From a file: GuardrailPolicy.from_file("policy.yaml") or nexura_guardrails.load_policy(path)
 ```
 
+## Shadow mode
+
+A policy in **shadow mode** shows what it would have done on real traffic without changing
+anything. Set `mode: shadow` on the policy (`GuardrailPolicy(mode="shadow")`), or
+`enforcement: shadow` on one rule (`Rule(..., enforcement="shadow")`). A rule's own setting
+wins, both ways: `enforcement: enforce` keeps one rule live inside a shadow policy. The default
+is `enforce`. Any other value is refused when the policy is loaded. (A rule's `mode` already
+means how its checks run, `tiered` or `parallel`, so the per-rule key is `enforcement`; a rule
+with `mode: shadow` is refused with a pointer to it.) The mode, and each rule's effective
+enforcement, are fixed when the policy is built: `policy.mode` is read-only. To change it,
+build a new policy; a policy installed with `install(locked=True)` (as the service installs
+its policy) then refuses the replacement, so switch modes by changing the file and restarting.
+
+What shadow mode does:
+
+- Every stage is evaluated exactly as in enforce mode: the same matching, the same checks,
+  judges and safety models, the same severity order and the same `on_error` handling. Judge and
+  safety-model verdicts are journaled as usual, so a resumed or recovered run does not ask the
+  model again.
+- Every decision is written to the audit sinks and sent as a `GUARDRAIL_DECISION` run event and
+  a `nexura.guardrail.decision` trace event, with the action the rule would have taken
+  (`block`, `scrub`, `require_approval` or `fail`), `mode: "shadow"` and `applied: false`.
+  Enforced decisions carry `mode: "enforce"` and `applied: true`.
+- The action is never applied. Nothing is blocked, scrubbed, sent for approval or failed, no
+  streamed reply is held or checked in windows, and shadow rules never make the policy refuse
+  `stream_guard="passthrough"`, an `AgentCoordinator` or an `AgentDefinition` subagent.
+- A check that errors or times out never fails the run. It is audited as an error (`decision:
+  "error"` and `error_type`), with the action `on_error` would have taken. With
+  `on_error: allow` it is still recorded, as an `allow` with the error. An audit sink that fails
+  on a shadow decision is logged and counted (`policy.audit_errors`) and never fails the run,
+  even with `audit: {required: true}`.
+- Shadow judges and safety models do not count toward the run's usage limits (`UsageLimits`)
+  or its budget: they are kept out of the run's budget admission, so a shadow rule can never
+  stop a run with `UsageLimitExceededError` or a budget refusal. Their usage is still reported:
+  each decision's audit record, run event and trace event carries `tokens` (labelled by
+  `mode: "shadow"`), and `policy.shadow_usage(run_id)` returns `calls`, `tokens`, `skipped`
+  and `estimated_cost` for a run. Enforced judges count toward the run's limits and budget
+  exactly as before.
+
+**Shadow judges still cost money.** A shadow judge calls its model on every item it matches,
+and that call is billed (or uses your local model's time) like an enforced one, even though
+the run's budget does not see it. Cap it per run with `shadow_budget`:
+
+```yaml
+shadow_budget: {max_tokens: 200000, max_cost: 2.00, cost_per_1k_tokens: 0.002}
+```
+
+`max_tokens` caps the tokens shadow model checks use in one run. `max_cost` caps their
+estimated cost, worked out from `cost_per_1k_tokens` (your price per 1,000 tokens, in your
+currency; required with `max_cost`). Give either or both. Before each shadow model check, the
+tokens already used in the run, plus an estimate of the text to check, are compared with the
+cap. When the sum would exceed it, the check is skipped: it is audited as an `allow` with
+`skipped: "shadow_budget"` (`mode: "shadow"`, `applied: false`), and the run goes on.
+Deterministic checks (the regex pre-filters) are free and are never skipped; a shadow rule
+whose checks include a model check is skipped as a whole. A check can use more than its
+estimate (the judge's instructions and reply), so a run can end slightly above the cap. In
+Python: `GuardrailPolicy(shadow_budget=ShadowBudget(max_tokens=200_000))` or a dict. The cap
+never applies to enforced judges.
+
+**Mixed policies.** Enforced rules apply as they always have, decided over the enforced rules
+only (most severe wins). Shadow rules are evaluated after them, under their own stage timeout,
+and reported alongside (`StageOutcome.shadow` for code that calls `evaluate` or `check_call`).
+A shadow rule never weakens an enforced one: a shadow `allow` does not admit a call to an
+enforced allowlist, and a shadow `block` does not spare a call an enforced approval. It never
+strengthens one either.
+
+**Allowlist mode** follows the policy's `mode`. With `mode: shadow` and
+`default_tool_action: block`, a call that no `allow` rule admits is reported as a `block` by
+`default_tool_action` and then runs.
+
+```python
+import asyncio
+
+from nexura_agents import Agent, FakeModel, Runner, ToolCall, tool
+from nexura_guardrails import GuardrailPolicy, MemoryAuditSink, Rule, When
+
+paid = []
+
+
+@tool
+def pay(to: str, amount: float) -> str:
+    """Pay a supplier."""
+    paid.append(amount)
+    return f"paid {amount} to {to}"
+
+
+def agent() -> Agent:
+    return Agent(
+        name="payments",
+        instructions="Pay suppliers.",
+        model=FakeModel(
+            responses=[[ToolCall(id="c1", name="pay", arguments={"to": "acme", "amount": 900})], "Done."]
+        ),
+        tools=[pay],
+    )
+
+
+ceiling = Rule(
+    "payment-ceiling",
+    When(stage="tool_input", tools="pay", args={"$.amount": {"gt": 500}}),
+    action="block",
+)
+
+# Week 1: shadow. The payment goes through; the audit shows what the rule would have done.
+audit = MemoryAuditSink()
+shadow = GuardrailPolicy(name="payments-pilot", mode="shadow", rules=[ceiling], audit=audit)
+asyncio.run(Runner(hooks=[shadow]).run_async(agent(), "Pay Acme 900"))
+assert paid == [900]
+(record,) = audit.records
+assert (record.rule_id, record.action, record.mode, record.applied) == (
+    "payment-ceiling",
+    "block",
+    "shadow",
+    False,
+)
+
+# Then: enforce. The same rule now blocks the call.
+live = GuardrailPolicy(name="payments-pilot", rules=[ceiling], audit=audit)
+result = asyncio.run(Runner(hooks=[live]).run_async(agent(), "Pay Acme 900"))
+assert paid == [900]  # not paid again
+told = [m.content for m in result.messages if m.role == "tool"]
+assert told[0].startswith("Tool call blocked by policy rule 'payment-ceiling'")
+assert (audit.records[-1].mode, audit.records[-1].applied) == ("enforce", True)
+```
+
+### Rolling out a policy
+
+1. **Shadow.** Install the policy with `mode: shadow` and a JSON-lines audit sink, and let it
+   see real traffic. Nothing changes for users.
+
+   ```yaml
+   version: 1
+   name: payments-pilot
+   mode: shadow
+   shadow_budget: {max_tokens: 200000}   # only matters once you add shadow judges
+   rules:
+     - id: payment-ceiling
+       when: {stage: tool_input, tools: [pay], args: {$.amount: {gt: 500}}}
+       action: block
+   audit: {sink: jsonl, path: audit/guardrails.jsonl}
+   ```
+
+   Read what it would have done:
+
+   ```bash
+   jq -c 'select(.mode == "shadow") | {rule_id, action, tool, run_id, error_type, tokens, skipped}' audit/guardrails.jsonl
+   ```
+
+   Look for calls it would have refused that should have gone through (tune the rule), checks
+   that error or time out (they would block under `on_error: block`), and what the judges cost.
+2. **Enforce with an amount ceiling.** Set `mode: enforce` (or remove the line). The same rule,
+   `block when $.amount > 500`, now refuses any `pay` call above 500 and tells the model why.
+   Rules you are still tuning can stay in shadow with `enforcement: shadow` on each of them:
+
+   ```yaml
+   version: 1
+   name: payments-pilot
+   mode: enforce
+   checks:
+     fraud: {type: judge, model: "ollama:qwen3:8b", policy_file: policies/fraud.md}
+   rules:
+     - id: payment-ceiling
+       when: {stage: tool_input, tools: [pay], args: {$.amount: {gt: 500}}}
+       action: block
+     - id: fraud-review
+       when: {stage: tool_input, tools: [pay]}
+       check: fraud
+       action: block
+       enforcement: shadow    # still reporting only
+   audit: {sink: jsonl, path: audit/guardrails.jsonl}
+   ```
+
+   An argument rule does not match a call without that argument, and an amount sent as text
+   counts as matching a `block` rule (fail closed; see [Matching](#matching)). A ceiling is one
+   check on one argument: for real money keep human approval on writes and an allowlist of
+   tools (see [Security notes](#security-notes)).
+
+### What shadow mode does not do
+
+- It does not protect anything. Every shadow finding goes through: personal data reaches the
+  model, the tool or the user, and a refused call runs. Use it to measure, not to guard.
+- It does not save money or time. Shadow checks, judges and safety models run on every item
+  they match, after the enforced rules, so a shadow judge adds its latency and its bill. Shadow
+  checks do not count toward the run's usage limits or budget, but they do cost money: cap them
+  with `shadow_budget` (see above). The shadow budget is counted per run in this process: a
+  recovered run starts counting again (journaled verdicts it reuses cost nothing), and checks
+  running at the same time (parallel tool calls) reserve their estimates, not their final usage.
+- `timeouts.stage_seconds` applies to the enforced rules and to the shadow rules separately, so
+  a stage item can take up to twice the stage timeout.
+- An older Studio or client that does not know about `mode` shows a shadow policy installed by
+  the service as "Enforced by the server" (`enforced` only says the server installed and locked
+  it). Studio from this release shows "Shadow mode: reporting only, nothing is blocked".
+- It does not report rules where the policy cannot run: an `AgentCoordinator` run or an
+  `AgentDefinition` subagent is not refused because of shadow rules, and their shadow
+  `input`, `model_input`, `model_output` and `output` rules are not evaluated there.
+- Shadow `output` rules are checked once, on the agent's final answer when it finishes (not on
+  streamed windows), and see that answer after any enforced rule changed it. They are not
+  reported when the run stops before the agent finishes (an enforced trip or a failure).
+  After a crash, an answer's shadow `output` decision can be reported twice (the end of an
+  agent is at-least-once).
+- A workflow step the policy cannot match (a plain Python handler or a parallel step) is not
+  refused by a shadow allowlist, and it is not reported either: there is no tool call to
+  record. Module nodes are checked and reported like tool calls.
+- It does not change what an approval, a resume or a recovery does: only enforced
+  `require_approval` rules pause a run. A shadow `require_approval` is reported when the call
+  runs.
+
 ## Errors, timeouts and journaled verdicts
 
 Any check error, timeout or malformed verdict follows `on_error` (policy-wide, or per rule):
@@ -318,8 +525,10 @@ Every decision other than `allow` (all of them with `audit_allows=True`) produce
 
 - a `GUARDRAIL_DECISION` run event and a `nexura.guardrail.decision` trace event with the stage,
   rule, check, backend, action, categories, score, latency, source (`live`, `cache` or
-  `journal`) and the first 16 characters of the policy digest; on tool stages also the tool
-  name and call id;
+  `journal`), the first 16 characters of the policy digest, `mode` (`enforce` or `shadow`) and
+  `applied` (false for a [shadow](#shadow-mode) decision), `tokens` (a model check's usage)
+  and `skipped` (`shadow_budget`); on tool stages also the tool name
+  and call id;
 - an `AuditRecord` for each audit sink: `JsonlAuditSink(path)` (one JSON line per decision,
   file mode `0600`, `fsync` for `block` and `fail`), `CallbackAuditSink(fn)` or
   `MemoryAuditSink()`.
@@ -466,3 +675,4 @@ script written by one call and run by another, a different tool) are not single 
   with checks run after approval, in `before_tool`.
 - `capture_content` (a redacted excerpt in audit records) is not supported: audit records never
   hold content.
+- Shadow mode reports and never applies; see [What shadow mode does not do](#what-shadow-mode-does-not-do).

@@ -5,6 +5,7 @@ import type { RunRecord } from '@liceron/nexura-sdk';
 import { useApi } from '../../api/context';
 import { formatApiError } from '../../api/errors';
 import { RunStatus } from '../runs/RunStatus';
+import { CancelRunButton } from '../runs/CancelRunButton';
 
 import { Spinner } from '../../components/Spinner';
 import { useI18n } from '../../i18n';
@@ -98,6 +99,10 @@ export function WaitingForInputList({ reloadKey = 0 }: { reloadKey?: number }) {
                   {run.run_id}
                 </span>
               </a>
+              <CancelRunButton runId={run.run_id} status={run.status} onCancelled={() => {
+                setRuns(current => current.filter(item => item.run_id !== run.run_id));
+                setTotal(current => Math.max(0, current - 1));
+              }} />
             </div>
           </div>
         );

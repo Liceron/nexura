@@ -82,12 +82,14 @@ export function useRunStream(runId: string | null): UseRunStreamResult {
     if (!runId) {
       setRun(null);
       setEvents([]);
+      setError(null);
       setLoading(false);
       setStreamStatus('closed');
       return;
     }
 
     // Reset state for new run
+    setRun(null);
     setLoading(true);
     setError(null);
     setEvents([]);
@@ -172,7 +174,7 @@ export function useRunStream(runId: string | null): UseRunStreamResult {
                     }
                   : prev
               );
-            } else if (event.type === 'RUN_PENDING_APPROVAL') {
+            } else if (event.type === 'RUN_PENDING_APPROVAL' || event.type === 'RUN_WAITING_FOR_INPUT') {
               setStreamStatus('connected');
               await fetchSnapshot();
             } else if (

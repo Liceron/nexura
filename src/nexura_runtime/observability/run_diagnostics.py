@@ -52,6 +52,13 @@ _NON_SECRET_FIELDS = frozenset(
         "token_budget",
         "token_type",
         "max_token",
+        # Names of workflow state keys (agent node config, step identity), not credentials:
+        # the "<anything>_key" rule hid them in traces (live pass minor 18).
+        "input_key",
+        "output_key",
+        "reply_key",
+        "state_key",
+        "step_key",
     }
 )
 # Words that make a key secret when they appear as a whole word of the normalised name.

@@ -16,6 +16,7 @@ from typing import Any
 
 from nexura_agents.contracts.errors import MissingDependencyError
 
+from nexura_postgres.db import noop_reset, normalize_url
 from nexura_postgres.repository import ASYNCPG_MISSING
 from nexura_runtime.knowledge.chunks.models import IndexLineage
 from nexura_runtime.knowledge.vector.adapters.common import (
@@ -62,7 +63,13 @@ class PgVectorStoreAdapter:
                 if self._pool is None:
                     import asyncpg  # type: ignore[import-untyped]
 
-                    self._pool = await asyncpg.create_pool(self.dsn, min_size=1, max_size=10)
+                    self._pool = await asyncpg.create_pool(
+                        normalize_url(self.dsn, strict=False),
+                        min_size=1,
+                        max_size=10,
+                        statement_cache_size=0,
+                        reset=noop_reset,
+                    )
         if not self._initialized:
             async with self._init_lock:
                 if not self._initialized:

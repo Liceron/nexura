@@ -106,8 +106,9 @@ comes with that call's result.
 The events are redacted: they never carry the checked text, the rejection message or your
 `info`. From a mapping `info` they copy only plain classification fields: `categories`,
 `backend`, `rule`, `check` and `error_type` (identifier tokens), `decision` (one of `allow`,
-`block`, `review`, `error`, `rewrite`), `score` (a number) and `cached` and `review`
-(booleans). An identifier token has only letters, digits and `_ . : / + -`, at most 128
+`block`, `review`, `error`, `rewrite`), `score` and `tokens` (numbers), `cached`, `review` and
+`applied` (booleans) and `mode` (`enforce` or `shadow`) and `skipped`, set by a
+[guardrail policy](guardrail-policy.md#shadow-mode). An identifier token has only letters, digits and `_ . : / + -`, at most 128
 characters, and no `@`, no run of six or more digits, no nine or more digits joined only by
 `-`, `.` or spaces (`4111-1111-1111-1111`, `123-456-7890`), no unbroken run of 33 or more
 letters and digits and no API-key prefix such as `sk-` or `ghp_`, so an email, a card or

@@ -187,7 +187,11 @@ describe('Round 2 working surfaces', () => {
     expect(screen.getByTestId('mock-minimap')).toBeInTheDocument();
     await user.click(screen.getByRole('tab', { name: /^Nodes/ }));
     await user.click(screen.getByRole('button', { name: 'Edit done' }));
+    const confirmDelete = vi.spyOn(window, 'confirm').mockReturnValueOnce(false).mockReturnValue(true);
     await user.click(within(screen.getByRole('dialog', { name: 'Edit done' })).getByRole('button', { name: 'Delete Node' }));
+    expect(screen.getByTestId('accessible-node-done')).toBeInTheDocument();
+    await user.click(within(screen.getByRole('dialog', { name: 'Edit done' })).getByRole('button', { name: 'Delete Node' }));
+    expect(confirmDelete).toHaveBeenCalledWith('Delete node “done” and its connections?');
     expect(screen.queryByTestId('accessible-node-done')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Add step' })).toHaveFocus();
   });

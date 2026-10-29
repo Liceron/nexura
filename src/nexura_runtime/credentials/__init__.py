@@ -4,6 +4,7 @@
 
 from nexura_runtime.credentials.errors import (
     CredentialAccessDeniedError,
+    CredentialAlreadyExistsError,
     CredentialError,
     CredentialNotFoundError,
 )
@@ -17,5 +18,6 @@ __all__ = [
     "CredentialError",
     "CredentialNotFoundError",
     "CredentialAccessDeniedError",
+    "CredentialAlreadyExistsError",
     "redact_secrets",
 ]

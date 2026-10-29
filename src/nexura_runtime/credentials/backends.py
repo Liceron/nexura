@@ -76,7 +76,13 @@ class CredentialBackend(Protocol):
         status: str = "active",
         created_by: str = "",
     ) -> CredentialRecord:
-        """Create or replace a credential and return its description."""
+        """Create or replace a credential and return its description.
+
+        A backend may also accept ``mode="create"`` (refuse an existing name with
+        ``SecretExistsError``) and ``mode="replace"`` (refuse a missing one with
+        ``SecretNotFoundError``); ``ScopedCredentialStore`` passes ``mode`` only when it asks
+        for one of them.
+        """
         ...
 
     def resolve(self, workspace_id: str, name: str) -> str:

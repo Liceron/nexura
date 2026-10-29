@@ -52,7 +52,7 @@ export function parseHash(
   rawHash: string,
   extensions: StudioExtensionRegistry = studioExtensions,
 ): ParsedRoute {
-  const hash = rawHash || '#/workflows';
+  const hash = rawHash.split('?')[0] || '#/workflows';
   const base: ParsedRoute = {
     tab: 'workflows',
     workflowId: null,

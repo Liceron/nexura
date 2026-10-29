@@ -217,6 +217,11 @@ assert tools[0].timeout == 10.0
 
 ## Approval policies
 
+To govern an external MCP client with an approval id and exact-action retry, see
+the offline [cross-framework governance prototype](crossframework-governance.md).
+It adds an explicit application-level pending-result handler; stock
+`AgentMCPServer` tools still refuse approval-gated calls without a resume path.
+
 `requires_approval` accepts these forms:
 
 | Value | Meaning |

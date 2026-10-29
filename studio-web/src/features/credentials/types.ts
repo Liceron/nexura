@@ -49,7 +49,8 @@ export interface CurrentMembershipState {
 
 export interface VerificationResult {
   credential_id: string;
-  status: 'valid' | 'invalid' | 'revoked';
+  status: 'stored' | 'valid' | 'invalid' | 'revoked';
+  checked_with_provider?: boolean;
   message: string;
   checked_at: number;
 }

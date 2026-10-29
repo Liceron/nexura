@@ -24,7 +24,11 @@ import {
 import type { BuilderNode, BuilderEdge, GraphDocument, BuilderNodeData } from './types';
 import { WorkflowNodeComponent } from './WorkflowNodeComponent';
 import { NodeInspector } from './NodeInspector';
-import { ModulePalette } from '../modules/ModulePalette';
+import { ModulePalette, MODULE_DRAG_TYPE, useModuleCatalog } from '../modules/ModulePalette';
+import { isOfferedInPalette } from '../modules/types';
+import { useBuilderAccess } from './useBuilderAccess';
+import { WorkflowTestPanel } from './WorkflowTestPanel';
+import { extractNodeExecutionStatus } from '../runs/events';
 import { HistoryManager } from './history';
 import {
   graphToSpec,
@@ -34,7 +38,7 @@ import {
 } from './serializer';
 import { Button } from '../../components/Button';
 import { useApi } from '../../api/context';
-import type { WorkflowSpec, WorkflowRecord, ValidationIssue } from '@liceron/nexura-sdk';
+import type { WorkflowSpec, WorkflowRecord, ValidationIssue, RunEvent } from '@liceron/nexura-sdk';
 import {
   saveWorkflowDraft,
   loadWorkflowDraft,
@@ -57,6 +61,7 @@ interface WorkflowCanvasProps {
   primaryAllowed?: boolean;
   viewMode?: 'graph' | 'nodes';
   moreActions?: ReactNode;
+  readOnly?: boolean;
   onDirtyChange?: (dirty: boolean) => void;
   onImportedPython?: (record: WorkflowRecord) => void;
   workflowId: string;
@@ -74,6 +79,47 @@ const nodeTypes = {
   workflowNode: WorkflowNodeComponent,
 };
 
+const ADD_NODE_SIZE = { width: 256, height: 160 };
+const ADD_NODE_GAP = 24;
+type Point = { x: number; y: number };
+
+/**
+ * Where a click/keyboard add goes: the canvas centre, else the nearest free grid spot around it
+ * whose top-left corner is on screen (`visible`, flow coordinates), else the nearest free spot
+ * (`reveal`: the caller pans to it). Measured existing rectangles take precedence.
+ */
+export function freeAddPosition(centre: Point, nodes: BuilderNode[], visible?: { min: Point; max: Point }) {
+  const { width, height } = ADD_NODE_SIZE;
+  const free = (p: Point) => !nodes.some(node => {
+    const nodeWidth = node.measured?.width ?? node.width ?? width;
+    const nodeHeight = node.measured?.height ?? node.height ?? height;
+    return p.x < node.position.x + nodeWidth + ADD_NODE_GAP && p.x + width + ADD_NODE_GAP > node.position.x &&
+      p.y < node.position.y + nodeHeight + ADD_NODE_GAP && p.y + height + ADD_NODE_GAP > node.position.y;
+  });
+  const shown = (p: Point) => !visible || (p.x >= visible.min.x && p.y >= visible.min.y && p.x <= visible.max.x && p.y <= visible.max.y);
+  const spots: Point[] = [];
+  for (let ring = 0; ring <= 6; ring++) {
+    for (let row = -ring; row <= ring; row++) {
+      for (let col = -ring; col <= ring; col++) {
+        if (Math.max(Math.abs(row), Math.abs(col)) !== ring) continue;
+        spots.push({ x: centre.x + col * (width + ADD_NODE_GAP), y: centre.y + row * (height + ADD_NODE_GAP) });
+      }
+    }
+  }
+  const onScreen = spots.find(p => shown(p) && free(p));
+  if (onScreen) return { position: onScreen, reveal: false };
+  // Every grid spot is taken: go below the lowest step, which nothing can overlap.
+  const bottom = Math.max(...nodes.map(node => node.position.y + (node.measured?.height ?? node.height ?? height)));
+  const position = spots.find(free) ?? { x: centre.x, y: bottom + ADD_NODE_GAP };
+  return { position, reveal: true };
+}
+
+/** Screen pixels of a new step (its title strip) that must be on screen after a click/keyboard add. */
+const VISIBLE_STRIP = 48;
+const FIT_PADDING = 0.1;
+/** Below this zoom step text is too small to read; pan instead of zooming out further. */
+const MIN_READABLE_ZOOM = 0.5;
+
 export function WorkflowCanvasInner({
   initialSpec,
   actionHost,
@@ -82,6 +128,7 @@ export function WorkflowCanvasInner({
   primaryAllowed = true,
   viewMode = 'graph',
   moreActions,
+  readOnly = false,
   onDirtyChange,
   onImportedPython,
   workflowId,
@@ -97,7 +144,30 @@ export function WorkflowCanvasInner({
   const { manager, connection } = useApi();
   const locale = useLocale();
   const t = useBuilderT();
+  const access = useBuilderAccess();
+  const canEdit = access.edit && !readOnly;
   const editorRoot = useRef<HTMLDivElement>(null);
+  const canvasRoot = useRef<HTMLDivElement>(null);
+  const testButton = useRef<HTMLButtonElement>(null);
+  const sidebarButton = useRef<HTMLButtonElement>(null);
+  const editVersion = useRef(0);
+  const [dropActive, setDropActive] = useState(false);
+  const sidebarKey = `nexura.builder.modules:${JSON.stringify([connection.workspace, connection.principal])}`;
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  useEffect(() => {
+    try { setSidebarOpen(localStorage.getItem(sidebarKey) !== 'closed'); } catch { setSidebarOpen(true); }
+  }, [sidebarKey]);
+  const toggleSidebar = (open: boolean) => {
+    setSidebarOpen(open);
+    if (!open) sidebarButton.current?.focus();
+    try { localStorage.setItem(sidebarKey, open ? 'open' : 'closed'); } catch { /* Optional preference. */ }
+  };
+  const [testOpen, setTestOpen] = useState(false);
+  const [testInitialized, setTestInitialized] = useState(false);
+  const [testStatuses, setTestStatuses] = useState<Map<string, NodeExecutionStatus> | undefined>();
+  const onTestEvents = useCallback((events: RunEvent[], nodeId?: string | null) => {
+    setTestStatuses(events.length ? extractNodeExecutionStatus(events, nodeId) : undefined);
+  }, []);
   const flow = useReactFlow<BuilderNode, BuilderEdge>();
   const [showMinimap, setShowMinimap] = useState(false);
   const [interactive, setInteractive] = useState(true);
@@ -121,7 +191,7 @@ export function WorkflowCanvasInner({
   useEffect(() => {
     setNodes((currentNodes) =>
       currentNodes.map((n) => {
-        const status = runNodeStatuses?.get(n.id) || 'idle';
+        const status = ((active && testOpen ? testStatuses : undefined) ?? runNodeStatuses)?.get(n.id) || 'idle';
         const isActiveReplay = n.id === activeReplayNodeId;
         if (n.data.executionStatus === status && n.data.isActiveReplayNode === isActiveReplay) {
           return n;
@@ -136,13 +206,14 @@ export function WorkflowCanvasInner({
         };
       })
     );
-  }, [runNodeStatuses, activeReplayNodeId, setNodes]);
+  }, [runNodeStatuses, testStatuses, activeReplayNodeId, setNodes, active, testOpen]);
 
   // Selection
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
 
   // Drawers & Modals
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const catalog = useModuleCatalog(canEdit && active && ((wide && sidebarOpen) || drawerOpen));
   const [inspectorOpen, setInspectorOpen] = useState(true);
   const [conflictModalOpen, setConflictModalOpen] = useState(false);
   const [importExportOpen, setImportExportOpen] = useState(false);
@@ -235,6 +306,7 @@ export function WorkflowCanvasInner({
   // Push snapshot to history
   const pushHistory = useCallback(
     (newNodes: BuilderNode[], newEdges: BuilderEdge[], newEntry: string) => {
+      editVersion.current += 1;
       historyRef.current.push({
         nodes: newNodes,
         edges: newEdges,
@@ -247,6 +319,8 @@ export function WorkflowCanvasInner({
   );
 
   const handleUndo = useCallback(() => {
+    if (!canEdit) return;
+    editVersion.current += 1;
     const prev = historyRef.current.undo();
     if (prev) {
       setNodes(prev.nodes);
@@ -254,9 +328,11 @@ export function WorkflowCanvasInner({
       setEntryNode(prev.entryNode);
       setIsDirty(true);
     }
-  }, [setNodes, setEdges]);
+  }, [setNodes, setEdges, canEdit]);
 
   const handleRedo = useCallback(() => {
+    if (!canEdit) return;
+    editVersion.current += 1;
     const next = historyRef.current.redo();
     if (next) {
       setNodes(next.nodes);
@@ -264,7 +340,7 @@ export function WorkflowCanvasInner({
       setEntryNode(next.entryNode);
       setIsDirty(true);
     }
-  }, [setNodes, setEdges]);
+  }, [setNodes, setEdges, canEdit]);
 
   // Connect edges
   const onConnect = useCallback(
@@ -315,18 +391,25 @@ export function WorkflowCanvasInner({
 
   // Add node from module palette
   const handleSelectModule = useCallback(
-    (mod: { module_id: string; version: string; title: string; requires_approval: boolean }) => {
+    (mod: { module_id: string; version: string; title: string; requires_approval: boolean }, position?: { x: number; y: number }) => {
+      if (!canEdit || !active) return;
+      const bounds = canvasRoot.current?.getBoundingClientRect();
+      const centre = { x: (bounds?.left ?? 0) + (bounds?.width ?? 0) / 2, y: (bounds?.top ?? 0) + (bounds?.height ?? 0) / 2 };
       const shortId = Math.random().toString(36).substring(2, 6);
       const safePrefix = mod.module_id.split('.').pop() || 'step';
       const newNodeId = `${safePrefix}_${shortId}`;
 
+      const visible = bounds && {
+        min: flow.screenToFlowPosition({ x: bounds.left, y: bounds.top }),
+        max: flow.screenToFlowPosition({ x: bounds.right - VISIBLE_STRIP, y: bounds.bottom - VISIBLE_STRIP }),
+      };
+      const spot = position ? { position, reveal: false } : freeAddPosition(flow.screenToFlowPosition(centre), nodes, visible);
+      const placed = spot.position;
       const newNode: BuilderNode = {
         id: newNodeId,
         type: 'workflowNode',
-        position: {
-          x: 200 + (nodes.length % 4) * 80,
-          y: 150 + (nodes.length % 4) * 80,
-        },
+        position: placed,
+        selected: true,
         data: {
           nodeId: newNodeId,
           label: mod.title || newNodeId,
@@ -341,22 +424,35 @@ export function WorkflowCanvasInner({
         },
       };
 
-      const updatedNodes = [...nodes, newNode];
+      const updatedNodes = [...nodes.map(node => ({ ...node, selected: false })), newNode];
       const newEntry = nodes.length === 0 ? newNodeId : entryNode;
       setNodes(updatedNodes);
       if (nodes.length === 0) setEntryNode(newEntry);
       pushHistory(updatedNodes, edges, newEntry);
       setSelectedNodeId(newNodeId);
       setInspectorOpen(true);
+      setTestOpen(false);
       setDrawerOpen(false);
+      // No free spot on screen: zoom out so every step, the new one included, is in view; a graph
+      // too large to read at that zoom pans to the new step instead.
+      if (spot.reveal && bounds) {
+        const rects = [...nodes.map(node => ({ ...node.position, width: node.measured?.width ?? node.width ?? ADD_NODE_SIZE.width, height: node.measured?.height ?? node.height ?? ADD_NODE_SIZE.height })), { ...placed, ...ADD_NODE_SIZE }];
+        const left = Math.min(...rects.map(r => r.x));
+        const top = Math.min(...rects.map(r => r.y));
+        const all = { x: left, y: top, width: Math.max(...rects.map(r => r.x + r.width)) - left, height: Math.max(...rects.map(r => r.y + r.height)) - top };
+        const zoom = Math.min(bounds.width / (all.width * (1 + 2 * FIT_PADDING)), bounds.height / (all.height * (1 + 2 * FIT_PADDING)));
+        if (zoom >= MIN_READABLE_ZOOM) void flow.fitBounds(all, { padding: FIT_PADDING, duration: 200 });
+        else void flow.setCenter(placed.x + ADD_NODE_SIZE.width / 2, placed.y + ADD_NODE_SIZE.height / 2, { zoom: flow.getZoom(), duration: 200 });
+      }
     },
-    [nodes, edges, entryNode, pushHistory, setNodes]
+    [nodes, edges, entryNode, pushHistory, setNodes, canEdit, active, flow]
   );
 
   // Add a composite step (parallel / map / sub-workflow). The spec fields start empty and
   // are filled in from the inspector; validation reports anything still missing.
   const handleAddComposite = useCallback(
     (kind: Exclude<StepKind, 'step'>) => {
+      if (!canEdit) return;
       const shortId = Math.random().toString(36).substring(2, 6);
       const newNodeId = `${kind}_${shortId}`;
       const base: BuilderNodeData = {
@@ -389,12 +485,13 @@ export function WorkflowCanvasInner({
       setSelectedNodeId(newNodeId);
       setInspectorOpen(true);
     },
-    [nodes, edges, entryNode, pushHistory, setNodes]
+    [nodes, edges, entryNode, pushHistory, setNodes, canEdit]
   );
 
   // Delete node
   const handleDeleteNode = useCallback(
     (nodeIdToDelete: string) => {
+      if (!window.confirm(`Delete node “${nodeIdToDelete}” and its connections?`)) return;
       const { remainingNodes, remainingEdges, newEntryNode } = deleteNodeAndPruneEdges(
         nodeIdToDelete,
         nodes,
@@ -595,21 +692,28 @@ export function WorkflowCanvasInner({
   };
 
   // Authoritative Save
-  const handleSave = async () => {
-    if (!isDirty || draftNotice || isSaving || isValidating) return;
+  const handleSave = async (): Promise<boolean> => {
+    if (!canEdit || !isDirty || draftNotice || isSaving || isValidating) return false;
+    const savingVersion = editVersion.current;
     setSaveError(null);
     // Never send a spec the backend would reject: validate first and show errors inline.
     if (!(await runValidation())) {
       setSaveError(t('builder.validateFirst'));
-      return;
+      return false;
     }
     setIsSaving(true);
     try {
       const spec = graphToSpec({ nodes, edges, entryNode }, initialSpec);
       await onSaveSpec(spec, revision);
+      // Edits made during validation/save remain a draft and must not be tested silently.
+      if (savingVersion !== editVersion.current) {
+        setSaveError(t('builderTest.changedDuringSave'));
+        return false;
+      }
       clearWorkflowDraft(connection.workspace, connection.principal, workflowId);
       setIsDirty(false);
       setSaveStatus('clean');
+      return true;
     } catch (err: unknown) {
       const isConflict =
         (err as any)?.statusCode === 409 ||
@@ -625,6 +729,7 @@ export function WorkflowCanvasInner({
     } finally {
       setIsSaving(false);
     }
+    return false;
   };
 
   const handleApplyImportedSpec = (importedSpec: WorkflowSpec) => {
@@ -648,7 +753,7 @@ export function WorkflowCanvasInner({
   // Keyboard accessibility & hotkeys
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (!active || document.querySelector('[role="dialog"]')) return;
+      if (!active || !canEdit || document.querySelector('[role="dialog"]')) return;
       // Don't intercept when user is typing in form inputs or textareas
       const target = e.target as HTMLElement;
       if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT') {
@@ -681,7 +786,7 @@ export function WorkflowCanvasInner({
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [active, selectedNodeId, handleUndo, handleRedo, handleCopy, handlePaste, handleDeleteNode, handleSave]);
+  }, [active, canEdit, selectedNodeId, handleUndo, handleRedo, handleCopy, handlePaste, handleDeleteNode, handleSave]);
 
   const selectedNode = nodes.find((n) => n.id === selectedNodeId) || null;
 
@@ -751,8 +856,8 @@ export function WorkflowCanvasInner({
       {saveStatus === 'conflict' ? t('ui.revisionConflict') : isSaving ? t('ui.saving') : isDirty ? t('ui.unsavedChanges') : t('workflowDesign.saved')}
     </span>
     <Button variant="ghost" size="sm" disabled={isSaving} loading={isValidating} onClick={handleValidate}>{t('ui.validate')}</Button>
-    <Button variant={isDirty && primaryAllowed ? 'primary' : 'secondary'} size="sm" disabled={!isDirty || !!draftNotice || isValidating} loading={isSaving} onClick={handleSave} title={t('ui.saveCtrlS')}>{t('ui.save')}</Button>
-    {onRunWorkflow && <Button variant={!isDirty && primaryAllowed && !draftNotice ? 'primary' : 'secondary'} size="sm" disabled={isSaving || isValidating} onClick={onRunWorkflow}>{t('ui.run')}</Button>}
+    <Button variant={isDirty && primaryAllowed && !testOpen ? 'primary' : 'secondary'} size="sm" disabled={!canEdit || !isDirty || !!draftNotice || isValidating} loading={isSaving} onClick={handleSave} title={t('ui.saveCtrlS')}>{t('ui.save')}</Button>
+    {onRunWorkflow && <Button variant={!isDirty && primaryAllowed && !draftNotice && !testOpen ? 'primary' : 'secondary'} size="sm" disabled={isSaving || isValidating} onClick={onRunWorkflow}>{t('ui.run')}</Button>}
     <ActionDisclosure label={t('workflowDesign.more')}>
       {moreActions}
       <Button variant="ghost" onClick={() => { setImportExportMode('export'); setImportExportOpen(true); }}>{t('workflowDesign.importExport')}</Button>
@@ -798,6 +903,8 @@ export function WorkflowCanvasInner({
 
       {actionHost ? createPortal(actions, actionHost) : <div className="workflow-actions">{actions}</div>}
       <div className="workflow-canvas-toolbar">
+        {wide && canEdit && <Button ref={sidebarButton} variant="ghost" size="sm" aria-expanded={sidebarOpen} onClick={() => toggleSidebar(!sidebarOpen)}>{t('builderTest.modules')}</Button>}
+        {canEdit && <>
         <ActionDisclosure label={t('ui.addStep')}>
           <Button variant="ghost" onClick={() => setDrawerOpen(true)}>{t('workflowDesign.standard')}</Button>
           <Button variant="ghost" onClick={() => handleAddComposite('parallel')} title={t('builder.addParallelHint')}>{t('builder.addParallel')}</Button>
@@ -811,6 +918,8 @@ export function WorkflowCanvasInner({
           <Button variant="ghost" onClick={handlePaste}>{t('ui.paste')}</Button>
           {selectedNodeId && <Button variant="ghost" className="workflow-danger-action" onClick={() => handleDeleteNode(selectedNodeId)}>{t('ui.delete')}</Button>}
         </ActionDisclosure>
+        </>}
+        <Button ref={testButton} variant="secondary" size="sm" aria-expanded={testOpen} onClick={() => { setTestInitialized(true); setTestOpen(!testOpen); setInspectorOpen(false); }}>{t('builderTest.title')}</Button>
         {viewMode === 'graph' && <div className="workflow-viewport-controls">
           <Button variant="ghost" size="sm" onClick={() => flow.fitView({ padding: '40px' })}>{t('flowLabels.fitView')}</Button>
           <Button variant="ghost" size="sm" aria-label={t('flowLabels.zoomOut')} onClick={() => flow.zoomOut()}>−</Button>
@@ -824,13 +933,33 @@ export function WorkflowCanvasInner({
 
       {/* Main Canvas Area */}
       <div className="workflow-editor-panes" style={{ display: 'flex', flex: 1, position: 'relative', overflow: 'hidden' }}>
-        <div className="workflow-editor-main" onKeyDownCapture={(event) => {
+        {wide && canEdit && sidebarOpen && <ModulePalette sidebar open catalog={catalog} onClose={() => toggleSidebar(false)} onSelectModule={handleSelectModule} />}
+        <div ref={canvasRoot} className={`workflow-editor-main${dropActive ? ' workflow-drop-active' : ''}`}
+          onDragOver={event => {
+            if (!canEdit || !active || viewMode !== 'graph' || !Array.from(event.dataTransfer.types).includes(MODULE_DRAG_TYPE)) return;
+            event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; setDropActive(true);
+          }}
+          onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as globalThis.Node | null)) setDropActive(false); }}
+          onDrop={event => {
+            setDropActive(false);
+            if (!canEdit || !active || viewMode !== 'graph' || !Array.from(event.dataTransfer.types).includes(MODULE_DRAG_TYPE)) return;
+            event.preventDefault();
+            let payload: unknown;
+            try { payload = JSON.parse(event.dataTransfer.getData(MODULE_DRAG_TYPE)); } catch { return; }
+            if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return;
+            const { module_id: id, version } = payload as Record<string, unknown>;
+            if (typeof id !== 'string' || typeof version !== 'string') return;
+            const module = catalog.modules.find(item => item.module_id === id && item.version === version && isOfferedInPalette(item));
+            if (module) handleSelectModule(module, flow.screenToFlowPosition({ x: event.clientX, y: event.clientY }));
+          }}
+          onKeyDownCapture={(event) => {
           if (event.key !== 'Enter') return;
           const target = event.target as HTMLElement;
           const id = target.closest('[data-testid^="node-"]')?.getAttribute('data-testid')?.slice(5)
             || target.closest('.react-flow__node')?.getAttribute('data-id');
           if (id && nodes.some((node) => node.id === id)) { event.preventDefault(); setSelectedNodeId(id); setInspectorOpen(true); }
         }} style={{ flex: 1, height: '100%', position: 'relative' }}>
+          {dropActive && <div role="status" className="workflow-drop-hint">{t('builderTest.dropHere')}</div>}
           {viewMode === 'nodes' ? <div role="region" aria-label={t('ui.accessibleNodesList')} data-testid="accessible-nodes-list" className="workflow-node-list">
             {nodes.map((node) => <div key={node.id} data-testid={`accessible-node-${node.id}`}>
               <Button variant="ghost" aria-label={t('workflowDesign.editNode', { name: node.id })} onClick={() => { setSelectedNodeId(node.id); setInspectorOpen(true); }}>{node.id}</Button>
@@ -843,19 +972,23 @@ export function WorkflowCanvasInner({
             nodes={nodes}
             edges={edges}
             nodeTypes={nodeTypes}
-            nodesDraggable={interactive}
-            nodesConnectable={interactive}
+            nodesDraggable={interactive && canEdit}
+            nodesConnectable={interactive && canEdit}
+            deleteKeyCode={canEdit ? ['Backspace', 'Delete'] : null}
             elementsSelectable={interactive}
+            onBeforeDelete={async ({ nodes: removedNodes, edges: removedEdges }) => window.confirm(`Delete ${removedNodes.length ? removedNodes.map(node => `node “${node.id}”`).join(', ') : `${removedEdges.length} connection(s)`}?`)}
             onNodesChange={(changes) => {
+              if (!canEdit) changes = changes.filter(change => change.type === 'select' || change.type === 'dimensions');
               onNodesChange(changes);
               // Measurement and selection are presentation state. Layout edits are saved.
               const changed = changes.some((change) => change.type === 'position' && change.position || change.type === 'remove');
-              if (changed) setIsDirty(true);
+              if (changed) { setIsDirty(true); editVersion.current += 1; }
               if (changes.some((change) => change.type === 'position' && !change.dragging || change.type === 'remove')) {
                 pushHistory(applyNodeChanges(changes, nodes), edges, entryNode);
               }
             }}
             onEdgesChange={(changes) => {
+              if (!canEdit) changes = changes.filter(change => change.type === 'select');
               onEdgesChange(changes);
               if (changes.some((change) => change.type === 'remove')) {
                 pushHistory(nodes, applyEdgeChanges(changes, edges), entryNode);
@@ -897,15 +1030,18 @@ export function WorkflowCanvasInner({
 
           {/* Module Palette Popover */}
           <ModulePalette
-            open={drawerOpen}
+            open={drawerOpen && canEdit}
+            catalog={catalog}
             onClose={() => setDrawerOpen(false)}
             onSelectModule={handleSelectModule}
           />
         </div>
 
-        {wide && inspectorOpen && inspector}
+        {wide && canEdit && inspectorOpen && !testOpen && inspector}
+        {testInitialized && <WorkflowTestPanel open={testOpen} wide={wide} active={active} workflowId={workflowId} spec={graphToSpec({ nodes, edges, entryNode }, initialSpec)}
+          dirty={isDirty} draftPending={!!draftNotice} canRun={access.run && !readOnly} onSave={handleSave} onClose={() => { setTestOpen(false); testButton.current?.focus(); }} onEvents={onTestEvents} />}
       </div>
-      {!wide && <Modal open={active && inspectorOpen && !!selectedNode} onClose={() => setInspectorOpen(false)} title={t('workflowDesign.editNode', { name: selectedNode?.id || '' })} variant="drawer" maxWidth={320}
+      {!wide && <Modal open={active && canEdit && inspectorOpen && !!selectedNode} onClose={() => setInspectorOpen(false)} title={t('workflowDesign.editNode', { name: selectedNode?.id || '' })} variant="drawer" maxWidth={320}
         returnFocusTo={() => editorRoot.current?.querySelector<HTMLButtonElement>('.workflow-canvas-toolbar .studio-disclosure-trigger') ?? null}>
         {inspector}
       </Modal>}

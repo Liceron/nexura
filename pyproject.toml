@@ -1,6 +1,6 @@
 [project]
 name = "nexura-runtime"
-version = "0.4.0"
+version = "0.4.1"
 description = "Nexura platform: durable agent workflows with exact-action approvals, guardrail policy, RAG, evaluations and a local REST service."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
@@ -16,7 +16,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "nexura-agents==0.4.0",
+    "nexura-agents==0.4.1",
     "httpx>=0.27.0,<1.0.0",
     "pydantic>=2.7.0,<3.0.0",
     "packaging>=24.0",
@@ -45,6 +45,10 @@ knowledge = [
 secrets = []
 sandbox = [
     "pydantic-monty>=1.1.0,<2.0.0",
+]
+# Blob storage on Google Cloud Storage (NEXURA_BLOB_URL=gs://...); imported only when used.
+gcs = [
+    "google-cloud-storage>=2.18.0,<4.0.0",
 ]
 
 [project.scripts]
@@ -78,8 +82,8 @@ members = [
     "packages/nexura-studio",
     "packages/nexura-vertex",
 ]
-# The closed edition is its own uv project, never a member (EDITIONS_PLAN 2.1).
-exclude = ["enterprise"]
+# The closed edition and reference-SDK experiment own separate environments.
+exclude = ["enterprise", "experiments/crossframework"]
 
 [tool.uv.sources]
 nexura-agents = { workspace = true }

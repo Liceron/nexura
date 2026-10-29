@@ -5,10 +5,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 from typing import Any, Protocol
 
+from nexura_runtime.blobs.base import BlobIntegrityError, BlobNotFoundError
+from nexura_runtime.blobs.binding import SQLiteBlobBinding
+from nexura_runtime.blobs.payloads import EVAL_TRACE_NAMESPACE
 from nexura_runtime.evaluation.dataset import create_synthetic_support_dataset
 from nexura_runtime.evaluation.errors import DatasetNotFoundError
 from nexura_runtime.evaluation.models import (
@@ -17,6 +21,9 @@ from nexura_runtime.evaluation.models import (
     EvaluationSummary,
     StoredTrace,
 )
+from nexura_runtime.store_retention import DEFAULT_PRUNE_LIMIT, prune_cutoff, sqlite_prune_traces
+
+logger = logging.getLogger(__name__)
 
 
 class EvaluationStore(Protocol):
@@ -34,18 +41,50 @@ class EvaluationStore(Protocol):
     def list_runs(
         self, workspace_id: str = "default", limit: int = 50, offset: int = 0
     ) -> list[dict[str, Any]]: ...
+    def delete_run(self, run_id: str, workspace_id: str = "default") -> bool: ...
     def save_trace(self, trace: StoredTrace, workspace_id: str = "default") -> None: ...
     def list_traces(self, workspace_id: str = "default") -> list[StoredTrace]: ...
 
+    def prune(
+        self,
+        older_than_seconds: float,
+        *,
+        now: float | None = None,
+        limit: int = DEFAULT_PRUNE_LIMIT,
+        dry_run: bool = False,
+    ) -> dict[str, int]: ...
+
 
 class SqliteEvaluationStore:
-    """Crash-resilient SQLite storage for datasets and evaluation runs."""
+    """Crash-resilient SQLite storage for datasets and evaluation runs.
 
-    def __init__(self, db_path: str = ":memory:") -> None:
+    ``nexura_postgres.PostgresEvaluationStore`` is the Postgres twin (MVP WP8). Lists order by
+    ``created_at`` newest first, then by insertion (``rowid``; ``seq`` on Postgres).
+    """
+
+    #: Local file I/O: async callers may run calls inline (Postgres: a network round trip).
+    blocking_io = False
+
+    def __init__(self, db_path: str = ":memory:", *, blob_payloads: Any = None) -> None:
         self.db_path = db_path
+        #: A ``nexura_runtime.blobs.BlobPayloads``: recorded traces above its threshold are
+        #: stored as blobs and ``trace_json`` keeps a reference (MVP WP2b). The service sets it.
+        self._blob_payloads: Any = None
+        self.blob_payloads = blob_payloads
         self._lock = threading.RLock()
         self._connection: sqlite3.Connection | None = None
         self._init_db()
+
+    @property
+    def blob_payloads(self) -> Any:
+        return self._blob_payloads
+
+    @blob_payloads.setter
+    def blob_payloads(self, codec: Any) -> None:
+        """Set the codec and register this database (a file) as one holding its references."""
+        self._blob_payloads = codec
+        if codec is not None and hasattr(codec, "add_binding") and self.db_path != ":memory:":
+            codec.add_binding(SQLiteBlobBinding(self.db_path))
 
     @property
     def _conn(self) -> sqlite3.Connection:
@@ -100,6 +139,36 @@ class SqliteEvaluationStore:
                     PRIMARY KEY (run_id, workspace_id)
                 );
             """)
+            # Nullable for existing rows: an unknown age is never evidence for deletion.
+            # BEGIN IMMEDIATE serializes this upgrade across independent connections.
+            self._conn.execute("BEGIN IMMEDIATE")
+            columns = {r[1] for r in self._conn.execute("PRAGMA table_info(eval_traces)")}
+            if "created_at" not in columns:
+                self._conn.execute("ALTER TABLE eval_traces ADD COLUMN created_at REAL")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_eval_trace_retention ON eval_traces(created_at)"
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_eval_run_retention "
+                "ON eval_runs(created_at, run_id, workspace_id)"
+            )
+
+    def prune(
+        self,
+        older_than_seconds: float,
+        *,
+        now: float | None = None,
+        limit: int = DEFAULT_PRUNE_LIMIT,
+        dry_run: bool = False,
+    ) -> dict[str, int]:
+        """Expire trace rows only; never delete blobs, summaries or datasets.
+
+        A matching summary's run time takes precedence over the trace's run time. Legacy
+        rows with neither are retained. There is no newest-N exemption from explicit TTL.
+        """
+        cutoff = prune_cutoff(older_than_seconds, now, limit)
+        with self._lock, self._conn:
+            return sqlite_prune_traces(self._conn, cutoff, limit, dry_run=dry_run)
 
     def save_dataset(self, dataset: EvaluationDataset, workspace_id: str = "default") -> None:
         with self._lock, self._conn:
@@ -147,7 +216,7 @@ class SqliteEvaluationStore:
             else:
                 cur = self._conn.execute(
                     "SELECT * FROM eval_datasets WHERE dataset_id = ? AND workspace_id = ? ORDER "
-                    "BY created_at DESC LIMIT 1",
+                    "BY created_at DESC, rowid DESC LIMIT 1",
                     (dataset_id, workspace_id),
                 )
             row = cur.fetchone()
@@ -182,7 +251,8 @@ class SqliteEvaluationStore:
 
         with self._lock:
             cur = self._conn.execute(
-                "SELECT * FROM eval_datasets WHERE workspace_id = ? ORDER BY created_at DESC",
+                "SELECT * FROM eval_datasets WHERE workspace_id = ? "
+                "ORDER BY created_at DESC, rowid DESC",
                 (workspace_id,),
             )
             rows = cur.fetchall()
@@ -246,6 +316,15 @@ class SqliteEvaluationStore:
                 ),
             )
 
+    def delete_run(self, run_id: str, workspace_id: str = "default") -> bool:
+        """Delete one evaluation run (its summary and per-example results) of a workspace."""
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "DELETE FROM eval_runs WHERE run_id = ? AND workspace_id = ?",
+                (run_id, workspace_id),
+            )
+            return cur.rowcount > 0
+
     def get_run(self, run_id: str, workspace_id: str = "default") -> EvaluationSummary | None:
         with self._lock:
             cur = self._conn.execute(
@@ -268,7 +347,7 @@ class SqliteEvaluationStore:
                        total_latency_ms, total_cost_usd, created_at
                 FROM eval_runs
                 WHERE workspace_id = ?
-                ORDER BY created_at DESC
+                ORDER BY created_at DESC, rowid DESC
                 LIMIT ? OFFSET ?
                 """,
                 (workspace_id, limit, offset),
@@ -295,20 +374,46 @@ class SqliteEvaluationStore:
 
     def save_trace(self, trace: StoredTrace, workspace_id: str = "default") -> None:
         """Store an imported recorded run snapshot without executing it."""
+        text = trace.model_dump_json()
+        codec = self.blob_payloads
+        if codec is not None:  # a large trace goes to the blob store before the lock is taken
+            text = codec.encode(workspace_id, EVAL_TRACE_NAMESPACE, text)
         with self._lock, self._conn:
             self._conn.execute(
-                "INSERT INTO eval_traces VALUES (?, ?, ?) ON CONFLICT(run_id, workspace_id) "
-                "DO UPDATE SET trace_json=excluded.trace_json",
-                (trace.run_id, workspace_id, trace.model_dump_json()),
+                "INSERT INTO eval_traces (run_id, workspace_id, trace_json, created_at) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT(run_id, workspace_id) "
+                "DO UPDATE SET trace_json=excluded.trace_json, created_at=excluded.created_at",
+                (trace.run_id, workspace_id, text, trace.timestamp),
             )
 
     def list_traces(self, workspace_id: str = "default") -> list[StoredTrace]:
+        """Stored traces. One whose blob cannot be read (deleted by payload retention, failing its
+        integrity check, or a store error) is skipped and logged; integrity failures at ERROR."""
         with self._lock:
             rows = self._conn.execute(
                 "SELECT trace_json FROM eval_traces WHERE workspace_id=? ORDER BY run_id",
                 (workspace_id,),
             ).fetchall()
+        codec = self.blob_payloads
+        if codec is None:
             return [StoredTrace.model_validate_json(row["trace_json"]) for row in rows]
+        traces: list[StoredTrace] = []
+        for row in rows:
+            try:
+                text = codec.decode(row["trace_json"], workspace_id)
+            except BlobNotFoundError:
+                logger.warning("A stored trace's payload blob is missing; skipping it")
+                continue
+            except BlobIntegrityError:
+                logger.error(
+                    "A stored trace failed its integrity check; skipping it", exc_info=True
+                )
+                continue
+            except Exception:
+                logger.warning("A stored trace could not be read; skipping it", exc_info=True)
+                continue
+            traces.append(StoredTrace.model_validate_json(text))
+        return traces
 
     def close(self) -> None:
         with self._lock:
@@ -318,3 +423,10 @@ class SqliteEvaluationStore:
                 # use still fails instead of silently starting empty.
                 if self.db_path != ":memory:":
                     self._connection = None
+
+
+class MemoryEvaluationStore(SqliteEvaluationStore):
+    """Evaluation storage in a private in-memory SQLite database, using the same contract."""
+
+    def __init__(self, *, blob_payloads: Any = None) -> None:
+        super().__init__(":memory:", blob_payloads=blob_payloads)

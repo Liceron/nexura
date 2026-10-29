@@ -652,6 +652,12 @@ class KnowledgeClient:
             "DELETE", f"/knowledge/documents/{_safe_quote(document_id)}"
         )
 
+    async def delete_collection(self, collection_id: str) -> dict[str, Any]:
+        """Delete a collection with its documents and index (``default`` is emptied)."""
+        return await self._root._request(
+            "DELETE", f"/knowledge/collections/{_safe_quote(collection_id)}"
+        )
+
     async def retrieve(
         self,
         query: str,
@@ -824,6 +830,21 @@ class IntegrationsClient:
         if tool_ids:
             payload["tool_ids"] = tool_ids
         return await self._root._request("POST", "/integrations/register", json_data=payload)
+
+    async def list_registrations(self) -> dict[str, Any]:
+        """The workspace's "Add to palette" tool registrations."""
+        return await self._root._request("GET", "/integrations/registrations")
+
+    async def delete_registrations(
+        self, *, module_id: str | None = None, server_name_or_prefix: str | None = None
+    ) -> dict[str, Any]:
+        """Remove one registered tool, or every tool registered under one prefix."""
+        params = {
+            k: v
+            for k, v in (("module_id", module_id), ("server_name_or_prefix", server_name_or_prefix))
+            if v is not None
+        }
+        return await self._root._request("DELETE", "/integrations/registrations", params=params)
 
 
 class StudioEvaluationsClient:
@@ -1115,6 +1136,9 @@ class EvaluationsClient:
 
     async def get_run(self, eval_id: str) -> dict[str, Any]:
         return await self._root._request("GET", f"/evaluations/runs/{_safe_quote(eval_id)}")
+
+    async def delete_run(self, eval_id: str) -> dict[str, Any]:
+        return await self._root._request("DELETE", f"/evaluations/runs/{_safe_quote(eval_id)}")
 
     async def compare_runs(self, run_id_a: str, run_id_b: str) -> dict[str, Any]:
         payload = {"run_id_a": run_id_a, "run_id_b": run_id_b}
@@ -1506,6 +1530,10 @@ class NexuraClient:
             "get_chunk",
         ),
         ("DELETE", "/api/v1/knowledge/documents/{document_id}"): ("knowledge", "delete_document"),
+        ("DELETE", "/api/v1/knowledge/collections/{collection_id}"): (
+            "knowledge",
+            "delete_collection",
+        ),
         ("POST", "/api/v1/knowledge/retrieve"): ("knowledge", "retrieve"),
         ("POST", "/api/v1/knowledge/answer"): ("knowledge", "answer"),
         # Credentials
@@ -1522,6 +1550,8 @@ class NexuraClient:
         ("POST", "/api/v1/integrations/openapi/discover"): ("integrations", "discover_openapi"),
         ("POST", "/api/v1/integrations/openapi/test-run"): ("integrations", "test_run_openapi"),
         ("POST", "/api/v1/integrations/register"): ("integrations", "register"),
+        ("GET", "/api/v1/integrations/registrations"): ("integrations", "list_registrations"),
+        ("DELETE", "/api/v1/integrations/registrations"): ("integrations", "delete_registrations"),
         # Evaluations (Core & Studio)
         ("GET", "/api/v1/evaluations/datasets"): ("evaluations", "list_datasets"),
         ("GET", "/api/v1/evaluations/graders"): ("evaluations", "graders"),
@@ -1534,6 +1564,7 @@ class NexuraClient:
         ("POST", "/api/v1/evaluations/run"): ("evaluations", "run_evaluation"),
         ("GET", "/api/v1/evaluations/runs"): ("evaluations", "list_runs"),
         ("GET", "/api/v1/evaluations/runs/{eval_id}"): ("evaluations", "get_run"),
+        ("DELETE", "/api/v1/evaluations/runs/{eval_id}"): ("evaluations", "delete_run"),
         ("POST", "/api/v1/evaluations/compare"): ("evaluations", "compare_runs"),
         ("GET", "/api/v1/evaluations/studio/targets"): ("evaluations", "studio.list_targets"),
         ("GET", "/api/v1/evaluations/studio/datasets"): ("evaluations", "studio.list_datasets"),
