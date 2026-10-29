@@ -77,9 +77,13 @@ jobs:
           tests/backend/b26/test_channels.py tests/backend/test_export_and_tools_api.py
           tests/backend/test_security_b8_sessions_integrations.py
       # Full Postgres mode (WP8): the whole service on one database, no SQLite file.
+      # The two deselected tests build the wheels and the TypeScript client; they do not touch
+      # the database and run in the python job, which builds those first.
       - name: Service suites on Postgres (WP2–WP8)
         run: >-
           uv run --frozen pytest -rs -n auto --dist loadfile --service-backend=postgres
+          --deselect tests/backend/b32/test_release_gate.py::test_wheel_build_and_clean_environment_install
+          --deselect tests/backend/b31/test_api_and_clients.py::test_typescript_client_interop
           -m "not sqlite_only" tests/postgres tests/service tests/backend tests/workflows
           tests/p28_seams tests/p35 tests/test_knowledge_hybrid.py tests/test_p35a3_embeddings.py
           tests/test_playground_knowledge.py tests/test_evaluation_p38_c5.py
