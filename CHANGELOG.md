@@ -2,7 +2,10 @@
 
 All notable changes to this project.
 
-## Unreleased
+## 0.4.2 (2026-10-30)
+
+Connect the open-source SDK to a hosted Nexura workspace: deploy from the command line and
+send SDK traces. See [docs/hosted.md](docs/hosted.md).
 
 - Hosted SDK connection: `nexura-runtime login|logout|whoami`, `push workflow|agent|traces`,
   and matching `nexura.commands` entry points. Login stores verified credentials with mode

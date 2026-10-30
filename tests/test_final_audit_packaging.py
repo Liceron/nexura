@@ -73,7 +73,7 @@ def test_docker_installs_workspace_packages() -> None:
 
 def test_docker_check_rejects_missing_split_package() -> None:
     recipe = (ROOT / "deployment/Dockerfile").read_text()
-    broken = recipe.replace("/build/dist/nexura_studio-0.4.1-py3-none-any.whl", "")
+    broken = recipe.replace("/build/dist/nexura_studio-0.4.2-py3-none-any.whl", "")
     with pytest.raises(AssertionError):
         check_recipe(broken)
 

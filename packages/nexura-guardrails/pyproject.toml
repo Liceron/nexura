@@ -1,6 +1,6 @@
 [project]
 name = "nexura-guardrails"
-version = "0.4.1"
+version = "0.4.2"
 description = "Guardrails for Nexura agents: verdicts, a category taxonomy, fast pre-filters, an LLM judge, local safety models, presets and tiered composition."
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
@@ -21,7 +21,7 @@ classifiers = [
 # Depends on the agent SDK only (not on nexura-runtime), with the same Python range, and on no
 # third-party package of its own. Judge calls go through nexura_agents models, so budgets apply.
 dependencies = [
-    "nexura-agents==0.4.1",
+    "nexura-agents==0.4.2",
 ]
 
 [project.optional-dependencies]

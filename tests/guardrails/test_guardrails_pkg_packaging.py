@@ -95,4 +95,4 @@ def test_import_is_lazy_and_every_export_resolves() -> None:
         [sys.executable, "-c", probe], capture_output=True, text=True, timeout=120, check=True
     )
     data = json.loads(out.stdout)
-    assert data["loaded"] == [] and data["missing"] == [] and data["version"] == "0.4.1"
+    assert data["loaded"] == [] and data["missing"] == [] and data["version"] == "0.4.2"

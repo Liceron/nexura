@@ -1,6 +1,6 @@
 [project]
 name = "nexura-runtime"
-version = "0.4.1"
+version = "0.4.2"
 description = "Nexura platform: durable agent workflows with exact-action approvals, guardrail policy, RAG, evaluations and a local REST service."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
@@ -16,7 +16,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "nexura-agents==0.4.1",
+    "nexura-agents==0.4.2",
     "httpx>=0.27.0,<1.0.0",
     "pydantic>=2.7.0,<3.0.0",
     "packaging>=24.0",

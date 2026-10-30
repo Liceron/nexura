@@ -79,7 +79,7 @@ Or build and install a wheel into any Python 3.12 environment:
 
 ```bash
 uv build
-pip install "dist/nexura_runtime-0.4.1-py3-none-any.whl[studio]"
+pip install "dist/nexura_runtime-0.4.2-py3-none-any.whl[studio]"
 ```
 
 The repository builds one package per feature group (`uv build --all-packages` writes every

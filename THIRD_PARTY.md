@@ -157,7 +157,7 @@ ESLint, Playwright, Testing Library, TypeScript, type packages) are not bundled 
 | `classcat` | 5.0.5 | MIT | Jorge Bucaran | https://github.com/jorgebucaran/classcat |
 | `d3-color`, `d3-dispatch`, `d3-drag`, `d3-interpolate`, `d3-selection`, `d3-timer`, `d3-transition`, `d3-zoom` | 3.x | ISC | Mike Bostock | https://github.com/d3 |
 | `d3-ease` | 3.0.1 | BSD-3-Clause | Mike Bostock; Robert Penner (easing equations) | https://github.com/d3/d3-ease |
-| `@liceron/nexura-sdk` | 0.4.1 | MIT | Liceron (first party, `clients/typescript`) | this repository |
+| `@liceron/nexura-sdk` | 0.4.2 | MIT | Liceron (first party, `clients/typescript`) | this repository |
 
 ---
 
