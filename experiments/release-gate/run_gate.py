@@ -120,7 +120,7 @@ def pytest_extra(output: str) -> tuple[list[Invariant], dict[str, Any]]:
 @contextmanager
 def test_services() -> Iterator[None]:
     """Start the local Postgres/Qdrant test containers, restoring their prior state after."""
-    names = os.environ.get("NEXURA_GATE_CONTAINERS", "nexura-test-pg nexura-test-qd").split()
+    names = os.environ.get("NEXURA_GATE_CONTAINERS", "nexura-mvp-pg nexura-test-qd").split()
     started: list[str] = []
     if shutil.which("docker"):
         for name in names:

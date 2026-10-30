@@ -109,3 +109,19 @@ def test_runtime_sources_do_not_import_the_studio_package() -> None:
         or "from nexura_studio" in path.read_text(encoding="utf-8")
     ]
     assert hits == []
+
+
+def test_packaged_page_uses_the_canonical_mark() -> None:
+    """The packaged Studio page draws the same checkpoint mark as the React Studio, not a glyph."""
+    import re
+
+    canonical = (ROOT / "studio-web/src/components/NexuraMark.tsx").read_text(encoding="utf-8")
+    page = (
+        ROOT / "packages/nexura-studio/src/nexura_studio/static/index.html"
+    ).read_text(encoding="utf-8")
+    paths = re.findall(r'd="([^"]+)"', canonical)
+    assert len(paths) == 3
+    mark = re.search(r'<svg class="logo-mark".*?</svg>', page, re.S)
+    assert mark is not None
+    assert re.findall(r'd="([^"]+)"', mark.group(0)) == paths
+    assert "▲" not in page

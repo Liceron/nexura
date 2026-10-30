@@ -91,7 +91,10 @@ body {
   gap: 8px;
 }
 
-.logo-accent {
+.logo-mark {
+  width: 20px;
+  height: 20px;
+  flex: none;
   color: var(--primary);
 }
 
