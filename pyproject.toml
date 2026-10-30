@@ -66,6 +66,9 @@ sandbox = "nexura_runtime.cli.commands:sandbox"
 # win, so they are offered as `nexura project init|dev|deploy`; `dev` does not clash.
 dev = "nexura_runtime.cli.commands:dev"
 project = "nexura_runtime.cli.commands:project"
+logout = "nexura_runtime.cli.commands:logout"
+whoami = "nexura_runtime.cli.commands:whoami"
+push = "nexura_runtime.cli.commands:push"
 
 [build-system]
 requires = ["hatchling"]

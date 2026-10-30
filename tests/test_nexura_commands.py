@@ -24,6 +24,9 @@ RUNTIME_NAMES = {
     # P37 B5: `init` and `deploy` are client built-ins, so they live under `project`.
     "dev",
     "project",
+    "logout",
+    "whoami",
+    "push",
 }
 BUILTINS = {
     "doctor",
@@ -44,7 +47,7 @@ BUILTINS = {
 
 def test_installed_command_names_and_owners() -> None:
     assert {ep.name for ep in COMMANDS} == RUNTIME_NAMES | {"studio"}
-    assert len(COMMANDS) == 10
+    assert len(COMMANDS) == 13
     for ep in COMMANDS:
         assert re.fullmatch(r"[a-z][a-z0-9-]{0,31}", ep.name)
         assert ep.name not in BUILTINS

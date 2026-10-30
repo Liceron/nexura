@@ -272,7 +272,20 @@ class BodySizeLimitMiddleware:
                 break
         scanner = (
             _JsonDepthScanner(MAX_JSON_DEPTH)
-            if b"multipart/" not in content_type and b"octet-stream" not in content_type
+            if (
+                b"multipart/" not in content_type
+                and b"octet-stream" not in content_type
+                and not (
+                    route_path(scope) in {"/v1/traces", "/api/v1/sdk-traces/otlp"}
+                    and (
+                        b"x-protobuf" in content_type
+                        or any(
+                            k == b"content-encoding" and v.lower() == b"gzip"
+                            for k, v in scope.get("headers", [])
+                        )
+                    )
+                )
+            )
             else None
         )
         state = {"seen": 0, "overflow": False, "started": False, "deep": False}

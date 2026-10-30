@@ -1775,19 +1775,21 @@ class NexuraClient:
             )
 
         if response.status_code >= 400:
+            details: Any = None
             try:
                 err_data = response.json()
                 detail = err_data.get("detail", {})
                 if isinstance(detail, dict):
                     code = detail.get("code", "HTTP_ERROR")
                     msg = detail.get("message", response.text)
+                    details = detail
                 else:
                     code = "HTTP_ERROR"
                     msg = str(detail)
             except Exception:
                 code = "HTTP_ERROR"
                 msg = response.text
-            raise NexuraApiError(response.status_code, code, msg)
+            raise NexuraApiError(response.status_code, code, msg, details)
 
         data = response.json()
         return cast(dict[str, Any], data) if isinstance(data, dict) else {"data": data}

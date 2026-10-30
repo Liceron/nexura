@@ -59,7 +59,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-__all__ = ["instrument", "uninstrument", "is_instrumented", "span", "trace"]
+__all__ = ["connect", "instrument", "uninstrument", "is_instrumented", "span", "trace"]
 
 # Longest content value recorded on a span event, in characters. Structured message
 # attributes truncate each text value to this length and keep their JSON structure.
@@ -199,6 +199,43 @@ class _State:
 
 _STATE: _State | None = None
 _LOCK = threading.Lock()
+_CONNECTED_PROVIDER: Any = None
+_CONNECTION: Any = None
+
+
+def connect(
+    url: str | None = None, api_key: str | None = None, *, service_name: str | None = None
+) -> Any:
+    """Send SDK spans to hosted Nexura via batched OTLP/HTTP JSON.
+
+    Reads NEXURA_URL/NEXURA_API_KEY and the CLI login file. Requires the optional
+    opentelemetry-sdk package. Returns a processor with force_flush(), shutdown() and
+    dropped_spans/exported_spans/rejected_spans counters. Content capture stays off.
+    Subsequent instrument() calls reuse this provider unless one is explicitly supplied.
+    """
+    from nexura_agents._hosted_tracing import HostedTraceProcessor
+    from nexura_agents.hosted import resolve_connection
+
+    target, key = resolve_connection(url, api_key)
+    try:
+        from opentelemetry.sdk.resources import Resource
+        from opentelemetry.sdk.trace import TracerProvider
+    except ImportError as exc:
+        raise ImportError(
+            "connect() requires opentelemetry-sdk; pip install opentelemetry-sdk"
+        ) from exc
+    global _CONNECTED_PROVIDER, _CONNECTION
+    if _CONNECTION is not None:
+        _CONNECTION.shutdown()
+    provider = TracerProvider(
+        resource=Resource.create({"service.name": service_name or "nexura-sdk"}),
+        shutdown_on_exit=False,
+    )
+    processor = HostedTraceProcessor(target, key)
+    provider.add_span_processor(processor)  # type: ignore[arg-type]
+    _CONNECTED_PROVIDER, _CONNECTION = provider, processor
+    instrument(tracer_provider=provider)
+    return processor
 
 
 def is_instrumented() -> bool:
@@ -239,7 +276,11 @@ def instrument(
             "OpenTelemetry tracing needs opentelemetry-api. "
             'Install it with: pip install "nexura-agents[otel]"'
         ) from exc
-    provider = tracer_provider if tracer_provider is not None else trace.get_tracer_provider()
+    provider = (
+        tracer_provider
+        if tracer_provider is not None
+        else (_CONNECTED_PROVIDER or trace.get_tracer_provider())
+    )
     try:
         tracer = provider.get_tracer(_INSTRUMENTATION_NAME, schema_url=SEMCONV_GENAI_SCHEMA_URL)
     except TypeError:  # a provider without the schema_url parameter

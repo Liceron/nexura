@@ -952,6 +952,9 @@ def build_parser() -> argparse.ArgumentParser:
         description="Nexura AgentKit standalone developer and export CLI.",
     )
     subparsers = parser.add_subparsers(dest="subcommand", required=True)
+    from nexura_runtime.cli.hosted import add_commands
+
+    add_commands(subparsers)
 
     from nexura_runtime.cli.database import (
         blob_claim_command,
@@ -1396,6 +1399,8 @@ def build_parser() -> argparse.ArgumentParser:
     _add_deploy_arguments(
         project_subs.add_parser("deploy", help=DEPLOY_HELP, description=DEPLOY_HELP)
     )
+    # The Cloud launcher's built-in login wins over plugins: offer the hosted login here.
+    add_commands(project_subs)
 
     return parser
 

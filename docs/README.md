@@ -18,6 +18,8 @@ one owner's projects. They do not add accounts or tenant isolation.
 
 ## Start here
 
+- [Use the hosted Nexura app](hosted.md): workspace API keys, CLI login and uploads,
+  and SDK traces over standard OTLP/HTTP.
 - [Packages and installation](packages.md): the nine Python packages, TypeScript client,
   source/wheel installs, supported versions and optional backend requirements.
 - [Getting started](getting-started.md): install, first agent, first tool, in five minutes.

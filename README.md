@@ -175,7 +175,7 @@ Version 0.4.0 was published to PyPI and npm on 2026-10-25; 0.4.1 on 2026-10-29. 
 
 ## Documentation map
 
-[Documentation index](https://github.com/Liceron/nexura/blob/main/docs/README.md): **46 guides** plus the generated [API reference](https://github.com/Liceron/nexura/blob/main/docs/api-reference.md). Offline Python examples are executed by tests; blocks needing a real model or running service are marked and skipped.
+[Documentation index](https://github.com/Liceron/nexura/blob/main/docs/README.md): **47 guides** plus the generated [API reference](https://github.com/Liceron/nexura/blob/main/docs/api-reference.md). Offline Python examples are executed by tests; blocks needing a real model or running service are marked and skipped.
 
 | Start with | Continue to |
 |---|---|

@@ -4,6 +4,18 @@ All notable changes to this project.
 
 ## Unreleased
 
+- Hosted SDK connection: `nexura-runtime login|logout|whoami`, `push workflow|agent|traces`,
+  and matching `nexura.commands` entry points. Login stores verified credentials with mode
+  0600; uploads refuse custom Python tools and use existing declarative import APIs.
+- `nexura_agents.tracing.connect()` configures a bounded, batched OTLP/HTTP JSON exporter
+  using httpx, with retry, drop counters and exit flushing. Content capture stays opt-in.
+- Enterprise: durable workspace editor/viewer API keys on SQLite and Postgres, workspace
+  admin key-management APIs and audit; authenticated protobuf/JSON/gzip OTLP ingestion,
+  workspace quotas, trace read/delete APIs and retention on the existing trigger tick.
+- `push` errors name the server's error code and the rejected fields (never server messages);
+  an invalid workflow file is a clean error, not a traceback. `NexuraApiError.details` now
+  carries the error detail object.
+
 ## 0.4.1 (2026-10-29)
 
 Fixes from a live user pass of the hosted product, the workflow builder upgrade, and the
