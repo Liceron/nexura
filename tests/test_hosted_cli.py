@@ -87,6 +87,9 @@ def test_login_0600_whoami_and_logout(
     assert "workspace-alpha" in output.out and "editor" in output.out
     assert main(["logout"]) == 0
     assert not credentials_path().exists()
+    capsys.readouterr()
+    assert main(["whoami"]) == 1
+    assert "Not logged in" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("kind", ["json", "python", "zip", "directory"])

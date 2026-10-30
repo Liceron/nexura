@@ -392,7 +392,10 @@ async def test_cancellation_cleans_up_fully(cgroup_parent: str) -> None:
     try:
         container, task_dir = await _wait_for_container(cgroup_parent, before)
         assert task_dir is not None
-        seen_mounts = _null_netns_mounts(task_dir)
+        # The cgroup appears slightly before runsc mounts the null netns; wait for it.
+        deadline = time.monotonic() + 5
+        while not (seen_mounts := _null_netns_mounts(task_dir)) and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task

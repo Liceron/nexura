@@ -3,6 +3,7 @@
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import pytest
 from nexura_sandbox.gvisor_worker import GVisorOCIWorker
@@ -52,7 +53,8 @@ async def test_real_gvisor_process_limit_applies_to_fork(real_config: SandboxCon
 async def test_real_gvisor_low_level_socket_cannot_reach_host(
     real_config: SandboxConfig, review_infrastructure: dict[str, Any]
 ) -> None:
-    port = review_infrastructure["qdrant"]["port"]
+    # Any host port with a listener works; the record stores the Qdrant test service as a URL.
+    port = urlsplit(review_infrastructure.get("qdrant_url") or "http://127.0.0.1:6333").port
     code = (
         f"import _socket\ns = _socket.socket()\n"
         f"s.connect(('127.0.0.1', {port}))\nprint('HOST_CONNECTED')"

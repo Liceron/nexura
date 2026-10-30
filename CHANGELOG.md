@@ -2,6 +2,11 @@
 
 All notable changes to this project.
 
+## 0.4.3 (2026-10-30)
+
+- `nexura-runtime whoami` and `push` before `login` now say "Not logged in" instead of a URL
+  validation error; `tracing.connect()` without a URL or login reports the same.
+
 ## 0.4.2 (2026-10-30)
 
 Connect the open-source SDK to a hosted Nexura workspace: deploy from the command line and

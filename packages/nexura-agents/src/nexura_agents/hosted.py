@@ -45,6 +45,11 @@ def resolve_connection(url: str | None = None, api_key: str | None = None) -> tu
         except (OSError, ValueError):
             pass
     target = url if url is not None else os.environ.get("NEXURA_URL", saved.get("url", ""))
+    if not target:
+        raise ValueError(
+            "Not logged in. Run nexura-runtime login --url URL, "
+            "or set NEXURA_URL and NEXURA_API_KEY."
+        )
     target = validate_url(target)
     key = api_key if api_key is not None else os.environ.get("NEXURA_API_KEY")
     if key is None and saved.get("url", "").rstrip("/") == target:
