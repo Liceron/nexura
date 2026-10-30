@@ -12,6 +12,12 @@ import { TemplateGraph } from './TemplateGraph';
 import { rememberSampleInput } from './sampleInput';
 import type { InstantiateResult, TemplateDetail, TemplateList, TemplateSummary } from './types';
 
+const categoryOrder = ['agents', 'knowledge', 'automation', 'data', 'governance', 'support'];
+const categoryRank = (category: string) => {
+  const index = categoryOrder.indexOf(category);
+  return index === -1 ? categoryOrder.length : index;
+};
+
 const selectStyle = {
   padding: '6px 10px',
   borderRadius: 'var(--radius-md)',
@@ -84,7 +90,7 @@ export function TemplatesView() {
         tpl.title.toLowerCase().includes(q) ||
         tpl.description.toLowerCase().includes(q) ||
         tpl.tags.some((x) => x.toLowerCase().includes(q))
-    );
+    ).sort((a, b) => categoryRank(a.category) - categoryRank(b.category) || a.title.localeCompare(b.title));
   }, [catalog, search]);
 
   const openPreview = useCallback(
@@ -144,8 +150,8 @@ export function TemplatesView() {
           {t('templates.category')}{' '}
           <select aria-label={t('templates.category')} value={category} onChange={(e) => setCategory(e.target.value)} style={selectStyle}>
             <option value="">{t('templates.all')}</option>
-            {(catalog?.categories ?? []).map((c) => (
-              <option key={c} value={c}>{c}</option>
+            {[...(catalog?.categories ?? [])].sort((a, b) => categoryRank(a) - categoryRank(b)).map((c) => (
+              <option key={c} value={c}>{t(`templates.categories.${c}`, c)}</option>
             ))}
           </select>
         </label>
@@ -211,7 +217,7 @@ export function TemplatesView() {
               <p>{tpl.description}</p>
               <div className="workflow-template-meta">
                 <span>{tpl.node_count} {t('templates.steps')}</span>
-                <span>{tpl.category} · {t(`templates.difficulty.${tpl.difficulty}`)}</span>
+                <span>{t(`templates.categories.${tpl.category}`, tpl.category)} · {t(`templates.difficulty.${tpl.difficulty}`)}</span>
                 {tpl.has_approval && <span>{t('workflowDesign.needsApproval')}</span>}
                 {tpl.has_trigger && <span>{t('templates.trigger')}</span>}
                 <span>{t('templates.credentials')}: {tpl.required_credentials.length ? tpl.required_credentials.join(', ') : t('templates.none')}</span>

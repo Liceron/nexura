@@ -673,6 +673,14 @@
     "error": "त्रुटि"
   },
   "templates": {
+    "categories": {
+      "agents": "Agents",
+      "knowledge": "Knowledge",
+      "automation": "Automation",
+      "data": "Data",
+      "governance": "Governance",
+      "support": "Support"
+    },
     "title": "टेम्पलेट गैलरी",
     "subtitle": "परीक्षित स्टार्टर वर्कफ़्लो जो ऑफ़लाइन चलते हैं। एक का पूर्वावलोकन करें और उसे अपनी शुरुआत बनाएँ।",
     "search": "टेम्पलेट खोजें...",

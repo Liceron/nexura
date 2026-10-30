@@ -270,7 +270,7 @@
     "next": "Next",
     "showing": "Showing",
     "of": "of",
-    "browseGallery": "Start from template",
+    "browseGallery": "Browse all templates",
     "describeIt": "Describe it",
     "describeLabel": "Describe the workflow you want",
     "describePlaceholder": "For example: a support agent that looks up orders and asks a manager before refunds over 100",
@@ -673,6 +673,14 @@
     "error": "Error"
   },
   "templates": {
+    "categories": {
+      "agents": "Agents",
+      "knowledge": "Knowledge",
+      "automation": "Automation",
+      "data": "Data",
+      "governance": "Governance",
+      "support": "Support"
+    },
     "title": "Template gallery",
     "subtitle": "Tested starter workflows that run offline. Preview one, then use it as your starting point.",
     "search": "Search templates...",

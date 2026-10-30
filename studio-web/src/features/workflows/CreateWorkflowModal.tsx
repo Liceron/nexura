@@ -6,7 +6,7 @@ import { Modal } from '../../components/Modal';
 import { Input } from '../../components/Input';
 import { Button } from '../../components/Button';
 import { Badge } from '../../components/Badge';
-import { useI18n } from '../../i18n';
+import { languageChoiceEnabled, useI18n } from '../../i18n';
 import { REGISTRY_TEMPLATES } from './templates';
 import type { WorkflowTemplate } from './types';
 import type { WorkflowSpec, ValidationIssue } from '@liceron/nexura-sdk';
@@ -34,19 +34,20 @@ export function CreateWorkflowModal({
 }: CreateWorkflowModalProps) {
   const { manager } = useApi();
   const { t } = useI18n();
+  const initialSelection = initialTemplateId === 'bilingual-greeting' && !languageChoiceEnabled() ? 'blank' : initialTemplateId || 'blank';
 
   // "New workflow" starts blank; a template is preselected only when one was picked to open this.
-  const [selectedTemplateId, setSelectedTemplateId] = useState<string>(initialTemplateId || 'blank');
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string>(initialSelection);
   const [name, setName] = useState<string>('');
   const [isValidating, setIsValidating] = useState<boolean>(false);
   const [validationErrors, setValidationErrors] = useState<ValidationIssue[]>([]);
   const [generalError, setGeneralError] = useState<string | null>(null);
   const [describing, setDescribing] = useState<boolean>(false);
   useEffect(() => {
-    if (open) { setName(''); setGeneralError(null); setSelectedTemplateId(initialTemplateId || 'blank'); }
-  }, [open, initialTemplateId]);
+    if (open) { setName(''); setGeneralError(null); setSelectedTemplateId(initialSelection); }
+  }, [open, initialSelection]);
 
-  const allTemplates = [...REGISTRY_TEMPLATES, ...(extraTemplates ?? [])];
+  const allTemplates = [...REGISTRY_TEMPLATES, ...(extraTemplates ?? [])].filter(template => template.id !== 'bilingual-greeting' || languageChoiceEnabled());
 
   const handleTemplateChange = (templateId: string) => {
     setSelectedTemplateId(templateId);
