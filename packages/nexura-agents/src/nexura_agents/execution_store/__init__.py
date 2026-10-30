@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Execution Contract v1 stores; additive APIs not yet used by Nexura executors."""
 

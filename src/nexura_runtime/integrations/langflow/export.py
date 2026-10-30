@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Write an ``ImportedFlow`` back to Langflow 1.12.x flow JSON (so V2's editor can open it).
 

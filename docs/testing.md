@@ -361,7 +361,7 @@ an active event loop. Use `pytest-asyncio` or your runner's equivalent.
 
 This record was transcribed on 2026-10-19 from the project's historical verification
 records. It is not a new live test, an external audit or a claim of current release
-readiness. The open-source edition is MIT: **single user, this machine only; for a
+readiness. The open-source edition is **single user, this machine only; for a
 team or a public endpoint use the hosted or enterprise edition**.
 
 ### Owner-run Vertex check, 2026-10-08

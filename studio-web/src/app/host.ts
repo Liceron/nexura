@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Liceron
 /**
  * How a page that hosts Studio (for example inside its own navigation frame) configures it:

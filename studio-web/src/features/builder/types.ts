@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Liceron
 import type { Node, Edge } from '@xyflow/react';
 import type { WorkflowSpec } from '@liceron/nexura-sdk';

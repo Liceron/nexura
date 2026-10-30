@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Tweaks: per-run overrides of node fields, applied to a copy of the imported fields.
 

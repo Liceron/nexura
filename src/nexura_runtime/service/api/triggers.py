@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """REST API router for schedules, signed webhooks, trigger jobs, and dry-run outbox."""
 

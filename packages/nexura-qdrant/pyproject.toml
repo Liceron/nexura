@@ -1,11 +1,11 @@
 [project]
 name = "nexura-qdrant"
-version = "0.4.3"
+version = "0.5.0"
 description = "Qdrant vector store for nexura-runtime: workspace-scoped collections and immutable index generations."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
-license = "MIT"
-license-files = ["LICENSE"]
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Liceron", email = "info@liceron.in" }]
 keywords = ["agents", "rag", "vector-store", "qdrant", "retrieval"]
 classifiers = [
@@ -18,8 +18,8 @@ classifiers = [
 ]
 # Same version as the runtime whose VectorStore protocol it implements.
 dependencies = [
-    "nexura-runtime==0.4.3",
-    "nexura-agents==0.4.3",
+    "nexura-runtime==0.5.0",
+    "nexura-agents==0.5.0",
     "qdrant-client>=1.12.0,<2.0.0",
 ]
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Liceron
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';

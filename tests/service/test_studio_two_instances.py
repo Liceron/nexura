@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Two service instances on one Postgres database (MVP Postgres WP3, design §4 WP3 row).
 

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """ContextVar-isolated execution tracer with OpenTelemetry-compatible span models."""
 

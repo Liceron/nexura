@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Liceron
 // B39: one-time signing secret, delivery URL, signing headers/snippets and the workflow picker
 // used by the trigger forms. Text only; the secret is passed in from React state and never

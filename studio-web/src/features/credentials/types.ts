@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Liceron
 export type CredentialType = 'api_key' | 'bearer_token' | 'basic_auth' | 'oauth' | 'database_url' | 'custom';
 

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Benchmark runner comparing Nexura, Pydantic AI, and LangGraph on S1, S2a, S2b, and S3a-c."""
 

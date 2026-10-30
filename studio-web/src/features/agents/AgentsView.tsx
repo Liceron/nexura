@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Liceron
 import { useAfterRender } from '../../app/useAfterRender';
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';

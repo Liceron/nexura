@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Liceron
 import { NexuraMark } from '../components/NexuraMark';
 import { Icon } from '../components/Icon';

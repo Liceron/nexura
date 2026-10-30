@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Shared offline helpers for the nexura-guardrails tests (FakeModel and scripted models only).
 

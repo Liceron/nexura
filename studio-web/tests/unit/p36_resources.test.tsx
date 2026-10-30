@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Liceron
 // Round 4 (chat, knowledge and authoring resources). Explicit local mock API: no service,
 // provider, model or network calls. The streamed text below is a scripted mock of the

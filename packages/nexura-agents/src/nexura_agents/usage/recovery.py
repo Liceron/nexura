@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Budget reservations across a takeover (Execution Contract v1 §2.7, A6 S11).
 

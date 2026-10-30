@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Serve Nexura agents and tools over MCP, so Claude Desktop, Cursor, VS Code or any
 other MCP client can use them.
@@ -120,7 +120,7 @@ class AgentMCPServer:
         tools: Sequence[Tool] = (),
         deps: Any = None,
         runner: Any = None,
-        version: str = "0.4.3",
+        version: str = "0.5.0",
         list_ttl_ms: int = 60_000,
         instructions: str | None = None,
     ) -> None:

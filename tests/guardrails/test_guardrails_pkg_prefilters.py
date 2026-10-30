@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """P39 G3: the pre-filter wrappers reuse the nexura_agents built-ins and map to verdicts."""
 

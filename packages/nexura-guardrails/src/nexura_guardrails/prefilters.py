@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Fast pre-filters as ``Check`` objects, over the ``nexura_agents`` built-ins.
 

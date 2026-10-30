@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """The service's knowledge index on Postgres (MVP Postgres WP7): wiring and two instances.
 

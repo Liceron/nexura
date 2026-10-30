@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """MVP Postgres WP3: service wiring of the Postgres run store, and the WP2b round-3 follow-ups.
 

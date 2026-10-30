@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Liceron
 // Workflow tests (P22): save a completed workflow run as an eval case, list the test datasets
 // bound to a workflow, run one against the workflow's current revision and compare with the

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Parse and validate Langflow 1.12.x saved-flow JSON into an inert ``ImportedFlow``.
 

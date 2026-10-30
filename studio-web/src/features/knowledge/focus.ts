@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Liceron
 /** Session-storage key used to hand a cited chunk from chat footnotes to the Knowledge page. */
 export const KNOWLEDGE_FOCUS_KEY = 'nexura_knowledge_focus';

@@ -28,7 +28,7 @@ gVisor sandbox (it needs a privileged runtime) and the local release gate.
 | Python tests | `uv run pytest -n auto --dist loadfile --deselect tests/backend/b22` (parallel, one file per worker; about 8 minutes on 4 cores instead of 17; drop `-n auto --dist loadfile` to run serially) |
 | Python lint / format | `uv run ruff check src tests examples` and `uv run ruff format --check <changed files>` |
 | Python types | `uv run mypy src packages/*/src` |
-| Licence headers (new source files need the MIT SPDX header) | `uv run python scripts/add_spdx_headers.py --check`; run it without `--check` to add missing headers |
+| Licence headers (new source files need the Apache-2.0 SPDX header) | `uv run python scripts/add_spdx_headers.py --check`; run it without `--check` to add missing headers |
 | Vector stores (needs Postgres+pgvector and Qdrant) | set `NEXURA_TEST_POSTGRES_URI` and `NEXURA_TEST_QDRANT_URL`, then `uv run pytest tests/backend/b22 tests/postgres` |
 | Sandbox isolation (needs gVisor `runsc` and passwordless sudo) | `NEXURA_REAL_GVISOR=1 uv run pytest tests/backend/b30` (the test helper `tests/backend/b30/conftest.py` reads `runsc_path`, `rootfs_path` and `runsc_command_prefix` from `.agy/review-infrastructure.json` at the repo root and passes them in an explicit operator `SandboxConfig`; the SDK itself never reads that file) |
 | Local release gate (all profiles, writes receipts) | `uv run python experiments/release-gate/run_gate.py` |

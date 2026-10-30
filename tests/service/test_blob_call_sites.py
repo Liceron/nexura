@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Large payloads leave the database (MVP WP2b): the codec, its two call sites, config wiring.
 

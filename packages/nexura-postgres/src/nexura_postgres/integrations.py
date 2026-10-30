@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Persisted MCP/OpenAPI fixture tool registrations on Postgres (MVP WP8, stores #17, #18).
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Liceron
 // P39 G4: the Playground's live reply for an agent with output guardrails. Explicit local
 // mock API (the round 4 fixture): no service, provider, model or network calls. The events

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Single-host SQLite execution journal, using WAL and BEGIN IMMEDIATE transactions."""
 

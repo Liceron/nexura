@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 # P38 C4 re-review (round 2) repros. Each asserts the secure / documented
 # behaviour; all three failed before the R2 fixes. Offline: in-process apps and one

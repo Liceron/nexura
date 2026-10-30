@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Write the public open-source repository tree from an explicit allow-list.
 
@@ -47,6 +47,7 @@ ALLOW: tuple[str, ...] = (
     # Clients and Studio (sources and their own configs only; no build output)
     "clients/typescript/**",
     "studio-web/LICENSE",
+    "studio-web/NOTICE",
     "studio-web/index.html",
     "studio-web/package.json",
     "studio-web/package-lock.json",
@@ -79,6 +80,7 @@ ALLOW: tuple[str, ...] = (
     "SECURITY_MODEL.md",
     "THIRD_PARTY.md",
     "LICENSE",
+    "NOTICE",
     "CLA.md",
 )
 

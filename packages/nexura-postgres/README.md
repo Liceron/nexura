@@ -228,4 +228,4 @@ transaction-pooling gate; both the OSS and the enterprise suites run it.
 
 ## Documentation and licence
 
-[Main documentation](https://github.com/Liceron/nexura/blob/main/docs/README.md) · [Full guide](https://github.com/Liceron/nexura/blob/main/docs/knowledge.md). MIT, Copyright (c) 2026 Liceron. See [LICENSE](https://github.com/Liceron/nexura/blob/main/packages/nexura-postgres/LICENSE).
+[Main documentation](https://github.com/Liceron/nexura/blob/main/docs/README.md) · [Full guide](https://github.com/Liceron/nexura/blob/main/docs/knowledge.md). Apache-2.0, Copyright (c) 2026 Liceron. See [LICENSE](https://github.com/Liceron/nexura/blob/main/packages/nexura-postgres/LICENSE).

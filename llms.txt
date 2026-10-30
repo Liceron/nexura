@@ -1,6 +1,6 @@
 # Nexura
 
-> Nexura is an MIT-licensed, typed Python SDK for operational AI agents and approval-gated workflows. `nexura-agents` (import `nexura_agents`, needs only httpx and pydantic) has agents, tools, teams, handoffs, structured output, human approval, budgets, durable runs and `FakeModel` for offline tests. `nexura-runtime` (import `nexura_runtime`) adds durable workflows, RAG, evaluations, a local REST service and a browser Studio. The project is alpha and not yet on PyPI: install from the repository. The open-source edition is single user, on one machine.
+> Nexura is an Apache-2.0-licensed, typed Python SDK for operational AI agents and approval-gated workflows. `nexura-agents` (import `nexura_agents`, needs only httpx and pydantic) has agents, tools, teams, handoffs, structured output, human approval, budgets, durable runs and `FakeModel` for offline tests. `nexura-runtime` (import `nexura_runtime`) adds durable workflows, RAG, evaluations, a local REST service and a browser Studio. The project is alpha and not yet on PyPI: install from the repository. The open-source edition is single user, on one machine.
 
 Every Python example in the docs runs offline with `FakeModel`, a scripted model, and is executed by the test suite. A model string such as `"openai:gpt-4.1-mini"` swaps in a real provider. The full text of every page below is in [llms-full.txt](https://github.com/Liceron/nexura/blob/main/llms-full.txt). Guidance for AI coding agents is in [skills/nexura/SKILL.md](https://github.com/Liceron/nexura/blob/main/skills/nexura/SKILL.md).
 

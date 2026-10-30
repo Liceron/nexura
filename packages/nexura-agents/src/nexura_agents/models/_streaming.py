@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Shared decoding of OpenAI-style streaming chat chunks into ``StreamDelta`` values.
 

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Bounded Linux crash cleanup, loaded by the worker's stdlib-only watchdog.
 

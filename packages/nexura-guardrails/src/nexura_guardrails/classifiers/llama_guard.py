@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Llama Guard 3 (1B and 8B) over Ollama or an OpenAI-compatible server.
 

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Liceron
 // Dataset editor helpers: import/export JSON and case validation (mirrors server limits;
 // the server remains authoritative).

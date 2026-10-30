@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
-"""Add or check the MIT SPDX header on every first-party open-source source file.
+"""Add or check the Apache-2.0 SPDX header on every first-party open-source source file.
 
 Header (Python uses ``#``, TypeScript uses ``//``)::
 
-    # SPDX-License-Identifier: MIT
+    # SPDX-License-Identifier: Apache-2.0
     # Copyright (c) 2026 Liceron
 
 The header goes on the first lines of the file, after a shebang and a PEP 263
@@ -31,7 +31,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-SPDX_ID = "SPDX-License-Identifier: MIT"
+SPDX_ID = "SPDX-License-Identifier: Apache-2.0"
 COPYRIGHT = "Copyright (c) 2026 Liceron"
 
 # (base directory, glob patterns, comment prefix)

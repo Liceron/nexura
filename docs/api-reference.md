@@ -3,7 +3,7 @@
 Generated from docstrings by `scripts/gen_api_reference.py`; do not edit by hand.
 The guides in this folder explain how the pieces fit together; this page lists
 the selected public exports with their signatures.
-MIT open-source edition: single user, this machine only; for a team or a public endpoint use the hosted or enterprise edition.
+Open-source edition (Apache-2.0): single user, this machine only; for a team or a public endpoint use the hosted or enterprise edition.
 
 ## Failure reproduction (`nexura_agents.repro`)
 
@@ -1391,7 +1391,7 @@ Args:
 
 ### `AgentMCPServer`
 
-class `AgentMCPServer(name: 'str', *, agents: 'Sequence[Agent | Team]' = (), tools: 'Sequence[Tool]' = (), deps: 'Any' = None, runner: 'Any' = None, version: 'str' = '0.4.3', list_ttl_ms: 'int' = 60000, instructions: 'str | None' = None) -> 'None'`
+class `AgentMCPServer(name: 'str', *, agents: 'Sequence[Agent | Team]' = (), tools: 'Sequence[Tool]' = (), deps: 'Any' = None, runner: 'Any' = None, version: 'str' = '0.5.0', list_ttl_ms: 'int' = 60000, instructions: 'str | None' = None) -> 'None'`
 
 ~~~text
 Expose agents and tools as an MCP server.

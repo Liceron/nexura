@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 # ruff: noqa: E402 -- stdlib-only watchdog entry point must precede runtime imports
 """gVisor (runsc) OCI sandbox backend: a user-space kernel boundary for untrusted code.

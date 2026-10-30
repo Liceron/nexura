@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Chat session, saved-agent and skill store contracts on both backends (MVP Postgres WP4).
 

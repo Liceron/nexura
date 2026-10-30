@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """P39 G6 (design 8.7): model-based policy verdicts are journaled and replayed.
 

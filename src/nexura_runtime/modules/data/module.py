@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Module wrapper exposing JSON transforms, merge, and classification routing via B00/B01."""
 

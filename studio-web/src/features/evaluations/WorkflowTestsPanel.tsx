@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Liceron
 import { Icon } from '../../components/Icon';
 import { useCallback, useEffect, useState, type CSSProperties } from 'react';

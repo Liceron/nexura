@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Liceron
 /**
  * Pure helpers for the durable-run screens (interrupt answers, checkpoint history, fork,

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """P38 C3 adversarial review repros. Local FakeModel only; no network, no paid calls.
 

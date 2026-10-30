@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """P39 G4: a crash while a guarded reply is held or checked in windows (SIGKILL rows).
 

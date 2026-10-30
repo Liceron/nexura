@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Blob store location from configuration: ``NEXURA_BLOB_URL`` or ``blob_url=``.
 

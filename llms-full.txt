@@ -20,7 +20,7 @@ Two packages:
 - **`nexura-runtime`** (`import nexura_runtime`): the platform. It adds durable
   workflows, the REST service, Studio, RAG, evaluations and budgets.
 
-The MIT open-source edition is **single user, this machine only; for a team or a
+The open-source edition is **single user, this machine only; for a team or a
 public endpoint use the hosted or enterprise edition**. Local workspaces organise
 one owner's projects. They do not add accounts or tenant isolation.
 
@@ -145,7 +145,7 @@ Source: https://github.com/Liceron/nexura/blob/main/docs/hosted.md
 Build and test locally with the open-source SDK, then upload a declarative workflow or
 saved agent to your hosted workspace. SDK runs that stay on your machine can send traces
 to the same workspace. The hosted service requires the enterprise edition; the SDK stays
-MIT licensed and does not require a hosted account for local use.
+Apache-2.0 licensed and does not require a hosted account for local use.
 
 ## Create a workspace key and sign in
 
@@ -303,14 +303,14 @@ Source: https://github.com/Liceron/nexura/blob/main/docs/packages.md
 
 # Packages and installation
 
-The package inventory, source/wheel installation commands and backend requirements for the MIT edition. All packages are alpha (0.4) and published on PyPI and npm. See the [documentation index](README.md) for the subject guides.
+The package inventory, source/wheel installation commands and backend requirements for the open-source edition. All packages are alpha (0.5) and published on PyPI and npm. See the [documentation index](README.md) for the subject guides.
 
 ## Package overview
 
 A typed Python SDK for building operational agents and approval-gated workflows,
 with a local REST service, a TypeScript API client and a browser Studio.
 
-> **Status: alpha (0.4), published 2026-10-25.** Install with `pip` or `npm` as below, or from a
+> **Status: alpha (0.5); first published 2026-10-25.** Install with `pip` or `npm` as below, or from a
 > source checkout.
 
 > **Just want to build agents?** Start with **[Nexura Agents](../packages/nexura-agents/README.md)**
@@ -382,7 +382,7 @@ Or build and install a wheel into any Python 3.12 environment:
 
 ```bash
 uv build
-pip install "dist/nexura_runtime-0.4.3-py3-none-any.whl[studio]"
+pip install "dist/nexura_runtime-0.5.0-py3-none-any.whl[studio]"
 ```
 
 The repository builds one package per feature group (`uv build --all-packages` writes every
@@ -435,7 +435,7 @@ uv run mypy src packages/*/src
 
 ## License
 
-MIT, copyright (c) 2026 Liceron. See [LICENSE](../LICENSE). Third-party notices are in
+Apache-2.0, copyright (c) 2026 Liceron. See [LICENSE](../LICENSE). Third-party notices are in
 [THIRD_PARTY.md](../THIRD_PARTY.md).
 
 ---
@@ -2012,7 +2012,7 @@ pip install "nexura-agents[otel]"    # + OpenTelemetry tracing
 
 ---
 
-The MIT open-source edition is **single user, this machine only; for a team or a
+The open-source edition is **single user, this machine only; for a team or a
 public endpoint use the hosted or enterprise edition**. Agent teams below compose
 agents in code; they do not provide human user accounts or service authentication.
 
@@ -2090,7 +2090,7 @@ MCP/OpenAPI connectors and evaluations.
 
 ## Project
 
-MIT licensed, © 2026 Liceron. Security reports: info@liceron.in.
+Apache-2.0 licensed, © 2026 Liceron. Security reports: info@liceron.in.
 
 ---
 
@@ -2459,7 +2459,7 @@ an active event loop. Use `pytest-asyncio` or your runner's equivalent.
 
 This record was transcribed on 2026-10-19 from the project's historical verification
 records. It is not a new live test, an external audit or a claim of current release
-readiness. The open-source edition is MIT: **single user, this machine only; for a
+readiness. The open-source edition is **single user, this machine only; for a
 team or a public endpoint use the hosted or enterprise edition**.
 
 ### Owner-run Vertex check, 2026-10-08
@@ -12347,7 +12347,7 @@ Agent tool names are the agent name lowercased with spaces replaced by `_` (clea
 
 ## AgentMCPServer arguments
 
-`AgentMCPServer(name, *, agents=(), tools=(), deps=None, runner=None, version="0.4.3", list_ttl_ms=60_000, instructions=None)`
+`AgentMCPServer(name, *, agents=(), tools=(), deps=None, runner=None, version="0.5.0", list_ttl_ms=60_000, instructions=None)`
 
 - `agents`: each becomes a tool named after the agent.
 - `tools`: `Tool` objects exposed with their own schemas.
@@ -16808,7 +16808,7 @@ Source: https://github.com/Liceron/nexura/blob/main/docs/studio-and-service.md
 
 # Service and Studio
 
-The MIT open-source edition is **single user, this machine only; for a team or a public endpoint use the hosted or enterprise edition**. This holds when you embed the service too: `create_api_app()` answers 403 `NON_LOOPBACK_CLIENT` to any peer that is not loopback unless you give the explicit insecure opt-in, even under `uvicorn.run(app, host="0.0.0.0")`. The one exception is [remote single-operator mode](remote-single-operator.md) (`nexura-runtime serve --auth token`): the same single owner on a remote host or VM, with one operator token on every request, behind a TLS reverse proxy. It adds no accounts or roles.
+The open-source edition is **single user, this machine only; for a team or a public endpoint use the hosted or enterprise edition**. This holds when you embed the service too: `create_api_app()` answers 403 `NON_LOOPBACK_CLIENT` to any peer that is not loopback unless you give the explicit insecure opt-in, even under `uvicorn.run(app, host="0.0.0.0")`. The one exception is [remote single-operator mode](remote-single-operator.md) (`nexura-runtime serve --auth token`): the same single owner on a remote host or VM, with one operator token on every request, behind a TLS reverse proxy. It adds no accounts or roles.
 
 The platform package `nexura-runtime` includes a local REST service and a browser Studio. The service stores workflows and runs in a SQLite file and exposes them under `/api/v1`. Studio is a React app that talks to that API, and `@liceron/nexura-sdk` is a TypeScript client for the same API. All three are optional: the Python SDK works on its own, and a workflow behaves the same whichever way you start it. Both packages are alpha and unpublished, so install from a source checkout.
 
@@ -17358,7 +17358,7 @@ The Sub-runs tab appears only for runs whose workflow has sub-workflow steps (`G
 
 ## Editions
 
-The open-source edition is MIT: **single user, this machine only; for a team or a
+The open-source edition is **single user, this machine only; for a team or a
 public endpoint use the hosted or enterprise edition**. Local workspaces are project
 folders for that one owner, not tenant or member accounts. Loopback binding, Host/Origin
 checks, local credentials, approvals, budgets and sandbox safety stay in this edition.
@@ -17373,7 +17373,7 @@ owner; it is not multi-user.
 
 The closed edition adds authentication, workspace members, organisations and invites,
 managed secrets and rotation, publishing and the embeddable widget, and hosted-product
-runtime compatibility. It has not had an external security review. Installing the MIT
+runtime compatibility. It has not had an external security review. Installing the open-source
 packages alone does not enable those features.
 
 ## Run the service and Studio web
@@ -19891,7 +19891,7 @@ Source: https://github.com/Liceron/nexura/blob/main/docs/api-reference.md
 Generated from docstrings by `scripts/gen_api_reference.py`; do not edit by hand.
 The guides in this folder explain how the pieces fit together; this page lists
 the selected public exports with their signatures.
-MIT open-source edition: single user, this machine only; for a team or a public endpoint use the hosted or enterprise edition.
+Open-source edition (Apache-2.0): single user, this machine only; for a team or a public endpoint use the hosted or enterprise edition.
 
 ## Failure reproduction (`nexura_agents.repro`)
 
@@ -21279,7 +21279,7 @@ Args:
 
 ### `AgentMCPServer`
 
-class `AgentMCPServer(name: 'str', *, agents: 'Sequence[Agent | Team]' = (), tools: 'Sequence[Tool]' = (), deps: 'Any' = None, runner: 'Any' = None, version: 'str' = '0.4.3', list_ttl_ms: 'int' = 60000, instructions: 'str | None' = None) -> 'None'`
+class `AgentMCPServer(name: 'str', *, agents: 'Sequence[Agent | Team]' = (), tools: 'Sequence[Tool]' = (), deps: 'Any' = None, runner: 'Any' = None, version: 'str' = '0.5.0', list_ttl_ms: 'int' = 60000, instructions: 'str | None' = None) -> 'None'`
 
 ~~~text
 Expose agents and tools as an MCP server.

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Artifact and recipe checks for the final packaging audit (no Docker or network)."""
 
@@ -51,7 +51,14 @@ def check_recipe(text: str) -> None:
     assert builds <= packages.keys()
     assert "COPY packages/ ./packages/" in lines
     assert "COPY src/ ./src/" in lines
-    for required in ("pyproject.toml", "uv.lock", "README.md", "LICENSE", "THIRD_PARTY.md"):
+    for required in (
+        "pyproject.toml",
+        "uv.lock",
+        "README.md",
+        "LICENSE",
+        "NOTICE",
+        "THIRD_PARTY.md",
+    ):
         assert any(
             required in shlex.split(line)[1:-1]
             for line in lines
@@ -73,7 +80,7 @@ def test_docker_installs_workspace_packages() -> None:
 
 def test_docker_check_rejects_missing_split_package() -> None:
     recipe = (ROOT / "deployment/Dockerfile").read_text()
-    broken = recipe.replace("/build/dist/nexura_studio-0.4.3-py3-none-any.whl", "")
+    broken = recipe.replace("/build/dist/nexura_studio-0.5.0-py3-none-any.whl", "")
     with pytest.raises(AssertionError):
         check_recipe(broken)
 
@@ -91,6 +98,7 @@ def assert_public_members(members: list[str]) -> None:
                 "docs",
                 "README.md",
                 "LICENSE",
+                "NOTICE",
                 "THIRD_PARTY.md",
                 "pyproject.toml",
                 "PKG-INFO",
@@ -113,7 +121,7 @@ def test_all_published_sdists_exclude_internal_material(tmp_path: Path) -> None:
         with tarfile.open(sdist) as archive:
             members = archive.getnames()
         assert_public_members(members)
-        for required in ("README.md", "LICENSE", "pyproject.toml", "PKG-INFO"):
+        for required in ("README.md", "LICENSE", "NOTICE", "pyproject.toml", "PKG-INFO"):
             assert any(n.endswith("/" + required) for n in members), (sdist, required)
 
 

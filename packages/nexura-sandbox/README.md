@@ -89,4 +89,4 @@ The shared-service startup guard refuses registered sandbox modules below `gviso
 
 ## Documentation and licence
 
-[Main documentation](https://github.com/Liceron/nexura/blob/main/docs/README.md) · [Full guide](https://github.com/Liceron/nexura/blob/main/docs/tools.md#code-execution-sandbox-nexuratoolssandboxexecute). MIT, Copyright (c) 2026 Liceron. See [LICENSE](https://github.com/Liceron/nexura/blob/main/packages/nexura-sandbox/LICENSE).
+[Main documentation](https://github.com/Liceron/nexura/blob/main/docs/README.md) · [Full guide](https://github.com/Liceron/nexura/blob/main/docs/tools.md#code-execution-sandbox-nexuratoolssandboxexecute). Apache-2.0, Copyright (c) 2026 Liceron. See [LICENSE](https://github.com/Liceron/nexura/blob/main/packages/nexura-sandbox/LICENSE).

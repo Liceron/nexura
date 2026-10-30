@@ -1,12 +1,12 @@
 [project]
 name = "nexura-studio"
-version = "0.4.3"
+version = "0.5.0"
 description = "Nexura Studio: a local web page to build, run and approve nexura-runtime workflows, and its nexura-studio launcher."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 # The bundled Noto Sans Devanagari font is under the SIL Open Font License 1.1.
-license = "MIT AND OFL-1.1"
-license-files = ["LICENSE", "src/nexura_studio/static/fonts/OFL.txt"]
+license = "Apache-2.0 AND OFL-1.1"
+license-files = ["LICENSE", "NOTICE", "src/nexura_studio/static/fonts/OFL.txt"]
 authors = [{ name = "Liceron", email = "info@liceron.in" }]
 keywords = ["agents", "workflows", "studio", "approvals", "fastapi"]
 classifiers = [
@@ -20,8 +20,8 @@ classifiers = [
 # Same version as the runtime it serves. FastAPI and uvicorn have the same constraints as the
 # runtime's `studio` extra, which the REST service (`nexura-runtime serve`) still uses.
 dependencies = [
-    "nexura-runtime==0.4.3",
-    "nexura-agents==0.4.3",
+    "nexura-runtime==0.5.0",
+    "nexura-agents==0.5.0",
     "fastapi>=0.111.0,<1.0.0",
     "uvicorn>=0.30.0,<1.0.0",
     "pydantic>=2.7.0,<3.0.0",

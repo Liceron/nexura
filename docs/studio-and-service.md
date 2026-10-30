@@ -1,6 +1,6 @@
 # Service and Studio
 
-The MIT open-source edition is **single user, this machine only; for a team or a public endpoint use the hosted or enterprise edition**. This holds when you embed the service too: `create_api_app()` answers 403 `NON_LOOPBACK_CLIENT` to any peer that is not loopback unless you give the explicit insecure opt-in, even under `uvicorn.run(app, host="0.0.0.0")`. The one exception is [remote single-operator mode](remote-single-operator.md) (`nexura-runtime serve --auth token`): the same single owner on a remote host or VM, with one operator token on every request, behind a TLS reverse proxy. It adds no accounts or roles.
+The open-source edition is **single user, this machine only; for a team or a public endpoint use the hosted or enterprise edition**. This holds when you embed the service too: `create_api_app()` answers 403 `NON_LOOPBACK_CLIENT` to any peer that is not loopback unless you give the explicit insecure opt-in, even under `uvicorn.run(app, host="0.0.0.0")`. The one exception is [remote single-operator mode](remote-single-operator.md) (`nexura-runtime serve --auth token`): the same single owner on a remote host or VM, with one operator token on every request, behind a TLS reverse proxy. It adds no accounts or roles.
 
 The platform package `nexura-runtime` includes a local REST service and a browser Studio. The service stores workflows and runs in a SQLite file and exposes them under `/api/v1`. Studio is a React app that talks to that API, and `@liceron/nexura-sdk` is a TypeScript client for the same API. All three are optional: the Python SDK works on its own, and a workflow behaves the same whichever way you start it. Both packages are alpha and unpublished, so install from a source checkout.
 
@@ -550,7 +550,7 @@ The Sub-runs tab appears only for runs whose workflow has sub-workflow steps (`G
 
 ## Editions
 
-The open-source edition is MIT: **single user, this machine only; for a team or a
+The open-source edition is **single user, this machine only; for a team or a
 public endpoint use the hosted or enterprise edition**. Local workspaces are project
 folders for that one owner, not tenant or member accounts. Loopback binding, Host/Origin
 checks, local credentials, approvals, budgets and sandbox safety stay in this edition.
@@ -565,7 +565,7 @@ owner; it is not multi-user.
 
 The closed edition adds authentication, workspace members, organisations and invites,
 managed secrets and rotation, publishing and the embeddable widget, and hosted-product
-runtime compatibility. It has not had an external security review. Installing the MIT
+runtime compatibility. It has not had an external security review. Installing the open-source
 packages alone does not enable those features.
 
 ## Run the service and Studio web

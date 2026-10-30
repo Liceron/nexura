@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Liceron
 import { useCallback, useEffect, useState } from 'react';
 import type { RunCheckpoint, RunRecord } from '@liceron/nexura-sdk';

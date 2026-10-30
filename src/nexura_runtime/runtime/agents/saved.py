@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """``nexura.agents.agent``: a workflow node that runs an agent saved in the run's workspace.
 

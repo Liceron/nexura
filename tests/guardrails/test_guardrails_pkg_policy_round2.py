@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """P39 G6 round 2: the independent security review's repros,
 inverted. Each test asserts the fixed behaviour. Offline: FakeModel, local files.

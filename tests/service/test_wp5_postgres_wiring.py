@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """MVP Postgres WP5: service wiring of secrets, the usage ledger and the readiness probe.
 

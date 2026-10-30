@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """PostgreSQL backends: run and session storage, the execution journal, durable SDK agent
 checkpoints (``PostgresCheckpointStore``), durable workflow state

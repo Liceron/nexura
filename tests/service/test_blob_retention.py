@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Blob retention (MVP WP2b): unreferenced-blob GC with a grace period, payload expiry, CLI.
 

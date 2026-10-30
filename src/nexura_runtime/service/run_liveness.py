@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Whether a Studio run is interrupted, decided from its execution-journal lease (A6 S9).
 

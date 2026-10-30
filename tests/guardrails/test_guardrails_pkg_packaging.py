@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """P39 G3: ``nexura-guardrails`` is its own workspace package that depends on nexura-agents only."""
 
@@ -28,7 +28,7 @@ def test_metadata_matches_the_other_agent_only_packages() -> None:
     assert project["name"] == "nexura-guardrails"
     assert project["version"] == agents["version"]
     assert project["requires-python"] == ">=3.11,<3.14" == agents["requires-python"]
-    assert project["license"] == "MIT"
+    assert project["license"] == "Apache-2.0"
     assert project["dependencies"] == [f"nexura-agents=={agents['version']}"]
     extras = project["optional-dependencies"]
     assert isinstance(extras, dict)
@@ -63,7 +63,9 @@ def test_imports_only_the_agent_sdk_and_the_stdlib() -> None:
     offenders = []
     for path in SRC.rglob("*.py"):
         text = path.read_text(encoding="utf-8")
-        assert text.startswith("# SPDX-License-Identifier: MIT\n# Copyright (c) 2026 Liceron\n")
+        assert text.startswith(
+            "# SPDX-License-Identifier: Apache-2.0\n# Copyright (c) 2026 Liceron\n"
+        )
         roots = allowed_roots | ({"httpx"} if path in httpx_allowed else set())
         roots |= {"yaml"} if path in yaml_allowed else set()
         for node in ast.walk(ast.parse(text)):
@@ -95,4 +97,4 @@ def test_import_is_lazy_and_every_export_resolves() -> None:
         [sys.executable, "-c", probe], capture_output=True, text=True, timeout=120, check=True
     )
     data = json.loads(out.stdout)
-    assert data["loaded"] == [] and data["missing"] == [] and data["version"] == "0.4.3"
+    assert data["loaded"] == [] and data["missing"] == [] and data["version"] == "0.5.0"

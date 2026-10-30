@@ -24,7 +24,7 @@ WORKDIR /build
 COPY --from=ghcr.io/astral-sh/uv:0.12.8 /uv /bin/uv
 
 # Copy the workspace and each package's README/license/build inputs.
-COPY pyproject.toml uv.lock README.md LICENSE THIRD_PARTY.md ./
+COPY pyproject.toml uv.lock README.md LICENSE NOTICE THIRD_PARTY.md ./
 COPY src/ ./src/
 COPY packages/ ./packages/
 
@@ -36,9 +36,9 @@ RUN uv build --wheel --package nexura-agents --out-dir /build/dist
 RUN uv export --frozen --no-dev --package nexura-runtime --package nexura-studio --package nexura-agents --extra studio --no-emit-workspace --no-hashes --output-file /build/requirements.txt
 RUN uv venv /opt/venv
 RUN uv pip install --python /opt/venv/bin/python -r /build/requirements.txt \
-    "/build/dist/nexura_runtime-0.4.3-py3-none-any.whl[studio]" \
-    /build/dist/nexura_studio-0.4.3-py3-none-any.whl \
-    /build/dist/nexura_agents-0.4.3-py3-none-any.whl
+    "/build/dist/nexura_runtime-0.5.0-py3-none-any.whl[studio]" \
+    /build/dist/nexura_studio-0.5.0-py3-none-any.whl \
+    /build/dist/nexura_agents-0.5.0-py3-none-any.whl
 
 # Production Runtime Image
 FROM python:3.12-slim AS runtime

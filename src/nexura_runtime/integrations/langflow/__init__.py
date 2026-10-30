@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Import Langflow 1.12.x saved flows (as saved by Nexura V2) and run them on the Nexura SDK.
 

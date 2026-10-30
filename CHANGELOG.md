@@ -2,6 +2,14 @@
 
 All notable changes to this project.
 
+## 0.5.0 (2026-10-30)
+
+- **Licence: the open-source edition is now licensed under the Apache License 2.0** (was MIT).
+  Every package (`nexura-runtime`, `nexura-agents` and the seven add-ons, `@liceron/nexura-sdk`,
+  the Studio web app) ships the Apache-2.0 `LICENSE` and a `NOTICE` file, and every source file
+  carries `SPDX-License-Identifier: Apache-2.0`. Apache-2.0 adds an explicit patent licence from
+  contributors. Versions up to 0.4.3 remain available under MIT. No code changes.
+
 ## 0.4.3 (2026-10-30)
 
 - `nexura-runtime whoami` and `push` before `login` now say "Not logged in" instead of a URL

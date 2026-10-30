@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Liceron
 /** Studio entry point that takes extensions: `mountStudio(element, extensions)`. */
 import React from 'react';

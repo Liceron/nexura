@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Nexura guardrails: verdicts, a category taxonomy, fast pre-filters, an LLM judge, local
 safety models (Llama Guard 3, ShieldGemma, Granite Guardian, Nemotron Safety Guard), presets
@@ -25,7 +25,7 @@ from __future__ import annotations
 import importlib
 from typing import TYPE_CHECKING, Any
 
-__version__ = "0.4.3"
+__version__ = "0.5.0"
 
 _EXPORTS: dict[str, str] = {
     # Verdicts and taxonomy

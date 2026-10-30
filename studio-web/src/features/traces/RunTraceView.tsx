@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Liceron
 import { selectStyle } from '../../components/Input';
 import { useEffect, useMemo, useState, useRef } from 'react';

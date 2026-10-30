@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Liceron
 import { useLatestT, englishT, type Translate } from '../../i18n';
 import { useState, useEffect, useCallback, useRef } from 'react';

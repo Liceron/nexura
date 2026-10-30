@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Red-team eval pack: prompt-injection, approval-bypass and secret-exfiltration cases.
 

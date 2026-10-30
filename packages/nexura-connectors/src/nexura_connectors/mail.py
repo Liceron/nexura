@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """SMTP send and IMAP read connectors over small protocols (stdlib real clients, fakes for tests).
 

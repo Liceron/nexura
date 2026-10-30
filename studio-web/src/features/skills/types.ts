@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Liceron
 /** One skill in the list: the newest version's description plus label to version pointers. */
 export interface SkillSummary {

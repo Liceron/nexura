@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Liceron
 import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';

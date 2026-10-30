@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """MVP Postgres WP3 fix round (``review_wp03.md``): H1, M1, M2 and L3–L6.
 

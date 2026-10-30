@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Public SDK exports, loaded lazily so optional capabilities stay optional."""
 
@@ -74,7 +74,7 @@ class _AgentsAliasFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
 if not any(isinstance(f, _AgentsAliasFinder) for f in sys.meta_path):
     sys.meta_path.insert(0, _AgentsAliasFinder())
 
-__version__ = "0.4.3"
+__version__ = "0.5.0"
 
 __all__ = [
     "Agent",

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Multi-agent coordinator managing recursive handoffs, turn fuel, and isolation."""
 

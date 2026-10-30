@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """P37 B5: ``nexura-runtime init`` templates, ``dev`` wiring and ``deploy --target docker``.
 

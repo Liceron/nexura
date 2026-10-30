@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Liceron
 // deriveEndpoint, split out of publish_snippet.test.ts when publishing moved to the closed
 // edition (EDITIONS_PLAN step 4); the triggers feature uses it for webhook delivery URLs.

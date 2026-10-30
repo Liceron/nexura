@@ -902,7 +902,7 @@ pip install "nexura-agents[otel]"    # + OpenTelemetry tracing
 
 ---
 
-The MIT open-source edition is **single user, this machine only; for a team or a
+The open-source edition is **single user, this machine only; for a team or a
 public endpoint use the hosted or enterprise edition**. Agent teams below compose
 agents in code; they do not provide human user accounts or service authentication.
 
@@ -980,4 +980,4 @@ MCP/OpenAPI connectors and evaluations.
 
 ## Project
 
-MIT licensed, © 2026 Liceron. Security reports: info@liceron.in.
+Apache-2.0 licensed, © 2026 Liceron. Security reports: info@liceron.in.

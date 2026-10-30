@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Small bounded OTLP/HTTP JSON processor. All network I/O runs on a daemon thread."""
 

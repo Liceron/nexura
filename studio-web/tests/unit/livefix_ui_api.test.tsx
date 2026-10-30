@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Liceron
 // All requests use a local mocked client; no provider or HTTP calls.
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """MVP Postgres WP8: the last stores in the service, full Postgres mode, and two instances.
 

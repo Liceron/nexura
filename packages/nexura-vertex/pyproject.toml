@@ -1,11 +1,11 @@
 [project]
 name = "nexura-vertex"
-version = "0.4.3"
+version = "0.5.0"
 description = "Google Vertex AI (Gemini) provider for Nexura agents, using your Google Cloud login."
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
-license = "MIT"
-license-files = ["LICENSE"]
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Liceron", email = "info@liceron.in" }]
 keywords = ["agents", "ai-agents", "llm", "vertex-ai", "gemini", "google-cloud"]
 classifiers = [
@@ -21,7 +21,7 @@ classifiers = [
 # Depends on the agent SDK only (not on nexura-runtime), with the same Python range. Was the
 # `vertex` extra of nexura-agents and nexura-runtime (google-auth).
 dependencies = [
-    "nexura-agents==0.4.3",
+    "nexura-agents==0.5.0",
     "httpx>=0.27.0,<1.0.0",
     "google-auth[requests]>=2.30,<3",
 ]

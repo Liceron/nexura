@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Build a model from a ``"provider:model"`` string, e.g. ``"vertex:gemini-2.5-flash"``."""
 

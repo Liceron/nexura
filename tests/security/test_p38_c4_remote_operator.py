@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """P38 C4: remote single-operator mode (one operator token on every request).
 
@@ -502,4 +502,4 @@ def test_real_server_in_remote_mode_over_http(tmp_path: Path) -> None:
 def test_operator_token_module_is_oss_only() -> None:
     source = (ROOT / "src/nexura_runtime/service/api/operator_token.py").read_text("utf-8")
     assert "nexura_enterprise" not in source and "enterprise/" not in source
-    assert source.startswith("# SPDX-License-Identifier: MIT\n")
+    assert source.startswith("# SPDX-License-Identifier: Apache-2.0\n")

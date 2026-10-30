@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Liceron
 /** Canonical checkpoint N geometry. Public/Studio copies are generated and checked. */
 export function NexuraMark({ variant = 'static', className = '' }: {

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Channel delivery dedup keys and the dry-run outbox on Postgres (MVP WP8, store #16).
 

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """IBM Granite Guardian (3.0 and 4.1) over Ollama or an OpenAI-compatible server.
 

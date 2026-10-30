@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Liceron
 /** Studio inside a host's frame: the host's credential, rotation, refusal and no chrome. */
 import { describe, it, expect, vi, afterEach } from 'vitest';

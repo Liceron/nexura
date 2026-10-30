@@ -1,13 +1,13 @@
 # Packages and installation
 
-The package inventory, source/wheel installation commands and backend requirements for the MIT edition. All packages are alpha (0.4) and published on PyPI and npm. See the [documentation index](README.md) for the subject guides.
+The package inventory, source/wheel installation commands and backend requirements for the open-source edition. All packages are alpha (0.5) and published on PyPI and npm. See the [documentation index](README.md) for the subject guides.
 
 ## Package overview
 
 A typed Python SDK for building operational agents and approval-gated workflows,
 with a local REST service, a TypeScript API client and a browser Studio.
 
-> **Status: alpha (0.4), published 2026-10-25.** Install with `pip` or `npm` as below, or from a
+> **Status: alpha (0.5); first published 2026-10-25.** Install with `pip` or `npm` as below, or from a
 > source checkout.
 
 > **Just want to build agents?** Start with **[Nexura Agents](../packages/nexura-agents/README.md)**
@@ -79,7 +79,7 @@ Or build and install a wheel into any Python 3.12 environment:
 
 ```bash
 uv build
-pip install "dist/nexura_runtime-0.4.3-py3-none-any.whl[studio]"
+pip install "dist/nexura_runtime-0.5.0-py3-none-any.whl[studio]"
 ```
 
 The repository builds one package per feature group (`uv build --all-packages` writes every
@@ -132,5 +132,5 @@ uv run mypy src packages/*/src
 
 ## License
 
-MIT, copyright (c) 2026 Liceron. See [LICENSE](../LICENSE). Third-party notices are in
+Apache-2.0, copyright (c) 2026 Liceron. See [LICENSE](../LICENSE). Third-party notices are in
 [THIRD_PARTY.md](../THIRD_PARTY.md).

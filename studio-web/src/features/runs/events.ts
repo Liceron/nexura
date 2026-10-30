@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Liceron
 import type { RunEvent } from '@liceron/nexura-sdk';
 import type { NodeExecutionStatus, ReplayStep } from './types';

@@ -111,14 +111,15 @@ def test_core_import_does_not_load_optional_extras() -> None:
 
 def test_license_and_security_contact_match_project_metadata() -> None:
     license_text = (ROOT / "LICENSE").read_text(encoding="utf-8")
-    assert license_text.startswith("MIT License")
+    assert "Apache License" in license_text and "Version 2.0, January 2004" in license_text
     author = PYPROJECT["project"]["authors"][0]
-    assert f"Copyright (c) 2026 {author['name']}" in license_text
-    assert PYPROJECT["project"]["license"] == "MIT"
+    # Apache-2.0 keeps the copyright in NOTICE; section 4(d) makes redistributions carry it.
+    assert f"Copyright 2026 {author['name']}" in (ROOT / "NOTICE").read_text(encoding="utf-8")
+    assert PYPROJECT["project"]["license"] == "Apache-2.0"
     security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
     assert author["email"] in security
     ts_package = (ROOT / "clients" / "typescript" / "package.json").read_text(encoding="utf-8")
-    assert author["name"] in ts_package and '"license": "MIT"' in ts_package
+    assert author["name"] in ts_package and '"license": "Apache-2.0"' in ts_package
 
 
 def test_ci_never_publishes_or_needs_paid_keys() -> None:
@@ -160,8 +161,9 @@ def test_built_wheel_contains_docs_and_excludes_local_state(tmp_path: Path) -> N
     with zipfile.ZipFile(wheel) as zf:
         names = zf.namelist()
         metadata = zf.read(next(n for n in names if n.endswith("METADATA"))).decode()
-    assert "License-Expression: MIT" in metadata
+    assert "License-Expression: Apache-2.0" in metadata
     assert any(n.endswith("licenses/LICENSE") for n in names)
+    assert any(n.endswith("licenses/NOTICE") for n in names)
     assert "Requires-Python: <3.13,>=3.12" in metadata
     assert "nexura_runtime/py.typed" in names
     leaked = [n for n in names if n.endswith((".sqlite3", ".db", ".env", ".pem"))]

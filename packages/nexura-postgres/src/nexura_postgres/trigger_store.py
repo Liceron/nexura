@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Postgres trigger store: webhooks, receipts, schedules and the trigger job queue (A6 S10b).
 

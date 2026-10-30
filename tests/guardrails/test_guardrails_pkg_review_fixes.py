@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """P39 G3 review fixes: tests beyond the reviewer's repros (offline, scripted models only)."""
 

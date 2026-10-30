@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Persistent SQLite and in-memory store for evaluation datasets, runs, and comparison reports."""
 

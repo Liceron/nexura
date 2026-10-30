@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Blob store contract: write-once bytes outside the database, addressed by a ``BlobRef``.
 

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """TEST ONLY: a Postgres wire proxy that counts round trips and can add network latency.
 

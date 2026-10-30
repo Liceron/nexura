@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """B43 review regression (promoted from .autopilot/b43/repros/test_b43_review_gate.py).
 

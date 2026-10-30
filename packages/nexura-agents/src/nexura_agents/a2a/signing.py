@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Signed A2A Agent Cards (A2A 1.0, section 8.4): JWS (RFC 7515) over the JCS (RFC 8785)
 canonical form of the card.

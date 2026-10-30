@@ -146,8 +146,8 @@ For schedules, workers, model allowlists, streaming chat, exports, pending input
 
 | Edition | Includes | Boundary |
 |---|---|---|
-| MIT open source | Agents, workflows, local Studio/service, local credentials, approvals, budgets, sandbox safety, Langflow import/export and trace export | **single user, this machine only; for a team or a public endpoint use the hosted or enterprise edition** |
-| [Enterprise](https://github.com/Liceron/nexura-enterprise) (private) | Authentication, workspace members, organisations/invites, hosted secrets and rotation, publishing/widget, Nexura V2 compatibility, client and Studio add-ons | Proprietary; no external security review; installing MIT packages alone does not enable these features |
+| Open source (Apache-2.0) | Agents, workflows, local Studio/service, local credentials, approvals, budgets, sandbox safety, Langflow import/export and trace export | **single user, this machine only; for a team or a public endpoint use the hosted or enterprise edition** |
+| [Enterprise](https://github.com/Liceron/nexura-enterprise) (private) | Authentication, workspace members, organisations/invites, hosted secrets and rotation, publishing/widget, Nexura V2 compatibility, client and Studio add-ons | Proprietary; no external security review; installing the open-source packages alone does not enable these features |
 
 Local workspaces organise one owner's projects; they are not tenant or member accounts. The open-source service has no account logins, authentication tokens or API keys. Even when embedded, `create_api_app()` refuses non-loopback peers and requires `X-Nexura-Session` for state-changing requests. The session token stops other web pages, not local programs on this machine, which can read it. An insecure network opt-in adds no authentication and does not make a public endpoint safe. A single-user local Docker setup is in `deployment/`.
 
@@ -171,7 +171,7 @@ Workflow JSON never contains code: only trusted registered handlers run. Approva
 
 Historical fake-model measurements establish neither real-model quality, provider bills/cache savings, production scale, customer demand nor superiority over other frameworks. The older gate that skipped a required browser check remains documented separately. The approximately 135 ms SDK import on 2026-10-09 (Python 3.12, warm cache, lazy provider loading) is a single local measurement, not a benchmark. See the [verification record](https://github.com/Liceron/nexura/blob/main/docs/testing.md#verification-record) for the complete chronology and limitations.
 
-Version 0.4.0 was published to PyPI and npm on 2026-10-25; 0.4.1 on 2026-10-29; 0.4.3 on 2026-10-30. Copyright holder and security contact: Liceron, info@liceron.in.
+Version 0.4.0 was published to PyPI and npm on 2026-10-25; 0.4.1 on 2026-10-29; 0.4.3 on 2026-10-30; 0.5.0 (Apache-2.0) on 2026-10-30. Copyright holder and security contact: Liceron, info@liceron.in.
 
 ## Documentation map
 
@@ -202,4 +202,10 @@ Report vulnerabilities privately using [SECURITY.md](https://github.com/Liceron/
 
 ## Licence
 
-MIT. **Copyright (c) 2026 Liceron.** See [LICENSE](https://github.com/Liceron/nexura/blob/main/LICENSE) and [third-party notices](https://github.com/Liceron/nexura/blob/main/THIRD_PARTY.md).
+Apache License 2.0. **Copyright (c) 2026 Liceron.** See [LICENSE](https://github.com/Liceron/nexura/blob/main/LICENSE), [NOTICE](https://github.com/Liceron/nexura/blob/main/NOTICE) and [third-party notices](https://github.com/Liceron/nexura/blob/main/THIRD_PARTY.md).
+
+- You may use, modify and redistribute Nexura, including in commercial and closed products.
+- Keep the `LICENSE` and `NOTICE` files with any copy you distribute, and mark files you change.
+- The licence includes an explicit patent grant from contributors (section 3).
+- Versions up to and including 0.4.3 were released under the MIT License and remain available under it.
+- The [enterprise edition](https://github.com/Liceron/nexura-enterprise) is separate, proprietary software.

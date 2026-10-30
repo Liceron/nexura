@@ -1,11 +1,11 @@
 [project]
 name = "nexura-sandbox"
-version = "0.4.3"
+version = "0.5.0"
 description = "Stronger code-execution sandboxes for nexura-runtime: WebAssembly (WASI), bubblewrap namespaces with seccomp, and gVisor."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
-license = "MIT"
-license-files = ["LICENSE"]
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Liceron", email = "info@liceron.in" }]
 keywords = ["agents", "sandbox", "code-execution", "gvisor", "bubblewrap", "seccomp", "wasi", "webassembly"]
 classifiers = [
@@ -20,7 +20,7 @@ classifiers = [
 # Same version as the runtime it plugs into: the runtime's sandbox backend selection
 # (build_backend) imports these backends when this package is installed.
 dependencies = [
-    "nexura-runtime==0.4.3",
+    "nexura-runtime==0.5.0",
 ]
 
 [project.urls]

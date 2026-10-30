@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Removed: ``DurableExecutionEngine`` (P35 A6 S12); see ``nexura_runtime._removed``."""
 

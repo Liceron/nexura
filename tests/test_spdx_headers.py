@@ -1,6 +1,6 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
-"""Every first-party open-source source file carries the MIT SPDX header."""
+"""Every first-party open-source source file carries the Apache-2.0 SPDX header."""
 
 from __future__ import annotations
 
@@ -39,7 +39,9 @@ def test_check_mode_fails_when_a_file_lacks_the_header(tmp_path: Path) -> None:
     mod = _load_script()
     pkg = tmp_path / "src" / "pkg"
     pkg.mkdir(parents=True)
-    (pkg / "good.py").write_text("# SPDX-License-Identifier: MIT\n# Copyright (c) 2026 Liceron\n")
+    (pkg / "good.py").write_text(
+        "# SPDX-License-Identifier: Apache-2.0\n# Copyright (c) 2026 Liceron\n"
+    )
     (pkg / "bad.py").write_text('"""No header."""\n')
     assert mod.run(check=True, root=tmp_path) == 1
     # --check never writes.
@@ -52,7 +54,7 @@ def test_conflicting_identifier_is_reported_and_left_alone(tmp_path: Path) -> No
     mod = _load_script()
     pkg = tmp_path / "src"
     pkg.mkdir()
-    original = "# SPDX-License-Identifier: Apache-2.0\nx = 1\n"
+    original = "# SPDX-License-Identifier: MIT\nx = 1\n"
     (pkg / "other.py").write_text(original)
     assert mod.run(check=False, root=tmp_path) == 1
     assert (pkg / "other.py").read_text() == original
@@ -74,7 +76,7 @@ def test_header_keeps_docstring_future_import_shebang_and_encoding() -> None:
     lines = updated.splitlines()
     assert lines[0] == "#!/usr/bin/env python3"
     assert lines[1] == "# -*- coding: utf-8 -*-"
-    assert lines[2] == "# SPDX-License-Identifier: MIT"
+    assert lines[2] == "# SPDX-License-Identifier: Apache-2.0"
     assert lines[3] == "# Copyright (c) 2026 Liceron"
     tree = ast.parse(updated)
     assert ast.get_docstring(tree) == "Module docstring."
@@ -86,9 +88,11 @@ def test_header_keeps_docstring_future_import_shebang_and_encoding() -> None:
 def test_typescript_header_and_missing_copyright_line() -> None:
     mod = _load_script()
     updated = mod.add_header("import x from 'y';\n", "//")
-    assert updated.startswith("// SPDX-License-Identifier: MIT\n// Copyright (c) 2026 Liceron\n")
+    assert updated.startswith(
+        "// SPDX-License-Identifier: Apache-2.0\n// Copyright (c) 2026 Liceron\n"
+    )
     assert mod.inspect(updated, "//") == "ok"
-    partial = "// SPDX-License-Identifier: MIT\nexport const a = 1;\n"
+    partial = "// SPDX-License-Identifier: Apache-2.0\nexport const a = 1;\n"
     assert mod.inspect(partial, "//") == "missing"
     fixed = mod.add_header(partial, "//")
     assert fixed.count("SPDX-License-Identifier") == 1

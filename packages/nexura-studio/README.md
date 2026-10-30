@@ -50,4 +50,4 @@ Single user, this machine only. The launcher defaults to `127.0.0.1` and refuses
 
 ## Documentation and licence
 
-[Main documentation](https://github.com/Liceron/nexura/blob/main/docs/README.md) · [Full guide](https://github.com/Liceron/nexura/blob/main/docs/studio-and-service.md). MIT, Copyright (c) 2026 Liceron. See [LICENSE](https://github.com/Liceron/nexura/blob/main/packages/nexura-studio/LICENSE). Bundled Noto Sans Devanagari is SIL OFL 1.1; see its `OFL.txt`.
+[Main documentation](https://github.com/Liceron/nexura/blob/main/docs/README.md) · [Full guide](https://github.com/Liceron/nexura/blob/main/docs/studio-and-service.md). Apache-2.0, Copyright (c) 2026 Liceron. See [LICENSE](https://github.com/Liceron/nexura/blob/main/packages/nexura-studio/LICENSE). Bundled Noto Sans Devanagari is SIL OFL 1.1; see its `OFL.txt`.

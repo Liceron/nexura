@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """API endpoints and scoped backend adapters for MCP and OpenAPI tools discovery, configuration,
 and test-runs."""

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """NVIDIA Llama-3.1-Nemotron-Safety-Guard-8B-v3 over an OpenAI-compatible server or Ollama.
 

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """B00/B01 module adapter converting MCP tools into native BaseModules
 with anti-poisoning defenses."""

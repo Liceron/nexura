@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Liceron
 // Types for the Studio evals API (/evaluations/studio). Scoring and comparison are done by
 // the SDK evals engine on the server; these mirror its JSON.

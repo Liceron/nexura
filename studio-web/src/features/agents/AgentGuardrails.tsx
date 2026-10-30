@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Liceron
 // P39 G6: the agent editor's Guardrails section (presets only, no code) and the effect class
 // badge of a tool. The operator's service policy is shown read-only above the presets; a policy

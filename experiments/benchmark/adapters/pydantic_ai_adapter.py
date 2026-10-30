@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Pydantic AI benchmark adapter evaluating S1, S2a, S2b, and S3 using FunctionModel."""
 

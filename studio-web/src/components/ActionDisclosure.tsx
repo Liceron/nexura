@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Liceron
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';

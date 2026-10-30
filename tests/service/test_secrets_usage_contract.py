@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Encrypted secret store and usage ledger contracts on both backends (MVP Postgres WP5).
 

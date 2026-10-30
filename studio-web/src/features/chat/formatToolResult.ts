@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Liceron
 /** Readable tool output that omits absent fields and preserves zero/false values. */
 export function formatToolResult(value: unknown): string {

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Liceron
 // Pure comparison/filter logic for the Studio evals view. The server (SDK
 // EvalReport.compare) decides what is a regression; this joins that verdict with the two

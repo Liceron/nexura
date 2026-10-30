@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """P40 item 1: the service shows a guardrail policy's shadow mode and runs it as reporting only.
 

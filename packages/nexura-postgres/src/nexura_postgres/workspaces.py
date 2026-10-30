@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Workspaces and resource ownership on Postgres (MVP Postgres WP2, store #4 and #6).
 

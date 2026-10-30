@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Liceron
 import { useState, type ReactNode } from 'react';
 import { cleanup, render, screen, within, waitFor } from '@testing-library/react';

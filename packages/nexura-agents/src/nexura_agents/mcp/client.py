@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Client session implementation for Model Context Protocol (MCP).
 
@@ -70,7 +70,7 @@ logger = logging.getLogger(__name__)
 # the result object for that request (an ElicitResult, CreateMessageResult, ...).
 InputHandler = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
 
-DEFAULT_CLIENT_INFO = McpImplementation(name="nexura-agents", version="0.4.3")
+DEFAULT_CLIENT_INFO = McpImplementation(name="nexura-agents", version="0.5.0")
 # HTTP statuses a legacy server uses to refuse a request it does not understand.
 _LEGACY_HTTP_STATUSES = frozenset({400, 404, 405})
 

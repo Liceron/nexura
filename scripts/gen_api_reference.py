@@ -190,10 +190,10 @@ def render(
         "The guides in this folder explain how the pieces fit together; this page lists",
         "the selected public exports with their signatures.",
         (
-            "MIT open-source edition: single user, this machine only; for a team or a "
+            "Open-source edition (Apache-2.0): single user, this machine only; for a team or a "
             "public endpoint use the hosted or enterprise edition."
             if edition == "oss"
-            else "Closed enterprise edition: additions to the MIT API reference. "
+            else "Closed enterprise edition: additions to the open-source API reference. "
             "This reference does not establish deployment readiness or an external security audit."
         ),
         "",

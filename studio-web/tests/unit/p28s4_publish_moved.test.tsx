@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Liceron
 // P28 step 4: the Publish feature moved to the closed edition; extensions bring their own
 // translations through the registry's `messages`.

@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Nexura Agents: build AI agents that stay on budget, ask before risky actions and
 survive restarts.
@@ -14,7 +14,7 @@ import importlib
 import importlib.util
 from typing import TYPE_CHECKING, Any
 
-__version__ = "0.4.3"
+__version__ = "0.5.0"
 
 _EXPORTS: dict[str, str] = {
     # Build and run agents

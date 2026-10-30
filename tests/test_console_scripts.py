@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Console scripts (B42): the CLI is ``nexura-runtime``; the bare ``nexura`` command belongs
 to the separately published Nexura Cloud client package, so this project must not install it."""

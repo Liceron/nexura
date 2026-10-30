@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Liceron
 // Local mock API only; no model or service calls.
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';

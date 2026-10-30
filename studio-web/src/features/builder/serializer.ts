@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Liceron
 import type { WorkflowSpec, WorkflowNode } from '@liceron/nexura-sdk';
 import type { BuilderNode, BuilderEdge, GraphDocument, BuilderNodeData } from './types';

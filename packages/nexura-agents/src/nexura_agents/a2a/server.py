@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Serve a Nexura agent or team as an A2A (Agent2Agent) agent over JSON-RPC and SSE.
 

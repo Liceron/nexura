@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Studio workflows, run records and run events on Postgres (MVP Postgres WP3, store #1).
 

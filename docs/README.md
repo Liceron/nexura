@@ -12,7 +12,7 @@ Two packages:
 - **`nexura-runtime`** (`import nexura_runtime`): the platform. It adds durable
   workflows, the REST service, Studio, RAG, evaluations and budgets.
 
-The MIT open-source edition is **single user, this machine only; for a team or a
+The open-source edition is **single user, this machine only; for a team or a
 public endpoint use the hosted or enterprise edition**. Local workspaces organise
 one owner's projects. They do not add accounts or tenant isolation.
 

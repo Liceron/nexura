@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Workspace-scoped hybrid knowledge index: vector similarity plus SQLite FTS5 keyword search.
 

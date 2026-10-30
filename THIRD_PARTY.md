@@ -1,22 +1,22 @@
 # Third-Party Notices and Open Source Software Licenses
 
 This file lists the third-party software that the open-source Nexura packages depend on or
-bundle. The packages themselves are Liceron's own code under the MIT License
+bundle. The packages themselves are Liceron's own code under the Apache License 2.0
 ("Copyright (c) 2026 Liceron"); see `LICENSE`.
 
 | Package | Where it lives | Licence |
 | --- | --- | --- |
-| `nexura-runtime` (Python) | `src/nexura_runtime` | MIT, Liceron |
-| `nexura-agents` (Python) | `packages/nexura-agents` | MIT, Liceron |
-| `nexura-connectors` (Python) | `packages/nexura-connectors` | MIT, Liceron |
-| `nexura-guardrails` (Python) | `packages/nexura-guardrails` | MIT, Liceron |
-| `nexura-postgres` (Python) | `packages/nexura-postgres` | MIT, Liceron |
-| `nexura-qdrant` (Python) | `packages/nexura-qdrant` | MIT, Liceron |
-| `nexura-sandbox` (Python) | `packages/nexura-sandbox` | MIT, Liceron |
-| `nexura-studio` (Python) | `packages/nexura-studio` | MIT AND OFL-1.1, Liceron and font authors |
-| `nexura-vertex` (Python) | `packages/nexura-vertex` | MIT, Liceron |
-| `@liceron/nexura-sdk` (TypeScript client) | `clients/typescript` | MIT, Liceron |
-| Nexura Studio web app | `studio-web` | MIT, Liceron |
+| `nexura-runtime` (Python) | `src/nexura_runtime` | Apache-2.0, Liceron |
+| `nexura-agents` (Python) | `packages/nexura-agents` | Apache-2.0, Liceron |
+| `nexura-connectors` (Python) | `packages/nexura-connectors` | Apache-2.0, Liceron |
+| `nexura-guardrails` (Python) | `packages/nexura-guardrails` | Apache-2.0, Liceron |
+| `nexura-postgres` (Python) | `packages/nexura-postgres` | Apache-2.0, Liceron |
+| `nexura-qdrant` (Python) | `packages/nexura-qdrant` | Apache-2.0, Liceron |
+| `nexura-sandbox` (Python) | `packages/nexura-sandbox` | Apache-2.0, Liceron |
+| `nexura-studio` (Python) | `packages/nexura-studio` | Apache-2.0 AND OFL-1.1, Liceron and font authors |
+| `nexura-vertex` (Python) | `packages/nexura-vertex` | Apache-2.0, Liceron |
+| `@liceron/nexura-sdk` (TypeScript client) | `clients/typescript` | Apache-2.0, Liceron |
+| Nexura Studio web app | `studio-web` | Apache-2.0, Liceron |
 
 Licences below were read from the installed package metadata (`importlib.metadata` for Python,
 each package's `package.json` and `LICENSE` file under `studio-web/node_modules` for npm) in this
@@ -30,7 +30,7 @@ its own licence and notices; this list does not replace them.
 
 | Dependency | Licence | Copyright / project | Repository | Use |
 | --- | --- | --- | --- | --- |
-| `nexura-agents` | MIT | Liceron (first party) | this repository | Agent runtime library |
+| `nexura-agents` | Apache-2.0 | Liceron (first party) | this repository | Agent runtime library |
 | `httpx` | BSD-3-Clause | Encode OSS Ltd. | https://github.com/encode/httpx | HTTP transport |
 | `pydantic` | MIT | Samuel Colvin and contributors | https://github.com/pydantic/pydantic | Typed models and validation |
 | `packaging` | Apache-2.0 OR BSD-2-Clause | PyPA | https://github.com/pypa/packaging | Version parsing |
@@ -157,7 +157,7 @@ ESLint, Playwright, Testing Library, TypeScript, type packages) are not bundled 
 | `classcat` | 5.0.5 | MIT | Jorge Bucaran | https://github.com/jorgebucaran/classcat |
 | `d3-color`, `d3-dispatch`, `d3-drag`, `d3-interpolate`, `d3-selection`, `d3-timer`, `d3-transition`, `d3-zoom` | 3.x | ISC | Mike Bostock | https://github.com/d3 |
 | `d3-ease` | 3.0.1 | BSD-3-Clause | Mike Bostock; Robert Penner (easing equations) | https://github.com/d3/d3-ease |
-| `@liceron/nexura-sdk` | 0.4.3 | MIT | Liceron (first party, `clients/typescript`) | this repository |
+| `@liceron/nexura-sdk` | 0.5.0 | Apache-2.0 | Liceron (first party, `clients/typescript`) | this repository |
 
 ---
 

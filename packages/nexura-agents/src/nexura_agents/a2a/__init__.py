@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """A2A (Agent2Agent) interoperability: serve Nexura agents and call remote A2A agents.
 

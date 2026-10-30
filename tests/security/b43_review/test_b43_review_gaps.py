@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """B43 review: the liveness and design gaps the review listed without repros, plus edges of
 the finding fixes (positional binding, canonical keys, module decider, workflow expiry).

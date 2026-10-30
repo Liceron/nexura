@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """P39 G5: local safety-model checks (Llama Guard 3, ShieldGemma, Granite Guardian, Nemotron).
 

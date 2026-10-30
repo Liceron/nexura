@@ -3,7 +3,7 @@
 Build and test locally with the open-source SDK, then upload a declarative workflow or
 saved agent to your hosted workspace. SDK runs that stay on your machine can send traces
 to the same workspace. The hosted service requires the enterprise edition; the SDK stays
-MIT licensed and does not require a hosted account for local use.
+Apache-2.0 licensed and does not require a hosted account for local use.
 
 ## Create a workspace key and sign in
 

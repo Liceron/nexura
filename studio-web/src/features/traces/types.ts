@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Liceron
 export type SpanKind = 'run' | 'node' | 'agent' | 'model' | 'tool' | 'handoff' | 'retry' | 'error' | 'note';
 export type SpanStatus = 'ok' | 'error' | 'running' | 'unknown';

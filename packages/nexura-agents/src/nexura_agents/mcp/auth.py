@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Issuer checks of the MCP 2026-07-28 authorization profile, for callers that run their
 own OAuth 2.1 authorization-code flow against an MCP server's authorization server.

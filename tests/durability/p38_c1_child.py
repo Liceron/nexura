@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Local FakeModel child for todo SIGKILL/recovery rows; uses existing marker helpers."""
 

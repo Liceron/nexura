@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Liceron
 """Declarative agent specs saved per workspace and run by the ``nexura.agents.agent`` node.
 

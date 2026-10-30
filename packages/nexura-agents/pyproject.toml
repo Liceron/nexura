@@ -1,11 +1,11 @@
 [project]
 name = "nexura-agents"
-version = "0.4.3"
+version = "0.5.0"
 description = "Build AI agents with estimated-cost admission control, action approvals, and resumable runs."
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
-license = "MIT"
-license-files = ["LICENSE"]
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "Liceron", email = "info@liceron.in" }]
 keywords = ["agents", "ai-agents", "llm", "agentic-ai", "tool-calling", "human-in-the-loop", "gemini"]
 classifiers = [

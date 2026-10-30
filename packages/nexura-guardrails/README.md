@@ -69,4 +69,4 @@ Full guide: [docs/guardrails-package.md](https://github.com/Liceron/nexura/blob/
 
 ## License
 
-MIT. See `LICENSE`.
+Apache-2.0. See `LICENSE` and `NOTICE`.
