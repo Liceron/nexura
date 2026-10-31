@@ -1,6 +1,6 @@
 [project]
 name = "nexura-sandbox"
-version = "0.7.0"
+version = "0.7.1"
 description = "Stronger code-execution sandboxes for nexura-runtime: WebAssembly (WASI), bubblewrap namespaces with seccomp, and gVisor."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
@@ -20,7 +20,7 @@ classifiers = [
 # Same version as the runtime it plugs into: the runtime's sandbox backend selection
 # (build_backend) imports these backends when this package is installed.
 dependencies = [
-    "nexura-runtime==0.7.0",
+    "nexura-runtime==0.7.1",
 ]
 
 [project.urls]

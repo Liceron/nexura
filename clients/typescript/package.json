@@ -1,6 +1,6 @@
 {
   "name": "@liceron/nexura-sdk",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "TypeScript HTTP client for the Nexura Service API",
   "type": "module",
   "main": "./dist/index.js",

@@ -2,10 +2,9 @@
 
 ## Guardrails AI
 
-The separate `nexura-guardrails-ai` 0.6.0 package bridges both directions with
+The separate `nexura-guardrails-ai` package (since 0.7.0) bridges both directions with
 Guardrails AI `>=0.11,<0.12`. It depends only on agents, guardrails and Guardrails AI,
-without Nexura runtime or Studio. This is a source-only addition pending release;
-in this workspace use `uv sync`, or build with `uv build --package nexura-guardrails-ai`.
+without Nexura runtime or Studio. Install it with `pip install nexura-guardrails-ai`.
 
 Use an installed Guardrails AI validator as a Nexura `Check`:
 
@@ -78,6 +77,9 @@ json_guard = Guard(use_server=False).use(*nexura_validators())
 json_guard.validate('{"answer": "hello"}', num_reasks=0)
 json_redact = Guard(use_server=False).use(*nexura_validators(pii_action="redact"))
 ```
+
+Pass every validator in one `use(...)` call. In Guardrails AI 0.11 each `use` call replaces
+the validators already set on the same target, so `Guard().use(a).use(b)` keeps only `b`.
 
 `as_validator(check, name=None, on_fail=OnFailAction.EXCEPTION, stage="output")`
 registers once under `nexura/<check-name>`; instances retain independent check
@@ -547,7 +549,7 @@ agent = Agent(
     instructions="Help customers.",
     model="openai:gpt-4o-mini",
     input_guardrails=[as_guardrail(moderation)],
-    output_guardrails=[as_guardrail(moderation)],
+    output_guardrails=[as_guardrail(moderation, stage="output")],
 )
 ```
 

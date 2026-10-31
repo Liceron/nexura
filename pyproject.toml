@@ -1,6 +1,6 @@
 [project]
 name = "nexura-runtime"
-version = "0.7.0"
+version = "0.7.1"
 description = "Nexura platform: durable agent workflows with exact-action approvals, guardrail policy, RAG, evaluations and a local REST service."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
@@ -16,7 +16,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "nexura-agents==0.7.0",
+    "nexura-agents==0.7.1",
     "httpx>=0.27.0,<1.0.0",
     "pydantic>=2.7.0,<3.0.0",
     "packaging>=24.0",
@@ -138,7 +138,7 @@ dev = [
     "pytest-asyncio>=0.24.0,<1.0.0",
     # Parallel test runs: `pytest -n auto --dist loadfile` (see docs/testing.md).
     "pytest-xdist>=3.6.0,<4.0.0",
-    "ruff>=0.7.0,<1.0.0",
+    "ruff>=0.7.1,<1.0.0",
     "mypy>=1.10.0,<2.0.0",
     "fastapi>=0.111.0,<1.0.0",
     "uvicorn>=0.30.0,<1.0.0",

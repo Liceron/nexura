@@ -16,7 +16,7 @@ from nexura_guardrails_ai.validators import as_validator, nexura_validators
 # Before any Guard exists: an unset telemetry preference means off.
 _telemetry.install()
 
-__version__ = "0.7.0"
+__version__ = "0.7.1"
 __all__ = [
     "HUB_CATEGORIES",
     "GuardrailsAICheck",

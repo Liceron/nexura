@@ -2,6 +2,16 @@
 
 All notable changes to this project.
 
+## 0.7.1 (2026-10-31)
+
+Checked against the real services: `OpenAIModeration` with OpenAI's Moderation API, and the
+Guardrails AI bridge with a real Hub validator (`ValidURL`). Documentation fixes from that check:
+
+- The moderation example registers its output guardrail with `stage="output"`.
+- Pass every validator in one `Guard.use(...)` call: in Guardrails AI 0.11 each `use` call
+  replaces the validators already set on the same target.
+- The Guardrails AI section now says the bridge is released on PyPI.
+
 ## 0.7.0 (2026-10-31)
 
 - **`OpenAIModeration`** in `nexura-guardrails`: OpenAI's Moderation API as a guardrail check
@@ -10,7 +20,7 @@ All notable changes to this project.
   size, shape, model and timeout errors; oversized text is never sent; HTTPS only; the key
   never appears in `repr`, errors or evidence. See
   [docs/guardrails-package.md](docs/guardrails-package.md#openai-moderation).
-- Add `nexura-guardrails-ai` 0.6.0: Guardrails AI validators and Guards as Nexura checks,
+- Add `nexura-guardrails-ai` 0.7.0: Guardrails AI validators and Guards as Nexura checks,
   Nexura checks as registered Guardrails AI validators, and an input/output preset.
   Includes offline integration tests and explicit failure, fix, timeout and category mapping.
   Guardrails AI's own usage telemetry stays off unless you chose it (an explicit

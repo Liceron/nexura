@@ -73,7 +73,7 @@ Agent tool names are the agent name lowercased with spaces replaced by `_` (clea
 
 ## AgentMCPServer arguments
 
-`AgentMCPServer(name, *, agents=(), tools=(), deps=None, runner=None, version="0.7.0", list_ttl_ms=60_000, instructions=None)`
+`AgentMCPServer(name, *, agents=(), tools=(), deps=None, runner=None, version="0.7.1", list_ttl_ms=60_000, instructions=None)`
 
 - `agents`: each becomes a tool named after the agent.
 - `tools`: `Tool` objects exposed with their own schemas.

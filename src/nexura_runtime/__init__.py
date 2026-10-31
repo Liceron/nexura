@@ -74,7 +74,7 @@ class _AgentsAliasFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
 if not any(isinstance(f, _AgentsAliasFinder) for f in sys.meta_path):
     sys.meta_path.insert(0, _AgentsAliasFinder())
 
-__version__ = "0.7.0"
+__version__ = "0.7.1"
 
 __all__ = [
     "Agent",

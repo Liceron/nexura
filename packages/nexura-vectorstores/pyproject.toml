@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Liceron
 [project]
 name = "nexura-vectorstores"
-version = "0.7.0"
+version = "0.7.1"
 description = "HTTP vector stores for Nexura: Chroma, Pinecone, Weaviate, Milvus, Elasticsearch and OpenSearch."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
@@ -18,7 +18,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Typing :: Typed",
 ]
-dependencies = ["nexura-runtime==0.7.0", "nexura-agents==0.7.0", "httpx>=0.27,<1"]
+dependencies = ["nexura-runtime==0.7.1", "nexura-agents==0.7.1", "httpx>=0.27,<1"]
 
 [project.urls]
 Homepage = "https://github.com/Liceron/nexura"

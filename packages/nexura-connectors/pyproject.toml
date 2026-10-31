@@ -1,6 +1,6 @@
 [project]
 name = "nexura-connectors"
-version = "0.7.0"
+version = "0.7.1"
 description = "15 SaaS connectors (Slack, GitHub, Google Drive and Sheets, S3, Postgres and more) as Nexura workflow modules with approval-gated writes."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
@@ -18,8 +18,8 @@ classifiers = [
 # Same version as the runtime it plugs into: the runtime imports this package when installed
 # and registers every connector as a `nexura.connectors.*` workflow module.
 dependencies = [
-    "nexura-runtime==0.7.0",
-    "nexura-agents==0.7.0",
+    "nexura-runtime==0.7.1",
+    "nexura-agents==0.7.1",
     "httpx>=0.27.0,<1.0.0",
     "httpcore>=1.0.0,<2.0.0",
     "pydantic>=2.7.0,<3.0.0",
