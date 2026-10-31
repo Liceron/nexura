@@ -39,7 +39,7 @@ test.describe('Studio Web Smoke & Local Service Integration', () => {
 
     // Verify system capabilities rendered from real API
     await expect(page.getByRole('heading', { level: 1, name: 'System' })).toBeVisible();
-    await expect(page.getByText('0.6.0')).toBeVisible();
+    await expect(page.getByText('0.7.0')).toBeVisible();
     const capabilities = page.getByRole('table', { name: 'Capabilities' });
     await expect(capabilities.getByRole('row', { name: /Module discovery/ })).toContainText('Supported');
     await expect(capabilities.getByRole('row', { name: /Graph validation/ })).toContainText('Supported');

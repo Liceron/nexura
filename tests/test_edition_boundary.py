@@ -550,8 +550,8 @@ def test_real_oss_artifacts_have_no_closed_client_route_strings(tmp_path: Path) 
         timeout=300,
     )
     archives = sorted([*out.glob("*.whl"), *out.glob("*.tar.gz")])
-    # A wheel and an sdist for each of the nine Python packages (nexura-guardrails added in P39).
-    assert len(archives) == 20
+    # A wheel and an sdist for each of the eleven Python packages.
+    assert len(archives) == 22
     assert any(p.name.startswith("nexura_runtime-") and p.suffix == ".whl" for p in archives)
     assert any(p.name.startswith("nexura_guardrails-") and p.suffix == ".whl" for p in archives)
     for archive in archives:

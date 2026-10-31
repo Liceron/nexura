@@ -87,6 +87,7 @@ jobs:
           mv dist/nexura_runtime-"$v"* stage/2/
           mv dist/nexura_postgres-"$v"* dist/nexura_qdrant-"$v"* dist/nexura_sandbox-"$v"* \
              dist/nexura_vectorstores-"$v"* \
+             dist/nexura_guardrails_ai-"$v"* \
              dist/nexura_connectors-"$v"* stage/3/
           mv dist/nexura_studio-"$v"* stage/4/
           leftover="$(find dist -type f ! -name .gitignore)"
@@ -131,7 +132,7 @@ jobs:
           packages-dir: stage/2/
           repository-url: ${{ env.REPOSITORY_URL }}
           skip-existing: true
-      - name: Upload nexura-postgres, nexura-qdrant, nexura-vectorstores, nexura-sandbox and nexura-connectors
+      - name: Upload nexura-postgres, nexura-qdrant, nexura-vectorstores, nexura-guardrails-ai, nexura-sandbox and nexura-connectors
         uses: pypa/gh-action-pypi-publish@v1.14.2
         with:
           packages-dir: stage/3/

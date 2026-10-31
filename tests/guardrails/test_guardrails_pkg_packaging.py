@@ -56,7 +56,9 @@ def test_imports_only_the_agent_sdk_and_the_stdlib() -> None:
     agents_deps = _project(ROOT / "packages/nexura-agents/pyproject.toml")["dependencies"]
     assert isinstance(agents_deps, list)
     assert any(str(d).startswith("httpx") for d in agents_deps)
-    httpx_allowed = {SRC / "classifiers" / "_base.py"}
+    # httpx (a dependency of nexura-agents): the safety-model base and OpenAI moderation, the
+    # two modules that call an HTTP API.
+    httpx_allowed = {SRC / "classifiers" / "_base.py", SRC / "moderation.py"}
     # P39 G6: PyYAML (the [yaml] extra) only in the policy loader, imported inside the YAML
     # function so JSON policies and every other module work without it.
     yaml_allowed = {SRC / "policy" / "loader.py"}
@@ -97,4 +99,4 @@ def test_import_is_lazy_and_every_export_resolves() -> None:
         [sys.executable, "-c", probe], capture_output=True, text=True, timeout=120, check=True
     )
     data = json.loads(out.stdout)
-    assert data["loaded"] == [] and data["missing"] == [] and data["version"] == "0.6.0"
+    assert data["loaded"] == [] and data["missing"] == [] and data["version"] == "0.7.0"

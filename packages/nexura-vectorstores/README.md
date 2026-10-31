@@ -1,9 +1,9 @@
 # nexura-vectorstores
 
 HTTP adapters for Nexura's `VectorStore` protocol: Chroma, Pinecone, Weaviate,
-Milvus/Zilliz, Elasticsearch and OpenSearch. Version 0.6.0, Apache-2.0, Liceron.
+Milvus/Zilliz, Elasticsearch and OpenSearch. Version 0.7.0, Apache-2.0, Liceron.
 This new package is source-only until a separate release; nothing was published.
-Dependencies: `nexura-runtime==0.6.0`, `nexura-agents==0.6.0`, `httpx>=0.27,<1`.
+Dependencies: `nexura-runtime==0.7.0`, `nexura-agents==0.7.0`, `httpx>=0.27,<1`.
 No vendor SDK, automatic embedding service, Docker or hosted control plane.
 
 Install from this checkout:

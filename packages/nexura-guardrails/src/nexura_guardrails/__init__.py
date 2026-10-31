@@ -25,7 +25,7 @@ from __future__ import annotations
 import importlib
 from typing import TYPE_CHECKING, Any
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 _EXPORTS: dict[str, str] = {
     # Verdicts and taxonomy
@@ -69,6 +69,8 @@ _EXPORTS: dict[str, str] = {
     "NemotronGuard": "nexura_guardrails.classifiers",
     "SafetyModelCheck": "nexura_guardrails.classifiers",
     "SAFETY_MODELS": "nexura_guardrails.classifiers",
+    # OpenAI Moderation API (needs an OpenAI API key; the text is sent to OpenAI)
+    "OpenAIModeration": "nexura_guardrails.moderation",
     # Composition
     "tiered": "nexura_guardrails.compose",
     "parallel": "nexura_guardrails.compose",
@@ -124,6 +126,7 @@ __all__ = [
     "Prefilter",
     "SAFETY_MODELS",
     "SafetyModelCheck",
+    "OpenAIModeration",
     "ShieldGemma",
     "Stage",
     "Tiered",
@@ -209,6 +212,7 @@ if TYPE_CHECKING:
         parse_verdict,
         token_upper_bound,
     )
+    from nexura_guardrails.moderation import OpenAIModeration
     from nexura_guardrails.policy import (
         ArgCondition,
         AuditRecord,

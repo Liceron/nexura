@@ -1,6 +1,6 @@
 [project]
 name = "nexura-studio"
-version = "0.6.0"
+version = "0.7.0"
 description = "Nexura Studio: a local web page to build, run and approve nexura-runtime workflows, and its nexura-studio launcher."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
@@ -20,8 +20,8 @@ classifiers = [
 # Same version as the runtime it serves. FastAPI and uvicorn have the same constraints as the
 # runtime's `studio` extra, which the REST service (`nexura-runtime serve`) still uses.
 dependencies = [
-    "nexura-runtime==0.6.0",
-    "nexura-agents==0.6.0",
+    "nexura-runtime==0.7.0",
+    "nexura-agents==0.7.0",
     "fastapi>=0.111.0,<1.0.0",
     "uvicorn>=0.30.0,<1.0.0",
     "pydantic>=2.7.0,<3.0.0",

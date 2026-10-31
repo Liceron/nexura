@@ -1,13 +1,13 @@
 # Packages and installation
 
-The package inventory, source/wheel installation commands and backend requirements for the open-source edition. Released packages are alpha (0.6) and published on PyPI and npm; source-only additions are marked below. See the [documentation index](README.md) for the subject guides.
+The package inventory, source/wheel installation commands and backend requirements for the open-source edition. Released packages are alpha (0.7) and published on PyPI and npm; source-only additions are marked below. See the [documentation index](README.md) for the subject guides.
 
 ## Package overview
 
 A typed Python SDK for building operational agents and approval-gated workflows,
 with a local REST service, a TypeScript API client and a browser Studio.
 
-> **Status: alpha (0.6); first published 2026-10-25.** Install with `pip` or `npm` as below, or from a
+> **Status: alpha (0.7); first published 2026-10-25.** Install with `pip` or `npm` as below, or from a
 > source checkout.
 
 > **Just want to build agents?** Start with **[Nexura Agents](../packages/nexura-agents/README.md)**
@@ -35,6 +35,7 @@ with a local REST service, a TypeScript API client and a browser Studio.
 | `packages/nexura-sandbox` | `nexura-sandbox` (Python, import `nexura_sandbox`) | The WASI, bubblewrap and gVisor code-execution backends. The runtime keeps the backend selection, `SandboxConfig` and the default Monty backend, and reports these backends unavailable ("pip install nexura-sandbox") without it |
 | `packages/nexura-vertex` | `nexura-vertex` (Python, import `nexura_vertex`) | The Google Vertex AI provider (`VertexAIProvider`, `"vertex:..."` model strings). Depends on `nexura-agents` only |
 | `packages/nexura-guardrails` | `nexura-guardrails` (Python, import `nexura_guardrails`) | Guardrail checks: verdicts and a category taxonomy, pre-filters over the `nexura-agents` built-ins, an LLM judge that fails closed, tiered and parallel composition ([docs/guardrails-package.md](guardrails-package.md)). Depends on `nexura-agents` only; extras `judge` (empty) and `yaml` |
+| `packages/nexura-guardrails-ai` | `nexura-guardrails-ai` (Python, import `nexura_guardrails_ai`; source-only pending release) | Bidirectional [Guardrails AI bridge](guardrails-package.md#guardrails-ai), validators/Guards as Nexura checks and Nexura checks as registered validators; depends on agents, guardrails and Guardrails AI 0.11 |
 | `src/nexura_runtime/service` | same package, `[studio]` extra | Local REST API (`/api/v1/...`) that Studio web and the TS client call, plus a trigger worker that runs scheduled and webhook workflows |
 | `clients/typescript` | `@liceron/nexura-sdk` | TypeScript client for the REST API (no runtime of its own) |
 | `studio-web` | `nexura-studio-web` (private, not a package) | React Studio UI served by Vite; talks to the REST API |
@@ -80,7 +81,7 @@ Or build and install a wheel into any Python 3.12 environment:
 
 ```bash
 uv build
-pip install "dist/nexura_runtime-0.6.0-py3-none-any.whl[studio]"
+pip install "dist/nexura_runtime-0.7.0-py3-none-any.whl[studio]"
 ```
 
 The repository builds one package per feature group (`uv build --all-packages` writes every

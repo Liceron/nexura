@@ -1,5 +1,122 @@
 # Guardrails package (`nexura-guardrails`)
 
+## Guardrails AI
+
+The separate `nexura-guardrails-ai` 0.6.0 package bridges both directions with
+Guardrails AI `>=0.11,<0.12`. It depends only on agents, guardrails and Guardrails AI,
+without Nexura runtime or Studio. This is a source-only addition pending release;
+in this workspace use `uv sync`, or build with `uv build --package nexura-guardrails-ai`.
+
+Use an installed Guardrails AI validator as a Nexura `Check`:
+
+```python notest
+from nexura_guardrails import as_guardrail, as_tool_guardrail, tiered, injection
+from nexura_guardrails_ai import GuardrailsAICheck, from_hub, guardrails_ai
+
+# Requires an already-installed Hub validator (see installation below).
+validator = from_hub("guardrails/toxic_language", threshold=0.5, use_local=True)
+check = GuardrailsAICheck(validator, on_fail="block", timeout=5)
+input_guardrail = as_guardrail(tiered(injection(), check))
+tool_result_guardrail = as_tool_guardrail(check, stage="tool_output")
+preset = guardrails_ai(validator)  # preset.agent_kwargs(), preset.apply(agent)
+```
+
+`GuardrailsAICheck` accepts a validator, an iterable of validators, `Guard`, or
+`AsyncGuard`, and works with `GuardrailPolicy`, `tiered`, `parallel`, and `cached`.
+Defaults: four agent/tool stages, `on_fail="block"`, `on_error="block"`, ten-second
+timeout, `deterministic=False`. Only assert `deterministic=True` when every wrapped
+validator is rule-based. Direct validators run in order; fixes feed subsequent
+validators. `on_fail="fix"` returns a rewrite only on `output` and `tool_output`
+when every failing validator supplied a string fix. Other stages block. An existing
+Guard preserves its configured on-fail actions: only its successfully corrected
+string output can become a rewrite; EXCEPTION always blocks. Reasks are disabled
+(`num_reasks=0`); the bridge never invokes an LLM to repair validation.
+
+Passes allow. Validation failures block, including Guardrails' `ValidationError`
+from EXCEPTION actions. Unexpected exceptions and timeouts return `error` (fail
+closed); explicit `on_error="allow"` or `"review"` changes that outcome. Validator
+names, statuses and failure reasons appear in evidence; failure reasons are
+truncated to 200 characters and may still contain content echoed by a validator.
+Treat evidence as sensitive. Reason text and tool rejection text contain no validator
+failure messages. Error spans retain offsets only. Sync validators run off the
+event loop; AsyncGuard/native async validators are awaited. Timing out cannot stop
+an already-running Python thread or its side effects. Avoid sharing stateful
+validators or externally mutating/using an existing Guard concurrently with the bridge.
+
+Category defaults (class names and normalized registry ids both match):
+
+| Validator | Nexura categories |
+| --- | --- |
+| `ToxicLanguage`, `ProfanityFree` | `harassment` |
+| `DetectPII` | `privacy` |
+| `DetectJailbreak` | `jailbreak` |
+| `CompetitorCheck`, `RestrictToTopic` | `other` |
+| Unknown validator | `other` (or the caller's `category=`) |
+
+Override with `categories={"guardrails/detect_pii": ("privacy",)}`. All ids are
+validated against Nexura's taxonomy. Only failing validators contribute categories.
+
+Use Nexura checks in a Guard (local regex example, no model):
+
+```python
+from guardrails import AsyncGuard, Guard, OnFailAction
+from nexura_guardrails import injection, pii
+from nexura_guardrails_ai import as_validator, nexura_validators
+
+guard = Guard(use_server=False).use(as_validator(injection()))
+guard.validate("a normal request", num_reasks=0)
+
+redact = Guard(use_server=False).use(
+    as_validator(pii(action="redact"), on_fail=OnFailAction.FIX)
+)
+assert "bob@example.com" not in redact.validate("Email bob@example.com").validated_output
+async_guard = AsyncGuard(use_server=False).use(as_validator(injection()))
+# In an async function: await async_guard.validate("a normal request", num_reasks=0)
+
+# Ready defaults target JSON output: injection, PII, length, JSON-only.
+json_guard = Guard(use_server=False).use(*nexura_validators())
+json_guard.validate('{"answer": "hello"}', num_reasks=0)
+json_redact = Guard(use_server=False).use(*nexura_validators(pii_action="redact"))
+```
+
+`as_validator(check, name=None, on_fail=OnFailAction.EXCEPTION, stage="output")`
+registers once under `nexura/<check-name>`; instances retain independent check
+configuration. Allow maps to PassResult; block/review/error map to FailResult with
+only the name and category ids; rewrite supplies `fix_value`. Sync validation uses
+`asyncio.run`; inside a running loop it executes in a worker thread. AsyncGuard uses
+`async_validate`. The convenience helper's PII variant is selectable (`block` or
+`redact`), avoiding a block before redaction. Redact uses FIX; other defaults use
+EXCEPTION. Length caps 100,000 characters; the topics filter is included when `keywords=`
+or `deny=` is supplied. Use individual validators for plain text.
+
+Install Hub validators explicitly in your own environment before calling `from_hub`:
+
+```bash
+guardrails hub install hub://guardrails/toxic_language
+```
+
+`from_hub("guardrails/toxic_language", **validator_kwargs)` looks up the local Hub
+registry; `from_hub("ToxicLanguage", ...)` uses the `guardrails.hub` export. Missing
+validators raise `MissingDependencyError` with an installation command. Nothing is
+downloaded at runtime. Guardrails AI 0.11 also supports separately installed PyPI
+validator packages and deprecates `guardrails.hub` imports; follow the installed
+validator's own instructions if it has migrated. See the
+[upstream repository](https://github.com/guardrails-ai/guardrails).
+
+Hub validators have their own licenses, model weights and dependencies. Validators
+that call remote APIs or models send checked content off your machine; a local
+Guard does not prevent that. The preset conservatively reports `network="model"`.
+**Telemetry is off by default.** Guardrails AI on its own sends usage telemetry to its
+servers when `~/.guardrailsrc` does not say otherwise, and every `Guard` reloads that file.
+Importing `nexura_guardrails_ai` makes an unset preference load as `enable_metrics=False`, so
+the bridge sends nothing unless you chose it: an explicit `enable_metrics=` or `no_metrics=`
+line in `~/.guardrailsrc` is respected, and `NEXURA_GUARDRAILS_AI_TELEMETRY=on` keeps
+Guardrails' own default. Remote inference (`use_remote_inferencing`) and validators that
+call remote APIs are separate choices the bridge leaves as you configured them. Offline tests disable these
+features in fixtures and deny network connections; no Hub downloads or LLMs run.
+
+## Nexura checks
+
 Guardrail checks reduce risk and leave an audit trail. They are **not a security boundary**. The protection that holds against a determined attacker is structural: offer the model only the tools it needs, require human approval for tools with side effects (see [Human approval](approvals.md)), run code in a sandbox, give each tool least-privilege credentials, and treat every tool result and document as untrusted data. Use the checks on this page on top of those controls, not instead of them.
 
 `nexura-guardrails` is a separate package that depends on `nexura-agents` only, with no third-party dependency of its own. It adds:
@@ -402,6 +519,86 @@ The same data, with the pinned revisions, is in `nexura_guardrails.SAFETY_MODELS
 - **Long inputs are refused, not partially checked.** The guard sees only what fits in its context window; anything longer is a hard `ContentTooLong` error, so the guardrail blocks it. Raise `context_tokens` (and the server's memory) for longer text, or check long tool results with the pre-filters.
 - Not covered by this package yet (future work): gpt-oss-safeguard (listed in the design for this phase, not implemented), Llama Guard 4, Prompt Guard 2, Granite Guardian's RAG and function-call risks (they need documents or tool definitions).
 
+## OpenAI moderation
+
+`OpenAIModeration` sends the checked text to OpenAI's
+[Moderation API](https://platform.openai.com/docs/guides/moderation) (`omni-moderation-latest`
+by default, which OpenAI offers to API users free of charge) and maps its 13 labels to the
+category taxonomy:
+
+| OpenAI label | Nexura category |
+| --- | --- |
+| `violence`, `violence/graphic` | `violence` |
+| `illicit` | `crime` |
+| `illicit/violent` | `weapons` |
+| `sexual/minors` | `child_safety` |
+| `hate`, `hate/threatening` | `hate` |
+| `self-harm`, `self-harm/intent`, `self-harm/instructions` | `self_harm` |
+| `sexual` | `sexual` |
+| `harassment`, `harassment/threatening` | `harassment` |
+
+```python notest
+from nexura_agents import Agent
+from nexura_guardrails import OpenAIModeration, as_guardrail
+
+moderation = OpenAIModeration()  # reads OPENAI_API_KEY
+agent = Agent(
+    name="Support",
+    instructions="Help customers.",
+    model="openai:gpt-4o-mini",
+    input_guardrails=[as_guardrail(moderation)],
+    output_guardrails=[as_guardrail(moderation)],
+)
+```
+
+The same check offline, against a fake of the API (how the tests run it):
+
+```python
+import asyncio
+
+import httpx
+from nexura_agents.run_context import RunContext
+from nexura_guardrails import CheckInput, OpenAIModeration
+
+
+def fake_openai(request: httpx.Request) -> httpx.Response:
+    result = {
+        "flagged": True,
+        "categories": {"violence": True},
+        "category_scores": {"violence": 0.93},
+    }
+    return httpx.Response(200, json={"model": "omni-moderation-latest", "results": [result]})
+
+
+check = OpenAIModeration(api_key="sk-demo", transport=httpx.MockTransport(fake_openai))
+ctx = RunContext(deps=None, run_id="demo", agent_name="Support")
+verdict = asyncio.run(check(ctx, CheckInput(stage="input", text="...")))
+print(verdict.decision, verdict.categories)  # block ('violence',)
+```
+
+- **Decision.** By default the check follows OpenAI's `flagged` field. `threshold=0.4` blocks
+  on any category score at or above 0.4 instead, and `labels=["violence", "hate"]` limits which
+  OpenAI labels count. A flagged reply whose label is not in the table (a label OpenAI adds
+  later) blocks with category `other`.
+- **Verdict evidence** holds the flagged labels and the three highest scores, never the text.
+- **Fails closed** on a timeout, a network error, an HTTP error (401, 429, 5xx), a reply over
+  256 KB, a reply that is not the documented shape (including scores outside 0 to 1 or `NaN`)
+  and a reply from a different model; `on_error="allow"` or `"review"` softens these. Text over
+  `max_input_tokens` (32,000 by default) is never sent and cannot be softened.
+- **Key and transport.** The key comes from `api_key=` or `OPENAI_API_KEY` and never appears in
+  `repr`, errors or evidence. `base_url` must be `https://` (Azure OpenAI and compatible
+  gateways work through it).
+- `include_context=True` sends the conversation context with the text (off by default, to send
+  less). A `VerdictCache` reuses verdicts for repeated text.
+
+**Limits.** The text leaves your machine for OpenAI: use a [local safety
+model](#local-safety-models) for data you may not send. Moderation covers the 13 harm labels
+only, not prompt injection, jailbreaks, personal data or groundedness, so pair it with the
+`injection` and `pii` pre-filters or the judge (for example
+`tiered(injection(), OpenAIModeration())`). The adapter was tested against an in-process fake of
+the documented `POST /v1/moderations` API; it has not been run against OpenAI from this
+repository.
+
 ## Presets
 
 `nexura_guardrails.presets` has one-line constructors with documented defaults:
@@ -468,7 +665,7 @@ print([m.license for m in preset.licenses()])                  # ['Apache-2.0']
 
 Categories have stable ids: `violence`, `crime`, `sexual_crime`, `child_safety`, `defamation`, `unauthorized_advice`, `privacy`, `ip`, `weapons`, `hate`, `self_harm`, `sexual`, `elections`, `misinformation`, `code_abuse`, `harassment`, `fraud`, `prompt_injection`, `jailbreak`, `groundedness`, `function_call_error` and `other`. `CATEGORIES` holds each one's title and description; `policy_for(ids)` turns ids into judge policy text.
 
-`map_label(source, label)` maps safety-classifier labels to these ids, for `llama_guard` (S1 to S14), `shieldgemma`, `granite_guardian`, `nemotron` (Nemotron Safety Guard v3) and `openai_moderation`. Unmapped labels map to `other`. The [local safety models](#local-safety-models) use these maps; an OpenAI moderation adapter is planned.
+`map_label(source, label)` maps safety-classifier labels to these ids, for `llama_guard` (S1 to S14), `shieldgemma`, `granite_guardian`, `nemotron` (Nemotron Safety Guard v3) and `openai_moderation`. Unmapped labels map to `other`. The [local safety models](#local-safety-models) and [OpenAI moderation](#openai-moderation) use these maps.
 
 ## Benchmark
 

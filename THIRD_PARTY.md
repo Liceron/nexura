@@ -10,6 +10,7 @@ bundle. The packages themselves are Liceron's own code under the Apache License 
 | `nexura-agents` (Python) | `packages/nexura-agents` | Apache-2.0, Liceron |
 | `nexura-connectors` (Python) | `packages/nexura-connectors` | Apache-2.0, Liceron |
 | `nexura-guardrails` (Python) | `packages/nexura-guardrails` | Apache-2.0, Liceron |
+| `nexura-guardrails-ai` (Python) | `packages/nexura-guardrails-ai` | Apache-2.0, Liceron |
 | `nexura-postgres` (Python) | `packages/nexura-postgres` | Apache-2.0, Liceron |
 | `nexura-qdrant` (Python) | `packages/nexura-qdrant` | Apache-2.0, Liceron |
 | `nexura-vectorstores` (Python) | `packages/nexura-vectorstores` | Apache-2.0, Liceron |
@@ -82,6 +83,7 @@ those shared dependencies are attributed above. Their additional dependencies ar
 | `nexura-vertex` | `httpx` | BSD-3-Clause | https://github.com/encode/httpx | Provider HTTP transport |
 | `nexura-vertex` | `google-auth[requests]` | Apache-2.0 | https://github.com/googleapis/google-auth-library-python | Vertex AI credentials |
 | `nexura-guardrails[yaml]` | `pyyaml` 6.0.3 (licence read 2026-10-22) | MIT | https://github.com/yaml/pyyaml | YAML policy files (optional) |
+| `nexura-guardrails-ai` | `guardrails-ai` 0.11.0 | Apache-2.0, Guardrails AI | https://github.com/guardrails-ai/guardrails | Validator/Guard bridge; Hub validators have separate dependencies and licenses |
 | `nexura-studio` | `fastapi`, `uvicorn`, `pydantic` | MIT, BSD-3-Clause, MIT respectively | https://github.com/fastapi/fastapi, https://github.com/encode/uvicorn and https://github.com/pydantic/pydantic | Studio service and validation |
 | `nexura-sandbox[wasi]` | `wasmtime` 49.0.0 | Apache-2.0 WITH LLVM-exception | https://github.com/bytecodealliance/wasmtime-py | WASI interpreter; native runtime outside the service process |
 
@@ -159,7 +161,7 @@ ESLint, Playwright, Testing Library, TypeScript, type packages) are not bundled 
 | `classcat` | 5.0.5 | MIT | Jorge Bucaran | https://github.com/jorgebucaran/classcat |
 | `d3-color`, `d3-dispatch`, `d3-drag`, `d3-interpolate`, `d3-selection`, `d3-timer`, `d3-transition`, `d3-zoom` | 3.x | ISC | Mike Bostock | https://github.com/d3 |
 | `d3-ease` | 3.0.1 | BSD-3-Clause | Mike Bostock; Robert Penner (easing equations) | https://github.com/d3/d3-ease |
-| `@liceron/nexura-sdk` | 0.6.0 | Apache-2.0 | Liceron (first party, `clients/typescript`) | this repository |
+| `@liceron/nexura-sdk` | 0.7.0 | Apache-2.0 | Liceron (first party, `clients/typescript`) | this repository |
 
 ---
 

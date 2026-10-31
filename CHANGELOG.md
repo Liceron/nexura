@@ -2,6 +2,20 @@
 
 All notable changes to this project.
 
+## 0.7.0 (2026-10-31)
+
+- **`OpenAIModeration`** in `nexura-guardrails`: OpenAI's Moderation API as a guardrail check
+  (`omni-moderation-latest`), its 13 labels mapped to the category taxonomy, `flagged` or a
+  score `threshold` decides, `labels` narrows what counts. Fails closed on network, HTTP,
+  size, shape, model and timeout errors; oversized text is never sent; HTTPS only; the key
+  never appears in `repr`, errors or evidence. See
+  [docs/guardrails-package.md](docs/guardrails-package.md#openai-moderation).
+- Add `nexura-guardrails-ai` 0.6.0: Guardrails AI validators and Guards as Nexura checks,
+  Nexura checks as registered Guardrails AI validators, and an input/output preset.
+  Includes offline integration tests and explicit failure, fix, timeout and category mapping.
+  Guardrails AI's own usage telemetry stays off unless you chose it (an explicit
+  `.guardrailsrc` setting or `NEXURA_GUARDRAILS_AI_TELEMETRY=on`).
+
 ## 0.6.0 (2026-10-31)
 
 - **24 new starter templates** (30 in total), each a tested workflow with offline fixture runs and

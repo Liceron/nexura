@@ -80,7 +80,7 @@ def test_docker_installs_workspace_packages() -> None:
 
 def test_docker_check_rejects_missing_split_package() -> None:
     recipe = (ROOT / "deployment/Dockerfile").read_text()
-    broken = recipe.replace("/build/dist/nexura_studio-0.6.0-py3-none-any.whl", "")
+    broken = recipe.replace("/build/dist/nexura_studio-0.7.0-py3-none-any.whl", "")
     with pytest.raises(AssertionError):
         check_recipe(broken)
 
@@ -116,7 +116,7 @@ def test_all_published_sdists_exclude_internal_material(tmp_path: Path) -> None:
         timeout=120,
     )
     sdists = sorted(tmp_path.glob("*.tar.gz"))
-    assert len(sdists) == len(workspace()) == 10
+    assert len(sdists) == len(workspace()) == 11
     for sdist in sdists:
         with tarfile.open(sdist) as archive:
             members = archive.getnames()

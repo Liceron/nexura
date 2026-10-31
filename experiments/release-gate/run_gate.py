@@ -204,6 +204,7 @@ PACKAGE_SOURCES = tuple(
         "nexura-agents",
         "nexura-connectors",
         "nexura-guardrails",
+        "nexura-guardrails-ai",
         "nexura-postgres",
         "nexura-qdrant",
         "nexura-sandbox",
