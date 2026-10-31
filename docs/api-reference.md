@@ -1391,7 +1391,7 @@ Args:
 
 ### `AgentMCPServer`
 
-class `AgentMCPServer(name: 'str', *, agents: 'Sequence[Agent | Team]' = (), tools: 'Sequence[Tool]' = (), deps: 'Any' = None, runner: 'Any' = None, version: 'str' = '0.7.1', list_ttl_ms: 'int' = 60000, instructions: 'str | None' = None) -> 'None'`
+class `AgentMCPServer(name: 'str', *, agents: 'Sequence[Agent | Team]' = (), tools: 'Sequence[Tool]' = (), deps: 'Any' = None, runner: 'Any' = None, version: 'str' = '0.8.0', list_ttl_ms: 'int' = 60000, instructions: 'str | None' = None) -> 'None'`
 
 ~~~text
 Expose agents and tools as an MCP server.
@@ -4053,7 +4053,7 @@ Binds named identifiers to trusted Python handler functions or BaseModules.
 
 ### `WorkflowEngine`
 
-class `WorkflowEngine(spec: 'WorkflowSpec', registry: 'ModuleRegistry', *, store: 'WorkflowCheckpointStore | None' = None, max_steps: 'int' = 50, timeout: 'float | None' = None, workspace_id: 'str' = 'default', budget: 'Any | None' = None, event_sink: 'Any | None' = None, artifact_store: 'Any | None' = None, credential_resolver: 'Any | None' = None, approval_required_handlers: 'frozenset[str] | set[str] | None' = None, approval_ttl: 'float' = 3600.0, max_map_writes_per_approval: 'int' = 50, policy_version: 'str' = '1.0.0', lease_ttl: 'float' = 30.0, guardrail_policy: 'Any | None' = None) -> 'None'`
+class `WorkflowEngine(spec: 'WorkflowSpec', registry: 'ModuleRegistry', *, store: 'WorkflowCheckpointStore | None' = None, max_steps: 'int' = 50, timeout: 'float | None' = None, workspace_id: 'str' = 'default', budget: 'Any | None' = None, event_sink: 'Any | None' = None, artifact_store: 'Any | None' = None, credential_resolver: 'Any | None' = None, approval_required_handlers: 'frozenset[str] | set[str] | None' = None, approval_ttl: 'float' = 3600.0, max_map_writes_per_approval: 'int' = 50, policy_version: 'str' = '1.0.0', lease_ttl: 'float' = 30.0, guardrail_policy: 'Any | None' = None, module_gate: 'Callable[[str, Any], None] | None' = None) -> 'None'`
 
 ~~~text
 Executes workflows deterministically with checkpoints and approval gates.

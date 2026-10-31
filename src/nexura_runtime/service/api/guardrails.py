@@ -303,7 +303,22 @@ def check_agent_guardrails(
                 )
         elif ref.preset == "judge":
             name = ref.model or agent_model
-            if chat_models is None or name not in chat_models:
+            refused = getattr(chat_models, "refused", None)
+            if callable(refused) and refused(name):
+                # P45: an operator model this workspace may not use (model_access).
+                from nexura_runtime.service.api.model_access import (
+                    SERVER_MODELS_MESSAGE,
+                    SERVER_MODELS_NOT_AVAILABLE,
+                )
+
+                errors.append(
+                    {
+                        "field": where,
+                        "message": f"Judge model '{name}': {SERVER_MODELS_MESSAGE}",
+                        "code": SERVER_MODELS_NOT_AVAILABLE,
+                    }
+                )
+            elif chat_models is None or name not in chat_models:
                 errors.append({"field": where, "message": f"Unknown chat model '{name}'."})
             elif chat_models.is_fake(name):
                 errors.append(
@@ -325,10 +340,11 @@ def build_agent_guardrails(
     errors = check_agent_guardrails(guardrails, chat_models, agent_model)
     errors = [e for e in errors if e["field"] != "guardrails.stream_guard"]  # checked in check()
     if errors:
+        refused = any(e.get("code") == "SERVER_MODELS_NOT_AVAILABLE" for e in errors)
         raise AgentSpecError(
             "Invalid guardrails: " + "; ".join(e["message"] for e in errors[:3]),
-            errors,
-            code="GUARDRAILS_INVALID",
+            [{k: v for k, v in e.items() if k != "code"} for e in errors],
+            code="SERVER_MODELS_NOT_AVAILABLE" if refused else "GUARDRAILS_INVALID",
         )
     parts = AgentGuardrailParts(stream_guard=guardrails.stream_guard)
     if not guardrails.presets:
@@ -351,7 +367,11 @@ def build_agent_guardrails(
             try:
                 model = chat_models.resolve(name)
             except Exception as exc:
-                raise AgentSpecError(str(exc), code="MODEL_UNAVAILABLE") from None
+                # A refused operator model or an unusable own key keeps its own code.
+                code = getattr(exc, "code", None)
+                raise AgentSpecError(
+                    str(exc), code=code if isinstance(code, str) else "MODEL_UNAVAILABLE"
+                ) from None
             built.append(catalog.judge(ref.policy, model))
         parts.names.append(ref.preset)
     assert set(parts.names) <= set(GUARDRAIL_PRESETS)

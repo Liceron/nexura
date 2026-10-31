@@ -35,7 +35,17 @@ from nexura_runtime.service.api.chat_models import (
     ChatModelRegistry,
     ChatModelUnavailableError,
 )
+from nexura_runtime.service.api.credential_models import (
+    ModelAccessError,
+    WorkspaceChatModels,
+    workspace_chat_models,
+)
 from nexura_runtime.service.api.knowledge import _aindex, _check_retrieval_rate, _hit_citation
+from nexura_runtime.service.api.model_access import (
+    SERVER_MODELS_MESSAGE,
+    SERVER_MODELS_NOT_AVAILABLE,
+    ServerModelsNotAvailableError,
+)
 from nexura_runtime.service.api.models import PaginatedResponse
 from nexura_runtime.service.auth.errors import PermissionDeniedError
 from nexura_runtime.service.auth.models import ActionPermission, Principal, WorkspaceRole
@@ -375,7 +385,7 @@ def _safe_citation(citation: dict[str, Any]) -> dict[str, Any]:
 
 
 async def _workspace_has_documents(request: Request, workspace_id: str) -> bool:
-    index = await _aindex(request)
+    index = await _aindex(request, workspace_id)
     if index.blocking_io:  # Postgres (MVP WP7): a network round trip, off the event loop
         return bool(await asyncio.to_thread(index.has_documents, workspace_id))
     return bool(index.has_documents(workspace_id))
@@ -415,7 +425,7 @@ def knowledge_search_tool(
             )
         hits = []
         for collection_id in ids:
-            hits += await (await _aindex(holder)).search(
+            hits += await (await _aindex(holder, workspace_id)).search(
                 workspace_id=workspace_id,
                 query=str(query)[:KNOWLEDGE_QUERY_MAX_CHARS],
                 collection_id=collection_id,
@@ -704,14 +714,24 @@ async def delete_session(request: Request, session_id: str) -> dict[str, Any]:
     return {"deleted": True, "session_id": session_id}
 
 
-def _registry(request: Request) -> ChatModelRegistry:
-    registry: ChatModelRegistry = request.app.state.chat_models
-    return registry
+def _registry(request: Request) -> WorkspaceChatModels:
+    """The caller workspace's chat models: the operator's allowlist (when the server model
+    policy allows the workspace) plus its own provider keys (``cred:<id>/<model>``)."""
+    return workspace_chat_models(request.app.state, _get_caller_context(request)[0])
+
+
+def _server_models_refused() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={"code": SERVER_MODELS_NOT_AVAILABLE, "message": SERVER_MODELS_MESSAGE},
+    )
 
 
 def _resolve_chat_model(request: Request, payload: ChatRequest) -> Any:
     """Validate the requested name against the allowlist and build the model lazily."""
     registry = _registry(request)
+    if registry.refused(payload.model):
+        raise _server_models_refused()
     if payload.model not in registry:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -740,6 +760,12 @@ def _resolve_chat_model(request: Request, payload: ChatRequest) -> Any:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={"code": "MODEL_UNAVAILABLE", "message": str(exc)},
+        ) from None
+    except ServerModelsNotAvailableError:
+        raise _server_models_refused() from None
+    except ModelAccessError as exc:
+        raise HTTPException(
+            status_code=exc.status_code, detail={"code": exc.code, "message": exc.message}
         ) from None
 
 
@@ -778,7 +804,8 @@ def _usage_limits(request: Request) -> UsageLimits:
 
 @chat_router.get("/models")
 async def list_chat_models(request: Request) -> list[dict[str, Any]]:
-    """Chat models the operator allowed. Never includes keys or provider specs."""
+    """Chat models this workspace may use: the operator's (unless the server model policy
+    refuses the workspace) and its own keys' models. Never includes keys or provider specs."""
     return _registry(request).describe()
 
 
@@ -911,6 +938,8 @@ def _saved_agent(
             },
         )
     registry = _registry(request)
+    if registry.refused(spec.model):
+        raise _server_models_refused()
     if spec.model not in registry:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -940,6 +969,8 @@ def _saved_agent(
     try:
         built = runtime.build_from_spec(workspace_id, agent_id, revision, spec, context)
     except AgentSpecError as exc:
+        if exc.code == SERVER_MODELS_NOT_AVAILABLE:
+            raise _server_models_refused() from None
         raise HTTPException(
             status_code=503 if exc.code == "MODEL_UNAVAILABLE" else 422,
             detail={"code": exc.code, "message": exc.message},
@@ -1053,7 +1084,7 @@ async def chat_in_session(
     return body
 
 
-def _model_fields(registry: ChatModelRegistry, name: str) -> dict[str, Any]:
+def _model_fields(registry: ChatModelRegistry | WorkspaceChatModels, name: str) -> dict[str, Any]:
     return {
         "model_name": name,
         "model_display": registry.display(name),
@@ -1082,11 +1113,13 @@ def _safe_failure(error_type: str) -> tuple[str, str]:
 
 
 def _log_provider_failure(exc: BaseException, code: str) -> None:
-    """Server-side detail only, with environment secret values redacted."""
+    """Server-side detail only, with environment secret values and key-shaped text (a
+    workspace's own provider key echoed back by the provider) redacted."""
     text = str(exc)
     for name, value in os.environ.items():
         if value and len(value) >= 6 and name.upper().endswith(("_KEY", "_TOKEN", "_SECRET")):
             text = text.replace(value, "[redacted]")
+    text = redact_secret_text(text)
     _log.warning("chat model failure %s (%s): %s", code, type(exc).__name__, text)
 
 
@@ -1115,7 +1148,7 @@ async def _chat_event_stream(
     session_id: str,
     payload: ChatRequest,
     model: Any | None = None,
-    registry: ChatModelRegistry | None = None,
+    registry: ChatModelRegistry | WorkspaceChatModels | None = None,
     usage_limits: UsageLimits | None = None,
     knowledge_tool: Tool | None = None,
     has_documents: bool = False,

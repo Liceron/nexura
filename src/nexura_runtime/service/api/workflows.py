@@ -23,7 +23,7 @@ from nexura_runtime.service.api.models import (
     PaginatedResponse,
     UpdateWorkflowRequest,
 )
-from nexura_runtime.service.api.policy import enforce_approval_policy
+from nexura_runtime.service.api.policy import enforce_approval_policy, enforce_model_policy
 from nexura_runtime.service.api.validation import (
     WorkflowValidateRequest,
     WorkflowValidateResponse,
@@ -172,6 +172,7 @@ def _prepare_spec(
             status_code=422,  # literal: the constant was renamed in newer Starlette
             detail={"code": "VALIDATION_ERROR", "message": f"Invalid spec: {exc}"},
         ) from exc
+    enforce_model_policy(request.app.state, caller_ws, spec)
 
     enforcer = ResourceScopeEnforcer(ws_repo)
     try:
@@ -404,6 +405,7 @@ async def update_workflow(
             status_code=422,  # literal: the constant was renamed in newer Starlette
             detail={"code": "VALIDATION_ERROR", "message": f"Invalid spec: {exc}"},
         ) from exc
+    enforce_model_policy(request.app.state, caller_ws, spec)
 
     enforcer = ResourceScopeEnforcer(ws_repo)
     try:

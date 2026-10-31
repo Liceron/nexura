@@ -2671,6 +2671,7 @@ class WorkflowEngine:
         policy_version: str = "1.0.0",
         lease_ttl: float = 30.0,
         guardrail_policy: Any | None = None,
+        module_gate: Callable[[str, Any], None] | None = None,
     ) -> None:
         self.approval_required_handlers = (
             frozenset(approval_required_handlers)
@@ -2709,6 +2710,9 @@ class WorkflowEngine:
         # P39 G6: tool_input / tool_output / require_approval rules for module nodes; None
         # uses the process default when it is a guardrail policy (service engines included).
         self.guardrail_policy: Any = _resolve_guardrail_policy(guardrail_policy)
+        # ``module_gate(name, handler)`` runs whenever a step resolves its handler and raises to
+        # refuse it (the service refuses server-key model nodes for some workspaces, P45).
+        self.module_gate = module_gate
         # Journal runs on stores that offer one; a sub-workflow child keeps its own journal
         # (A6 S7) with ``parent_run_id`` set to the run that started it.
         self._journal_enabled = True
@@ -5685,6 +5689,8 @@ class WorkflowEngine:
                 f"Cross-workspace access denied: module '{module_id or name}' "
                 f"belongs to workspace '{mod_ws}', not '{self.workspace_id}'."
             )
+        if self.module_gate is not None:
+            self.module_gate(module_id or name, handler_obj)
         return handler_obj
 
     async def _run_step(
@@ -6222,6 +6228,7 @@ class WorkflowEngine:
             policy_version=self.policy_version,
             max_map_writes_per_approval=self.max_map_writes_per_approval,
             guardrail_policy=self.guardrail_policy,
+            module_gate=self.module_gate,
         )
         # A sub-workflow inside a mapped item cannot pause either, at any depth.
         child._pause_forbidden = self._pause_forbidden

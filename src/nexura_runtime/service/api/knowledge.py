@@ -151,12 +151,49 @@ def _build_lock(state: Any) -> threading.Lock:
     return lock
 
 
-def _index(request: Request) -> KnowledgeIndexBase:
+def _caller_workspace(holder: Any, workspace_id: str | None) -> str | None:
+    """``workspace_id``, else the request's workspace (``None`` outside a request)."""
+    if workspace_id is not None:
+        return workspace_id
+    found = getattr(getattr(holder, "state", None), "workspace_id", None)
+    return found if isinstance(found, str) else None
+
+
+def _for_workspace(
+    state: Any, index: KnowledgeIndexBase, workspace_id: str | None
+) -> KnowledgeIndexBase:
+    """``index``, or for a workspace that may not use the server's keys (P45, ``model_access``)
+    the same index with the offline fixture embedder: its collections are indexed and searched
+    without the operator's embedding key (their lineage says so)."""
+    from nexura_runtime.knowledge.embeddings.provider import DeterministicEmbeddingProvider
+    from nexura_runtime.service.api.model_access import server_models_allowed
+
+    if isinstance(index.embedder.provider, DeterministicEmbeddingProvider):
+        return index
+    if server_models_allowed(state, workspace_id):
+        return index
+    keyless: KnowledgeIndexBase | None = getattr(state, "keyless_knowledge_index", None)
+    if keyless is None or getattr(keyless, "_keyless_of", None) is not index:
+        import copy
+
+        from nexura_runtime.knowledge.embeddings.embedder import EmbeddingOrchestrator
+
+        # A shallow copy shares the connection, its lock and the tables; only the embedder
+        # (and so the lineage written and checked) differs.
+        keyless = copy.copy(index)
+        keyless.embedder = EmbeddingOrchestrator()
+        keyless._keyless_of = index  # type: ignore[attr-defined]
+        state.keyless_knowledge_index = keyless
+    return keyless
+
+
+def _index(request: Request, workspace_id: str | None = None) -> KnowledgeIndexBase:
     """Workspace-scoped hybrid index, created lazily (SQLite, or Postgres with ``database_url``).
 
     Synchronous: use ``_aindex`` from async code. A Postgres service builds its index when the
     app is created (``create_api_app``), so this only builds on SQLite or after a test or
-    operator replaced it with ``None``.
+    operator replaced it with ``None``. ``workspace_id`` (default: the request's) selects the
+    keyless variant for a workspace that may not use the server's embedding key.
     """
     state = request.app.state
     index: KnowledgeIndexBase | None = getattr(state, "hybrid_knowledge_index", None)
@@ -168,7 +205,7 @@ def _index(request: Request) -> KnowledgeIndexBase:
                     getattr(state, "vector_store", None), state.knowledge_embedder
                 )
                 state.hybrid_knowledge_index = index
-    return index
+    return _for_workspace(state, index, _caller_workspace(request, workspace_id))
 
 
 def _collection_lock(request: Request, workspace_id: str, collection_id: str) -> asyncio.Lock:
@@ -192,18 +229,18 @@ def _collection_lock(request: Request, workspace_id: str, collection_id: str) ->
     return lock
 
 
-async def _aindex(request: Request) -> KnowledgeIndexBase:
+async def _aindex(request: Request, workspace_id: str | None = None) -> KnowledgeIndexBase:
     """``_index`` for async callers. Building a Postgres index runs its migrations (the shared
     migration lock, ``CREATE EXTENSION``) and a catalog query, so it runs in a worker thread
     and never on the event loop (MVP WP7 review M2); concurrent first callers build it once."""
     state = request.app.state
     index: KnowledgeIndexBase | None = getattr(state, "hybrid_knowledge_index", None)
     if index is not None:
-        return index
+        return _for_workspace(state, index, _caller_workspace(request, workspace_id))
     stores = getattr(state, "service_stores", None)
     if stores is not None and getattr(stores, "database_url", None):
-        return await asyncio.to_thread(_index, request)
-    return _index(request)
+        return await asyncio.to_thread(_index, request, workspace_id)
+    return _index(request, workspace_id)
 
 
 async def _io[T](index: KnowledgeIndexBase, fn: Callable[[], T]) -> T:

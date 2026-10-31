@@ -2,6 +2,8 @@
 # Copyright (c) 2026 Liceron
 """Server-owned approval requirements cannot be disabled by a workflow document."""
 
+from typing import Any
+
 from fastapi import HTTPException, Request
 
 from nexura_runtime.workflow import WorkflowSpec
@@ -12,6 +14,23 @@ DESTINATION_POLICY_KEYS = frozenset({"allow_loopback", "allow_private_ranges", "
 
 def enforce_approval_policy(request: Request, spec: WorkflowSpec) -> None:
     check_approval_policy(request.app.state.approval_required_handlers, spec)
+
+
+def enforce_model_policy(app_state: Any, workspace_id: str | None, spec: WorkflowSpec) -> None:
+    """403 ``SERVER_MODELS_NOT_AVAILABLE`` when the spec has nodes that call a provider with the
+    server's key and the server model policy refuses the workspace (P45, ``model_access``).
+    Checked when a workflow is saved and whenever a run starts or continues."""
+    from nexura_runtime.service.api.model_access import (
+        ServerModelsNotAvailableError,
+        check_workflow_models,
+    )
+
+    try:
+        check_workflow_models(app_state, workspace_id, spec)
+    except ServerModelsNotAvailableError as exc:
+        raise HTTPException(
+            status_code=403, detail={"code": exc.code, "message": exc.message}
+        ) from None
 
 
 def check_approval_policy(required: frozenset[str], spec: WorkflowSpec) -> None:

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from typing import Any, Literal
 
 from nexura_agents.contracts import CredentialReference
@@ -66,6 +67,10 @@ class ScopedCredentialStore:
         # threads (resolvers in worker threads) read them.
         self._lock = threading.RLock()
         self._environment = environment or EnvironmentCredentialSource()
+        # ``environment_policy(workspace_id) -> bool`` (P45): when set, a workspace it does not
+        # allow never resolves an environment-variable fallback (the server's own keys). The
+        # service sets it from ``app.state.server_model_policy``; ``None`` allows every one.
+        self.environment_policy: Callable[[str], bool] | None = None
         if secret_store is not None:
             for info in secret_store.list_all_info():
                 self._entries[(info.workspace_id, info.name)] = (
@@ -279,13 +284,24 @@ class ScopedCredentialStore:
                 )
             return self._reveal(context_workspace_id, ref.credential_id, secret)
 
-        # 2. Check environment fallback if declared on ref
-        if ref.environment_variable:
+        # 2. Check environment fallback if declared on ref (and allowed for this workspace)
+        if ref.environment_variable and self.environment_allowed(context_workspace_id):
             env_val = self._environment.get(ref.environment_variable)
             if env_val:
                 return SecretValue(env_val)
 
         raise CredentialNotFoundError(ref.credential_id, context_workspace_id)
+
+    def environment_allowed(self, workspace_id: str) -> bool:
+        """True when ``workspace_id`` may resolve environment-variable fallbacks (fail closed:
+        a policy that raises or answers anything but ``True`` refuses)."""
+        policy = self.environment_policy
+        if policy is None:
+            return True
+        try:
+            return policy(workspace_id) is True
+        except Exception:
+            return False
 
     def revoke(self, workspace_id: str, credential_id: str) -> CredentialMetadata:
         """Mark a credential as revoked."""

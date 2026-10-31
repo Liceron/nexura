@@ -36,6 +36,7 @@ from pydantic import ValidationError
 
 from nexura_runtime.observability.run_diagnostics import redact_run_content
 from nexura_runtime.runtime.approvals.errors import WrongWorkspaceError
+from nexura_runtime.service.api.model_access import workflow_module_gate
 from nexura_runtime.service.api.models import (
     CancelRunRequest,
     DecisionRequest,
@@ -47,7 +48,11 @@ from nexura_runtime.service.api.models import (
     RunResponse,
     StartRunRequest,
 )
-from nexura_runtime.service.api.policy import check_approval_policy, enforce_approval_policy
+from nexura_runtime.service.api.policy import (
+    check_approval_policy,
+    enforce_approval_policy,
+    enforce_model_policy,
+)
 from nexura_runtime.service.api.run_revocation import ACCESS_REVOKED, cancel_message
 from nexura_runtime.service.auth.errors import (
     CrossWorkspaceAccessError,
@@ -798,6 +803,9 @@ async def start_workflow_run(
     ws_repo: WorkspaceRepository = app_state.workspace_repo
 
     check_approval_policy(getattr(app_state, "approval_required_handlers", frozenset()), spec)
+    # P45: no server-key model node for a workspace the server model policy refuses (API runs,
+    # triggers, schedules and publications all start here).
+    enforce_model_policy(app_state, workspace_id, spec)
 
     # Validate cross-resource references (credentials, artifacts, indexes, datasets, schedules)
     scope_enforcer = ResourceScopeEnforcer(ws_repo)
@@ -888,6 +896,7 @@ async def start_workflow_run(
         event_sink=event_sink,
         approval_required_handlers=approval_handlers,
         lease_ttl=workflow_lease_ttl(app_state),
+        module_gate=workflow_module_gate(app_state, workspace_id),
     )
 
     async def _execute_job() -> None:
@@ -1379,6 +1388,7 @@ async def decide_run(request: Request, run_id: str, payload: DecisionRequest) ->
 
     bound_spec = await _bound_definition(request.app.state, run)
     enforce_approval_policy(request, bound_spec)
+    enforce_model_policy(request.app.state, caller_ws, bound_spec)
     engine, event_sink = _build_engine(request, bound_spec, run_id, caller_ws)
 
     # Decision events are a pre-dispatch boundary: access-revocation hooks must run
@@ -1547,6 +1557,8 @@ def _engine_for(
         event_sink=event_sink,
         approval_required_handlers=approval_handlers,
         lease_ttl=workflow_lease_ttl(app_state),
+        # P45: a continued run (approval, input, recover, migrate, fork) re-checks every step.
+        module_gate=workflow_module_gate(app_state, workspace_id),
     )
     return engine, event_sink
 
@@ -1617,6 +1629,7 @@ async def provide_run_input(
     _scan_references(request, caller_ws, payload.value)
     bound_spec = await _bound_definition(request.app.state, run)
     enforce_approval_policy(request, bound_spec)
+    enforce_model_policy(request.app.state, caller_ws, bound_spec)
     engine, event_sink = _build_engine(request, bound_spec, run_id, caller_ws)
 
     async def record_answer() -> None:
@@ -1967,6 +1980,7 @@ async def recover_run(
     on_uncertain = payload.on_uncertain if payload is not None else "pause"
     bound_spec = await _bound_definition(app_state, run)
     enforce_approval_policy(request, bound_spec)
+    enforce_model_policy(request.app.state, caller_ws, bound_spec)
     engine, event_sink = _build_engine(request, bound_spec, run_id, caller_ws)
     await _record_event(
         store,
@@ -2052,6 +2066,7 @@ async def migrate_run(request: Request, run_id: str, payload: MigrateRunRequest)
         spec.validate(app_state.registry)
         _scan_references(request, caller_ws, spec.to_dict())
         enforce_approval_policy(request, spec)
+        enforce_model_policy(request.app.state, caller_ws, spec)
         engine, event_sink = _build_engine(request, spec, run_id, caller_ws)
     except (WorkflowValidationError, KeyError, TypeError, ValueError) as exc:
         raise HTTPException(
@@ -2306,6 +2321,7 @@ async def fork_run(request: Request, run_id: str, payload: ForkRunRequest) -> di
     _scan_references(request, caller_ws, payload.state_update)
     spec = await _bound_definition(request.app.state, source)
     enforce_approval_policy(request, spec)
+    enforce_model_policy(request.app.state, caller_ws, spec)
     new_id = f"run-{uuid.uuid4().hex[:12]}"
     engine, event_sink = _build_engine(request, spec, new_id, caller_ws)
 

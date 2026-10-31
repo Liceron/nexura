@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import contextlib
+import functools
 import logging
 import shutil
 import tempfile
@@ -72,6 +73,7 @@ from nexura_runtime.service.api.middleware import (
     SecurityScopingMiddleware,
     require_shared_principal,
 )
+from nexura_runtime.service.api.model_access import server_models_allowed
 from nexura_runtime.service.api.model_pricing import build_pricing_table
 from nexura_runtime.service.api.operator_token import (
     DeliveryTokenStore,
@@ -281,6 +283,7 @@ def create_api_app(
     database_url: str | None = None,
     blob_url: str | None = None,
     model_pricing: str | Mapping[str, Any] | None = None,
+    server_model_policy: Callable[[str], bool] | None = None,
 ) -> FastAPI:
     """Create a configured FastAPI application exposing the Nexura REST API.
 
@@ -386,6 +389,14 @@ def create_api_app(
             ``set_default_hooks(policy, locked=True)``, so every agent run in this process
             uses it and no code can remove it; one process enforces one policy. It is never
             settable through the API; ``GET /api/v1/guardrails/policy`` shows a summary.
+
+    Model access (P45):
+        server_model_policy: ``None`` (default: every workspace may use the server's model
+            keys) or ``(workspace_id) -> bool``. A workspace it refuses cannot list or use
+            ``chat_models``, run or save workflows with server-key provider nodes, embed with
+            the configured (keyed) embedder, or resolve credential environment fallbacks; it
+            uses its own provider credentials (``cred:<credential>/<model>``). Also settable
+            later as ``app.state.server_model_policy``. See ``service/api/model_access.py``.
 
     Durable execution:
         database_url: opt-in service backend URL; ``None`` reads ``NEXURA_DATABASE_URL``.
@@ -839,6 +850,8 @@ def create_api_app(
     app.state.workflow_lease_ttl = float(workflow_lease_ttl)
     app.state.session_store = service_stores.sessions()
     app.state.chat_models = app_chat_models
+    # P45: which workspaces may use the server's model keys (None: every one, see model_access).
+    app.state.server_model_policy = server_model_policy
     # Prices of every run budget, trace and diagnostics cost (live pass C2).
     app.state.pricing_table = app_pricing_table
     if app_guardrail_policy is not None:
@@ -886,6 +899,11 @@ def create_api_app(
         profile=effective_profile_mgr.profile,
         db_path=getattr(effective_store, "db_path", None),
         stores=service_stores,
+    )
+    # P45: environment-variable fallbacks follow the server model policy (read at call time,
+    # so a policy installed after the app is created applies too).
+    app.state.credential_store.environment_policy = functools.partial(
+        server_models_allowed, app.state
     )
     app.state.workspace_repo = effective_ws_repo
     app.state.profile_manager = effective_profile_mgr

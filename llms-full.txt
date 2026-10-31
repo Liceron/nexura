@@ -386,7 +386,7 @@ Or build and install a wheel into any Python 3.12 environment:
 
 ```bash
 uv build
-pip install "dist/nexura_runtime-0.7.1-py3-none-any.whl[studio]"
+pip install "dist/nexura_runtime-0.8.0-py3-none-any.whl[studio]"
 ```
 
 The repository builds one package per feature group (`uv build --all-packages` writes every
@@ -12550,7 +12550,7 @@ Agent tool names are the agent name lowercased with spaces replaced by `_` (clea
 
 ## AgentMCPServer arguments
 
-`AgentMCPServer(name, *, agents=(), tools=(), deps=None, runner=None, version="0.7.1", list_ttl_ms=60_000, instructions=None)`
+`AgentMCPServer(name, *, agents=(), tools=(), deps=None, runner=None, version="0.8.0", list_ttl_ms=60_000, instructions=None)`
 
 - `agents`: each becomes a tool named after the agent.
 - `tools`: `Tool` objects exposed with their own schemas.
@@ -17617,6 +17617,20 @@ nexura-runtime serve --chat-model gpt=openai:gpt-4o-mini --chat-model gem=gemini
   fixture keeps working.
 - `GET /api/v1/chat/models` returns `[{name, provider, label, offline, streaming, default}]`
   (no secrets, no model ids). `fake-deterministic` is always listed and is the default.
+- Your own provider keys: a workspace credential whose `provider` is `openai`, `anthropic`,
+  `gemini` (or `google`) or `sarvam` names chat models `cred:<credential_id>/<model_id>`
+  (`model_id` matches `^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$`). The listing adds a few suggested
+  ids per active credential (entries also carry `credential_id`); any well-formed id resolves.
+  They work wherever an allowlist name does (playground, saved agents, judge presets, the
+  builder's `model_ref`), use the stored secret only (never an environment fallback), are
+  billed to that key's provider account and need no price unless a cost cap applies. A
+  replaced or revoked key is never reused, and one workspace cannot name another's credential.
+- `create_api_app(server_model_policy=...)` (`(workspace_id) -> bool`, default `None`: every
+  workspace may) limits the server's own keys to the workspaces it allows. Any other workspace
+  sees only the fixture and its own `cred:` models; the server's models, workflow nodes that
+  call a provider with an environment key (`nexura.models.openai` and the like), the
+  configured embeddings (it gets the offline embedder) and credential `environment_variable`
+  fallbacks answer `403 SERVER_MODELS_NOT_AVAILABLE` (or `400` for credential creation).
 - Real models get the playground agent's instructions and tools. Each turn is capped by
   `chat_usage_limits` (default: 10 model requests and 50,000 total tokens per request; exceeding
   it returns `429 USAGE_LIMIT_EXCEEDED`). Usage is what the model reports; unknown stays `null`.
@@ -21682,7 +21696,7 @@ Args:
 
 ### `AgentMCPServer`
 
-class `AgentMCPServer(name: 'str', *, agents: 'Sequence[Agent | Team]' = (), tools: 'Sequence[Tool]' = (), deps: 'Any' = None, runner: 'Any' = None, version: 'str' = '0.7.1', list_ttl_ms: 'int' = 60000, instructions: 'str | None' = None) -> 'None'`
+class `AgentMCPServer(name: 'str', *, agents: 'Sequence[Agent | Team]' = (), tools: 'Sequence[Tool]' = (), deps: 'Any' = None, runner: 'Any' = None, version: 'str' = '0.8.0', list_ttl_ms: 'int' = 60000, instructions: 'str | None' = None) -> 'None'`
 
 ~~~text
 Expose agents and tools as an MCP server.
@@ -24344,7 +24358,7 @@ Binds named identifiers to trusted Python handler functions or BaseModules.
 
 ### `WorkflowEngine`
 
-class `WorkflowEngine(spec: 'WorkflowSpec', registry: 'ModuleRegistry', *, store: 'WorkflowCheckpointStore | None' = None, max_steps: 'int' = 50, timeout: 'float | None' = None, workspace_id: 'str' = 'default', budget: 'Any | None' = None, event_sink: 'Any | None' = None, artifact_store: 'Any | None' = None, credential_resolver: 'Any | None' = None, approval_required_handlers: 'frozenset[str] | set[str] | None' = None, approval_ttl: 'float' = 3600.0, max_map_writes_per_approval: 'int' = 50, policy_version: 'str' = '1.0.0', lease_ttl: 'float' = 30.0, guardrail_policy: 'Any | None' = None) -> 'None'`
+class `WorkflowEngine(spec: 'WorkflowSpec', registry: 'ModuleRegistry', *, store: 'WorkflowCheckpointStore | None' = None, max_steps: 'int' = 50, timeout: 'float | None' = None, workspace_id: 'str' = 'default', budget: 'Any | None' = None, event_sink: 'Any | None' = None, artifact_store: 'Any | None' = None, credential_resolver: 'Any | None' = None, approval_required_handlers: 'frozenset[str] | set[str] | None' = None, approval_ttl: 'float' = 3600.0, max_map_writes_per_approval: 'int' = 50, policy_version: 'str' = '1.0.0', lease_ttl: 'float' = 30.0, guardrail_policy: 'Any | None' = None, module_gate: 'Callable[[str, Any], None] | None' = None) -> 'None'`
 
 ~~~text
 Executes workflows deterministically with checkpoints and approval gates.

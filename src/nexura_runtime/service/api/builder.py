@@ -24,8 +24,13 @@ from nexura_runtime.builder_assistant import (
 )
 from nexura_runtime.credentials.errors import CredentialAccessDeniedError, CredentialNotFoundError
 from nexura_runtime.credentials.store import ScopedCredentialStore
-from nexura_runtime.service.api.chat_models import ChatModelRegistry, ChatModelUnavailableError
+from nexura_runtime.service.api.chat_models import ChatModelUnavailableError
+from nexura_runtime.service.api.credential_models import ModelAccessError, workspace_chat_models
 from nexura_runtime.service.api.credentials import _assert_visible
+from nexura_runtime.service.api.model_access import (
+    SERVER_MODELS_MESSAGE,
+    SERVER_MODELS_NOT_AVAILABLE,
+)
 from nexura_runtime.service.api.validation import validate_workflow_graph
 from nexura_runtime.service.api.workflows import _get_caller_context, _require_edit
 from nexura_runtime.templates.catalog import list_templates
@@ -116,10 +121,16 @@ def _check_rate(request: Request, workspace_id: str) -> None:
 
 
 def _resolve_model(request: Request, payload: DraftRequest, workspace_id: str) -> tuple[Any, str]:
-    chat_models: ChatModelRegistry = request.app.state.chat_models
+    # P45: the workspace's view; operator models are hidden from (and refused for) a workspace
+    # the server model policy refuses, and ``cred:<id>/<model>`` names its own keys' models.
+    chat_models = workspace_chat_models(request.app.state, workspace_id)
     cred_store: ScopedCredentialStore | None = getattr(request.app.state, "credential_store", None)
 
     if payload.model_ref:
+        if chat_models.refused(payload.model_ref):
+            raise _error(
+                SERVER_MODELS_NOT_AVAILABLE, SERVER_MODELS_MESSAGE, status.HTTP_403_FORBIDDEN
+            )
         if payload.model_ref not in chat_models:
             raise _error(
                 "MODEL_NOT_FOUND",
@@ -132,6 +143,8 @@ def _resolve_model(request: Request, payload: DraftRequest, workspace_id: str) -
             return chat_models.resolve(payload.model_ref), chat_models.display(payload.model_ref)
         except ChatModelUnavailableError as exc:
             raise _error("MODEL_UNAVAILABLE", str(exc), status.HTTP_400_BAD_REQUEST) from None
+        except ModelAccessError as exc:
+            raise _error(exc.code, exc.message, status.HTTP_400_BAD_REQUEST) from None
 
     if cred_store is not None:
         name = payload.credential
@@ -162,6 +175,13 @@ def _resolve_model(request: Request, payload: DraftRequest, workspace_id: str) -
                     f"Credential '{name}' is for '{meta.provider}', which cannot draft workflows.",
                     status.HTTP_400_BAD_REQUEST,
                 )
+            if not secret.reveal().strip():
+                # An empty key would make the provider read the server environment (P45).
+                raise _error(
+                    "CREDENTIAL_UNUSABLE",
+                    f"Credential '{name}' has an empty value.",
+                    status.HTTP_400_BAD_REQUEST,
+                )
             model_name = payload.model or DEFAULT_MODELS[meta.provider]
             try:
                 model = build_model_from_credential(meta.provider, model_name, secret.reveal())
@@ -175,7 +195,8 @@ def _resolve_model(request: Request, payload: DraftRequest, workspace_id: str) -
     elif payload.credential:
         raise _no_model()
 
-    # Operator-configured chat models (their own keys), never the offline fixture.
+    # Operator-configured chat models (their own keys), never the offline fixture. ``names``
+    # holds none for a workspace the server model policy refuses: no fallback to them (P45).
     for name in chat_models.names:
         if not chat_models.is_fake(name):
             try:

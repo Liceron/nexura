@@ -35,6 +35,7 @@ Safety rules enforced in code, not just in the prompt:
 from __future__ import annotations
 
 import copy
+import inspect
 import json
 import re
 import secrets
@@ -588,10 +589,20 @@ def _placeholder(spec: dict[str, Any], errors: list[ValidationIssue]) -> list[st
 
 
 async def _ask(model: Any, messages: list[Message], schema: dict[str, Any]) -> str:
-    kwargs: dict[str, Any] = {"timeout": MODEL_TIMEOUT_SECONDS}
-    if getattr(model, "supports_response_schema", False):
-        kwargs["response_schema"] = schema
-    response = await model.generate(messages, None, **kwargs)
+    if not getattr(model, "supports_response_schema", False):
+        response = await model.generate(messages, None, timeout=MODEL_TIMEOUT_SECONDS)
+    elif "response_schema" in inspect.signature(model.generate).parameters:
+        response = await model.generate(
+            messages, None, timeout=MODEL_TIMEOUT_SECONDS, response_schema=schema
+        )
+    else:
+        # Provider adapters (BaseProvider) take the schema on a GenerationRequest, as the
+        # agent runner sends it; they have no ``response_schema`` keyword.
+        from nexura_agents.providers.types import GenerationRequest
+
+        response = await model.generate(
+            GenerationRequest(messages=messages, schema=schema, timeout=MODEL_TIMEOUT_SECONDS)
+        )
     text = response.message.content or ""
     if len(text) > MAX_MODEL_REPLY_CHARS:
         raise DraftError("MODEL_REPLY_TOO_LARGE", "The model's reply was too large to use.")

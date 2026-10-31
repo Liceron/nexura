@@ -32,6 +32,14 @@ from nexura_runtime.evaluation._service_access import registered_agents
 from nexura_runtime.evaluation.studio_engine import StudioEvalError
 from nexura_runtime.observability.run_diagnostics import is_secret_key, redact_run_content
 from nexura_runtime.service.api.chat_models import DEFAULT_CHAT_MODEL
+from nexura_runtime.service.api.credential_models import workspace_chat_models
+from nexura_runtime.service.api.model_access import (
+    SERVER_MODELS_MESSAGE,
+    SERVER_MODELS_NOT_AVAILABLE,
+    ServerModelsNotAvailableError,
+    check_workflow_models,
+    server_models_allowed,
+)
 from nexura_runtime.service.api.ratelimit import SlidingWindowRateLimiter
 from nexura_runtime.service.api.runs import _assert_run_ownership, _assert_run_resource
 from nexura_runtime.service.auth.errors import CrossWorkspaceAccessError, PermissionDeniedError
@@ -812,6 +820,12 @@ async def create_run(request: Request, body: RunBody) -> dict[str, Any]:
         if wf is None:
             raise _not_found("WORKFLOW_NOT_FOUND", f"Workflow '{target_id}'")
         spec = WorkflowSpec.from_dict(wf["spec"])
+        try:
+            check_workflow_models(request.app.state, workspace, spec)
+        except ServerModelsNotAvailableError as exc:
+            raise HTTPException(
+                status_code=403, detail={"code": exc.code, "message": exc.message}
+            ) from None
         key = body.target.get("output_key")
         if key is not None and (not isinstance(key, str) or not key):
             raise HTTPException(
@@ -845,6 +859,18 @@ async def create_run(request: Request, body: RunBody) -> dict[str, Any]:
         version = body.target.get("version")
         target["version"] = str(version) if version is not None else None
     specs = body.scorers if body.scorers else engine.default_scorer_specs(cases)
+    # The host's judge model spends the server's key: not for a workspace the server model
+    # policy refuses (P45).
+    judge_model = getattr(request.app.state, "eval_judge_model", None)
+    if not server_models_allowed(request.app.state, workspace):
+        if judge_model is not None and any(
+            isinstance(item, dict) and item.get("type") == "llm_judge" for item in specs
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail={"code": SERVER_MODELS_NOT_AVAILABLE, "message": SERVER_MODELS_MESSAGE},
+            )
+        judge_model = None
     try:
         report = await asyncio.wait_for(
             engine.run_dataset(
@@ -852,7 +878,7 @@ async def create_run(request: Request, body: RunBody) -> dict[str, Any]:
                 scorer_specs=specs,
                 target=target,
                 repeats=body.repeats,
-                judge_model=getattr(request.app.state, "eval_judge_model", None),
+                judge_model=judge_model,
                 workflow=workflow,
                 agent_factory=factory,
             ),
@@ -960,10 +986,14 @@ def _redteam_model(request: Request) -> tuple[str, Any, bool]:
     """The server-configured red-team model: ``(name, model, offline)``.
 
     Offline fake unless the operator set ``app.state.redteam_model`` to a configured chat
-    model name; clients can never choose the model.
+    model name; clients can never choose the model. A workspace the server model policy
+    refuses (P45, ``model_access``) gets the offline fake, as if none were configured: the
+    operator's key is never spent for it.
     """
     registry = request.app.state.chat_models
     name = getattr(request.app.state, "redteam_model", None) or DEFAULT_CHAT_MODEL
+    if name in registry and not server_models_allowed(request.app.state, _ctx(request)[0]):
+        name = DEFAULT_CHAT_MODEL
     if name not in registry:
         raise HTTPException(
             status_code=503,
@@ -1023,7 +1053,12 @@ def _redteam_agent_model(request: Request, name: str) -> tuple[str, Any, bool]:
     is not used, because the pack sends many requests; the agent's model must still be a
     known chat model so a stale agent is reported instead of silently tested on another one.
     """
-    registry = request.app.state.chat_models
+    registry = workspace_chat_models(request.app.state, _ctx(request)[0])
+    if registry.refused(name):
+        raise HTTPException(
+            status_code=403,
+            detail={"code": SERVER_MODELS_NOT_AVAILABLE, "message": SERVER_MODELS_MESSAGE},
+        )
     if name not in registry:
         raise HTTPException(
             status_code=422,

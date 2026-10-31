@@ -406,6 +406,20 @@ nexura-runtime serve --chat-model gpt=openai:gpt-4o-mini --chat-model gem=gemini
   fixture keeps working.
 - `GET /api/v1/chat/models` returns `[{name, provider, label, offline, streaming, default}]`
   (no secrets, no model ids). `fake-deterministic` is always listed and is the default.
+- Your own provider keys: a workspace credential whose `provider` is `openai`, `anthropic`,
+  `gemini` (or `google`) or `sarvam` names chat models `cred:<credential_id>/<model_id>`
+  (`model_id` matches `^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$`). The listing adds a few suggested
+  ids per active credential (entries also carry `credential_id`); any well-formed id resolves.
+  They work wherever an allowlist name does (playground, saved agents, judge presets, the
+  builder's `model_ref`), use the stored secret only (never an environment fallback), are
+  billed to that key's provider account and need no price unless a cost cap applies. A
+  replaced or revoked key is never reused, and one workspace cannot name another's credential.
+- `create_api_app(server_model_policy=...)` (`(workspace_id) -> bool`, default `None`: every
+  workspace may) limits the server's own keys to the workspaces it allows. Any other workspace
+  sees only the fixture and its own `cred:` models; the server's models, workflow nodes that
+  call a provider with an environment key (`nexura.models.openai` and the like), the
+  configured embeddings (it gets the offline embedder) and credential `environment_variable`
+  fallbacks answer `403 SERVER_MODELS_NOT_AVAILABLE` (or `400` for credential creation).
 - Real models get the playground agent's instructions and tools. Each turn is capped by
   `chat_usage_limits` (default: 10 model requests and 50,000 total tokens per request; exceeding
   it returns `429 USAGE_LIMIT_EXCEEDED`). Usage is what the model reports; unknown stays `null`.

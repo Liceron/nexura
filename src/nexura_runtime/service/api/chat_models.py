@@ -3,7 +3,9 @@
 """Operator-configured model allowlist for the chat playground.
 
 Clients choose among names the operator configured; they can never supply provider
-strings or keys. API keys come only from the server environment.
+strings or keys. API keys come only from the server environment. Routes read it through
+``credential_models.WorkspaceChatModels``, which adds the workspace's own provider keys
+(``cred:<credential>/<model>``) and applies ``app.state.server_model_policy`` (P45).
 """
 
 from __future__ import annotations
@@ -61,6 +63,9 @@ class ChatModelRegistry:
                 raise ValueError(f"'{DEFAULT_CHAT_MODEL}' is reserved for the offline fixture.")
             if not name.strip():
                 raise ValueError("Chat model names must not be empty.")
+            if name.startswith("cred:"):
+                # Reserved for the workspace's own provider keys (credential_models).
+                raise ValueError(f"Chat model name '{name}': the 'cred:' prefix is reserved.")
             if isinstance(model, str):
                 provider = model.partition(":")[0] if ":" in model else "unknown"
                 self._entries[name] = _Entry(name, provider, model, None)

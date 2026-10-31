@@ -48,7 +48,9 @@ class CreateCredentialRequest(BaseModel):
         description="Transient secret value; immediately secured in memory/vault, never returned"
     )
     environment_variable: str | None = Field(
-        default=None, description="Optional environment variable fallback"
+        default=None,
+        description="Optional environment variable fallback (refused for workspaces that may "
+        "not use the server's keys)",
     )
 
 
@@ -114,7 +116,12 @@ def _get_caller_context(request: Request) -> tuple[str, Principal, WorkspaceRole
 def _get_credential_store(request: Request) -> ScopedCredentialStore:
     store = getattr(request.app.state, "credential_store", None)
     if store is None:
+        import functools
+
+        from nexura_runtime.service.api.model_access import server_models_allowed
+
         store = ScopedCredentialStore()
+        store.environment_policy = functools.partial(server_models_allowed, request.app.state)
         request.app.state.credential_store = store
     return store
 
@@ -187,6 +194,23 @@ async def create_credential(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail={"code": "EMPTY_SECRET", "message": "Secret cannot be empty."},
         )
+
+    if payload.environment_variable:
+        from nexura_runtime.service.api.model_access import (
+            SERVER_MODELS_NOT_AVAILABLE,
+            server_models_allowed,
+        )
+
+        if not server_models_allowed(request.app.state, caller_ws):
+            # P45: the fallback would read the server's own environment (its keys).
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": SERVER_MODELS_NOT_AVAILABLE,
+                    "message": "This workspace cannot use server environment variables; store "
+                    "the secret itself (Settings → AI keys for model providers).",
+                },
+            )
 
     store = _get_credential_store(request)
 

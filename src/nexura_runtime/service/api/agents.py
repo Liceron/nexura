@@ -9,7 +9,8 @@ workspace membership; create and update need the ``edit`` permission; delete nee
 ``field_errors``).
 
 Every name in a spec is checked against this app when the agent is saved and again each time
-it runs: the model must be in the chat model allowlist, tools must be registered modules
+it runs: the model must be in the chat model allowlist (or one of the workspace's own provider
+keys, ``cred:<credential>/<model>``), tools must be registered modules
 that are not internal and not agent nodes, knowledge collections and skills must belong to
 the workspace. Any tool whose module can write is forced to need approval.
 """
@@ -52,10 +53,20 @@ from nexura_runtime.agents_store import (
     AgentStoreError,
 )
 from nexura_runtime.runtime.agents.saved import AGENT_NODE_MODULE_ID, BuiltAgent
-from nexura_runtime.service.api.chat_models import ChatModelRegistry, ChatModelUnavailableError
+from nexura_runtime.service.api.chat_models import ChatModelUnavailableError
+from nexura_runtime.service.api.credential_models import (
+    ModelAccessError,
+    WorkspaceChatModels,
+    workspace_chat_models,
+)
 from nexura_runtime.service.api.credentials import _enforce_perm, _get_caller_context
 from nexura_runtime.service.api.guardrails import caller_is_admin, policy_view, preset_catalog
 from nexura_runtime.service.api.knowledge import _workspace_collections
+from nexura_runtime.service.api.model_access import (
+    SERVER_MODELS_MESSAGE,
+    SERVER_MODELS_NOT_AVAILABLE,
+    ServerModelsNotAvailableError,
+)
 from nexura_runtime.service.api.sessions import (
     _knowledge_reply,
     knowledge_search_tool,
@@ -247,9 +258,10 @@ class AgentRuntime:
 
     # ----------------------------------------------------------------- checks
 
-    def _models(self) -> ChatModelRegistry:
-        registry: ChatModelRegistry = self._state.chat_models
-        return registry
+    def _models(self, workspace_id: str) -> WorkspaceChatModels:
+        """The chat models ``workspace_id`` may name: the operator's (unless the server model
+        policy refuses the workspace) and its own credentials' ``cred:<id>/<model>``."""
+        return workspace_chat_models(self._state, workspace_id)
 
     def _skill_names(self, workspace_id: str) -> set[str] | None:
         skills = getattr(self._state, "skills_store", None)
@@ -260,8 +272,11 @@ class AgentRuntime:
     def check(self, workspace_id: str, spec: AgentSpec) -> None:
         """Refuse names that do not exist for this workspace (raises AgentSpecError)."""
         errors: list[dict[str, str]] = []
-        models = self._models()
-        if spec.model not in models:
+        models = self._models(workspace_id)
+        refused = models.refused(spec.model)
+        if refused:
+            errors.append({"field": "model", "message": SERVER_MODELS_MESSAGE})
+        elif spec.model not in models:
             errors.append(
                 {
                     "field": "model",
@@ -304,18 +319,28 @@ class AgentRuntime:
         )
         if errors:
             shown = "; ".join(e["message"] for e in errors[:5])
-            code = (
-                "MODEL_NOT_AVAILABLE"
-                if [e["field"] for e in errors] == ["model"]
-                else "AGENT_INVALID"
-            )
+            fields = [e["field"] for e in errors]
+            refused_judge = any(e.get("code") == SERVER_MODELS_NOT_AVAILABLE for e in errors)
+            if refused or (refused_judge and all(f.startswith("guardrails") for f in fields)):
+                code = SERVER_MODELS_NOT_AVAILABLE
+            elif fields == ["model"]:
+                code = "MODEL_NOT_AVAILABLE"
+            else:
+                code = "AGENT_INVALID"
+            errors = [{k: v for k, v in e.items() if k != "code"} for e in errors]
             raise AgentSpecError(f"Invalid agent: {shown}", errors, code=code)
 
     # ------------------------------------------------------------------ build
 
-    def resolve_model(self, spec: AgentSpec) -> Any | None:
-        """The configured model instance, or None for the offline fixture."""
-        models = self._models()
+    def resolve_model(self, spec: AgentSpec, workspace_id: str) -> Any | None:
+        """The configured model instance for ``workspace_id``, or None for the offline fixture."""
+        models = self._models(workspace_id)
+        if models.refused(spec.model):
+            raise AgentSpecError(
+                SERVER_MODELS_MESSAGE,
+                [{"field": "model", "message": SERVER_MODELS_MESSAGE}],
+                code=SERVER_MODELS_NOT_AVAILABLE,
+            )
         if spec.model not in models:
             raise AgentSpecError(
                 f"Model '{spec.model}' is not available on this server.",
@@ -328,6 +353,10 @@ class AgentRuntime:
             return models.resolve(spec.model)
         except ChatModelUnavailableError as exc:
             raise AgentSpecError(str(exc), code="MODEL_UNAVAILABLE") from None
+        except ServerModelsNotAvailableError as exc:
+            raise AgentSpecError(exc.message, code=SERVER_MODELS_NOT_AVAILABLE) from None
+        except ModelAccessError as exc:
+            raise AgentSpecError(exc.message, code=exc.code) from None
 
     def build_agent(
         self, workspace_id: str, agent_id: str, context: ExecutionContext | None
@@ -348,7 +377,7 @@ class AgentRuntime:
     ) -> BuiltAgent:
         """An ``Agent`` for ``spec``; ``replace_approval_tools(name)`` swaps write tools."""
         self.check(workspace_id, spec)
-        model = self.resolve_model(spec)
+        model = self.resolve_model(spec, workspace_id)
         tools: list[Tool] = []
         gated: list[str] = []
         for module_id in spec.tools:
@@ -375,7 +404,7 @@ class AgentRuntime:
         instructions = spec.instructions or f"You are the '{spec.name}' agent."
         from nexura_runtime.service.api.guardrails import build_agent_guardrails
 
-        guards = build_agent_guardrails(spec.guardrails, self._models(), spec.model)
+        guards = build_agent_guardrails(spec.guardrails, self._models(workspace_id), spec.model)
         if spec.skills:
             skills = getattr(self._state, "skills_store", None)
             if skills is None:
@@ -490,7 +519,7 @@ async def agent_options(request: Request) -> dict[str, Any]:
     ws_repo = getattr(request.app.state, "workspace_repo", None)
     skills = runtime._skill_names(workspace_id)
     return {
-        "models": runtime._models().describe(),
+        "models": runtime._models(workspace_id).describe(),
         "tools": runtime.tool_options(workspace_id),
         "knowledge_collections": (
             _workspace_collections(ws_repo, workspace_id) if ws_repo else ["default"]

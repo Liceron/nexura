@@ -2,6 +2,27 @@
 
 All notable changes to this project.
 
+## 0.8.0 (2026-10-31)
+
+- **Server model keys only for allowed workspaces.** `create_api_app(server_model_policy=...)`
+  (default `None`: unchanged) lets a host refuse the server's environment model keys to a
+  workspace. For a refused workspace the operator's chat models are hidden and refused
+  (`SERVER_MODELS_NOT_AVAILABLE`); workflows with provider nodes (`nexura.models.*`, and any
+  module needing an `api_key` credential) are refused at save, at every run start and when a
+  step resolves its handler; the builder never falls back to operator models; knowledge
+  search uses the offline embedder; and credentials with an environment-variable fallback are
+  refused.
+- **Bring your own key.** A workspace credential for `openai`, `anthropic`, `gemini`/`google`
+  or `sarvam` names chat models `cred:<credential>/<model>`, usable in the chat playground,
+  agents, guardrail judges, evaluations and the builder. They are built with the stored key
+  only (never an environment fallback), cached per workspace and key digest (a replaced or
+  revoked key is never reused) and listed with suggested model ids; any well-formed id works.
+- The workflow builder's draft request works with real provider adapters (it raised
+  `TypeError` because the schema went in a keyword they do not accept).
+- Provider-failure logs redact key-shaped text, including a workspace's own key echoed back
+  by a provider.
+- Studio's chat picker shows own-key models by their label.
+
 ## 0.7.1 (2026-10-31)
 
 Checked against the real services: `OpenAIModeration` with OpenAI's Moderation API, and the

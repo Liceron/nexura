@@ -244,7 +244,8 @@ export function ChatPlayground({ initialAgentId = '' }: { initialAgentId?: strin
           >
             {models.map((m) => (
               <option key={m.name} value={m.name}>
-                {m.name}
+                {/* Own-key models (cred:<key>/<model>) read better by their server label. */}
+                {m.name.startsWith('cred:') ? m.label || m.name : m.name}
                 {m.offline ? ' ' + t('ui.offline') : ''}
               </option>
             ))}
