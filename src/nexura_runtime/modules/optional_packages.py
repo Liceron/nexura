@@ -13,6 +13,9 @@ with: pip install <package>".
   report "pip install nexura-connectors" instead of an unknown module or an ``ImportError``.
 - ``nexura-postgres`` (``nexura_postgres``): PostgreSQL storage (``get_storage_repository``
   with a ``postgresql://`` URI) and the pgvector store.
+- ``nexura-qdrant`` (``nexura_qdrant``): the Qdrant vector store.
+- ``nexura-vectorstores`` (``nexura_vectorstores``): HTTP adapters for Chroma, Pinecone,
+  Weaviate, Milvus, Elasticsearch and OpenSearch.
 - ``nexura-sandbox`` (``nexura_sandbox``): the bubblewrap, gVisor and WASI sandbox backends
   (``build_backend``); without it they probe as unavailable and Monty stays the default.
 - ``nexura-studio`` (``nexura_studio``): the ``nexura-studio`` launcher and its web page.
@@ -37,6 +40,8 @@ class OptionalPackage(NamedTuple):
 
 
 POSTGRES_PACKAGE = OptionalPackage("nexura-postgres", "nexura_postgres")
+QDRANT_PACKAGE = OptionalPackage("nexura-qdrant", "nexura_qdrant")
+VECTORSTORES_PACKAGE = OptionalPackage("nexura-vectorstores", "nexura_vectorstores")
 SANDBOX_PACKAGE = OptionalPackage("nexura-sandbox", "nexura_sandbox")
 STUDIO_PACKAGE = OptionalPackage("nexura-studio", "nexura_studio")
 

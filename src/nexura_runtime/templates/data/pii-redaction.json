@@ -1,0 +1,73 @@
+{
+  "template_version": 1,
+  "id": "pii-redaction",
+  "title": "PII redaction before sharing",
+  "description": "Finds emails, card numbers (Luhn-checked), phone numbers and IP addresses in text and replaces them with labels, so the text can be shared or sent to a model.",
+  "category": "governance",
+  "difficulty": "beginner",
+  "tags": [
+    "privacy",
+    "pii",
+    "redaction",
+    "security"
+  ],
+  "required_modules": [
+    "tpl_pii_detect",
+    "tpl_pii_redact"
+  ],
+  "required_credentials": [],
+  "spec": {
+    "spec_version": 1,
+    "name": "PII redaction before sharing",
+    "entry_node": "detect",
+    "nodes": {
+      "detect": {
+        "id": "detect",
+        "handler": "tpl_pii_detect",
+        "transitions": {},
+        "default_transition": "redact",
+        "requires_approval": false
+      },
+      "redact": {
+        "id": "redact",
+        "handler": "tpl_pii_redact",
+        "transitions": {},
+        "default_transition": null,
+        "requires_approval": false
+      }
+    },
+    "terminal_nodes": [
+      "redact"
+    ]
+  },
+  "sample_input": {
+    "text": "Contact asha@example.com, card 4111 1111 1111 1111, from 10.0.0.12."
+  },
+  "fixture": {
+    "runs": [
+      {
+        "name": "emails, cards and IPs are redacted",
+        "input": {
+          "text": "Contact asha@example.com, card 4111 1111 1111 1111, from 10.0.0.12."
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "pii_found.email": 1,
+          "pii_found.card": 1,
+          "pii_found.ip": 1,
+          "redacted": "Contact [EMAIL], card [CARD], from [IP]."
+        }
+      },
+      {
+        "name": "a phone number is redacted",
+        "input": {
+          "text": "Call me on +91 98765 43210 today"
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "redacted": "Call me on [PHONE] today"
+        }
+      }
+    ]
+  }
+}

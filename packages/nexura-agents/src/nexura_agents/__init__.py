@@ -14,7 +14,7 @@ import importlib
 import importlib.util
 from typing import TYPE_CHECKING, Any
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 _EXPORTS: dict[str, str] = {
     # Build and run agents

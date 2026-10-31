@@ -1,0 +1,150 @@
+{
+  "template_version": 1,
+  "id": "invoice-reconciliation",
+  "title": "Invoice and payment reconciliation",
+  "description": "Matches payments to invoices by reference and then by amount, and reports unmatched invoices and payments as exceptions for finance to review.",
+  "category": "finance",
+  "difficulty": "intermediate",
+  "tags": [
+    "finance",
+    "reconciliation",
+    "accounting"
+  ],
+  "required_modules": [
+    "tpl_recon_flag",
+    "tpl_recon_match",
+    "tpl_recon_report"
+  ],
+  "required_credentials": [],
+  "spec": {
+    "spec_version": 1,
+    "name": "Invoice and payment reconciliation",
+    "entry_node": "match",
+    "nodes": {
+      "match": {
+        "id": "match",
+        "handler": "tpl_recon_match",
+        "transitions": {
+          "clean": "report",
+          "exceptions": "flag"
+        },
+        "default_transition": "flag",
+        "requires_approval": false
+      },
+      "flag": {
+        "id": "flag",
+        "handler": "tpl_recon_flag",
+        "transitions": {},
+        "default_transition": "report",
+        "requires_approval": false
+      },
+      "report": {
+        "id": "report",
+        "handler": "tpl_recon_report",
+        "transitions": {},
+        "default_transition": null,
+        "requires_approval": false
+      }
+    },
+    "terminal_nodes": [
+      "report"
+    ]
+  },
+  "sample_input": {
+    "invoices": [
+      {
+        "id": "INV-1",
+        "amount": 100
+      },
+      {
+        "id": "INV-2",
+        "amount": 250
+      }
+    ],
+    "payments": [
+      {
+        "id": "P-9",
+        "amount": 100,
+        "reference": "INV-1"
+      },
+      {
+        "id": "P-10",
+        "amount": 250
+      }
+    ]
+  },
+  "fixture": {
+    "runs": [
+      {
+        "name": "every invoice is matched",
+        "input": {
+          "invoices": [
+            {
+              "id": "INV-1",
+              "amount": 100
+            },
+            {
+              "id": "INV-2",
+              "amount": 250
+            }
+          ],
+          "payments": [
+            {
+              "id": "P-9",
+              "amount": 100,
+              "reference": "INV-1"
+            },
+            {
+              "id": "P-10",
+              "amount": 250
+            }
+          ]
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "report.matched": 2,
+          "report.status": "balanced"
+        },
+        "expect_absent": [
+          "exceptions"
+        ]
+      },
+      {
+        "name": "unmatched items are exceptions",
+        "input": {
+          "invoices": [
+            {
+              "id": "INV-1",
+              "amount": 100
+            },
+            {
+              "id": "INV-3",
+              "amount": 75
+            }
+          ],
+          "payments": [
+            {
+              "id": "P-1",
+              "amount": 100
+            },
+            {
+              "id": "P-2",
+              "amount": 60
+            }
+          ]
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "reconciliation.unmatched_invoices": [
+            "INV-3"
+          ],
+          "reconciliation.unmatched_payments": [
+            "P-2"
+          ],
+          "exceptions": 2,
+          "report.status": "needs_review"
+        }
+      }
+    ]
+  }
+}

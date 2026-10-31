@@ -1,0 +1,121 @@
+{
+  "template_version": 1,
+  "id": "leave-request",
+  "title": "Leave request approval",
+  "description": "Counts the working days in a leave request, approves short requests automatically, sends longer ones to the manager and declines requests above the remaining balance.",
+  "category": "hr",
+  "difficulty": "beginner",
+  "tags": [
+    "hr",
+    "leave",
+    "approval"
+  ],
+  "required_modules": [
+    "tpl_leave_approve",
+    "tpl_leave_check",
+    "tpl_leave_deny"
+  ],
+  "required_credentials": [],
+  "spec": {
+    "spec_version": 1,
+    "name": "Leave request approval",
+    "entry_node": "check",
+    "nodes": {
+      "check": {
+        "id": "check",
+        "handler": "tpl_leave_check",
+        "transitions": {
+          "auto": "approve",
+          "manager": "manager",
+          "deny": "deny"
+        },
+        "default_transition": "deny",
+        "requires_approval": false
+      },
+      "manager": {
+        "id": "manager",
+        "handler": "tpl_leave_approve",
+        "transitions": {},
+        "default_transition": null,
+        "requires_approval": true
+      },
+      "approve": {
+        "id": "approve",
+        "handler": "tpl_leave_approve",
+        "transitions": {},
+        "default_transition": null,
+        "requires_approval": false
+      },
+      "deny": {
+        "id": "deny",
+        "handler": "tpl_leave_deny",
+        "transitions": {},
+        "default_transition": null,
+        "requires_approval": false
+      }
+    },
+    "terminal_nodes": [
+      "manager",
+      "approve",
+      "deny"
+    ]
+  },
+  "sample_input": {
+    "start": "2026-11-09",
+    "end": "2026-11-13",
+    "balance": 12
+  },
+  "fixture": {
+    "runs": [
+      {
+        "name": "two days are approved automatically",
+        "input": {
+          "start": "2026-11-12",
+          "end": "2026-11-13",
+          "balance": 10
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "leave.days": 2,
+          "leave.status": "approved",
+          "leave.remaining": 8.0
+        },
+        "expect_path": [
+          "check",
+          "approve"
+        ]
+      },
+      {
+        "name": "a week goes to the manager",
+        "input": {
+          "start": "2026-11-09",
+          "end": "2026-11-15",
+          "balance": 12
+        },
+        "approval": {
+          "node": "manager",
+          "decision": "approve"
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "leave.days": 5,
+          "leave.status": "approved",
+          "leave.remaining": 7.0
+        }
+      },
+      {
+        "name": "a request above the balance is declined",
+        "input": {
+          "start": "2026-11-09",
+          "end": "2026-11-20",
+          "balance": 3
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "leave.status": "denied",
+          "leave.reason": "not enough balance"
+        }
+      }
+    ]
+  }
+}

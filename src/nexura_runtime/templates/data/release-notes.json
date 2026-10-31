@@ -1,0 +1,97 @@
+{
+  "template_version": 1,
+  "id": "release-notes",
+  "title": "Release notes from commits",
+  "description": "Groups conventional commit messages into features, fixes and other changes, calls out breaking changes, writes the notes and publishes them after approval.",
+  "category": "engineering",
+  "difficulty": "beginner",
+  "tags": [
+    "engineering",
+    "release",
+    "changelog",
+    "approval"
+  ],
+  "required_modules": [
+    "tpl_release_group",
+    "tpl_release_publish",
+    "tpl_release_write"
+  ],
+  "required_credentials": [
+    "model_api_key"
+  ],
+  "spec": {
+    "spec_version": 1,
+    "name": "Release notes from commits",
+    "entry_node": "group",
+    "nodes": {
+      "group": {
+        "id": "group",
+        "handler": "tpl_release_group",
+        "transitions": {},
+        "default_transition": "write",
+        "requires_approval": false
+      },
+      "write": {
+        "id": "write",
+        "handler": "tpl_release_write",
+        "transitions": {},
+        "default_transition": "publish",
+        "requires_approval": false
+      },
+      "publish": {
+        "id": "publish",
+        "handler": "tpl_release_publish",
+        "transitions": {},
+        "default_transition": null,
+        "requires_approval": true
+      }
+    },
+    "terminal_nodes": [
+      "publish"
+    ]
+  },
+  "sample_input": {
+    "version": "1.4.0",
+    "commits": [
+      "feat: export dashboards to CSV",
+      "fix(auth): refresh tokens on expiry",
+      "docs: add webhook guide",
+      "feat!: drop Python 3.10"
+    ]
+  },
+  "fixture": {
+    "runs": [
+      {
+        "name": "commits are grouped and published",
+        "input": {
+          "version": "1.4.0",
+          "commits": [
+            "feat: export dashboards to CSV",
+            "fix(auth): refresh tokens on expiry",
+            "docs: add webhook guide",
+            "feat!: drop Python 3.10",
+            "chore: bump deps"
+          ]
+        },
+        "approval": {
+          "node": "publish",
+          "decision": "approve"
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "changes.Features": [
+            "export dashboards to CSV",
+            "drop Python 3.10"
+          ],
+          "breaking": [
+            "drop Python 3.10"
+          ],
+          "published.version": "1.4.0"
+        },
+        "expect_contains": {
+          "notes": "### Breaking changes"
+        }
+      }
+    ]
+  }
+}

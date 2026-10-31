@@ -266,17 +266,65 @@ def _catalog_text(modules: list[dict[str, Any]], description: str = "") -> str:
     return "\n".join(lines)
 
 
+_FILLER = frozenset(
+    {
+        "the",
+        "and",
+        "for",
+        "with",
+        "that",
+        "this",
+        "from",
+        "into",
+        "over",
+        "under",
+        "before",
+        "after",
+        "then",
+        "than",
+        "when",
+        "what",
+        "which",
+        "who",
+        "are",
+        "was",
+        "were",
+        "has",
+        "have",
+        "will",
+        "can",
+        "not",
+        "you",
+        "your",
+        "our",
+        "its",
+        "their",
+        "them",
+        "they",
+    }
+)
+
+
+def _content_words(text: str) -> set[str]:
+    """Words that say what a workflow does: no filler, plurals folded ("refunds" is "refund")."""
+    found = set()
+    for word in re.findall(r"[a-z0-9]+", text.lower()):
+        if len(word) < 3 or word in _FILLER:
+            continue
+        found.add(word[:-1] if len(word) > 4 and word.endswith("s") else word)
+    return found
+
+
 def _template_examples(
     templates: Sequence[Template],
     installed: set[str],
     description: str,
     limit: int = _TEMPLATE_EXAMPLE_LIMIT,
 ) -> str:
-    words = set(re.findall(r"[a-z0-9]+", description.lower()))
+    words = _content_words(description)
 
     def overlap(tpl: Template) -> int:
-        text = f"{tpl.title} {tpl.description} {' '.join(tpl.tags)}".lower()
-        return len(words & set(re.findall(r"[a-z0-9]+", text)))
+        return len(words & _content_words(f"{tpl.title} {tpl.description} {' '.join(tpl.tags)}"))
 
     chosen: list[str] = []
     for tpl in sorted(templates, key=overlap, reverse=True):

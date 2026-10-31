@@ -36,6 +36,119 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
+## More vector databases
+
+The new, source-only `packages/nexura-vectorstores` package implements the runtime's
+`VectorStore` protocol through HTTP, with no vendor SDK. Install it from the
+checkout with `pip install ./packages/nexura-vectorstores` after installing the
+workspace's runtime and agents packages. The runtime also declares a
+`vectorstores` extra for the eventual package release; the new package has not
+been published. These adapters are usable directly through the vector protocol;
+the hybrid SQLite/FTS5 index described above keeps its current storage.
+
+| Database | Class in `nexura_vectorstores` | URL / environment variables | Metrics | Filter support | Notes |
+|---|---|---|---|---|---|
+| Chroma 1.x | `ChromaVectorStore` | `http://localhost:8000`; `NEXURA_CHROMA_URL`, `NEXURA_CHROMA_API_KEY` | cosine, dot_product (ip), euclidean (l2) | Native positive scalar comparisons, AND/OR; remainder post-filtered | REST v2; existing tenant/database, configurable via constructor |
+| Pinecone serverless / Local | `PineconeVectorStore` | Index URL required; `NEXURA_PINECONE_URL`, `NEXURA_PINECONE_API_KEY` | cosine, dot_product (dotproduct), euclidean | Native positive scalar comparisons, AND/OR; remainder post-filtered | One namespace per generation; provision index first, constructor dimensions/metric must match |
+| Weaviate 1.2x | `WeaviateVectorStore` | `http://localhost:8080`; `NEXURA_WEAVIATE_URL`, `NEXURA_WEAVIATE_API_KEY` | cosine, dot_product (dot), euclidean (l2-squared) | Native scalar equality/numeric range, And/Or; remainder post-filtered | Explicit schema, no vectorizer, GraphQL nearVector |
+| Milvus 2.4+ / Zilliz | `MilvusVectorStore` | `http://localhost:19530`; `NEXURA_MILVUS_URL`, `NEXURA_MILVUS_TOKEN` | cosine (COSINE), dot_product (IP), euclidean (L2) | Native positive scalar expressions, AND/OR; remainder post-filtered | RESTful v2; VARCHAR ids, dynamic fields, strong reads; `db_name="default"` |
+| Elasticsearch 8.x | `ElasticsearchVectorStore` | `http://localhost:9200`; `NEXURA_ELASTICSEARCH_URL`, `NEXURA_ELASTICSEARCH_API_KEY` | cosine, dot_product (max_inner_product), euclidean (l2_norm) | Native scalar equality/range/set/negative, bool AND/OR; remainder post-filtered | dense_vector + knn; arbitrary-norm dot product needs 8.11+ |
+| OpenSearch 2.x | `OpenSearchVectorStore` | `http://localhost:9200`; `NEXURA_OPENSEARCH_URL`, `NEXURA_OPENSEARCH_TOKEN` | cosine (cosinesimil), dot_product (innerproduct), euclidean (l2) | Native scalar equality/range/set/negative, bool AND/OR; remainder post-filtered | knn_vector, index.knn enabled, nmslib HNSW; outer filters |
+
+Every filter supports `$and/$or`, `$eq/$ne/$in/$nin`,
+`$gt/$gte/$lt/$lte` and `$contains`. Substring/list containment, JSON/null
+equality, string ordering and vendor differences around missing fields use
+`matches_filter` after over-fetching. Scores are canonical Nexura cosine/dot
+similarities or `1 / (1 + euclidean_distance)`, always higher is better.
+
+Each adapter persists its workspace/collection manifest and separate generation
+spaces. A single manifest replacement switches the active generation and retires
+the old one together. The instance serializes writers; coordinate multiple
+processes externally. Server consistency (including Pinecone eventual visibility)
+still applies. Following Qdrant, active and building generations accept upserts;
+retired/dropped generations reject them. Soft deletes persist tombstones;
+hard deletes remove records, including existing tombstones.
+
+Fallback searches over-fetch the complete candidate set, up to 10,000 stored
+records including tombstones; larger fallback pools fail explicitly. Fully native
+Pinecone, Milvus and Elasticsearch queries fetch just top_k, as do unfiltered
+Chroma/Weaviate queries. Chroma filtered searches account for stale metadata
+projections; OpenSearch nmslib outer filters always need the complete pool.
+Pinecone exact counts share the 10,000 bound. Vendor payload limits apply to records and manifest
+history. See the [package README](../packages/nexura-vectorstores/README.md)
+for transport injection, credential headers, API references and live-test setup.
+Offline MockTransport conformance is provided; these APIs have not been
+validated against live servers in this assignment.
+
+The following examples require configured disposable servers and make no model
+calls. First define this shared operation:
+
+```python notest
+import asyncio
+from nexura_runtime.knowledge.vector.models import VectorRecord, VectorSearchQuery
+
+async def index_vectors(store):
+    async with store:
+        await store.create_collection("demo", "documents", dimensions=2)
+        await store.upsert("demo", "documents", [
+            VectorRecord(
+                id="one", workspace_id="demo", collection_id="documents",
+                generation_id="", vector=[1.0, 0.0], text="Offline-generated vector",
+                metadata={"kind": "guide"},
+            )
+        ])
+        return await store.search("demo", VectorSearchQuery(
+            workspace_id="demo", collection_id="documents", vector=[1.0, 0.0],
+            filter={"kind": "guide"}, top_k=1,
+        ))
+```
+
+Chroma (default tenant/database must exist):
+
+```python notest
+from nexura_vectorstores import ChromaVectorStore
+hits = asyncio.run(index_vectors(ChromaVectorStore()))
+```
+
+Pinecone (set the index URL and key; this example needs a provisioned
+two-dimensional cosine index):
+
+```python notest
+from nexura_vectorstores import PineconeVectorStore
+hits = asyncio.run(index_vectors(PineconeVectorStore(dimensions=2, metric="cosine")))
+```
+
+Weaviate:
+
+```python notest
+from nexura_vectorstores import WeaviateVectorStore
+hits = asyncio.run(index_vectors(WeaviateVectorStore()))
+```
+
+Milvus / Zilliz:
+
+```python notest
+from nexura_vectorstores import MilvusVectorStore
+hits = asyncio.run(index_vectors(MilvusVectorStore(db_name="default")))
+```
+
+Elasticsearch:
+
+```python notest
+from nexura_vectorstores import ElasticsearchVectorStore
+hits = asyncio.run(index_vectors(ElasticsearchVectorStore()))
+```
+
+OpenSearch:
+
+```python notest
+from nexura_vectorstores import OpenSearchVectorStore
+hits = asyncio.run(index_vectors(OpenSearchVectorStore()))
+```
+
+For a keyless, network-free run, use
+`python examples/vectorstores_offline.py`.
+
 ## How search works
 
 1. The query is reduced to safe terms (letters, digits and Devanagari only). FTS5 operators,

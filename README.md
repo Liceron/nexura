@@ -171,11 +171,11 @@ Workflow JSON never contains code: only trusted registered handlers run. Approva
 
 Historical fake-model measurements establish neither real-model quality, provider bills/cache savings, production scale, customer demand nor superiority over other frameworks. The older gate that skipped a required browser check remains documented separately. The approximately 135 ms SDK import on 2026-10-09 (Python 3.12, warm cache, lazy provider loading) is a single local measurement, not a benchmark. See the [verification record](https://github.com/Liceron/nexura/blob/main/docs/testing.md#verification-record) for the complete chronology and limitations.
 
-Version 0.4.0 was published to PyPI and npm on 2026-10-25; 0.4.1 on 2026-10-29; 0.4.3 on 2026-10-30; 0.5.0 (Apache-2.0) on 2026-10-30. Copyright holder and security contact: Liceron, info@liceron.in.
+Version 0.4.0 was published to PyPI and npm on 2026-10-25; 0.4.1 on 2026-10-29; 0.4.3 on 2026-10-30; 0.5.0 (Apache-2.0) on 2026-10-30; 0.6.0 on 2026-10-31. Copyright holder and security contact: Liceron, info@liceron.in.
 
 ## Documentation map
 
-[Documentation index](https://github.com/Liceron/nexura/blob/main/docs/README.md): **47 guides** plus the generated [API reference](https://github.com/Liceron/nexura/blob/main/docs/api-reference.md). Offline Python examples are executed by tests; blocks needing a real model or running service are marked and skipped.
+[Documentation index](https://github.com/Liceron/nexura/blob/main/docs/README.md): **48 guides** plus the generated [API reference](https://github.com/Liceron/nexura/blob/main/docs/api-reference.md). Offline Python examples are executed by tests; blocks needing a real model or running service are marked and skipped.
 
 | Start with | Continue to |
 |---|---|

@@ -1,20 +1,20 @@
 # Packages and installation
 
-The package inventory, source/wheel installation commands and backend requirements for the open-source edition. All packages are alpha (0.5) and published on PyPI and npm. See the [documentation index](README.md) for the subject guides.
+The package inventory, source/wheel installation commands and backend requirements for the open-source edition. Released packages are alpha (0.6) and published on PyPI and npm; source-only additions are marked below. See the [documentation index](README.md) for the subject guides.
 
 ## Package overview
 
 A typed Python SDK for building operational agents and approval-gated workflows,
 with a local REST service, a TypeScript API client and a browser Studio.
 
-> **Status: alpha (0.5); first published 2026-10-25.** Install with `pip` or `npm` as below, or from a
+> **Status: alpha (0.6); first published 2026-10-25.** Install with `pip` or `npm` as below, or from a
 > source checkout.
 
 > **Just want to build agents?** Start with **[Nexura Agents](../packages/nexura-agents/README.md)**
 > (`pip install nexura-agents`): the standalone agent SDK, two dependencies, offline-testable.
 > This repository's `nexura-runtime` is the full platform built on top of it.
 
-> **Guides:** [docs/](README.md) has 47 guides (agents, teams, tools, harness, MCP and OpenAPI,
+> **Guides:** [docs/](README.md) has 48 guides (agents, teams, tools, harness, MCP and OpenAPI,
 > A2A, memory, prompts, structured output, approvals, workflows, providers, tracing and
 > more) plus an index and a generated [API reference](api-reference.md). Every
 > offline example on those pages is run by the test suite; blocks needing a real model or
@@ -31,6 +31,7 @@ with a local REST service, a TypeScript API client and a browser Studio.
 | `packages/nexura-connectors` | `nexura-connectors` (Python, import `nexura_connectors`) | The 15 SaaS connectors (Slack, GitHub, Google Drive and Sheets, S3, Postgres, MySQL, email and more) as `nexura.connectors.*` workflow modules. Depends on `nexura-runtime`, which registers them when the package is installed and otherwise reports them unavailable ([docs/connectors.md](connectors.md)) |
 | `packages/nexura-postgres` | `nexura-postgres` (Python, import `nexura_postgres`) | PostgreSQL run and session storage (`PostgresRepository`) and the pgvector store. `get_storage_repository("postgresql://...")` uses it when installed and otherwise names `pip install nexura-postgres` |
 | `packages/nexura-qdrant` | `nexura-qdrant` (Python, import `nexura_qdrant`) | The Qdrant vector store (`QdrantVectorStoreAdapter`) for the runtime's `VectorStore` protocol |
+| `packages/nexura-vectorstores` | `nexura-vectorstores` (Python, import `nexura_vectorstores`; new, source-only pending release) | HTTP vector stores for Chroma, Pinecone, Weaviate, Milvus/Zilliz, Elasticsearch and OpenSearch; see [More vector databases](knowledge.md#more-vector-databases) |
 | `packages/nexura-sandbox` | `nexura-sandbox` (Python, import `nexura_sandbox`) | The WASI, bubblewrap and gVisor code-execution backends. The runtime keeps the backend selection, `SandboxConfig` and the default Monty backend, and reports these backends unavailable ("pip install nexura-sandbox") without it |
 | `packages/nexura-vertex` | `nexura-vertex` (Python, import `nexura_vertex`) | The Google Vertex AI provider (`VertexAIProvider`, `"vertex:..."` model strings). Depends on `nexura-agents` only |
 | `packages/nexura-guardrails` | `nexura-guardrails` (Python, import `nexura_guardrails`) | Guardrail checks: verdicts and a category taxonomy, pre-filters over the `nexura-agents` built-ins, an LLM judge that fails closed, tiered and parallel composition ([docs/guardrails-package.md](guardrails-package.md)). Depends on `nexura-agents` only; extras `judge` (empty) and `yaml` |
@@ -79,7 +80,7 @@ Or build and install a wheel into any Python 3.12 environment:
 
 ```bash
 uv build
-pip install "dist/nexura_runtime-0.5.0-py3-none-any.whl[studio]"
+pip install "dist/nexura_runtime-0.6.0-py3-none-any.whl[studio]"
 ```
 
 The repository builds one package per feature group (`uv build --all-packages` writes every

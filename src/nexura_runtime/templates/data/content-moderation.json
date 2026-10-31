@@ -1,0 +1,112 @@
+{
+  "template_version": 1,
+  "id": "content-moderation",
+  "title": "User content moderation",
+  "description": "Checks a user post for blocked terms, personal data, link spam and shouting; clean posts are published, doubtful ones wait for a moderator, blocked ones are rejected.",
+  "category": "governance",
+  "difficulty": "intermediate",
+  "tags": [
+    "moderation",
+    "trust-and-safety",
+    "approval"
+  ],
+  "required_modules": [
+    "tpl_moderation_check",
+    "tpl_moderation_publish",
+    "tpl_moderation_reject"
+  ],
+  "required_credentials": [],
+  "spec": {
+    "spec_version": 1,
+    "name": "User content moderation",
+    "entry_node": "check",
+    "nodes": {
+      "check": {
+        "id": "check",
+        "handler": "tpl_moderation_check",
+        "transitions": {
+          "allow": "publish",
+          "review": "review",
+          "block": "reject"
+        },
+        "default_transition": "review",
+        "requires_approval": false
+      },
+      "review": {
+        "id": "review",
+        "handler": "tpl_moderation_publish",
+        "transitions": {},
+        "default_transition": null,
+        "requires_approval": true
+      },
+      "publish": {
+        "id": "publish",
+        "handler": "tpl_moderation_publish",
+        "transitions": {},
+        "default_transition": null,
+        "requires_approval": false
+      },
+      "reject": {
+        "id": "reject",
+        "handler": "tpl_moderation_reject",
+        "transitions": {},
+        "default_transition": null,
+        "requires_approval": false
+      }
+    },
+    "terminal_nodes": [
+      "review",
+      "publish",
+      "reject"
+    ]
+  },
+  "sample_input": {
+    "post": "Loved the workshop today, thanks everyone!"
+  },
+  "fixture": {
+    "runs": [
+      {
+        "name": "a normal post is published",
+        "input": {
+          "post": "Loved the workshop today, thanks everyone!"
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "moderation.decision": "allow",
+          "published": true
+        }
+      },
+      {
+        "name": "personal data waits for a moderator",
+        "input": {
+          "post": "Email me at asha@example.com for the slides"
+        },
+        "approval": {
+          "node": "review",
+          "decision": "reject"
+        },
+        "expect_status": "rejected",
+        "expect_state": {
+          "moderation.decision": "review",
+          "moderation.reasons": [
+            "personal data"
+          ]
+        },
+        "expect_absent": [
+          "published"
+        ]
+      },
+      {
+        "name": "a blocked term is rejected",
+        "input": {
+          "post": "Get free crypto now"
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "moderation.decision": "block",
+          "published": false
+        }
+      }
+    ]
+  }
+}

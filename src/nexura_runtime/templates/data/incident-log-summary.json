@@ -1,0 +1,109 @@
+{
+  "template_version": 1,
+  "id": "incident-log-summary",
+  "title": "Incident summary from logs",
+  "description": "Parses log lines, counts errors by service and level, rates the severity, pages on-call for a critical incident after approval, and writes a short incident summary.",
+  "category": "engineering",
+  "difficulty": "intermediate",
+  "tags": [
+    "engineering",
+    "incident",
+    "logs",
+    "on-call"
+  ],
+  "required_modules": [
+    "tpl_incident_assess",
+    "tpl_incident_page",
+    "tpl_incident_parse",
+    "tpl_incident_summary"
+  ],
+  "required_credentials": [
+    "model_api_key"
+  ],
+  "spec": {
+    "spec_version": 1,
+    "name": "Incident summary from logs",
+    "entry_node": "parse",
+    "nodes": {
+      "parse": {
+        "id": "parse",
+        "handler": "tpl_incident_parse",
+        "transitions": {},
+        "default_transition": "assess",
+        "requires_approval": false
+      },
+      "assess": {
+        "id": "assess",
+        "handler": "tpl_incident_assess",
+        "transitions": {
+          "page": "page",
+          "summary": "summary"
+        },
+        "default_transition": "summary",
+        "requires_approval": false
+      },
+      "page": {
+        "id": "page",
+        "handler": "tpl_incident_page",
+        "transitions": {},
+        "default_transition": "summary",
+        "requires_approval": true
+      },
+      "summary": {
+        "id": "summary",
+        "handler": "tpl_incident_summary",
+        "transitions": {},
+        "default_transition": null,
+        "requires_approval": false
+      }
+    },
+    "terminal_nodes": [
+      "summary"
+    ]
+  },
+  "sample_input": {
+    "logs": "2026-10-30T10:00Z ERROR payments: card gateway timeout\n2026-10-30T10:01Z INFO web: GET /health 200\n2026-10-30T10:02Z ERROR payments: card gateway timeout"
+  },
+  "fixture": {
+    "runs": [
+      {
+        "name": "a few errors are summarised without paging",
+        "input": {
+          "logs": "t ERROR payments: gateway timeout\nt INFO web: ok\nt ERROR payments: gateway timeout\nt WARNING cache: slow"
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "severity": "sev3",
+          "logs_summary.error_services": {
+            "payments": 2
+          },
+          "logs_summary.levels.WARN": 1
+        },
+        "expect_contains": {
+          "incident_summary": "payments"
+        },
+        "expect_absent": [
+          "page"
+        ]
+      },
+      {
+        "name": "a critical error pages on-call after approval",
+        "input": {
+          "logs": "t CRITICAL db: primary unreachable\nt ERROR api: 503"
+        },
+        "approval": {
+          "node": "page",
+          "decision": "approve"
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "severity": "sev1",
+          "page.to": "on-call"
+        },
+        "expect_contains": {
+          "incident_summary": "sev1"
+        }
+      }
+    ]
+  }
+}

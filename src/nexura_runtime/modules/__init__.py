@@ -15,7 +15,11 @@ import nexura_runtime.knowledge.ingest  # noqa: F401
 import nexura_runtime.knowledge.retrieval  # noqa: F401
 import nexura_runtime.knowledge.vector  # noqa: F401
 import nexura_runtime.modules.data  # noqa: F401
+import nexura_runtime.modules.dataops  # noqa: F401
+import nexura_runtime.modules.logic  # noqa: F401
 import nexura_runtime.modules.text  # noqa: F401
+import nexura_runtime.modules.textops  # noqa: F401
+import nexura_runtime.modules.utils  # noqa: F401
 import nexura_runtime.runtime.agents  # noqa: F401
 import nexura_runtime.service  # noqa: F401
 from nexura_runtime.modules.cli import main

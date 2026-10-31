@@ -1,6 +1,6 @@
 [project]
 name = "nexura-runtime"
-version = "0.5.0"
+version = "0.6.0"
 description = "Nexura platform: durable agent workflows with exact-action approvals, guardrail policy, RAG, evaluations and a local REST service."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
@@ -16,12 +16,13 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "nexura-agents==0.5.0",
+    "nexura-agents==0.6.0",
     "httpx>=0.27.0,<1.0.0",
     "pydantic>=2.7.0,<3.0.0",
     "packaging>=24.0",
     # Core since 2026-10-18: encryption for the secrets store, signed tokens and trigger keys.
     "cryptography>=46.0.0",
+    "regex>=2026.9.29",
 ]
 
 [project.urls]
@@ -81,6 +82,7 @@ members = [
     "packages/nexura-guardrails",
     "packages/nexura-postgres",
     "packages/nexura-qdrant",
+    "packages/nexura-vectorstores",
     "packages/nexura-sandbox",
     "packages/nexura-studio",
     "packages/nexura-vertex",
@@ -94,6 +96,7 @@ nexura-connectors = { workspace = true }
 nexura-guardrails = { workspace = true }
 nexura-postgres = { workspace = true }
 nexura-qdrant = { workspace = true }
+nexura-vectorstores = { workspace = true }
 nexura-sandbox = { workspace = true }
 nexura-studio = { workspace = true }
 nexura-vertex = { workspace = true }
@@ -124,6 +127,7 @@ dev = [
     "nexura-guardrails[yaml]",
     "nexura-postgres",
     "nexura-qdrant",
+    "nexura-vectorstores",
     "nexura-sandbox[wasi]",
     "nexura-studio",
     "nexura-vertex",
@@ -131,7 +135,7 @@ dev = [
     "pytest-asyncio>=0.24.0,<1.0.0",
     # Parallel test runs: `pytest -n auto --dist loadfile` (see docs/testing.md).
     "pytest-xdist>=3.6.0,<4.0.0",
-    "ruff>=0.5.0,<1.0.0",
+    "ruff>=0.6.0,<1.0.0",
     "mypy>=1.10.0,<2.0.0",
     "fastapi>=0.111.0,<1.0.0",
     "uvicorn>=0.30.0,<1.0.0",

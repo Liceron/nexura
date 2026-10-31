@@ -1,0 +1,96 @@
+{
+  "template_version": 1,
+  "id": "contract-review",
+  "title": "Contract risk review",
+  "description": "Flags risky clauses (automatic renewal, unlimited liability, exclusivity, long payment terms, unilateral changes, no termination for convenience); high-risk contracts need legal sign-off.",
+  "category": "governance",
+  "difficulty": "advanced",
+  "tags": [
+    "legal",
+    "contracts",
+    "risk",
+    "approval"
+  ],
+  "required_modules": [
+    "tpl_contract_legal_review",
+    "tpl_contract_report",
+    "tpl_contract_scan"
+  ],
+  "required_credentials": [],
+  "spec": {
+    "spec_version": 1,
+    "name": "Contract risk review",
+    "entry_node": "scan",
+    "nodes": {
+      "scan": {
+        "id": "scan",
+        "handler": "tpl_contract_scan",
+        "transitions": {
+          "legal": "legal",
+          "report": "report"
+        },
+        "default_transition": "legal",
+        "requires_approval": false
+      },
+      "legal": {
+        "id": "legal",
+        "handler": "tpl_contract_legal_review",
+        "transitions": {},
+        "default_transition": "report",
+        "requires_approval": true
+      },
+      "report": {
+        "id": "report",
+        "handler": "tpl_contract_report",
+        "transitions": {},
+        "default_transition": null,
+        "requires_approval": false
+      }
+    },
+    "terminal_nodes": [
+      "report"
+    ]
+  },
+  "sample_input": {
+    "contract": "1. This agreement will automatically renew each year. 2. The supplier has unlimited liability. 3. Payment is due within 90 days."
+  },
+  "fixture": {
+    "runs": [
+      {
+        "name": "a risky contract needs legal sign-off",
+        "input": {
+          "contract": "1. This agreement will automatically renew each year. 2. Customer accepts unlimited liability. 3. Payment is due within 90 days."
+        },
+        "approval": {
+          "node": "legal",
+          "decision": "approve"
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "risk.level": "high",
+          "risk.flags": [
+            "auto_renewal",
+            "unlimited_liability",
+            "long_payment_terms",
+            "no_termination_for_convenience"
+          ],
+          "legal.status": "signed_off"
+        }
+      },
+      {
+        "name": "a standard contract is reported without review",
+        "input": {
+          "contract": "Either party may terminate for convenience with 30 days notice. Payment within 30 days."
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "risk.level": "low",
+          "contract_report.flags": []
+        },
+        "expect_absent": [
+          "legal"
+        ]
+      }
+    ]
+  }
+}

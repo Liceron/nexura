@@ -14,7 +14,7 @@
       },
       {
         "name": "nexura:lock-sha256",
-        "value": "b957d9292565f730d1b287598a204a4adf08580f8b382d8c1f0ec0aac71587e5"
+        "value": "b07e416a4a1ba5d6e346fa790679f6ae12b67518451c7e914d4ab7eaec304187"
       },
       {
         "name": "nexura:generator",
@@ -361,66 +361,73 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:pypi/nexura-agents@0.5.0",
+      "bom-ref": "pkg:pypi/nexura-agents@0.6.0",
       "name": "nexura-agents",
-      "version": "0.5.0",
-      "purl": "pkg:pypi/nexura-agents@0.5.0"
+      "version": "0.6.0",
+      "purl": "pkg:pypi/nexura-agents@0.6.0"
     },
     {
       "type": "library",
-      "bom-ref": "pkg:pypi/nexura-connectors@0.5.0",
+      "bom-ref": "pkg:pypi/nexura-connectors@0.6.0",
       "name": "nexura-connectors",
-      "version": "0.5.0",
-      "purl": "pkg:pypi/nexura-connectors@0.5.0"
+      "version": "0.6.0",
+      "purl": "pkg:pypi/nexura-connectors@0.6.0"
     },
     {
       "type": "library",
-      "bom-ref": "pkg:pypi/nexura-guardrails@0.5.0",
+      "bom-ref": "pkg:pypi/nexura-guardrails@0.6.0",
       "name": "nexura-guardrails",
-      "version": "0.5.0",
-      "purl": "pkg:pypi/nexura-guardrails@0.5.0"
+      "version": "0.6.0",
+      "purl": "pkg:pypi/nexura-guardrails@0.6.0"
     },
     {
       "type": "library",
-      "bom-ref": "pkg:pypi/nexura-postgres@0.5.0",
+      "bom-ref": "pkg:pypi/nexura-postgres@0.6.0",
       "name": "nexura-postgres",
-      "version": "0.5.0",
-      "purl": "pkg:pypi/nexura-postgres@0.5.0"
+      "version": "0.6.0",
+      "purl": "pkg:pypi/nexura-postgres@0.6.0"
     },
     {
       "type": "library",
-      "bom-ref": "pkg:pypi/nexura-qdrant@0.5.0",
+      "bom-ref": "pkg:pypi/nexura-qdrant@0.6.0",
       "name": "nexura-qdrant",
-      "version": "0.5.0",
-      "purl": "pkg:pypi/nexura-qdrant@0.5.0"
+      "version": "0.6.0",
+      "purl": "pkg:pypi/nexura-qdrant@0.6.0"
     },
     {
       "type": "library",
-      "bom-ref": "pkg:pypi/nexura-runtime@0.5.0",
+      "bom-ref": "pkg:pypi/nexura-runtime@0.6.0",
       "name": "nexura-runtime",
-      "version": "0.5.0",
-      "purl": "pkg:pypi/nexura-runtime@0.5.0"
+      "version": "0.6.0",
+      "purl": "pkg:pypi/nexura-runtime@0.6.0"
     },
     {
       "type": "library",
-      "bom-ref": "pkg:pypi/nexura-sandbox@0.5.0",
+      "bom-ref": "pkg:pypi/nexura-sandbox@0.6.0",
       "name": "nexura-sandbox",
-      "version": "0.5.0",
-      "purl": "pkg:pypi/nexura-sandbox@0.5.0"
+      "version": "0.6.0",
+      "purl": "pkg:pypi/nexura-sandbox@0.6.0"
     },
     {
       "type": "library",
-      "bom-ref": "pkg:pypi/nexura-studio@0.5.0",
+      "bom-ref": "pkg:pypi/nexura-studio@0.6.0",
       "name": "nexura-studio",
-      "version": "0.5.0",
-      "purl": "pkg:pypi/nexura-studio@0.5.0"
+      "version": "0.6.0",
+      "purl": "pkg:pypi/nexura-studio@0.6.0"
     },
     {
       "type": "library",
-      "bom-ref": "pkg:pypi/nexura-vertex@0.5.0",
+      "bom-ref": "pkg:pypi/nexura-vectorstores@0.6.0",
+      "name": "nexura-vectorstores",
+      "version": "0.6.0",
+      "purl": "pkg:pypi/nexura-vectorstores@0.6.0"
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:pypi/nexura-vertex@0.6.0",
       "name": "nexura-vertex",
-      "version": "0.5.0",
-      "purl": "pkg:pypi/nexura-vertex@0.5.0"
+      "version": "0.6.0",
+      "purl": "pkg:pypi/nexura-vertex@0.6.0"
     },
     {
       "type": "library",
@@ -1018,7 +1025,7 @@
       "dependsOn": []
     },
     {
-      "ref": "pkg:pypi/nexura-agents@0.5.0",
+      "ref": "pkg:pypi/nexura-agents@0.6.0",
       "dependsOn": [
         "pkg:pypi/cryptography@50.0.2",
         "pkg:pypi/httpx@0.28.1",
@@ -1029,78 +1036,87 @@
       ]
     },
     {
-      "ref": "pkg:pypi/nexura-connectors@0.5.0",
+      "ref": "pkg:pypi/nexura-connectors@0.6.0",
       "dependsOn": [
         "pkg:pypi/asyncpg@0.32.0",
         "pkg:pypi/httpcore@1.0.9",
         "pkg:pypi/httpx@0.28.1",
-        "pkg:pypi/nexura-agents@0.5.0",
-        "pkg:pypi/nexura-runtime@0.5.0",
+        "pkg:pypi/nexura-agents@0.6.0",
+        "pkg:pypi/nexura-runtime@0.6.0",
         "pkg:pypi/pydantic@2.14.1"
       ]
     },
     {
-      "ref": "pkg:pypi/nexura-guardrails@0.5.0",
+      "ref": "pkg:pypi/nexura-guardrails@0.6.0",
       "dependsOn": [
         "pkg:pypi/httpx@0.28.1",
-        "pkg:pypi/nexura-agents@0.5.0",
+        "pkg:pypi/nexura-agents@0.6.0",
         "pkg:pypi/pyyaml@6.0.3"
       ]
     },
     {
-      "ref": "pkg:pypi/nexura-postgres@0.5.0",
+      "ref": "pkg:pypi/nexura-postgres@0.6.0",
       "dependsOn": [
         "pkg:pypi/asyncpg@0.32.0",
-        "pkg:pypi/nexura-agents@0.5.0",
-        "pkg:pypi/nexura-runtime@0.5.0"
+        "pkg:pypi/nexura-agents@0.6.0",
+        "pkg:pypi/nexura-runtime@0.6.0"
       ]
     },
     {
-      "ref": "pkg:pypi/nexura-qdrant@0.5.0",
+      "ref": "pkg:pypi/nexura-qdrant@0.6.0",
       "dependsOn": [
-        "pkg:pypi/nexura-agents@0.5.0",
-        "pkg:pypi/nexura-runtime@0.5.0",
+        "pkg:pypi/nexura-agents@0.6.0",
+        "pkg:pypi/nexura-runtime@0.6.0",
         "pkg:pypi/qdrant-client@1.19.1"
       ]
     },
     {
-      "ref": "pkg:pypi/nexura-runtime@0.5.0",
+      "ref": "pkg:pypi/nexura-runtime@0.6.0",
       "dependsOn": [
         "pkg:pypi/cryptography@50.0.2",
         "pkg:pypi/fastapi@0.144.0",
         "pkg:pypi/google-cloud-storage@3.17.1",
         "pkg:pypi/httpx@0.28.1",
-        "pkg:pypi/nexura-agents@0.5.0",
+        "pkg:pypi/nexura-agents@0.6.0",
         "pkg:pypi/packaging@26.3",
         "pkg:pypi/pydantic-monty@1.1.0",
         "pkg:pypi/pydantic@2.14.1",
         "pkg:pypi/pypdf@6.21.1",
+        "pkg:pypi/regex@2026.9.29",
         "pkg:pypi/uvicorn@0.54.0"
       ]
     },
     {
-      "ref": "pkg:pypi/nexura-sandbox@0.5.0",
+      "ref": "pkg:pypi/nexura-sandbox@0.6.0",
       "dependsOn": [
-        "pkg:pypi/nexura-runtime@0.5.0",
+        "pkg:pypi/nexura-runtime@0.6.0",
         "pkg:pypi/wasmtime@49.0.0"
       ]
     },
     {
-      "ref": "pkg:pypi/nexura-studio@0.5.0",
+      "ref": "pkg:pypi/nexura-studio@0.6.0",
       "dependsOn": [
         "pkg:pypi/fastapi@0.144.0",
-        "pkg:pypi/nexura-agents@0.5.0",
-        "pkg:pypi/nexura-runtime@0.5.0",
+        "pkg:pypi/nexura-agents@0.6.0",
+        "pkg:pypi/nexura-runtime@0.6.0",
         "pkg:pypi/pydantic@2.14.1",
         "pkg:pypi/uvicorn@0.54.0"
       ]
     },
     {
-      "ref": "pkg:pypi/nexura-vertex@0.5.0",
+      "ref": "pkg:pypi/nexura-vectorstores@0.6.0",
+      "dependsOn": [
+        "pkg:pypi/httpx@0.28.1",
+        "pkg:pypi/nexura-agents@0.6.0",
+        "pkg:pypi/nexura-runtime@0.6.0"
+      ]
+    },
+    {
+      "ref": "pkg:pypi/nexura-vertex@0.6.0",
       "dependsOn": [
         "pkg:pypi/google-auth@2.62.0",
         "pkg:pypi/httpx@0.28.1",
-        "pkg:pypi/nexura-agents@0.5.0"
+        "pkg:pypi/nexura-agents@0.6.0"
       ]
     },
     {

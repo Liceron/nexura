@@ -1,0 +1,96 @@
+{
+  "template_version": 1,
+  "id": "faq-chatbot",
+  "title": "FAQ chatbot with human escalation",
+  "description": "Answers questions from your FAQ by matching them to the closest entry, and hands anything it cannot match to a person instead of guessing.",
+  "category": "support",
+  "difficulty": "beginner",
+  "tags": [
+    "support",
+    "faq",
+    "chat",
+    "escalation"
+  ],
+  "required_modules": [
+    "tpl_faq_answer",
+    "tpl_faq_escalate",
+    "tpl_faq_match"
+  ],
+  "required_credentials": [
+    "model_api_key"
+  ],
+  "spec": {
+    "spec_version": 1,
+    "name": "FAQ chatbot with human escalation",
+    "entry_node": "match",
+    "nodes": {
+      "match": {
+        "id": "match",
+        "handler": "tpl_faq_match",
+        "transitions": {
+          "answer": "answer",
+          "escalate": "escalate"
+        },
+        "default_transition": "escalate",
+        "requires_approval": false
+      },
+      "answer": {
+        "id": "answer",
+        "handler": "tpl_faq_answer",
+        "transitions": {},
+        "default_transition": null,
+        "requires_approval": false
+      },
+      "escalate": {
+        "id": "escalate",
+        "handler": "tpl_faq_escalate",
+        "transitions": {},
+        "default_transition": null,
+        "requires_approval": false
+      }
+    },
+    "terminal_nodes": [
+      "answer",
+      "escalate"
+    ]
+  },
+  "sample_input": {
+    "question": "How do I reset my password?"
+  },
+  "fixture": {
+    "runs": [
+      {
+        "name": "a known question is answered from the FAQ",
+        "input": {
+          "question": "how can I reset my password"
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "answered_from_faq": true
+        },
+        "expect_contains": {
+          "reply": "Reset password"
+        },
+        "expect_path": [
+          "match",
+          "answer"
+        ]
+      },
+      {
+        "name": "an unknown question is escalated, not guessed",
+        "input": {
+          "question": "Do you sell gift cards?"
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "answered_from_faq": false,
+          "escalation.queue": "support"
+        },
+        "expect_path": [
+          "match",
+          "escalate"
+        ]
+      }
+    ]
+  }
+}

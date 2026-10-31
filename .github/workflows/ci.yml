@@ -104,6 +104,7 @@ jobs:
           uv run --frozen mypy src packages/nexura-agents/src packages/nexura-connectors/src
           packages/nexura-postgres/src packages/nexura-qdrant/src packages/nexura-sandbox/src
           packages/nexura-studio/src packages/nexura-vertex/src packages/nexura-guardrails/src
+          packages/nexura-vectorstores/src
       # The suite also checks the TypeScript client, installed wheels and the WASI sandbox.
       - run: npm ci && npm run build
         working-directory: clients/typescript

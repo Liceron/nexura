@@ -679,7 +679,12 @@
       "automation": "Automation",
       "data": "Data",
       "governance": "Governance",
-      "support": "Support"
+      "support": "Support",
+      "sales": "Sales",
+      "hr": "HR and people",
+      "finance": "Finance",
+      "engineering": "Engineering",
+      "content": "Content and marketing"
     },
     "title": "Template gallery",
     "subtitle": "Tested starter workflows that run offline. Preview one, then use it as your starting point.",

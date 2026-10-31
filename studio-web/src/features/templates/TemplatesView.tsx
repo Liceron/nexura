@@ -12,7 +12,10 @@ import { TemplateGraph } from './TemplateGraph';
 import { rememberSampleInput } from './sampleInput';
 import type { InstantiateResult, TemplateDetail, TemplateList, TemplateSummary } from './types';
 
-const categoryOrder = ['agents', 'knowledge', 'automation', 'data', 'governance', 'support'];
+const categoryOrder = [
+  'agents', 'knowledge', 'automation', 'data', 'governance', 'support',
+  'sales', 'hr', 'finance', 'engineering', 'content',
+];
 const categoryRank = (category: string) => {
   const index = categoryOrder.indexOf(category);
   return index === -1 ? categoryOrder.length : index;
@@ -224,7 +227,7 @@ export function TemplatesView() {
               </div>
               {tpl.tags.length > 0 && <div className="workflow-template-meta">{tpl.tags.join(' · ')}</div>}
             </div>
-            <Button size="sm" variant="ghost" data-testid={`template-use-${tpl.id}`} onClick={() => openPreview(tpl)}>{t('templates.preview')}</Button>
+            <Button size="sm" variant="ghost" style={{ flexShrink: 0, whiteSpace: 'nowrap' }} data-testid={`template-use-${tpl.id}`} onClick={() => openPreview(tpl)}>{t('templates.preview')}</Button>
           </li>
         ))}
       </ul>

@@ -82,7 +82,12 @@ def test_scheduled_report_suggests_a_trigger() -> None:
 
 
 def test_filters() -> None:
-    assert {t.id for t in list_templates(category="support")} == {"support-desk-refund-approval"}
+    assert {t.id for t in list_templates(category="support")} == {
+        "support-desk-refund-approval",
+        "faq-chatbot",
+        "ticket-triage",
+        "sentiment-escalation",
+    }
     assert "approval-workflow" in {t.id for t in list_templates(tag="approval")}
     assert list_templates(category="nope") == []
 
@@ -115,7 +120,11 @@ async def test_list_get_and_filter(local_client: httpx.AsyncClient) -> None:
     assert "support" in body["categories"] and "approval" in body["tags"]
     assert "spec" not in body["items"][0]
     only = (await local_client.get("/api/v1/templates", params={"category": "data"})).json()
-    assert [t["id"] for t in only["items"]] == ["structured-extraction"]
+    assert [t["id"] for t in only["items"]] == [
+        "customer-feedback-analysis",
+        "data-quality-check",
+        "structured-extraction",
+    ]
     tagged = (await local_client.get("/api/v1/templates", params={"tag": "rag"})).json()
     assert [t["id"] for t in tagged["items"]] == ["rag-qa-citations"]
     detail = (await local_client.get("/api/v1/templates/rag-qa-citations")).json()

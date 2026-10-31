@@ -12,6 +12,7 @@ members = [
     "nexura-runtime",
     "nexura-sandbox",
     "nexura-studio",
+    "nexura-vectorstores",
     "nexura-vertex",
 ]
 
@@ -877,7 +878,7 @@ wheels = [
 
 [[package]]
 name = "nexura-agents"
-version = "0.5.0"
+version = "0.6.0"
 source = { editable = "packages/nexura-agents" }
 dependencies = [
     { name = "httpx" },
@@ -909,7 +910,7 @@ provides-extras = ["litellm", "otel", "signing"]
 
 [[package]]
 name = "nexura-connectors"
-version = "0.5.0"
+version = "0.6.0"
 source = { editable = "packages/nexura-connectors" }
 dependencies = [
     { name = "httpcore" },
@@ -937,7 +938,7 @@ provides-extras = ["postgres"]
 
 [[package]]
 name = "nexura-guardrails"
-version = "0.5.0"
+version = "0.6.0"
 source = { editable = "packages/nexura-guardrails" }
 dependencies = [
     { name = "nexura-agents" },
@@ -961,7 +962,7 @@ provides-extras = ["judge", "ollama", "yaml"]
 
 [[package]]
 name = "nexura-postgres"
-version = "0.5.0"
+version = "0.6.0"
 source = { editable = "packages/nexura-postgres" }
 dependencies = [
     { name = "asyncpg" },
@@ -978,7 +979,7 @@ requires-dist = [
 
 [[package]]
 name = "nexura-qdrant"
-version = "0.5.0"
+version = "0.6.0"
 source = { editable = "packages/nexura-qdrant" }
 dependencies = [
     { name = "nexura-agents" },
@@ -995,7 +996,7 @@ requires-dist = [
 
 [[package]]
 name = "nexura-runtime"
-version = "0.5.0"
+version = "0.6.0"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
@@ -1003,6 +1004,7 @@ dependencies = [
     { name = "nexura-agents" },
     { name = "packaging" },
     { name = "pydantic" },
+    { name = "regex" },
 ]
 
 [package.optional-dependencies]
@@ -1031,6 +1033,7 @@ dev = [
     { name = "nexura-qdrant" },
     { name = "nexura-sandbox", extra = ["wasi"] },
     { name = "nexura-studio" },
+    { name = "nexura-vectorstores" },
     { name = "nexura-vertex" },
     { name = "opentelemetry-sdk" },
     { name = "pytest" },
@@ -1053,6 +1056,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.7.0,<3.0.0" },
     { name = "pydantic-monty", marker = "extra == 'sandbox'", specifier = ">=1.1.0,<2.0.0" },
     { name = "pypdf", marker = "extra == 'knowledge'", specifier = ">=6.19.0" },
+    { name = "regex", specifier = ">=2026.9.29" },
     { name = "uvicorn", marker = "extra == 'studio'", specifier = ">=0.30.0,<1.0.0" },
 ]
 provides-extras = ["studio", "knowledge", "secrets", "sandbox", "gcs"]
@@ -1068,20 +1072,21 @@ dev = [
     { name = "nexura-qdrant", editable = "packages/nexura-qdrant" },
     { name = "nexura-sandbox", extras = ["wasi"], editable = "packages/nexura-sandbox" },
     { name = "nexura-studio", editable = "packages/nexura-studio" },
+    { name = "nexura-vectorstores", editable = "packages/nexura-vectorstores" },
     { name = "nexura-vertex", editable = "packages/nexura-vertex" },
     { name = "opentelemetry-sdk", specifier = ">=1.20,<2" },
     { name = "pytest", specifier = ">=8.0.0,<9.0.0" },
     { name = "pytest-asyncio", specifier = ">=0.24.0,<1.0.0" },
     { name = "pytest-xdist", specifier = ">=3.6.0,<4.0.0" },
     { name = "qdrant-client", specifier = ">=1.12.0,<2.0.0" },
-    { name = "ruff", specifier = ">=0.5.0,<1.0.0" },
+    { name = "ruff", specifier = ">=0.6.0,<1.0.0" },
     { name = "sqlalchemy", specifier = ">=2.0.0,<3.0.0" },
     { name = "uvicorn", specifier = ">=0.30.0,<1.0.0" },
 ]
 
 [[package]]
 name = "nexura-sandbox"
-version = "0.5.0"
+version = "0.6.0"
 source = { editable = "packages/nexura-sandbox" }
 dependencies = [
     { name = "nexura-runtime" },
@@ -1101,7 +1106,7 @@ provides-extras = ["wasi"]
 
 [[package]]
 name = "nexura-studio"
-version = "0.5.0"
+version = "0.6.0"
 source = { editable = "packages/nexura-studio" }
 dependencies = [
     { name = "fastapi" },
@@ -1121,8 +1126,25 @@ requires-dist = [
 ]
 
 [[package]]
+name = "nexura-vectorstores"
+version = "0.6.0"
+source = { editable = "packages/nexura-vectorstores" }
+dependencies = [
+    { name = "httpx" },
+    { name = "nexura-agents" },
+    { name = "nexura-runtime" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "httpx", specifier = ">=0.27,<1" },
+    { name = "nexura-agents", editable = "packages/nexura-agents" },
+    { name = "nexura-runtime", editable = "." },
+]
+
+[[package]]
 name = "nexura-vertex"
-version = "0.5.0"
+version = "0.6.0"
 source = { editable = "packages/nexura-vertex" }
 dependencies = [
     { name = "google-auth", extra = ["requests"] },

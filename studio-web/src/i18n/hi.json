@@ -679,7 +679,12 @@
       "automation": "Automation",
       "data": "Data",
       "governance": "Governance",
-      "support": "Support"
+      "support": "Support",
+      "sales": "बिक्री",
+      "hr": "एचआर",
+      "finance": "वित्त",
+      "engineering": "इंजीनियरिंग",
+      "content": "सामग्री और मार्केटिंग"
     },
     "title": "टेम्पलेट गैलरी",
     "subtitle": "परीक्षित स्टार्टर वर्कफ़्लो जो ऑफ़लाइन चलते हैं। एक का पूर्वावलोकन करें और उसे अपनी शुरुआत बनाएँ।",

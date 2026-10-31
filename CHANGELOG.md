@@ -2,6 +2,33 @@
 
 All notable changes to this project.
 
+## 0.6.0 (2026-10-31)
+
+- **24 new starter templates** (30 in total), each a tested workflow with offline fixture runs and
+  approval gates where a person should decide: support (`faq-chatbot`, `ticket-triage`,
+  `sentiment-escalation`), sales (`lead-qualification`, `sales-outreach-email`), HR
+  (`resume-screening`, `employee-onboarding`, `leave-request`), finance (`expense-approval`,
+  `invoice-reconciliation`), engineering (`incident-log-summary`, `code-review-checklist`,
+  `release-notes`), content (`social-post-generator`, `seo-metadata`), knowledge
+  (`document-summarizer`), data (`customer-feedback-analysis`, `data-quality-check`), agents
+  (`trip-planner`), automation (`meeting-notes`, `order-alerts`) and governance
+  (`contract-review`, `content-moderation`, `pii-redaction`). Handlers live in
+  `nexura_runtime.templates.library`; the Studio gallery shows the new categories. See
+  [docs/templates.md](docs/templates.md).
+- Add 30 offline builder components as versioned modules: text splitting, joining,
+  replacement, extraction, case, cleaning, truncation, counts and markup extraction;
+  JSON/CSV conversion, filtering, sorting, field edits, flattening, deduplication and
+  grouping; if/else, switch and comparisons; safe arithmetic, replayable datetimes,
+  hashes, Base64, URLs and deterministic UUID5.
+- Expose component schemas and display examples through the existing registry and
+  descriptor API. Add aggregate resource bounds, interruptible regex matching through
+  the `regex` dependency, workflow branch tests and the [component guide](docs/components.md).
+- Add the optional `nexura-vectorstores` 0.5.0 workspace package with HTTP adapters
+  for Chroma, Pinecone, Weaviate, Milvus/Zilliz, Elasticsearch and OpenSearch.
+  Includes durable workspace-scoped generations, tombstones, structured filters,
+  canonical scores, injectable HTTP transports, offline conformance fakes and
+  opt-in live tests. The package has not been published; live servers remain unverified.
+
 ## 0.5.0 (2026-10-30)
 
 - **Licence: the open-source edition is now licensed under the Apache License 2.0** (was MIT).

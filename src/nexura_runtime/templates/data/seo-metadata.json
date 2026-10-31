@@ -1,0 +1,64 @@
+{
+  "template_version": 1,
+  "id": "seo-metadata",
+  "title": "SEO title, description and slug",
+  "description": "Reads an article and produces the main keywords, a title under 60 characters, a meta description under 155 characters and a URL slug.",
+  "category": "content",
+  "difficulty": "beginner",
+  "tags": [
+    "seo",
+    "content",
+    "marketing"
+  ],
+  "required_modules": [
+    "tpl_seo_keywords",
+    "tpl_seo_meta"
+  ],
+  "required_credentials": [],
+  "spec": {
+    "spec_version": 1,
+    "name": "SEO title, description and slug",
+    "entry_node": "keywords",
+    "nodes": {
+      "keywords": {
+        "id": "keywords",
+        "handler": "tpl_seo_keywords",
+        "transitions": {},
+        "default_transition": "meta",
+        "requires_approval": false
+      },
+      "meta": {
+        "id": "meta",
+        "handler": "tpl_seo_meta",
+        "transitions": {},
+        "default_transition": null,
+        "requires_approval": false
+      }
+    },
+    "terminal_nodes": [
+      "meta"
+    ]
+  },
+  "sample_input": {
+    "article": "Approval gates let a person review the exact tool call before an agent acts. They keep refunds, emails and record updates safe. Approval gates also leave an audit trail."
+  },
+  "fixture": {
+    "runs": [
+      {
+        "name": "metadata is produced within limits",
+        "input": {
+          "article": "Approval gates let a person review the exact tool call before an agent acts. They keep refunds, emails and record updates safe. Approval gates also leave an audit trail."
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "keywords.0": "approval",
+          "keywords.1": "gates",
+          "meta.slug": "approval-gates-let-a-person-review-the-exact-tool-call"
+        },
+        "expect_contains": {
+          "meta": "record updates safe"
+        }
+      }
+    ]
+  }
+}

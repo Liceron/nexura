@@ -1,0 +1,120 @@
+{
+  "template_version": 1,
+  "id": "resume-screening",
+  "title": "Resume screening against a job",
+  "description": "Extracts only job-relevant facts (skills and years of experience) from a resume, compares them with the job's requirements and shortlists or drafts a decline for a recruiter to review.",
+  "category": "hr",
+  "difficulty": "intermediate",
+  "tags": [
+    "hr",
+    "recruiting",
+    "screening",
+    "fairness"
+  ],
+  "required_modules": [
+    "tpl_resume_decline",
+    "tpl_resume_match",
+    "tpl_resume_parse",
+    "tpl_resume_shortlist"
+  ],
+  "required_credentials": [],
+  "spec": {
+    "spec_version": 1,
+    "name": "Resume screening against a job",
+    "entry_node": "parse",
+    "nodes": {
+      "parse": {
+        "id": "parse",
+        "handler": "tpl_resume_parse",
+        "transitions": {},
+        "default_transition": "match",
+        "requires_approval": false
+      },
+      "match": {
+        "id": "match",
+        "handler": "tpl_resume_match",
+        "transitions": {
+          "shortlist": "shortlist",
+          "decline": "decline"
+        },
+        "default_transition": "decline",
+        "requires_approval": false
+      },
+      "shortlist": {
+        "id": "shortlist",
+        "handler": "tpl_resume_shortlist",
+        "transitions": {},
+        "default_transition": null,
+        "requires_approval": false
+      },
+      "decline": {
+        "id": "decline",
+        "handler": "tpl_resume_decline",
+        "transitions": {},
+        "default_transition": null,
+        "requires_approval": false
+      }
+    },
+    "terminal_nodes": [
+      "shortlist",
+      "decline"
+    ]
+  },
+  "sample_input": {
+    "resume": "Backend engineer, 6 years. Python, FastAPI, PostgreSQL and SQL, Docker and AWS.",
+    "job": {
+      "required_skills": [
+        "python",
+        "sql",
+        "docker"
+      ],
+      "min_years": 3
+    }
+  },
+  "fixture": {
+    "runs": [
+      {
+        "name": "a matching candidate is shortlisted",
+        "input": {
+          "resume": "Backend engineer with 6 years. Python, SQL, Docker and AWS.",
+          "job": {
+            "required_skills": [
+              "python",
+              "sql",
+              "docker"
+            ],
+            "min_years": 3
+          }
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "candidate.years": 6,
+          "match.fit": 100,
+          "decision": "shortlist"
+        }
+      },
+      {
+        "name": "missing skills lead to a draft decline",
+        "input": {
+          "resume": "Designer, 2 years, Figma.",
+          "job": {
+            "required_skills": [
+              "python",
+              "sql"
+            ],
+            "min_years": 1
+          }
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "match.fit": 0,
+          "match.missing": [
+            "python",
+            "sql"
+          ],
+          "decision": "decline"
+        }
+      }
+    ]
+  }
+}

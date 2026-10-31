@@ -1,0 +1,126 @@
+{
+  "template_version": 1,
+  "id": "lead-qualification",
+  "title": "Lead qualification and routing",
+  "description": "Scores inbound leads on company size, budget, seniority and timeline; hot leads become a CRM deal after a person approves, the rest join a nurture sequence.",
+  "category": "sales",
+  "difficulty": "beginner",
+  "tags": [
+    "sales",
+    "crm",
+    "lead-scoring",
+    "approval"
+  ],
+  "required_modules": [
+    "tpl_lead_create_deal",
+    "tpl_lead_nurture",
+    "tpl_lead_score"
+  ],
+  "required_credentials": [],
+  "spec": {
+    "spec_version": 1,
+    "name": "Lead qualification and routing",
+    "entry_node": "score",
+    "nodes": {
+      "score": {
+        "id": "score",
+        "handler": "tpl_lead_score",
+        "transitions": {
+          "hot": "deal",
+          "nurture": "nurture"
+        },
+        "default_transition": "nurture",
+        "requires_approval": false
+      },
+      "deal": {
+        "id": "deal",
+        "handler": "tpl_lead_create_deal",
+        "transitions": {},
+        "default_transition": null,
+        "requires_approval": true
+      },
+      "nurture": {
+        "id": "nurture",
+        "handler": "tpl_lead_nurture",
+        "transitions": {},
+        "default_transition": null,
+        "requires_approval": false
+      }
+    },
+    "terminal_nodes": [
+      "deal",
+      "nurture"
+    ]
+  },
+  "sample_input": {
+    "lead": {
+      "company": "Acme Retail",
+      "employees": 800,
+      "budget": 60000,
+      "title": "VP Operations",
+      "timeline": "this quarter"
+    }
+  },
+  "fixture": {
+    "runs": [
+      {
+        "name": "a hot lead becomes a deal after approval",
+        "input": {
+          "lead": {
+            "company": "Acme",
+            "employees": 800,
+            "budget": 60000,
+            "title": "VP Operations",
+            "timeline": "now"
+          }
+        },
+        "approval": {
+          "node": "deal",
+          "decision": "approve"
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "qualification.score": 100,
+          "qualification.grade": "hot",
+          "deal.stage": "discovery"
+        }
+      },
+      {
+        "name": "a small lead is nurtured",
+        "input": {
+          "lead": {
+            "company": "Tiny",
+            "employees": 5,
+            "budget": 0,
+            "title": "Student"
+          }
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "qualification.grade": "cold",
+          "nurture.sequence": "monthly-newsletter"
+        },
+        "expect_absent": [
+          "deal"
+        ]
+      },
+      {
+        "name": "a warm lead gets product education",
+        "input": {
+          "lead": {
+            "company": "Mid",
+            "employees": 120,
+            "budget": 15000,
+            "title": "IT Manager"
+          }
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "qualification.score": 45,
+          "qualification.grade": "warm",
+          "nurture.sequence": "product-education"
+        }
+      }
+    ]
+  }
+}

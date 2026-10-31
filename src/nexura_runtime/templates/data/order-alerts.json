@@ -1,0 +1,103 @@
+{
+  "template_version": 1,
+  "id": "order-alerts",
+  "title": "Large order alerts",
+  "description": "Posts an alert to the sales channel when an order is above a threshold; smaller orders are only logged. Connect it to a webhook trigger from your shop.",
+  "category": "automation",
+  "difficulty": "beginner",
+  "tags": [
+    "automation",
+    "alerts",
+    "webhook",
+    "sales"
+  ],
+  "required_modules": [
+    "tpl_alert_check",
+    "tpl_alert_log",
+    "tpl_alert_notify"
+  ],
+  "required_credentials": [],
+  "spec": {
+    "spec_version": 1,
+    "name": "Large order alerts",
+    "entry_node": "check",
+    "nodes": {
+      "check": {
+        "id": "check",
+        "handler": "tpl_alert_check",
+        "transitions": {
+          "alert": "notify",
+          "skip": "log"
+        },
+        "default_transition": "log",
+        "requires_approval": false
+      },
+      "notify": {
+        "id": "notify",
+        "handler": "tpl_alert_notify",
+        "transitions": {},
+        "default_transition": null,
+        "requires_approval": false
+      },
+      "log": {
+        "id": "log",
+        "handler": "tpl_alert_log",
+        "transitions": {},
+        "default_transition": null,
+        "requires_approval": false
+      }
+    },
+    "terminal_nodes": [
+      "notify",
+      "log"
+    ]
+  },
+  "sample_input": {
+    "order": {
+      "id": "ORD-1042",
+      "customer": "Asha",
+      "total": 2400
+    },
+    "threshold": 1000
+  },
+  "fixture": {
+    "runs": [
+      {
+        "name": "a large order alerts sales",
+        "input": {
+          "order": {
+            "id": "ORD-1042",
+            "customer": "Asha",
+            "total": 2400
+          },
+          "threshold": 1000
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "large_order": true,
+          "alert.channel": "#sales"
+        },
+        "expect_contains": {
+          "alert": "ORD-1042"
+        }
+      },
+      {
+        "name": "a small order is only logged",
+        "input": {
+          "order": {
+            "id": "ORD-7",
+            "total": 40
+          }
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "large_order": false,
+          "logged": true
+        },
+        "expect_absent": [
+          "alert"
+        ]
+      }
+    ]
+  }
+}

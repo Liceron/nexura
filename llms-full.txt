@@ -8,8 +8,8 @@ Source: https://github.com/Liceron/nexura/blob/main/docs/README.md
 
 # Nexura documentation
 
-Guides for building AI agents and durable workflows with Nexura. Every example on these
-pages runs offline with `FakeModel` and is executed by the test suite
+Guides for building AI agents and durable workflows with Nexura. Executable Python examples
+run offline with local components or `FakeModel` and are executed by the test suite
 (`tests/docs/test_docs_examples.py`). Blocks that need a real model or a running service
 are marked as such.
 
@@ -28,7 +28,7 @@ one owner's projects. They do not add accounts or tenant isolation.
 
 - [Use the hosted Nexura app](hosted.md): workspace API keys, CLI login and uploads,
   and SDK traces over standard OTLP/HTTP.
-- [Packages and installation](packages.md): the nine Python packages, TypeScript client,
+- [Packages and installation](packages.md): the ten Python packages, TypeScript client,
   source/wheel installs, supported versions and optional backend requirements.
 - [Getting started](getting-started.md): install, first agent, first tool, in five minutes.
 - [Quickstart in 10 minutes](quickstart-10-minutes.md): from install to an approval-gated
@@ -94,6 +94,8 @@ one owner's projects. They do not add accounts or tenant isolation.
 - [Budgets and usage](budgets-and-usage.md): token and cost accounting, budgets, limits.
 - [Workflows](workflows.md): durable graphs with approvals, retries, `interrupt()`,
   history and fork, sub-workflows, parallel steps and Mermaid diagrams.
+- [Offline builder components](components.md): 30 deterministic text, data, logic and utility
+  modules with versioned schemas, examples and workflow routing.
 - [Observability](observability.md): OpenTelemetry traces for agents and workflows, OTLP
   export, opt-in content capture.
 - [Starter templates](templates.md): tested, offline-runnable workflows (support desk, RAG,
@@ -303,21 +305,21 @@ Source: https://github.com/Liceron/nexura/blob/main/docs/packages.md
 
 # Packages and installation
 
-The package inventory, source/wheel installation commands and backend requirements for the open-source edition. All packages are alpha (0.5) and published on PyPI and npm. See the [documentation index](README.md) for the subject guides.
+The package inventory, source/wheel installation commands and backend requirements for the open-source edition. Released packages are alpha (0.6) and published on PyPI and npm; source-only additions are marked below. See the [documentation index](README.md) for the subject guides.
 
 ## Package overview
 
 A typed Python SDK for building operational agents and approval-gated workflows,
 with a local REST service, a TypeScript API client and a browser Studio.
 
-> **Status: alpha (0.5); first published 2026-10-25.** Install with `pip` or `npm` as below, or from a
+> **Status: alpha (0.6); first published 2026-10-25.** Install with `pip` or `npm` as below, or from a
 > source checkout.
 
 > **Just want to build agents?** Start with **[Nexura Agents](../packages/nexura-agents/README.md)**
 > (`pip install nexura-agents`): the standalone agent SDK, two dependencies, offline-testable.
 > This repository's `nexura-runtime` is the full platform built on top of it.
 
-> **Guides:** [docs/](README.md) has 47 guides (agents, teams, tools, harness, MCP and OpenAPI,
+> **Guides:** [docs/](README.md) has 48 guides (agents, teams, tools, harness, MCP and OpenAPI,
 > A2A, memory, prompts, structured output, approvals, workflows, providers, tracing and
 > more) plus an index and a generated [API reference](api-reference.md). Every
 > offline example on those pages is run by the test suite; blocks needing a real model or
@@ -334,6 +336,7 @@ with a local REST service, a TypeScript API client and a browser Studio.
 | `packages/nexura-connectors` | `nexura-connectors` (Python, import `nexura_connectors`) | The 15 SaaS connectors (Slack, GitHub, Google Drive and Sheets, S3, Postgres, MySQL, email and more) as `nexura.connectors.*` workflow modules. Depends on `nexura-runtime`, which registers them when the package is installed and otherwise reports them unavailable ([docs/connectors.md](connectors.md)) |
 | `packages/nexura-postgres` | `nexura-postgres` (Python, import `nexura_postgres`) | PostgreSQL run and session storage (`PostgresRepository`) and the pgvector store. `get_storage_repository("postgresql://...")` uses it when installed and otherwise names `pip install nexura-postgres` |
 | `packages/nexura-qdrant` | `nexura-qdrant` (Python, import `nexura_qdrant`) | The Qdrant vector store (`QdrantVectorStoreAdapter`) for the runtime's `VectorStore` protocol |
+| `packages/nexura-vectorstores` | `nexura-vectorstores` (Python, import `nexura_vectorstores`; new, source-only pending release) | HTTP vector stores for Chroma, Pinecone, Weaviate, Milvus/Zilliz, Elasticsearch and OpenSearch; see [More vector databases](knowledge.md#more-vector-databases) |
 | `packages/nexura-sandbox` | `nexura-sandbox` (Python, import `nexura_sandbox`) | The WASI, bubblewrap and gVisor code-execution backends. The runtime keeps the backend selection, `SandboxConfig` and the default Monty backend, and reports these backends unavailable ("pip install nexura-sandbox") without it |
 | `packages/nexura-vertex` | `nexura-vertex` (Python, import `nexura_vertex`) | The Google Vertex AI provider (`VertexAIProvider`, `"vertex:..."` model strings). Depends on `nexura-agents` only |
 | `packages/nexura-guardrails` | `nexura-guardrails` (Python, import `nexura_guardrails`) | Guardrail checks: verdicts and a category taxonomy, pre-filters over the `nexura-agents` built-ins, an LLM judge that fails closed, tiered and parallel composition ([docs/guardrails-package.md](guardrails-package.md)). Depends on `nexura-agents` only; extras `judge` (empty) and `yaml` |
@@ -382,7 +385,7 @@ Or build and install a wheel into any Python 3.12 environment:
 
 ```bash
 uv build
-pip install "dist/nexura_runtime-0.5.0-py3-none-any.whl[studio]"
+pip install "dist/nexura_runtime-0.6.0-py3-none-any.whl[studio]"
 ```
 
 The repository builds one package per feature group (`uv build --all-packages` writes every
@@ -2005,7 +2008,7 @@ pip install "nexura-agents[otel]"    # + OpenTelemetry tracing
 > OpenAI, Anthropic, Gemini or Sarvam with your own key; the OpenAI, Anthropic and Sarvam checks have not run.
 > LiteLLM is checked offline only, against the real library's mock mode.
 >
-> Full guides live in the repository's `docs/` folder: 47 guides (getting started,
+> Full guides live in the repository's `docs/` folder: 48 guides (getting started,
 > agents, teams, tools, MCP and OpenAPI, A2A, memory, prompts, structured output,
 > approvals, guardrails, multimodal, providers, tracing, testing and more) plus a
 > generated API reference.
@@ -12347,7 +12350,7 @@ Agent tool names are the agent name lowercased with spaces replaced by `_` (clea
 
 ## AgentMCPServer arguments
 
-`AgentMCPServer(name, *, agents=(), tools=(), deps=None, runner=None, version="0.5.0", list_ttl_ms=60_000, instructions=None)`
+`AgentMCPServer(name, *, agents=(), tools=(), deps=None, runner=None, version="0.6.0", list_ttl_ms=60_000, instructions=None)`
 
 - `agents`: each becomes a tool named after the agent.
 - `tools`: `Tool` objects exposed with their own schemas.
@@ -16324,6 +16327,182 @@ asyncio.run(main())
 
 ---
 
+Source: https://github.com/Liceron/nexura/blob/main/docs/components.md
+
+# Offline builder components
+
+These 30 versioned modules run locally without models, credentials or network access.
+Importing `nexura_runtime.modules` registers them on `default_registry`. All have version
+`1.0.0`, kind `data_transform`, effect policy `read`, empty config and display examples.
+Input options belong in the node input mapping; config is `{}`.
+
+## Run a component
+
+```python
+import asyncio
+from nexura_agents.contracts import ExecutionContext
+from nexura_runtime.modules import default_registry
+
+async def main():
+    module = default_registry.get("nexura.text.clean", "1.0.0")
+    result = await module.execute(
+        ExecutionContext(run_id="offline-example", node_id="clean"),
+        {"text": "  Hello   world  "},
+        {},
+    )
+    assert result.outputs == {"text": "Hello world"}
+
+asyncio.run(main())
+```
+
+## Catalog
+
+Each example is the input object for `module.execute(context, inputs, {})`.
+Fields in parentheses are optional. Output fields are always present.
+The API descriptors expose full schemas and the same executable examples.
+
+### Text
+
+| Module id | Behavior | Inputs | Outputs | Example input |
+| --- | --- | --- | --- | --- |
+| `nexura.text.split` | Split by separator, line, sentence or overlapping fixed character windows. | text, (mode), (separator), (size), (overlap) | items | `{"text":"a,b","separator":","}` |
+| `nexura.text.join` | Combine text items with a separator. | items, (separator) | text | `{"items":["hello","world"],"separator":" "}` |
+| `nexura.text.replace` | Replace at most max_replacements occurrences; regex replacements support groups. | text, pattern, replacement, (mode), (max_replacements) | text | `{"text":"hello world","pattern":"world","replacement":"Nexura"}` |
+| `nexura.text.regex_extract` | Extract whole matches or named group objects (unmatched groups are null). | text, pattern, (mode), (max_matches) | matches | `{"text":"order 42","pattern":"[0-9]+"}` |
+| `nexura.text.case` | Convert text case, splitting camel case and acronym boundaries for identifiers. | text, mode | text | `{"text":"Hello World","mode":"snake"}` |
+| `nexura.text.clean` | NFC normalization, control removal (preserving tabs/newlines), whitespace collapse and trim. | text, (trim), (collapse_whitespace), (strip_controls), (normalize_unicode) | text | `{"text":"  Hello   world  "}` |
+| `nexura.text.truncate` | Keep limit characters or words and append ellipsis only if truncated. | text, (mode), limit, (ellipsis) | text, truncated | `{"text":"hello world","limit":5}` |
+| `nexura.text.count` | Count Unicode characters, whitespace words, splitlines and ceil(chars/4) approximate tokens. | text | chars, words, lines, approximate_tokens | `{"text":"hello world"}` |
+| `nexura.text.html_to_text` | Extract text and decode entities; drop script/style contents and separate blocks. | text | text | `{"text":"<p>Hello <b>world</b></p>"}` |
+| `nexura.text.markdown_to_text` | Remove common Markdown markers; keep link labels, image alt text and code contents. | text | text | `{"text":"# Hello **world**"}` |
+
+### Data
+
+| Module id | Behavior | Inputs | Outputs | Example input |
+| --- | --- | --- | --- | --- |
+| `nexura.data.json_parse` | Parse strict JSON text to a JSON value; reject NaN and Infinity. | text | value | `{"text":"{\"answer\": 42}"}` |
+| `nexura.data.json_stringify` | Serialize Unicode JSON compactly or with two-space indentation. | value, (pretty), (sort_keys) | text | `{"value":{"answer":42},"pretty":true}` |
+| `nexura.data.csv_parse` | Parse a unique nonempty header and equal-width string rows; reject overflow. | text, (delimiter), (max_rows) | items | `{"text":"name,score\nAda,10\n"}` |
+| `nexura.data.csv_build` | Build CSV with supplied columns or sorted union of row keys; missing cells are empty. | items, (delimiter), (fields) | text | `{"items":[{"name":"Ada","score":10}]}` |
+| `nexura.data.filter` | Keep matching items in order; omit field to compare each whole item. | items, (field), operator, value | items | `{"items":[{"score":2},{"score":7}],"field":"score","operator":"gte","value":5}` |
+| `nexura.data.sort` | Stable ascending/descending sort on scalar values or dotted fields; require comparable keys. | items, (field), (order) | items | `{"items":[{"score":7},{"score":2}],"field":"score"}` |
+| `nexura.data.pick` | Keep dotted fields as a nested object; missing fields become null. | data, fields | data | `{"data":{"user":{"name":"Ada","age":20}},"fields":["user.name"]}` |
+| `nexura.data.set_field` | Copy an object and set a dotted path, creating intermediate objects. | data, field, value | data | `{"data":{},"field":"user.name","value":"Ada"}` |
+| `nexura.data.flatten` | Flatten nested object keys to dotted paths or unflatten; arrays stay intact. | data, (mode) | data | `{"data":{"user":{"name":"Ada"}}}` |
+| `nexura.data.dedupe` | Keep first item per field (or whole value); compare canonical JSON including value types. | items, (field) | items | `{"items":[{"id":1,"name":"Ada"},{"id":1,"name":"Other"}],"field":"id"}` |
+| `nexura.data.group_by` | Group by a dotted field, in first-seen order; emit typed keys, lists and counts. | items, field | groups | `{"items":[{"team":"A"},{"team":"A"}],"field":"team"}` |
+
+### Logic
+
+| Module id | Behavior | Inputs | Outputs | Example input |
+| --- | --- | --- | --- | --- |
+| `nexura.logic.if_else` | Evaluate a condition and select the true or false workflow branch. | left, right, operator | result, route | `{"left":5,"right":3,"operator":"gt"}` |
+| `nexura.logic.switch` | Choose first matching case (whole data or dotted field), otherwise default_route. | data, cases, (default_route) | route | `{"data":5,"cases":[{"operator":"gt","value":3,"route":"large"}]}` |
+| `nexura.logic.compare` | Compare left and right with a classify operator, including guarded regex. | left, right, operator | result | `{"left":5,"right":3,"operator":"gt"}` |
+
+### Utilities
+
+| Module id | Behavior | Inputs | Outputs | Example input |
+| --- | --- | --- | --- | --- |
+| `nexura.utils.math` | Interpret numeric arithmetic and comparisons with min/max/round/abs; exponent cap 16. | expression, (variables) | value | `{"expression":"round(price * 1.2, 2)","variables":{"price":10}}` |
+| `nexura.utils.datetime` | Parse/format ISO dates, apply durations and convert zones; now requires explicit or context ISO time. | operation, (text), (format), (timezone), (duration) | text, iso | `{"operation":"add","text":"2026-01-01T00:00:00Z","duration":{"days":1}}` |
+| `nexura.utils.hash` | Compute a SHA-256, SHA-1 or MD5 hexadecimal fingerprint (not password hashing). | text, (algorithm) | digest | `{"text":"hello"}` |
+| `nexura.utils.base64` | Encode UTF-8 text or strictly decode padded Base64 to UTF-8; optional URL-safe alphabet. | text, operation, (url_safe) | text | `{"text":"hello","operation":"encode"}` |
+| `nexura.utils.url` | Parse URL parts or build with encoded query pairs, preserving duplicate keys and blanks. | operation, (url), (scheme), (netloc), (path), (query), (fragment) | url, parts | `{"operation":"parse","url":"https://example.test/search?q=hello+world"}` |
+| `nexura.utils.uuid` | Derive UUID5 from a namespace UUID (or dns/url/oid/x500) and a UTF-8 name. | namespace, name | uuid | `{"namespace":"dns","name":"example.test"}` |
+
+## Options and semantics
+
+- Text splitting defaults to separator mode with `,`. Line splitting uses `splitlines()`;
+  sentence splitting is a punctuation/whitespace heuristic. Fixed windows default to
+  size 1000 and overlap 0; overlap must be smaller than size.
+- Join defaults to an empty separator. Replace defaults to literal mode and at most 1024
+  replacements; set `mode="regex"` for patterns. Regex replacements accept `\1`,
+  `\g<name>` / `\g<0>`, `\n`, `\r`, `\t` and `\\`. Invalid escapes fail.
+  Extraction defaults to all whole matches, with a maximum of 1024; named mode emits
+  objects with null for unmatched groups. Exceeding the match cap fails rather than silently dropping data.
+- Case supports lower, upper, title, snake, kebab and camel. Identifier modes split ASCII
+  camel/acronym boundaries and Unicode word boundaries. Clean enables all four options
+  by default: NFC, remove control characters except tabs/newlines, collapse whitespace, trim.
+- Truncate defaults to character mode and appends `…` outside the retained limit only when
+  truncation occurs; word mode joins retained words with spaces. Counts use Unicode code
+  points, whitespace words and `splitlines()`. Approximate tokens are `ceil(chars/4)`,
+  independent of any model tokenizer.
+- HTML parsing drops script/style contents, decodes entities and separates common block tags.
+  Markdown extraction supports headings, lists, blockquotes, inline emphasis/code, fenced
+  code, inline links and images, then extracts HTML text. It is a text extraction heuristic,
+  not a complete CommonMark renderer or an HTML sanitizer.
+- JSON parsing rejects nonstandard NaN/Infinity; duplicate keys follow Python JSON behavior
+  (last wins). Stringify defaults to compact, unsorted Unicode JSON; pretty uses two spaces.
+- CSV defaults to comma delimiters and a 1024-row cap. Headers must be unique and nonempty,
+  rows must match header width. Build uses supplied fields or their sorted union, fills
+  absent cells with empty text, ignores columns outside supplied fields and rejects nested
+  cells. Empty input lists produce empty CSV unless fields are supplied. CSV is a data format;
+  text values are preserved verbatim, including spreadsheet formula prefixes.
+- Filter, compare, if_else and switch share classify operators: `eq`, `ne`, `gt`, `gte`,
+  `lt`, `lte`, `in`, `contains`, `regex`. Ordered comparisons require compatible types.
+  Missing fields compare as null; operators preserve existing classify equality semantics
+  (including Python numeric/bool equality). Regex comparisons require a string pattern.
+- Sort defaults to ascending and is stable in either direction. Sort keys must be
+  comparable non-null scalar values. Pick reconstructs nested objects and supplies null
+  for absent fields. Set field copies inputs and refuses to descend through scalars.
+- Dotted paths navigate dictionaries, not array indexes, and require 1–24 nonempty
+  segments and at most 256 characters. Flatten leaves arrays and empty objects intact;
+  nested keys containing dots or empty keys are rejected. Unflatten rejects colliding
+  parent/child paths. Dedupe keeps the first item using typed canonical JSON equality;
+  group_by returns first-seen groups as `{key, items, count}` to avoid string-key collisions.
+- Math permits numeric literals/variables, unary signs, `+ - * / // % **`, numeric
+  comparisons and `min/max/round/abs`. It interprets AST nodes and never executes Python.
+  Expressions are at most 1024 characters / 128 AST nodes, exponents have magnitude at most
+  16, intermediate magnitudes are at most `1e100`, and round digits range from -16 to 16.
+  Booleans are permitted as comparison results, not arithmetic operands.
+- Datetime treats naive ISO times as UTC. Add/subtract accepts days/hours/minutes/seconds
+  (each within ±36600), then optionally converts to an IANA timezone through `zoneinfo`.
+  Zone rules must be installed on the host; no arbitrary files are accepted. Format permits
+  only `%Y %m %d %H %M %S %f %z %j %w %u %V %G %%` (no locale-dependent directives).
+  `ExecutionContext` has no wall-clock API: `now` requires explicit ISO `text` or the
+  caller-injected ISO string `context.attributes["now"]`. Missing clock input fails;
+  the component never reads the current time. Pin host timezone data for replay across hosts.
+- Hash defaults to SHA-256; SHA-1/MD5 are fingerprints, not password or authentication hashes.
+  Base64 operates on UTF-8 text; decoding requires valid padded Base64 and valid UTF-8.
+  URL-safe encoding uses `-`/`_`. URL queries use ordered `{key, value}` pairs, preserving
+  duplicates and blanks; build percent-encodes query values. URL parsing performs no requests.
+- UUID always uses UUID5. Namespaces are UUID strings or `dns`, `url`, `oid`, `x500`.
+
+## Routing in workflows
+
+`if_else` reports `outputs["route"]` as `"true"` or `"false"` and sets
+`ModuleResult.branch` to that same value. `switch` sets both to its first matching case route
+or `default_route` (default `"default"`). This preserves classify-style inspectable route
+output while using the engine branch contract: the workflow engine reads `result.branch`
+(or the legacy `_branch` output), not an ordinary `route` output.
+Wire those branch names through `WorkflowNode.transitions`, and use `output_mapping` to
+save only the desired fields. A switch case may omit `field` to compare the whole data value.
+Compare returns a boolean and does not branch.
+
+## Resource limits and failures
+
+Every direct invocation and registry execution validates input and config. Inputs are
+JSON-only, finite, valid UTF-8, at most 131072 serialized bytes (also subject to a conservative
+preflight size check), 24 levels deep and 16384 visited values. Lists and objects have at
+most 1024 entries; text fields have at most 65536 characters. Cycles and integers above
+4096 bits fail. Outputs are checked against 262144 bytes and the same structural bounds;
+individual text outputs are capped at 65536 characters. Output expansion fails explicitly.
+
+Modules declare a 2-second timeout and check cancellation/deadlines through the execution
+context before and after processing. Work is bounded by the limits above; the synchronous
+non-regex operations do not offer preemptive interruption mid-operation. Regex patterns
+are capped at 512 characters, with an interruptible 50ms matching budget per operation
+(shared across collection comparisons). Invalid patterns and timeouts raise
+`SchemaValidationError`. Syntax, missing operation-dependent inputs, malformed encodings,
+unrepresentable results and resource overflows also raise clear schema errors.
+
+See [Workflows](workflows.md) for engine wiring and [Service and Studio](studio-and-service.md)
+for the module descriptor API and palette. These checks establish offline deterministic
+behavior; they do not validate any live model or claim production readiness.
+
+---
+
 Source: https://github.com/Liceron/nexura/blob/main/docs/observability.md
 
 # Observability with OpenTelemetry
@@ -16702,22 +16881,46 @@ Source: https://github.com/Liceron/nexura/blob/main/docs/templates.md
 
 # Starter templates
 
-Nexura ships a catalog of starter workflows. Each one is a versioned JSON file, validates
+Nexura ships a catalog of 30 starter workflows. Each one is a versioned JSON file, validates
 against the workflow engine, and has a test fixture that runs it end to end offline, with no
 network and no model provider. The same tests run in CI for every template.
 
 | Template id | Category | What it shows |
 | --- | --- | --- |
+| `faq-chatbot` | support | Answer from your FAQ by closest match; escalate to a person instead of guessing. |
+| `sentiment-escalation` | support | Unhappy customers get a goodwill credit a person approves, then an empathetic reply. |
 | `support-desk-refund-approval` | support | Classify a message; a refund waits for a human approval before it is issued. |
+| `ticket-triage` | support | Route tickets to billing, account, shipping or technical queues with an SLA; outages page on-call first. |
+| `lead-qualification` | sales | Score leads; hot leads become a CRM deal after approval, the rest are nurtured. |
+| `sales-outreach-email` | sales | Industry-specific outreach email, queued only after a person approves the text. |
+| `employee-onboarding` | hr | Dated onboarding checklist by department; accounts created after IT approves; welcome note. |
+| `leave-request` | hr | Count working days; short leave auto-approved, longer leave to the manager, over-balance declined. |
+| `resume-screening` | hr | Match job-relevant skills and years against a job; shortlist or draft a decline for a recruiter. |
+| `expense-approval` | finance | Policy limits and the receipt rule; over-limit claims wait for a manager. |
+| `invoice-reconciliation` | finance | Match payments to invoices by reference, then amount; report exceptions. |
+| `code-review-checklist` | engineering | Scan a diff for TODOs, debug output, possible secrets and huge changes; write a verdict. |
+| `incident-log-summary` | engineering | Count errors by service, rate severity, page on-call after approval, write a summary. |
+| `release-notes` | engineering | Group conventional commits, call out breaking changes, publish after approval. |
+| `seo-metadata` | content | Keywords, a title under 60 characters, a description under 155 and a slug. |
+| `social-post-generator` | content | One announcement to X, LinkedIn and Instagram posts within each length limit; scheduled after approval. |
+| `document-summarizer` | knowledge | Extractive summary: the most central sentences, in their original order. |
 | `rag-qa-citations` | knowledge | Answer from the documents you supply with numbered citations; refuse when nothing matches. |
-| `research-team` | agents | Planner, researcher, writer and reviewer agents in sequence. |
-| `approval-workflow` | governance | Small requests pass; large ones pause for approve or reject. |
-| `scheduled-report` | automation | Collect, summarise and queue a report; ships a suggested weekly schedule. |
+| `customer-feedback-analysis` | data | Tag feedback with themes and sentiment; summarise the top themes. |
+| `data-quality-check` | data | Missing fields, invalid emails and duplicate ids; publish or quarantine with a report. |
 | `structured-extraction` | data | Free text to a typed invoice record; incomplete documents are flagged, not guessed. |
+| `research-team` | agents | Planner, researcher, writer and reviewer agents in sequence. |
+| `trip-planner` | agents | Plan a trip from interests, price it and trim paid activities to fit the budget. |
+| `meeting-notes` | automation | Attendees, decisions and owned action items from notes; shared after approval. |
+| `order-alerts` | automation | Alert the sales channel about orders above a threshold; log the rest. |
+| `scheduled-report` | automation | Collect, summarise and queue a report; ships a suggested weekly schedule. |
+| `approval-workflow` | governance | Small requests pass; large ones pause for approve or reject. |
+| `content-moderation` | governance | Blocked terms, personal data, link spam and shouting: publish, review or reject. |
+| `contract-review` | governance | Flag risky clauses; high-risk contracts need legal sign-off. |
+| `pii-redaction` | governance | Replace emails, Luhn-checked card numbers, phones and IPs with labels. |
 
 ## What "offline" means here
 
-The handlers behind the templates (`tpl_*`, in `nexura_runtime.templates.handlers`) are
+The handlers behind the templates (`tpl_*`, in `nexura_runtime.templates.handlers` and `nexura_runtime.templates.library`) are
 deterministic stand-ins. Steps that stand for an LLM call run a real `Agent` on a scripted
 `FakeModel`. Steps that stand for an outside system (a payment API, a mail server) only record
 what they would do: the refund is `simulated`, and the report goes to a dry-run outbox
@@ -21279,7 +21482,7 @@ Args:
 
 ### `AgentMCPServer`
 
-class `AgentMCPServer(name: 'str', *, agents: 'Sequence[Agent | Team]' = (), tools: 'Sequence[Tool]' = (), deps: 'Any' = None, runner: 'Any' = None, version: 'str' = '0.5.0', list_ttl_ms: 'int' = 60000, instructions: 'str | None' = None) -> 'None'`
+class `AgentMCPServer(name: 'str', *, agents: 'Sequence[Agent | Team]' = (), tools: 'Sequence[Tool]' = (), deps: 'Any' = None, runner: 'Any' = None, version: 'str' = '0.6.0', list_ttl_ms: 'int' = 60000, instructions: 'str | None' = None) -> 'None'`
 
 ~~~text
 Expose agents and tools as an MCP server.
@@ -24210,6 +24413,119 @@ async def main() -> None:
 
 asyncio.run(main())
 ```
+
+## More vector databases
+
+The new, source-only `packages/nexura-vectorstores` package implements the runtime's
+`VectorStore` protocol through HTTP, with no vendor SDK. Install it from the
+checkout with `pip install ./packages/nexura-vectorstores` after installing the
+workspace's runtime and agents packages. The runtime also declares a
+`vectorstores` extra for the eventual package release; the new package has not
+been published. These adapters are usable directly through the vector protocol;
+the hybrid SQLite/FTS5 index described above keeps its current storage.
+
+| Database | Class in `nexura_vectorstores` | URL / environment variables | Metrics | Filter support | Notes |
+|---|---|---|---|---|---|
+| Chroma 1.x | `ChromaVectorStore` | `http://localhost:8000`; `NEXURA_CHROMA_URL`, `NEXURA_CHROMA_API_KEY` | cosine, dot_product (ip), euclidean (l2) | Native positive scalar comparisons, AND/OR; remainder post-filtered | REST v2; existing tenant/database, configurable via constructor |
+| Pinecone serverless / Local | `PineconeVectorStore` | Index URL required; `NEXURA_PINECONE_URL`, `NEXURA_PINECONE_API_KEY` | cosine, dot_product (dotproduct), euclidean | Native positive scalar comparisons, AND/OR; remainder post-filtered | One namespace per generation; provision index first, constructor dimensions/metric must match |
+| Weaviate 1.2x | `WeaviateVectorStore` | `http://localhost:8080`; `NEXURA_WEAVIATE_URL`, `NEXURA_WEAVIATE_API_KEY` | cosine, dot_product (dot), euclidean (l2-squared) | Native scalar equality/numeric range, And/Or; remainder post-filtered | Explicit schema, no vectorizer, GraphQL nearVector |
+| Milvus 2.4+ / Zilliz | `MilvusVectorStore` | `http://localhost:19530`; `NEXURA_MILVUS_URL`, `NEXURA_MILVUS_TOKEN` | cosine (COSINE), dot_product (IP), euclidean (L2) | Native positive scalar expressions, AND/OR; remainder post-filtered | RESTful v2; VARCHAR ids, dynamic fields, strong reads; `db_name="default"` |
+| Elasticsearch 8.x | `ElasticsearchVectorStore` | `http://localhost:9200`; `NEXURA_ELASTICSEARCH_URL`, `NEXURA_ELASTICSEARCH_API_KEY` | cosine, dot_product (max_inner_product), euclidean (l2_norm) | Native scalar equality/range/set/negative, bool AND/OR; remainder post-filtered | dense_vector + knn; arbitrary-norm dot product needs 8.11+ |
+| OpenSearch 2.x | `OpenSearchVectorStore` | `http://localhost:9200`; `NEXURA_OPENSEARCH_URL`, `NEXURA_OPENSEARCH_TOKEN` | cosine (cosinesimil), dot_product (innerproduct), euclidean (l2) | Native scalar equality/range/set/negative, bool AND/OR; remainder post-filtered | knn_vector, index.knn enabled, nmslib HNSW; outer filters |
+
+Every filter supports `$and/$or`, `$eq/$ne/$in/$nin`,
+`$gt/$gte/$lt/$lte` and `$contains`. Substring/list containment, JSON/null
+equality, string ordering and vendor differences around missing fields use
+`matches_filter` after over-fetching. Scores are canonical Nexura cosine/dot
+similarities or `1 / (1 + euclidean_distance)`, always higher is better.
+
+Each adapter persists its workspace/collection manifest and separate generation
+spaces. A single manifest replacement switches the active generation and retires
+the old one together. The instance serializes writers; coordinate multiple
+processes externally. Server consistency (including Pinecone eventual visibility)
+still applies. Following Qdrant, active and building generations accept upserts;
+retired/dropped generations reject them. Soft deletes persist tombstones;
+hard deletes remove records, including existing tombstones.
+
+Fallback searches over-fetch the complete candidate set, up to 10,000 stored
+records including tombstones; larger fallback pools fail explicitly. Fully native
+Pinecone, Milvus and Elasticsearch queries fetch just top_k, as do unfiltered
+Chroma/Weaviate queries. Chroma filtered searches account for stale metadata
+projections; OpenSearch nmslib outer filters always need the complete pool.
+Pinecone exact counts share the 10,000 bound. Vendor payload limits apply to records and manifest
+history. See the [package README](../packages/nexura-vectorstores/README.md)
+for transport injection, credential headers, API references and live-test setup.
+Offline MockTransport conformance is provided; these APIs have not been
+validated against live servers in this assignment.
+
+The following examples require configured disposable servers and make no model
+calls. First define this shared operation:
+
+```python notest
+import asyncio
+from nexura_runtime.knowledge.vector.models import VectorRecord, VectorSearchQuery
+
+async def index_vectors(store):
+    async with store:
+        await store.create_collection("demo", "documents", dimensions=2)
+        await store.upsert("demo", "documents", [
+            VectorRecord(
+                id="one", workspace_id="demo", collection_id="documents",
+                generation_id="", vector=[1.0, 0.0], text="Offline-generated vector",
+                metadata={"kind": "guide"},
+            )
+        ])
+        return await store.search("demo", VectorSearchQuery(
+            workspace_id="demo", collection_id="documents", vector=[1.0, 0.0],
+            filter={"kind": "guide"}, top_k=1,
+        ))
+```
+
+Chroma (default tenant/database must exist):
+
+```python notest
+from nexura_vectorstores import ChromaVectorStore
+hits = asyncio.run(index_vectors(ChromaVectorStore()))
+```
+
+Pinecone (set the index URL and key; this example needs a provisioned
+two-dimensional cosine index):
+
+```python notest
+from nexura_vectorstores import PineconeVectorStore
+hits = asyncio.run(index_vectors(PineconeVectorStore(dimensions=2, metric="cosine")))
+```
+
+Weaviate:
+
+```python notest
+from nexura_vectorstores import WeaviateVectorStore
+hits = asyncio.run(index_vectors(WeaviateVectorStore()))
+```
+
+Milvus / Zilliz:
+
+```python notest
+from nexura_vectorstores import MilvusVectorStore
+hits = asyncio.run(index_vectors(MilvusVectorStore(db_name="default")))
+```
+
+Elasticsearch:
+
+```python notest
+from nexura_vectorstores import ElasticsearchVectorStore
+hits = asyncio.run(index_vectors(ElasticsearchVectorStore()))
+```
+
+OpenSearch:
+
+```python notest
+from nexura_vectorstores import OpenSearchVectorStore
+hits = asyncio.run(index_vectors(OpenSearchVectorStore()))
+```
+
+For a keyless, network-free run, use
+`python examples/vectorstores_offline.py`.
 
 ## How search works
 

@@ -1,0 +1,115 @@
+{
+  "template_version": 1,
+  "id": "sentiment-escalation",
+  "title": "Unhappy customer recovery",
+  "description": "Scores the sentiment of a customer message; unhappy customers get a goodwill credit that a person approves before it is granted, then an empathetic reply.",
+  "category": "support",
+  "difficulty": "intermediate",
+  "tags": [
+    "support",
+    "sentiment",
+    "approval",
+    "retention"
+  ],
+  "required_modules": [
+    "tpl_sentiment_offer_credit",
+    "tpl_sentiment_reply",
+    "tpl_sentiment_score"
+  ],
+  "required_credentials": [
+    "model_api_key"
+  ],
+  "spec": {
+    "spec_version": 1,
+    "name": "Unhappy customer recovery",
+    "entry_node": "score",
+    "nodes": {
+      "score": {
+        "id": "score",
+        "handler": "tpl_sentiment_score",
+        "transitions": {
+          "negative": "credit",
+          "other": "reply"
+        },
+        "default_transition": "reply",
+        "requires_approval": false
+      },
+      "credit": {
+        "id": "credit",
+        "handler": "tpl_sentiment_offer_credit",
+        "transitions": {},
+        "default_transition": "reply",
+        "requires_approval": true
+      },
+      "reply": {
+        "id": "reply",
+        "handler": "tpl_sentiment_reply",
+        "transitions": {},
+        "default_transition": null,
+        "requires_approval": false
+      }
+    },
+    "terminal_nodes": [
+      "reply"
+    ]
+  },
+  "sample_input": {
+    "customer": "Asha",
+    "message": "The delivery was late and the box arrived broken. Terrible.",
+    "order_total": 120
+  },
+  "fixture": {
+    "runs": [
+      {
+        "name": "an angry customer gets an approved credit",
+        "input": {
+          "customer": "Asha",
+          "message": "Late again and the item is broken. Terrible service.",
+          "order_total": 120
+        },
+        "approval": {
+          "node": "credit",
+          "decision": "approve"
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "sentiment.label": "negative",
+          "credit.amount": 12.0
+        },
+        "expect_contains": {
+          "reply": "credit"
+        }
+      },
+      {
+        "name": "a rejected credit is never granted",
+        "input": {
+          "customer": "Ravi",
+          "message": "Awful, slow and broken.",
+          "order_total": 900
+        },
+        "approval": {
+          "node": "credit",
+          "decision": "reject"
+        },
+        "expect_status": "rejected",
+        "expect_absent": [
+          "credit"
+        ]
+      },
+      {
+        "name": "a happy customer is thanked, no credit",
+        "input": {
+          "customer": "Meena",
+          "message": "Great product, thanks!"
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "sentiment.label": "positive"
+        },
+        "expect_absent": [
+          "credit"
+        ]
+      }
+    ]
+  }
+}

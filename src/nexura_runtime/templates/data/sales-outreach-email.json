@@ -1,0 +1,107 @@
+{
+  "template_version": 1,
+  "id": "sales-outreach-email",
+  "title": "Personalised sales outreach",
+  "description": "Picks a value proposition for the prospect's industry, drafts a short personal email, and only queues it after a person approves the exact text.",
+  "category": "sales",
+  "difficulty": "intermediate",
+  "tags": [
+    "sales",
+    "email",
+    "outreach",
+    "approval"
+  ],
+  "required_modules": [
+    "tpl_outreach_draft",
+    "tpl_outreach_research",
+    "tpl_outreach_send"
+  ],
+  "required_credentials": [
+    "model_api_key"
+  ],
+  "spec": {
+    "spec_version": 1,
+    "name": "Personalised sales outreach",
+    "entry_node": "research",
+    "nodes": {
+      "research": {
+        "id": "research",
+        "handler": "tpl_outreach_research",
+        "transitions": {},
+        "default_transition": "draft",
+        "requires_approval": false
+      },
+      "draft": {
+        "id": "draft",
+        "handler": "tpl_outreach_draft",
+        "transitions": {},
+        "default_transition": "send",
+        "requires_approval": false
+      },
+      "send": {
+        "id": "send",
+        "handler": "tpl_outreach_send",
+        "transitions": {},
+        "default_transition": null,
+        "requires_approval": true
+      }
+    },
+    "terminal_nodes": [
+      "send"
+    ]
+  },
+  "sample_input": {
+    "prospect": {
+      "name": "Priya Shah",
+      "company": "Northwind Bank",
+      "industry": "finance",
+      "email": "priya@example.com"
+    }
+  },
+  "fixture": {
+    "runs": [
+      {
+        "name": "an approved email is queued as a dry run",
+        "input": {
+          "prospect": {
+            "name": "Priya Shah",
+            "company": "Northwind Bank",
+            "industry": "finance",
+            "email": "priya@example.com"
+          }
+        },
+        "approval": {
+          "node": "send",
+          "decision": "approve"
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "angle.industry": "finance",
+          "outbox.status": "queued",
+          "outbox.mode": "dry_run"
+        },
+        "expect_contains": {
+          "email": "close the books faster"
+        }
+      },
+      {
+        "name": "a rejected email is never queued",
+        "input": {
+          "prospect": {
+            "name": "Sam",
+            "company": "Contoso",
+            "industry": "retail"
+          }
+        },
+        "approval": {
+          "node": "send",
+          "decision": "reject"
+        },
+        "expect_status": "rejected",
+        "expect_absent": [
+          "outbox"
+        ]
+      }
+    ]
+  }
+}

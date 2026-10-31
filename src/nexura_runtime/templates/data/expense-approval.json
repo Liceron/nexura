@@ -1,0 +1,129 @@
+{
+  "template_version": 1,
+  "id": "expense-approval",
+  "title": "Expense claim approval",
+  "description": "Checks an expense claim against category limits and the receipt rule; claims within policy are reimbursed, claims over the limit wait for a manager, invalid claims are rejected with reasons.",
+  "category": "finance",
+  "difficulty": "beginner",
+  "tags": [
+    "finance",
+    "expenses",
+    "policy",
+    "approval"
+  ],
+  "required_modules": [
+    "tpl_expense_manager_review",
+    "tpl_expense_policy",
+    "tpl_expense_reimburse",
+    "tpl_expense_reject"
+  ],
+  "required_credentials": [],
+  "spec": {
+    "spec_version": 1,
+    "name": "Expense claim approval",
+    "entry_node": "policy",
+    "nodes": {
+      "policy": {
+        "id": "policy",
+        "handler": "tpl_expense_policy",
+        "transitions": {
+          "auto": "reimburse",
+          "review": "review",
+          "reject": "reject"
+        },
+        "default_transition": "reject",
+        "requires_approval": false
+      },
+      "review": {
+        "id": "review",
+        "handler": "tpl_expense_manager_review",
+        "transitions": {},
+        "default_transition": "reimburse",
+        "requires_approval": true
+      },
+      "reimburse": {
+        "id": "reimburse",
+        "handler": "tpl_expense_reimburse",
+        "transitions": {},
+        "default_transition": null,
+        "requires_approval": false
+      },
+      "reject": {
+        "id": "reject",
+        "handler": "tpl_expense_reject",
+        "transitions": {},
+        "default_transition": null,
+        "requires_approval": false
+      }
+    },
+    "terminal_nodes": [
+      "reimburse",
+      "reject"
+    ]
+  },
+  "sample_input": {
+    "expense": {
+      "category": "meals",
+      "amount": 42.5,
+      "receipt": true
+    }
+  },
+  "fixture": {
+    "runs": [
+      {
+        "name": "a claim within policy is reimbursed",
+        "input": {
+          "expense": {
+            "category": "meals",
+            "amount": 42.5,
+            "receipt": true
+          }
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "reimbursement.amount": 42.5,
+          "reimbursement.status": "scheduled"
+        },
+        "expect_absent": [
+          "review"
+        ]
+      },
+      {
+        "name": "an over-limit claim needs the manager",
+        "input": {
+          "expense": {
+            "category": "software",
+            "amount": 499,
+            "receipt": true
+          }
+        },
+        "approval": {
+          "node": "review",
+          "decision": "approve"
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "policy.over_limit": true,
+          "review.approver": "manager",
+          "reimbursement.status": "scheduled"
+        }
+      },
+      {
+        "name": "a claim without a receipt is rejected",
+        "input": {
+          "expense": {
+            "category": "travel",
+            "amount": 300
+          }
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "reimbursement.status": "rejected",
+          "reimbursement.issues": [
+            "receipt required above 25"
+          ]
+        }
+      }
+    ]
+  }
+}

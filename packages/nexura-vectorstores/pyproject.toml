@@ -1,0 +1,49 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Liceron
+[project]
+name = "nexura-vectorstores"
+version = "0.6.0"
+description = "HTTP vector stores for Nexura: Chroma, Pinecone, Weaviate, Milvus, Elasticsearch and OpenSearch."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "Liceron", email = "info@liceron.in" }]
+keywords = ["agents", "rag", "vector-store", "retrieval"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Database",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+dependencies = ["nexura-runtime==0.6.0", "nexura-agents==0.6.0", "httpx>=0.27,<1"]
+
+[project.urls]
+Homepage = "https://github.com/Liceron/nexura"
+Documentation = "https://github.com/Liceron/nexura/blob/main/docs/knowledge.md"
+Source = "https://github.com/Liceron/nexura"
+Issues = "https://github.com/Liceron/nexura/issues"
+Changelog = "https://github.com/Liceron/nexura/blob/main/CHANGELOG.md"
+
+[tool.uv.sources]
+nexura-runtime = { workspace = true }
+nexura-agents = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nexura_vectorstores"]
+
+[tool.hatch.build]
+dev-mode-dirs = ["src"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/src", "/README.md", "/LICENSE", "/NOTICE", "/pyproject.toml"]
+exclude = [
+    "**/__pycache__", "**/*.pyc",
+    "**/*blueprint*/**", "**/internal/**", "**/product/**", "**/.autopilot/**",
+]

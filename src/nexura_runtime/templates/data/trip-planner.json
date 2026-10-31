@@ -1,0 +1,124 @@
+{
+  "template_version": 1,
+  "id": "trip-planner",
+  "title": "Trip planner within a budget",
+  "description": "Plans a day-by-day trip from the traveller's interests, prices it, swaps paid activities for free ones when it is over budget, and writes the itinerary.",
+  "category": "agents",
+  "difficulty": "intermediate",
+  "tags": [
+    "agents",
+    "planning",
+    "travel",
+    "budget"
+  ],
+  "required_modules": [
+    "tpl_trip_budget",
+    "tpl_trip_itinerary",
+    "tpl_trip_plan",
+    "tpl_trip_trim"
+  ],
+  "required_credentials": [
+    "model_api_key"
+  ],
+  "spec": {
+    "spec_version": 1,
+    "name": "Trip planner within a budget",
+    "entry_node": "plan",
+    "nodes": {
+      "plan": {
+        "id": "plan",
+        "handler": "tpl_trip_plan",
+        "transitions": {},
+        "default_transition": "budget",
+        "requires_approval": false
+      },
+      "budget": {
+        "id": "budget",
+        "handler": "tpl_trip_budget",
+        "transitions": {
+          "within": "itinerary",
+          "over": "trim"
+        },
+        "default_transition": "trim",
+        "requires_approval": false
+      },
+      "trim": {
+        "id": "trim",
+        "handler": "tpl_trip_trim",
+        "transitions": {},
+        "default_transition": "itinerary",
+        "requires_approval": false
+      },
+      "itinerary": {
+        "id": "itinerary",
+        "handler": "tpl_trip_itinerary",
+        "transitions": {},
+        "default_transition": null,
+        "requires_approval": false
+      }
+    },
+    "terminal_nodes": [
+      "itinerary"
+    ]
+  },
+  "sample_input": {
+    "destination": "Lisbon",
+    "days": 3,
+    "interests": [
+      "museum",
+      "food tour",
+      "beach"
+    ],
+    "hotel_per_night": 120,
+    "budget": 500
+  },
+  "fixture": {
+    "runs": [
+      {
+        "name": "a trip within budget keeps every activity",
+        "input": {
+          "destination": "Lisbon",
+          "days": 3,
+          "interests": [
+            "museum",
+            "food tour",
+            "beach"
+          ],
+          "hotel_per_night": 120,
+          "budget": 500
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "cost.total": 445.0,
+          "plan.1.activity": "food tour"
+        },
+        "expect_absent": [
+          "trimmed"
+        ],
+        "expect_contains": {
+          "itinerary": "Lisbon"
+        }
+      },
+      {
+        "name": "an over-budget trip is trimmed",
+        "input": {
+          "destination": "Rome",
+          "days": 3,
+          "interests": [
+            "concert",
+            "food tour",
+            "museum"
+          ],
+          "hotel_per_night": 100,
+          "budget": 350
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "trimmed": true,
+          "plan.0.activity": "free walking tour",
+          "cost.total": 325.0
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,116 @@
+{
+  "template_version": 1,
+  "id": "data-quality-check",
+  "title": "Data quality gate",
+  "description": "Checks a batch of records for missing required fields, invalid emails and duplicate ids; clean batches are published, failing ones are quarantined with a row-level report.",
+  "category": "data",
+  "difficulty": "beginner",
+  "tags": [
+    "data",
+    "validation",
+    "quality"
+  ],
+  "required_modules": [
+    "tpl_dq_publish",
+    "tpl_dq_quarantine",
+    "tpl_dq_validate"
+  ],
+  "required_credentials": [],
+  "spec": {
+    "spec_version": 1,
+    "name": "Data quality gate",
+    "entry_node": "validate",
+    "nodes": {
+      "validate": {
+        "id": "validate",
+        "handler": "tpl_dq_validate",
+        "transitions": {
+          "pass": "publish",
+          "fail": "quarantine"
+        },
+        "default_transition": "quarantine",
+        "requires_approval": false
+      },
+      "publish": {
+        "id": "publish",
+        "handler": "tpl_dq_publish",
+        "transitions": {},
+        "default_transition": null,
+        "requires_approval": false
+      },
+      "quarantine": {
+        "id": "quarantine",
+        "handler": "tpl_dq_quarantine",
+        "transitions": {},
+        "default_transition": null,
+        "requires_approval": false
+      }
+    },
+    "terminal_nodes": [
+      "publish",
+      "quarantine"
+    ]
+  },
+  "sample_input": {
+    "rows": [
+      {
+        "id": 1,
+        "email": "asha@example.com"
+      },
+      {
+        "id": 2,
+        "email": "ravi@example.com"
+      }
+    ]
+  },
+  "fixture": {
+    "runs": [
+      {
+        "name": "a clean batch is published",
+        "input": {
+          "rows": [
+            {
+              "id": 1,
+              "email": "asha@example.com"
+            },
+            {
+              "id": 2,
+              "email": "ravi@example.com"
+            }
+          ]
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "quality.passed": true,
+          "dataset.status": "published",
+          "dataset.rows": 2
+        }
+      },
+      {
+        "name": "bad rows are quarantined with reasons",
+        "input": {
+          "rows": [
+            {
+              "id": 1,
+              "email": "not-an-email"
+            },
+            {
+              "id": 1,
+              "email": "x@example.com"
+            },
+            {
+              "id": 3,
+              "email": ""
+            }
+          ]
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "dataset.status": "quarantined",
+          "dataset.issue_count": 3,
+          "quality.issues.0.problem": "invalid"
+        }
+      }
+    ]
+  }
+}

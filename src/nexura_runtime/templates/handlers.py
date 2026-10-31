@@ -21,6 +21,7 @@ from nexura_agents.runner import Runner
 from pydantic import BaseModel, ValidationError
 
 from nexura_runtime.studio.traces import traced_run
+from nexura_runtime.templates.library import LIBRARY_HANDLERS
 from nexura_runtime.workflow import HandlerOutput, ModuleRegistry
 
 _WORD = re.compile(r"[a-z0-9]+")
@@ -329,6 +330,8 @@ def tpl_extract_flag(state: dict[str, Any]) -> dict[str, Any]:
 HANDLERS: dict[str, Any] = {
     name: fn for name, fn in sorted(globals().items()) if name.startswith("tpl_") and callable(fn)
 }
+# The business templates (support, sales, HR, finance, engineering, content, data, governance).
+HANDLERS.update(LIBRARY_HANDLERS)
 
 
 def template_registry() -> ModuleRegistry:

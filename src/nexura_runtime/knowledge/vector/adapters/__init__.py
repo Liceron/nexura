@@ -5,6 +5,8 @@
 The adapters themselves are separate packages that depend on this runtime: PostgreSQL
 pgvector is ``nexura_postgres.PgVectorStoreAdapter`` (``pip install nexura-postgres``) and
 Qdrant is ``nexura_qdrant.QdrantVectorStoreAdapter`` (``pip install nexura-qdrant``).
+Chroma, Pinecone, Weaviate, Milvus, Elasticsearch and OpenSearch are provided by
+``nexura_vectorstores`` (``pip install nexura-vectorstores``).
 """
 
 from __future__ import annotations

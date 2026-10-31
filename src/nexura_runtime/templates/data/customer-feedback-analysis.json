@@ -1,0 +1,76 @@
+{
+  "template_version": 1,
+  "id": "customer-feedback-analysis",
+  "title": "Customer feedback themes",
+  "description": "Tags each piece of feedback with themes (pricing, bugs, performance, usability, support) and sentiment, counts them and summarises the top themes.",
+  "category": "data",
+  "difficulty": "intermediate",
+  "tags": [
+    "feedback",
+    "analytics",
+    "sentiment",
+    "product"
+  ],
+  "required_modules": [
+    "tpl_feedback_classify",
+    "tpl_feedback_report"
+  ],
+  "required_credentials": [
+    "model_api_key"
+  ],
+  "spec": {
+    "spec_version": 1,
+    "name": "Customer feedback themes",
+    "entry_node": "classify",
+    "nodes": {
+      "classify": {
+        "id": "classify",
+        "handler": "tpl_feedback_classify",
+        "transitions": {},
+        "default_transition": "report",
+        "requires_approval": false
+      },
+      "report": {
+        "id": "report",
+        "handler": "tpl_feedback_report",
+        "transitions": {},
+        "default_transition": null,
+        "requires_approval": false
+      }
+    },
+    "terminal_nodes": [
+      "report"
+    ]
+  },
+  "sample_input": {
+    "feedback": [
+      "The app is slow when loading reports",
+      "Love the new design, very intuitive",
+      "Pricing is too expensive for small teams",
+      "Export crashes with an error"
+    ]
+  },
+  "fixture": {
+    "runs": [
+      {
+        "name": "themes and sentiment are counted",
+        "input": {
+          "feedback": [
+            "The app is slow when loading reports",
+            "Slow search, terrible",
+            "Love the new design, very intuitive",
+            "Pricing is too expensive",
+            "Export crashes with an error"
+          ]
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "analysis.count": 5,
+          "analysis.themes.performance": 2,
+          "top_theme": "performance",
+          "analysis.sentiment.positive": 1
+        }
+      }
+    ]
+  }
+}

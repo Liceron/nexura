@@ -12,6 +12,7 @@ bundle. The packages themselves are Liceron's own code under the Apache License 
 | `nexura-guardrails` (Python) | `packages/nexura-guardrails` | Apache-2.0, Liceron |
 | `nexura-postgres` (Python) | `packages/nexura-postgres` | Apache-2.0, Liceron |
 | `nexura-qdrant` (Python) | `packages/nexura-qdrant` | Apache-2.0, Liceron |
+| `nexura-vectorstores` (Python) | `packages/nexura-vectorstores` | Apache-2.0, Liceron |
 | `nexura-sandbox` (Python) | `packages/nexura-sandbox` | Apache-2.0, Liceron |
 | `nexura-studio` (Python) | `packages/nexura-studio` | Apache-2.0 AND OFL-1.1, Liceron and font authors |
 | `nexura-vertex` (Python) | `packages/nexura-vertex` | Apache-2.0, Liceron |
@@ -34,6 +35,7 @@ its own licence and notices; this list does not replace them.
 | `httpx` | BSD-3-Clause | Encode OSS Ltd. | https://github.com/encode/httpx | HTTP transport |
 | `pydantic` | MIT | Samuel Colvin and contributors | https://github.com/pydantic/pydantic | Typed models and validation |
 | `packaging` | Apache-2.0 OR BSD-2-Clause | PyPA | https://github.com/pypa/packaging | Version parsing |
+| `regex` | Apache-2.0 AND CNRI-Python | Matthew Barnett and contributors | https://github.com/mrabarnett/mrab-regex | Interruptible regex matching in offline builder components; license verified from installed 2026.9.29 metadata on 2026-10-30 |
 | `cryptography` | Apache-2.0 OR BSD-3-Clause | Individual contributors to pyca/cryptography | https://github.com/pyca/cryptography | AES-GCM secrets store, trigger signing keys, RS256 token verification (core since 0.4.0) |
 
 ## Python: `nexura-runtime` optional extras
@@ -157,7 +159,7 @@ ESLint, Playwright, Testing Library, TypeScript, type packages) are not bundled 
 | `classcat` | 5.0.5 | MIT | Jorge Bucaran | https://github.com/jorgebucaran/classcat |
 | `d3-color`, `d3-dispatch`, `d3-drag`, `d3-interpolate`, `d3-selection`, `d3-timer`, `d3-transition`, `d3-zoom` | 3.x | ISC | Mike Bostock | https://github.com/d3 |
 | `d3-ease` | 3.0.1 | BSD-3-Clause | Mike Bostock; Robert Penner (easing equations) | https://github.com/d3/d3-ease |
-| `@liceron/nexura-sdk` | 0.5.0 | Apache-2.0 | Liceron (first party, `clients/typescript`) | this repository |
+| `@liceron/nexura-sdk` | 0.6.0 | Apache-2.0 | Liceron (first party, `clients/typescript`) | this repository |
 
 ---
 

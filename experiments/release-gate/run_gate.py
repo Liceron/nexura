@@ -207,6 +207,7 @@ PACKAGE_SOURCES = tuple(
         "nexura-postgres",
         "nexura-qdrant",
         "nexura-sandbox",
+        "nexura-vectorstores",
         "nexura-studio",
         "nexura-vertex",
     )

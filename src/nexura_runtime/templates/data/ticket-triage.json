@@ -1,0 +1,113 @@
+{
+  "template_version": 1,
+  "id": "ticket-triage",
+  "title": "Support ticket triage",
+  "description": "Sorts incoming tickets into billing, account, shipping or technical queues with a priority and SLA, and pages on-call first for outages.",
+  "category": "support",
+  "difficulty": "beginner",
+  "tags": [
+    "support",
+    "triage",
+    "routing",
+    "sla"
+  ],
+  "required_modules": [
+    "tpl_triage_assign",
+    "tpl_triage_classify",
+    "tpl_triage_page"
+  ],
+  "required_credentials": [],
+  "spec": {
+    "spec_version": 1,
+    "name": "Support ticket triage",
+    "entry_node": "classify",
+    "nodes": {
+      "classify": {
+        "id": "classify",
+        "handler": "tpl_triage_classify",
+        "transitions": {
+          "urgent": "page",
+          "normal": "assign"
+        },
+        "default_transition": "assign",
+        "requires_approval": false
+      },
+      "page": {
+        "id": "page",
+        "handler": "tpl_triage_page",
+        "transitions": {},
+        "default_transition": "assign",
+        "requires_approval": false
+      },
+      "assign": {
+        "id": "assign",
+        "handler": "tpl_triage_assign",
+        "transitions": {},
+        "default_transition": null,
+        "requires_approval": false
+      }
+    },
+    "terminal_nodes": [
+      "assign"
+    ]
+  },
+  "sample_input": {
+    "subject": "Charged twice",
+    "body": "My invoice shows the payment twice this month.",
+    "plan": "pro"
+  },
+  "fixture": {
+    "runs": [
+      {
+        "name": "a billing question goes to the billing queue",
+        "input": {
+          "subject": "Charged twice",
+          "body": "My invoice shows the payment twice."
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "triage.category": "billing",
+          "triage.priority": "normal",
+          "triage.queue": "billing-queue",
+          "triage.sla_hours": 24
+        },
+        "expect_absent": [
+          "page"
+        ]
+      },
+      {
+        "name": "an outage pages on-call before assignment",
+        "input": {
+          "subject": "API down",
+          "body": "Every request returns 500, outage for all users"
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "triage.category": "technical",
+          "triage.priority": "urgent",
+          "triage.sla_hours": 1,
+          "page.to": "on-call"
+        },
+        "expect_path": [
+          "classify",
+          "page",
+          "assign"
+        ]
+      },
+      {
+        "name": "enterprise customers get high priority",
+        "input": {
+          "subject": "Locked out",
+          "body": "I cannot login to my account",
+          "plan": "enterprise"
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "triage.category": "account",
+          "triage.priority": "high",
+          "triage.sla_hours": 4
+        }
+      }
+    ]
+  }
+}

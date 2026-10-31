@@ -1,0 +1,88 @@
+{
+  "template_version": 1,
+  "id": "meeting-notes",
+  "title": "Meeting minutes and action items",
+  "description": "Pulls attendees, decisions and action items with owners out of raw meeting notes, writes the minutes and shares them with the attendees after approval.",
+  "category": "automation",
+  "difficulty": "beginner",
+  "tags": [
+    "meetings",
+    "productivity",
+    "action-items",
+    "approval"
+  ],
+  "required_modules": [
+    "tpl_meeting_extract",
+    "tpl_meeting_share",
+    "tpl_meeting_write"
+  ],
+  "required_credentials": [
+    "model_api_key"
+  ],
+  "spec": {
+    "spec_version": 1,
+    "name": "Meeting minutes and action items",
+    "entry_node": "extract",
+    "nodes": {
+      "extract": {
+        "id": "extract",
+        "handler": "tpl_meeting_extract",
+        "transitions": {},
+        "default_transition": "write",
+        "requires_approval": false
+      },
+      "write": {
+        "id": "write",
+        "handler": "tpl_meeting_write",
+        "transitions": {},
+        "default_transition": "share",
+        "requires_approval": false
+      },
+      "share": {
+        "id": "share",
+        "handler": "tpl_meeting_share",
+        "transitions": {},
+        "default_transition": null,
+        "requires_approval": true
+      }
+    },
+    "terminal_nodes": [
+      "share"
+    ]
+  },
+  "sample_input": {
+    "transcript": "Attendees: Asha, Ravi, Meena\nDecision: launch on Monday\nRavi will update the pricing page.\nAction: book the launch webinar"
+  },
+  "fixture": {
+    "runs": [
+      {
+        "name": "actions and decisions are extracted and shared",
+        "input": {
+          "transcript": "Attendees: Asha, Ravi, Meena\nDecision: launch on Monday\nRavi will update the pricing page.\nAction: book the launch webinar"
+        },
+        "approval": {
+          "node": "share",
+          "decision": "approve"
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "minutes.attendees": [
+            "Asha",
+            "Ravi",
+            "Meena"
+          ],
+          "minutes.decisions": [
+            "launch on Monday"
+          ],
+          "minutes.actions.0.owner": "Ravi",
+          "minutes.actions.1.owner": "unassigned",
+          "shared.recipients": [
+            "Asha",
+            "Ravi",
+            "Meena"
+          ]
+        }
+      }
+    ]
+  }
+}

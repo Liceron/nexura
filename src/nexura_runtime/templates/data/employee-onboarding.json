@@ -1,0 +1,104 @@
+{
+  "template_version": 1,
+  "id": "employee-onboarding",
+  "title": "Employee onboarding checklist",
+  "description": "Builds a dated onboarding checklist for the new hire's department, creates their accounts after IT approves, and writes a welcome message.",
+  "category": "hr",
+  "difficulty": "beginner",
+  "tags": [
+    "hr",
+    "onboarding",
+    "approval",
+    "checklist"
+  ],
+  "required_modules": [
+    "tpl_onboard_accounts",
+    "tpl_onboard_plan",
+    "tpl_onboard_welcome"
+  ],
+  "required_credentials": [
+    "model_api_key"
+  ],
+  "spec": {
+    "spec_version": 1,
+    "name": "Employee onboarding checklist",
+    "entry_node": "plan",
+    "nodes": {
+      "plan": {
+        "id": "plan",
+        "handler": "tpl_onboard_plan",
+        "transitions": {},
+        "default_transition": "accounts",
+        "requires_approval": false
+      },
+      "accounts": {
+        "id": "accounts",
+        "handler": "tpl_onboard_accounts",
+        "transitions": {},
+        "default_transition": "welcome",
+        "requires_approval": true
+      },
+      "welcome": {
+        "id": "welcome",
+        "handler": "tpl_onboard_welcome",
+        "transitions": {},
+        "default_transition": null,
+        "requires_approval": false
+      }
+    },
+    "terminal_nodes": [
+      "welcome"
+    ]
+  },
+  "sample_input": {
+    "name": "Arjun Rao",
+    "department": "engineering",
+    "start_date": "2026-11-02"
+  },
+  "fixture": {
+    "runs": [
+      {
+        "name": "an engineer gets the engineering checklist and accounts",
+        "input": {
+          "name": "Arjun Rao",
+          "department": "engineering",
+          "start_date": "2026-11-02"
+        },
+        "approval": {
+          "node": "accounts",
+          "decision": "approve"
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "task_count": 6,
+          "plan.0.due": "2026-11-02",
+          "accounts.systems": [
+            "email",
+            "chat",
+            "github"
+          ]
+        },
+        "expect_contains": {
+          "welcome": "Arjun"
+        }
+      },
+      {
+        "name": "accounts are not created without IT approval",
+        "input": {
+          "name": "Lee",
+          "department": "sales",
+          "start_date": "2026-12-01"
+        },
+        "approval": {
+          "node": "accounts",
+          "decision": "reject"
+        },
+        "expect_status": "rejected",
+        "expect_absent": [
+          "accounts",
+          "welcome"
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,91 @@
+{
+  "template_version": 1,
+  "id": "code-review-checklist",
+  "title": "Pull request review checklist",
+  "description": "Scans a unified diff for TODOs, debug output, possible secrets and very large changes, and writes a review comment with a verdict.",
+  "category": "engineering",
+  "difficulty": "intermediate",
+  "tags": [
+    "engineering",
+    "code-review",
+    "security"
+  ],
+  "required_modules": [
+    "tpl_review_comment",
+    "tpl_review_scan"
+  ],
+  "required_credentials": [
+    "model_api_key"
+  ],
+  "spec": {
+    "spec_version": 1,
+    "name": "Pull request review checklist",
+    "entry_node": "scan",
+    "nodes": {
+      "scan": {
+        "id": "scan",
+        "handler": "tpl_review_scan",
+        "transitions": {},
+        "default_transition": "comment",
+        "requires_approval": false
+      },
+      "comment": {
+        "id": "comment",
+        "handler": "tpl_review_comment",
+        "transitions": {},
+        "default_transition": null,
+        "requires_approval": false
+      }
+    },
+    "terminal_nodes": [
+      "comment"
+    ]
+  },
+  "sample_input": {
+    "diff": "+++ b/app.py\n+def pay(amount):\n+    print(amount)  # TODO remove\n+    return charge(amount)\n"
+  },
+  "fixture": {
+    "runs": [
+      {
+        "name": "debug output and TODOs become comments",
+        "input": {
+          "diff": "+++ b/app.py\n+def pay(amount):\n+    print(amount)  # TODO remove\n+    return charge(amount)\n"
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "review.files": [
+            "app.py"
+          ],
+          "review.added_lines": 3,
+          "verdict": "comment"
+        },
+        "expect_contains": {
+          "comment": "debug-output"
+        }
+      },
+      {
+        "name": "a hard-coded secret requests changes and is never echoed",
+        "input": {
+          "diff": "+++ b/config.py\n+API_KEY = 'sk_live_abcdef123456'\n+password = \"hunter22222\"\n"
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "verdict": "request_changes"
+        },
+        "expect_contains": {
+          "comment": "possible-secret"
+        }
+      },
+      {
+        "name": "a clean diff is approved",
+        "input": {
+          "diff": "+++ b/README.md\n+Install with pip.\n"
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "verdict": "approve"
+        }
+      }
+    ]
+  }
+}

@@ -42,6 +42,7 @@ Every Python example in the docs runs offline with `FakeModel`, a scripted model
 ## Workflows and the local service
 
 - [Workflows](https://github.com/Liceron/nexura/blob/main/docs/workflows.md): durable graphs with approval gates, retries, `interrupt()`, history and fork, sub-workflows, parallel steps.
+- [Offline builder components](https://github.com/Liceron/nexura/blob/main/docs/components.md): 30 deterministic text, data, logic and utility modules, examples and workflow routing.
 - [Durable execution contract](https://github.com/Liceron/nexura/blob/main/docs/durable-execution.md): leases, step intents, effect classes and recovery rules.
 - [Knowledge](https://github.com/Liceron/nexura/blob/main/docs/knowledge.md): ingest files, hybrid keyword and vector search, citations.
 - [Starter templates](https://github.com/Liceron/nexura/blob/main/docs/templates.md): tested, offline-runnable workflows.

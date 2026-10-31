@@ -1,0 +1,84 @@
+{
+  "template_version": 1,
+  "id": "social-post-generator",
+  "title": "Social posts from an announcement",
+  "description": "Turns one announcement into posts for X, LinkedIn and Instagram within each network's length limit, with hashtags, and schedules them only after approval.",
+  "category": "content",
+  "difficulty": "beginner",
+  "tags": [
+    "marketing",
+    "social",
+    "content",
+    "approval"
+  ],
+  "required_modules": [
+    "tpl_social_brief",
+    "tpl_social_schedule",
+    "tpl_social_write"
+  ],
+  "required_credentials": [
+    "model_api_key"
+  ],
+  "spec": {
+    "spec_version": 1,
+    "name": "Social posts from an announcement",
+    "entry_node": "brief",
+    "nodes": {
+      "brief": {
+        "id": "brief",
+        "handler": "tpl_social_brief",
+        "transitions": {},
+        "default_transition": "write",
+        "requires_approval": false
+      },
+      "write": {
+        "id": "write",
+        "handler": "tpl_social_write",
+        "transitions": {},
+        "default_transition": "schedule",
+        "requires_approval": false
+      },
+      "schedule": {
+        "id": "schedule",
+        "handler": "tpl_social_schedule",
+        "transitions": {},
+        "default_transition": null,
+        "requires_approval": true
+      }
+    },
+    "terminal_nodes": [
+      "schedule"
+    ]
+  },
+  "sample_input": {
+    "announcement": "Nexura 0.5 is out. The open-source edition is now Apache-2.0 licensed. Templates, components and vector stores were added.",
+    "link": "https://example.com/blog/0-5"
+  },
+  "fixture": {
+    "runs": [
+      {
+        "name": "posts fit each network and are scheduled after approval",
+        "input": {
+          "announcement": "Our analytics dashboard now supports realtime exports. Teams can export dashboards to CSV every minute. Exports respect workspace permissions.",
+          "link": "https://example.com/n"
+        },
+        "approval": {
+          "node": "schedule",
+          "decision": "approve"
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "schedule.status": "scheduled",
+          "schedule.networks": [
+            "instagram",
+            "linkedin",
+            "x"
+          ]
+        },
+        "expect_contains": {
+          "posts": "#exports"
+        }
+      }
+    ]
+  }
+}

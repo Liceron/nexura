@@ -1,0 +1,66 @@
+{
+  "template_version": 1,
+  "id": "document-summarizer",
+  "title": "Document summariser",
+  "description": "Ranks the sentences of a document by how central their words are and keeps the best few in their original order, so every line of the summary is a real sentence from the source.",
+  "category": "knowledge",
+  "difficulty": "beginner",
+  "tags": [
+    "knowledge",
+    "summarization",
+    "documents"
+  ],
+  "required_modules": [
+    "tpl_summary_rank",
+    "tpl_summary_write"
+  ],
+  "required_credentials": [
+    "model_api_key"
+  ],
+  "spec": {
+    "spec_version": 1,
+    "name": "Document summariser",
+    "entry_node": "rank",
+    "nodes": {
+      "rank": {
+        "id": "rank",
+        "handler": "tpl_summary_rank",
+        "transitions": {},
+        "default_transition": "write",
+        "requires_approval": false
+      },
+      "write": {
+        "id": "write",
+        "handler": "tpl_summary_write",
+        "transitions": {},
+        "default_transition": null,
+        "requires_approval": false
+      }
+    },
+    "terminal_nodes": [
+      "write"
+    ]
+  },
+  "sample_input": {
+    "document": "Nexura runs agents with approval gates. Approval gates pause the run until a person decides. The run keeps every step in its trace. Lunch was at noon.",
+    "max_sentences": 2
+  },
+  "fixture": {
+    "runs": [
+      {
+        "name": "the summary keeps the central sentences",
+        "input": {
+          "document": "Nexura runs agents with approval gates. Approval gates pause the run until a person decides. The run keeps every step in its trace. Lunch was at noon.",
+          "max_sentences": 2
+        },
+        "expect_status": "completed",
+        "expect_state": {
+          "sentences_kept": 2
+        },
+        "expect_contains": {
+          "summary": "Approval gates pause the run"
+        }
+      }
+    ]
+  }
+}

@@ -1,7 +1,7 @@
 # Nexura documentation
 
-Guides for building AI agents and durable workflows with Nexura. Every example on these
-pages runs offline with `FakeModel` and is executed by the test suite
+Guides for building AI agents and durable workflows with Nexura. Executable Python examples
+run offline with local components or `FakeModel` and are executed by the test suite
 (`tests/docs/test_docs_examples.py`). Blocks that need a real model or a running service
 are marked as such.
 
@@ -20,7 +20,7 @@ one owner's projects. They do not add accounts or tenant isolation.
 
 - [Use the hosted Nexura app](hosted.md): workspace API keys, CLI login and uploads,
   and SDK traces over standard OTLP/HTTP.
-- [Packages and installation](packages.md): the nine Python packages, TypeScript client,
+- [Packages and installation](packages.md): the ten Python packages, TypeScript client,
   source/wheel installs, supported versions and optional backend requirements.
 - [Getting started](getting-started.md): install, first agent, first tool, in five minutes.
 - [Quickstart in 10 minutes](quickstart-10-minutes.md): from install to an approval-gated
@@ -86,6 +86,8 @@ one owner's projects. They do not add accounts or tenant isolation.
 - [Budgets and usage](budgets-and-usage.md): token and cost accounting, budgets, limits.
 - [Workflows](workflows.md): durable graphs with approvals, retries, `interrupt()`,
   history and fork, sub-workflows, parallel steps and Mermaid diagrams.
+- [Offline builder components](components.md): 30 deterministic text, data, logic and utility
+  modules with versioned schemas, examples and workflow routing.
 - [Observability](observability.md): OpenTelemetry traces for agents and workflows, OTLP
   export, opt-in content capture.
 - [Starter templates](templates.md): tested, offline-runnable workflows (support desk, RAG,
