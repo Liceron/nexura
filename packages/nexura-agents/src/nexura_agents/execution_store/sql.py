@@ -315,6 +315,17 @@ class _SQLStore(_Store):
                 ),
             )
 
+    async def purge_workspace(self, workspace_id: str) -> int:
+        """Delete every journal row of ``workspace_id`` (events, effects and steps before their
+        runs); returns how many runs were removed. Used when a workspace is deleted."""
+        async with self._connection() as db:
+            params = {"workspace": workspace_id}
+            for table in ("nexura_exec_events", "nexura_exec_effects", "nexura_exec_steps"):
+                await db.execute(f"DELETE FROM {table} WHERE workspace_id=:workspace", params)
+            return await db.execute(
+                "DELETE FROM nexura_exec_runs WHERE workspace_id=:workspace", params
+            )
+
     async def list_recoverable(self, workspace_id: str | None = None) -> list[ExecutionRun]:
         """Use the database clock to list free/expired running or interrupted runs."""
         async with self._connection() as db:

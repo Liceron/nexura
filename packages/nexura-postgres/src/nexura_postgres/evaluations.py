@@ -50,6 +50,7 @@ from nexura_runtime.evaluation.models import (
     EvaluationSummary,
     StoredTrace,
 )
+from nexura_runtime.store_purge import postgres_purge
 from nexura_runtime.store_retention import DEFAULT_PRUNE_LIMIT, prune_cutoff
 
 logger = logging.getLogger("nexura_runtime.evaluation.store")
@@ -527,6 +528,12 @@ class PostgresEvaluationStore:
             traces.append(StoredTrace.model_validate_json(text))
         return traces
 
+    def purge_workspace(self, workspace_id: str) -> int:
+        """Delete every row of ``workspace_id`` (workspace deletion, P46); harmless to repeat."""
+        return postgres_purge(
+            self.database, ("eval_traces", "eval_runs", "eval_datasets"), workspace_id
+        )
+
     def close(self) -> None:
         """Nothing to release: the shared ``Database`` belongs to the app."""
 
@@ -804,6 +811,12 @@ class PostgresStudioEvalStore:
             return bool(deleted)
 
         return bool(self.database.run(run))
+
+    def purge_workspace(self, workspace_id: str) -> int:
+        """Delete every row of ``workspace_id`` (workspace deletion, P46); harmless to repeat."""
+        return postgres_purge(
+            self.database, ("studio_eval_runs", "studio_eval_datasets"), workspace_id
+        )
 
     def close(self) -> None:
         """Nothing to release: the shared ``Database`` belongs to the app."""

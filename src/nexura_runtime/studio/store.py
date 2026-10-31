@@ -30,7 +30,13 @@ from nexura_agents.errors import (
 )
 
 from nexura_runtime.blobs.binding import SQLiteBlobBinding
-from nexura_runtime.blobs.payloads import RUN_EVENT_NAMESPACE, DeferredPayload, decode_json
+from nexura_runtime.blobs.payloads import (
+    MARKER_PREFIX,
+    RUN_EVENT_NAMESPACE,
+    DeferredPayload,
+    blob_keys_of,
+    decode_json,
+)
 from nexura_runtime.studio.builtin_modules import get_default_workflow_spec
 from nexura_runtime.workflow import (
     PendingApproval,
@@ -175,6 +181,8 @@ SWEEP_ERROR = "Run was interrupted by server restart or shutdown."
 SWEEP_REASON = "Server shutdown / restart while run was executing."
 #: The workflow seeded into an empty workflow table.
 DEFAULT_WORKFLOW_ID = "wf-order-support"
+#: Run ids per statement when a workspace deletion purges runs (P46).
+_PURGE_CHUNK = 500
 
 # Column lists and row converters shared by the SQLite store and the Postgres store
 # (``nexura_postgres.PostgresStudioStore``), so both return the same dictionaries.
@@ -1041,6 +1049,71 @@ class StudioStore:
                     ),
                 )
             return True
+
+    # -------------------------------------------------------------------------
+    # Workspace deletion (P46)
+    # -------------------------------------------------------------------------
+
+    def _journal_run_ids_sync(self, workspace_id: str) -> list[str]:
+        with self._lock:
+            rows = (
+                self._ensure_open()
+                .execute(
+                    "SELECT run_id FROM nexura_studio_runs WHERE journal_workspace = ?",
+                    (workspace_id,),
+                )
+                .fetchall()
+            )
+        return sorted(str(r[0]) for r in rows)
+
+    def _run_blob_keys_sync(self, run_ids: Sequence[str]) -> list[str]:
+        keys: set[str] = set()
+        ids = list(dict.fromkeys(run_ids))
+        for start in range(0, len(ids), _PURGE_CHUNK):
+            chunk = ids[start : start + _PURGE_CHUNK]
+            marks = ",".join("?" * len(chunk))
+            with self._lock:
+                rows = (
+                    self._ensure_open()
+                    .execute(
+                        "SELECT data_json FROM nexura_studio_run_events "
+                        f"WHERE run_id IN ({marks}) AND substr(data_json, 1, ?) = ?",
+                        (*chunk, len(MARKER_PREFIX), MARKER_PREFIX),
+                    )
+                    .fetchall()
+                )
+            keys |= blob_keys_of(r[0] for r in rows)
+        return sorted(keys)
+
+    def _purge_runs_sync(self, run_ids: Sequence[str]) -> int:
+        removed = 0
+        ids = list(dict.fromkeys(run_ids))
+        for start in range(0, len(ids), _PURGE_CHUNK):
+            chunk = ids[start : start + _PURGE_CHUNK]
+            marks = ",".join("?" * len(chunk))
+            with self._lock:
+                conn = self._ensure_open()
+                with conn:
+                    conn.execute(
+                        f"DELETE FROM nexura_studio_run_events WHERE run_id IN ({marks})", chunk
+                    )
+                    removed += conn.execute(
+                        f"DELETE FROM nexura_studio_runs WHERE run_id IN ({marks})", chunk
+                    ).rowcount
+        return removed
+
+    async def journal_run_ids(self, workspace_id: str) -> list[str]:
+        """Ids of every run (any status) whose journal workspace is ``workspace_id``."""
+        return await asyncio.to_thread(self._journal_run_ids_sync, workspace_id)
+
+    async def run_blob_keys(self, run_ids: Sequence[str]) -> list[str]:
+        """Keys of the blobs the events of ``run_ids`` reference (wherever they are filed)."""
+        return await asyncio.to_thread(self._run_blob_keys_sync, list(run_ids))
+
+    async def purge_runs(self, run_ids: Sequence[str]) -> int:
+        """Delete the runs ``run_ids`` and their events (workspace deletion); returns how many
+        run rows were deleted. Repeating it is harmless."""
+        return await asyncio.to_thread(self._purge_runs_sync, list(run_ids))
 
     def _close_connection(self) -> None:
         with self._lock:

@@ -2,6 +2,19 @@
 
 All notable changes to this project.
 
+## 0.9.0 (2026-10-31)
+
+- **Delete a workspace.** `DELETE /api/v1/workspaces/{id}` with `{"confirm": "<id>"}`, for an
+  admin of the workspace or a platform operator. `default`, operator workspaces and
+  workspaces an edition protects answer `409 WORKSPACE_PROTECTED`. The request retires the
+  id for good (no path can create it again), ends access (members, API keys, webhooks,
+  schedules, pending trigger jobs) and cancels live runs. A resumable purge then deletes the
+  workspace's agents, skills, evaluations, knowledge, integrations, credentials, sessions,
+  workflows, runs, run events, checkpoints, execution journal, channel rows and blobs; the
+  trigger tick re-runs it until a pass after the workflow lease TTL marks it done. Usage
+  records and audit trails are kept. Editions extend deletion through
+  `app.state.workspace_deletion_hooks` (protection, operators, access, purge, audit).
+
 ## 0.8.0 (2026-10-31)
 
 - **Server model keys only for allowed workspaces.** `create_api_app(server_model_policy=...)`

@@ -48,6 +48,7 @@ from nexura_runtime.secrets.store import (
     StoredSecretInfo,
     _aad,
 )
+from nexura_runtime.store_purge import postgres_purge
 
 COMPONENT = "secrets"
 MIGRATIONS: tuple[Migration, ...] = (
@@ -360,6 +361,10 @@ class PostgresSecretStore(EncryptedSecretStore):
             )
 
         return self.database.run(run) is not None
+
+    def purge_workspace(self, workspace_id: str) -> int:
+        """Delete every row of ``workspace_id`` (workspace deletion, P46); harmless to repeat."""
+        return postgres_purge(self.database, ("nexura_secrets",), workspace_id)
 
     def close(self) -> None:
         """Nothing to release: the shared ``Database`` belongs to the app."""

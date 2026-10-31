@@ -16,6 +16,7 @@ so several service instances never disagree about workspaces, ownership or membe
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sqlite3
@@ -28,6 +29,7 @@ from typing import Any
 
 from nexura_runtime.service.workspaces.models import (
     Workspace,
+    WorkspaceDeletion,
     WorkspaceMember,
 )
 
@@ -41,6 +43,42 @@ FAIL_CLOSED_RESOURCE_TYPES = frozenset({"workflow", "run", "session", "document"
 
 class WorkspaceExistsError(ValueError):
     """Raised when creating a workspace whose id is already registered."""
+
+
+class WorkspaceDeletedError(WorkspaceExistsError):
+    """Raised when creating a workspace whose id belonged to a deleted workspace (P46): a
+    deleted workspace's id is retired and can never be created again by any path."""
+
+
+_DELETIONS_DDL = """
+    CREATE TABLE IF NOT EXISTS nexura_workspace_deletions (
+        workspace_id TEXT PRIMARY KEY,
+        requested_by TEXT NOT NULL,
+        requested_at REAL NOT NULL,
+        status TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        completed_at REAL
+    );
+"""
+_DELETION_COLUMNS = (
+    "workspace_id, requested_by, requested_at, status, attempts, last_error, completed_at"
+)
+
+
+def deletion_from_row(row: Any) -> WorkspaceDeletion:
+    """A ``WorkspaceDeletion`` from a ``nexura_workspace_deletions`` row (tuple or mapping)."""
+    if not hasattr(row, "keys"):
+        row = dict(zip([c.strip() for c in _DELETION_COLUMNS.split(",")], row, strict=True))
+    return WorkspaceDeletion(
+        workspace_id=row["workspace_id"],
+        requested_by=row["requested_by"],
+        requested_at=row["requested_at"],
+        status=row["status"],
+        attempts=row["attempts"],
+        last_error=row["last_error"],
+        completed_at=row["completed_at"],
+    )
 
 
 #: TEST ONLY. Set through ``nexura_runtime.testing.allow_sqlite_repository_import`` (never an
@@ -101,6 +139,11 @@ class WorkspaceRepository:
         self._workspaces: dict[str, Workspace] = {}
         # (resource_type, resource_id) -> (workspace_id, owner_id)
         self._ownership: dict[tuple[str, str], tuple[str, str]] = {}
+        # Deleted workspaces (P46): their ids are retired. workspace_id -> deleted_at; a deleted
+        # workspace is never in ``_workspaces``.
+        self._deleted: dict[str, float] = {}
+        # workspace_id -> its deletion record (the content purge's progress)
+        self._deletions: dict[str, WorkspaceDeletion] = {}
         # When True (shared mode), unowned resources of FAIL_CLOSED_RESOURCE_TYPES belong to nobody.
         self.fail_closed_unowned: bool = False
         # Read-through Postgres storage once ``bind_database`` ran; ``None`` means memory/SQLite.
@@ -158,13 +201,22 @@ class WorkspaceRepository:
                 ON nexura_service_resource_ownership(workspace_id, resource_type);
                 """
             )
+            # P46: deleted workspaces keep their row as a tombstone (``deleted_at``), so the id
+            # is retired, and the purge of their content is tracked in a deletion record.
+            with contextlib.suppress(sqlite3.OperationalError):
+                conn.execute("ALTER TABLE nexura_service_workspaces ADD COLUMN deleted_at REAL")
+            conn.execute(_DELETIONS_DDL)
 
             # Load existing workspaces
             cur = conn.execute(
-                "SELECT workspace_id, name, owner_id, created_at, metadata_json "
+                "SELECT workspace_id, name, owner_id, created_at, metadata_json, deleted_at "
                 "FROM nexura_service_workspaces"
             )
-            for ws_id, name, owner, created_at, meta_json in cur.fetchall():
+            for ws_id, name, owner, created_at, meta_json, deleted_at in cur.fetchall():
+                if deleted_at is not None:
+                    self._workspaces.pop(ws_id, None)
+                    self._deleted[ws_id] = float(deleted_at)
+                    continue
                 self._workspaces[ws_id] = Workspace(
                     workspace_id=ws_id,
                     name=name,
@@ -172,8 +224,13 @@ class WorkspaceRepository:
                     created_at=created_at,
                     metadata=json.loads(meta_json) if meta_json else {},
                 )
+            for row in conn.execute(
+                f"SELECT {_DELETION_COLUMNS} FROM nexura_workspace_deletions"
+            ).fetchall():
+                deletion = deletion_from_row(row)
+                self._deletions[deletion.workspace_id] = deletion
 
-            if "default" not in self._workspaces:
+            if "default" not in self._workspaces and "default" not in self._deleted:
                 now = time.time()
                 default_ws = Workspace(
                     workspace_id="default",
@@ -219,7 +276,9 @@ class WorkspaceRepository:
         return postgres.PostgresWorkspaceStore(database)
 
     def _import_into(self, store: Any) -> None:
-        """Copy in-memory records the database lacks (stored rows win, as ``bind_db_path``)."""
+        """Copy in-memory records the database lacks (stored rows win, as ``bind_db_path``).
+
+        Deleted workspaces are never copied: their ids stay retired where they were deleted."""
         store.import_state(list(self._workspaces.values()), dict(self._ownership))
 
     def bind_database(self, database: Any) -> None:
@@ -460,6 +519,8 @@ class WorkspaceRepository:
             )
             return created
         with self._lock:
+            if workspace_id in self._deleted:
+                raise WorkspaceDeletedError(workspace_id)
             if workspace_id in self._workspaces:
                 raise WorkspaceExistsError(workspace_id)
             ws = Workspace(
@@ -477,6 +538,15 @@ class WorkspaceRepository:
                     ) as conn,
                     conn,
                 ):
+                    # Another process may have deleted it since this one loaded (P46).
+                    if conn.execute(
+                        "SELECT 1 FROM nexura_service_workspaces "
+                        "WHERE workspace_id = ? AND deleted_at IS NOT NULL",
+                        (workspace_id,),
+                    ).fetchone():
+                        del self._workspaces[workspace_id]
+                        self._deleted[workspace_id] = time.time()
+                        raise WorkspaceDeletedError(workspace_id)
                     conn.execute(
                         """
                         INSERT OR REPLACE INTO nexura_service_workspaces
@@ -536,6 +606,145 @@ class WorkspaceRepository:
             return listed
         with self._lock:
             return list(self._workspaces.values())
+
+    # ---- deletion (P46) ----------------------------------------------------------------
+    def is_workspace_deleted(self, workspace_id: str) -> bool:
+        """True when ``workspace_id`` was deleted (its id is retired)."""
+        if self._pg is not None:
+            return bool(self._pg.is_workspace_deleted(workspace_id))
+        with self._lock:
+            return workspace_id in self._deleted
+
+    def retire_workspace(
+        self, workspace_id: str, requested_by: str, *, at: float | None = None
+    ) -> tuple[WorkspaceDeletion, bool]:
+        """Mark ``workspace_id`` deleted (a tombstone: the row stays, the id is retired) and
+        write its deletion record (``purging``), atomically.
+
+        Returns ``(record, True)``; ``(existing record, False)`` when it was deleted already.
+        ``KeyError`` when no such workspace exists.
+        """
+        now = time.time() if at is None else at
+        if self._pg is not None:
+            result: tuple[WorkspaceDeletion, bool] = self._pg.retire_workspace(
+                workspace_id, requested_by, now
+            )
+            return result
+        with self._lock:
+            if workspace_id in self._deleted:
+                existing = self._deletions.get(workspace_id) or WorkspaceDeletion(
+                    workspace_id=workspace_id,
+                    requested_by="",
+                    requested_at=self._deleted[workspace_id],
+                )
+                return existing, False
+            if workspace_id not in self._workspaces:
+                raise KeyError(workspace_id)
+            deletion = WorkspaceDeletion(
+                workspace_id=workspace_id, requested_by=requested_by, requested_at=now
+            )
+            if self.db_path is not None:
+                with (
+                    closing(sqlite3.connect(str(self.db_path), timeout=10.0)) as conn,
+                    conn,
+                ):
+                    conn.execute(
+                        "UPDATE nexura_service_workspaces SET deleted_at = ? "
+                        "WHERE workspace_id = ?",
+                        (now, workspace_id),
+                    )
+                    self._write_deletion(conn, deletion)
+            self._workspaces.pop(workspace_id, None)
+            self._deleted[workspace_id] = now
+            self._deletions[workspace_id] = deletion
+            return deletion, True
+
+    @staticmethod
+    def _write_deletion(conn: sqlite3.Connection, deletion: WorkspaceDeletion) -> None:
+        conn.execute(
+            f"INSERT OR REPLACE INTO nexura_workspace_deletions ({_DELETION_COLUMNS}) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                deletion.workspace_id,
+                deletion.requested_by,
+                deletion.requested_at,
+                deletion.status,
+                deletion.attempts,
+                deletion.last_error,
+                deletion.completed_at,
+            ),
+        )
+
+    def get_workspace_deletion(self, workspace_id: str) -> WorkspaceDeletion | None:
+        """The deletion record of ``workspace_id``, if it was deleted."""
+        if self._pg is not None:
+            found: WorkspaceDeletion | None = self._pg.get_workspace_deletion(workspace_id)
+            return found
+        with self._lock:
+            deletion = self._deletions.get(workspace_id)
+            return deletion.model_copy() if deletion is not None else None
+
+    def list_workspace_deletions(self, status: str | None = None) -> list[WorkspaceDeletion]:
+        """Deletion records, oldest request first; only those in ``status`` when given."""
+        if self._pg is not None:
+            listed: list[WorkspaceDeletion] = self._pg.list_workspace_deletions(status)
+            return listed
+        with self._lock:
+            found = [
+                d.model_copy()
+                for d in self._deletions.values()
+                if status is None or d.status == status
+            ]
+        return sorted(found, key=lambda d: (d.requested_at, d.workspace_id))
+
+    def record_purge_attempt(
+        self, workspace_id: str, *, done: bool, error: str | None = None
+    ) -> WorkspaceDeletion | None:
+        """Count one purge pass of ``workspace_id``: ``done`` marks the record ``done`` (with
+        ``completed_at``), ``error`` is kept as ``last_error``. ``None`` without a record; a
+        record already ``done`` stays done."""
+        now = time.time()
+        if self._pg is not None:
+            updated: WorkspaceDeletion | None = self._pg.record_purge_attempt(
+                workspace_id, done, error, now
+            )
+            return updated
+        with self._lock:
+            deletion = self._deletions.get(workspace_id)
+            if deletion is None:
+                return None
+            if deletion.status != "done":
+                deletion.attempts += 1
+                deletion.last_error = error
+                if done:
+                    deletion.status = "done"
+                    deletion.completed_at = now
+                if self.db_path is not None:
+                    with (
+                        closing(sqlite3.connect(str(self.db_path), timeout=10.0)) as conn,
+                        conn,
+                    ):
+                        self._write_deletion(conn, deletion)
+            return deletion.model_copy()
+
+    def delete_workspace_ownership(self, workspace_id: str) -> int:
+        """Remove every resource-ownership row of ``workspace_id``; returns how many."""
+        if self._pg is not None:
+            return int(self._pg.delete_workspace_ownership(workspace_id))
+        with self._lock:
+            keys = [k for k, (ws_id, _) in self._ownership.items() if ws_id == workspace_id]
+            for key in keys:
+                del self._ownership[key]
+            if self.db_path is not None:
+                with (
+                    closing(sqlite3.connect(str(self.db_path), timeout=10.0)) as conn,
+                    conn,
+                ):
+                    conn.execute(
+                        "DELETE FROM nexura_service_resource_ownership WHERE workspace_id = ?",
+                        (workspace_id,),
+                    )
+            return len(keys)
 
     def list_workspaces_for_principal(self, principal_id: str) -> list[Workspace]:
         """Every workspace for the local owner; nothing for anyone else."""

@@ -1192,6 +1192,13 @@ export class WorkspacesClient {
       body: { require_promotion_approval: requirePromotionApproval },
     });
   }
+
+  /** Delete a workspace for good (an admin of it or a platform operator); the id is repeated as the confirmation. */
+  public async delete(workspaceId: string): Promise<{ workspace_id: string; status: string }> {
+    return this.client.request("DELETE", `/workspaces/${encodeURIComponent(workspaceId)}`, {
+      body: { confirm: workspaceId },
+    });
+  }
 }
 
 export class StudioEvaluationsClient {

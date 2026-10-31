@@ -561,7 +561,10 @@ class SecurityScopingMiddleware(BaseHTTPMiddleware):
         if path.startswith("/api/v1/workspaces/"):
             rest = path[len("/api/v1/workspaces/") :]
             parts = rest.split("/")
-            if parts and parts[0]:
+            # Deleting a workspace (P46) authenticates against the caller's own workspace: a
+            # platform operator may delete one they are not a member of, and the route itself
+            # checks who may delete the one named in the path.
+            if parts and parts[0] and not (request.method == "DELETE" and len(parts) == 1):
                 path_ws = parts[0]
 
         incoming_ws = request.headers.get("x-workspace-id")
@@ -607,6 +610,16 @@ class SecurityScopingMiddleware(BaseHTTPMiddleware):
                 principal.profile,
             )
             principal = principal.model_copy(update={"profile": "authenticated-shared-service"})
+        if (
+            not shared
+            and identity.workspace_id is not None
+            and getattr(workspace_repo, "is_workspace_deleted", None) is not None
+            and workspace_repo.is_workspace_deleted(identity.workspace_id)
+        ):
+            # A deleted workspace (P46) is closed to everyone, the local owner and operator
+            # tokens included. In the shared profile the membership check refuses it (a
+            # deletion removes every member and revokes every key).
+            return _error(403, "WORKSPACE_DELETED", "This workspace was deleted.")
         request.state.principal = principal
         request.state.workspace_id = identity.workspace_id
         request.state.role = identity.role

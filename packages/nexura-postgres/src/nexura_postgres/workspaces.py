@@ -22,8 +22,12 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 from nexura_postgres.migrations import Migration, migrate_all, register
-from nexura_runtime.service.workspaces.models import Workspace
-from nexura_runtime.service.workspaces.repository import WorkspaceExistsError
+from nexura_runtime.service.workspaces.models import Workspace, WorkspaceDeletion
+from nexura_runtime.service.workspaces.repository import (
+    WorkspaceDeletedError,
+    WorkspaceExistsError,
+    deletion_from_row,
+)
 
 COMPONENT = "workspaces"
 MIGRATIONS: tuple[Migration, ...] = (
@@ -50,11 +54,33 @@ MIGRATIONS: tuple[Migration, ...] = (
                 ON nexura_service_resource_ownership (workspace_id, resource_type, seq)""",
         ),
     ),
+    (
+        2,
+        "workspace deletion: tombstones and deletion records",
+        (
+            # P46: a deleted workspace keeps its row (the id is retired); its content purge is
+            # tracked in a deletion record until a final pass marks it done.
+            "ALTER TABLE nexura_service_workspaces ADD COLUMN deleted_at DOUBLE PRECISION",
+            """CREATE TABLE nexura_workspace_deletions (
+                workspace_id TEXT PRIMARY KEY,
+                requested_by TEXT NOT NULL,
+                requested_at DOUBLE PRECISION NOT NULL,
+                status TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                completed_at DOUBLE PRECISION)""",
+            """CREATE INDEX idx_nexura_workspace_deletions_status
+                ON nexura_workspace_deletions (status, requested_at)""",
+        ),
+    ),
 )
 register(COMPONENT, MIGRATIONS)
 
 WORKSPACE_LOCK_SQL = "SELECT pg_advisory_xact_lock(hashtextextended('nexura-ws/' || $1, 0))"
 _WORKSPACE_COLUMNS = "workspace_id, name, owner_id, created_at, metadata_json"
+_DELETION_COLUMNS = (
+    "workspace_id, requested_by, requested_at, status, attempts, last_error, completed_at"
+)
 
 
 def workspace_from_row(row: Any) -> Workspace:
@@ -68,8 +94,19 @@ def workspace_from_row(row: Any) -> Workspace:
     )
 
 
+async def workspace_deleted(conn: Any, workspace_id: str) -> bool:
+    """True when ``workspace_id`` has a tombstone (it was deleted; the id is retired)."""
+    deleted = await conn.fetchval(
+        "SELECT 1 FROM nexura_service_workspaces WHERE workspace_id = $1 "
+        "AND deleted_at IS NOT NULL",
+        workspace_id,
+    )
+    return deleted is not None
+
+
 async def insert_workspace(conn: Any, ws: Workspace) -> bool:
-    """Insert ``ws`` unless its id exists; True when inserted."""
+    """Insert ``ws`` unless its id exists (a deleted workspace's tombstone included, so a
+    retired id is never created again); True when inserted."""
     inserted = await conn.fetchval(
         f"INSERT INTO nexura_service_workspaces ({_WORKSPACE_COLUMNS}) VALUES ($1,$2,$3,$4,$5) "
         "ON CONFLICT (workspace_id) DO NOTHING RETURNING workspace_id",
@@ -229,6 +266,8 @@ class PostgresWorkspaceStore:
         async def run(conn: Any) -> None:
             await conn.execute(WORKSPACE_LOCK_SQL, ws.workspace_id)
             if not await insert_workspace(conn, ws):
+                if await workspace_deleted(conn, ws.workspace_id):
+                    raise WorkspaceDeletedError(ws.workspace_id)
                 raise WorkspaceExistsError(ws.workspace_id)
 
         self.database.run(run)
@@ -239,7 +278,7 @@ class PostgresWorkspaceStore:
             await conn.execute(WORKSPACE_LOCK_SQL, workspace_id)
             row = await conn.fetchrow(
                 f"SELECT {_WORKSPACE_COLUMNS} FROM nexura_service_workspaces "
-                "WHERE workspace_id = $1 FOR UPDATE",
+                "WHERE workspace_id = $1 AND deleted_at IS NULL FOR UPDATE",
                 workspace_id,
             )
             if row is None:
@@ -260,7 +299,7 @@ class PostgresWorkspaceStore:
         async def run(conn: Any) -> Any:
             return await conn.fetchrow(
                 f"SELECT {_WORKSPACE_COLUMNS} FROM nexura_service_workspaces "
-                "WHERE workspace_id = $1",
+                "WHERE workspace_id = $1 AND deleted_at IS NULL",
                 workspace_id,
             )
 
@@ -273,7 +312,123 @@ class PostgresWorkspaceStore:
         async def run(conn: Any) -> Any:
             return await conn.fetch(
                 f"SELECT {_WORKSPACE_COLUMNS} FROM nexura_service_workspaces "
-                "ORDER BY workspace_id <> 'default', seq"
+                "WHERE deleted_at IS NULL ORDER BY workspace_id <> 'default', seq"
             )
 
         return [workspace_from_row(row) for row in self.database.run(run, autocommit=True)]
+
+    # ---- deletion (P46) ----------------------------------------------------------------
+    def is_workspace_deleted(self, workspace_id: str) -> bool:
+        async def run(conn: Any) -> bool:
+            return await workspace_deleted(conn, workspace_id)
+
+        return bool(self.database.run(run, autocommit=True))
+
+    def retire_workspace(
+        self, workspace_id: str, requested_by: str, at: float
+    ) -> tuple[WorkspaceDeletion, bool]:
+        """Tombstone ``workspace_id`` and write its deletion record in one transaction, under
+        the workspace lock (see ``WorkspaceRepository.retire_workspace``)."""
+
+        async def run(conn: Any) -> tuple[WorkspaceDeletion, bool]:
+            await conn.execute(WORKSPACE_LOCK_SQL, workspace_id)
+            row = await conn.fetchrow(
+                "SELECT deleted_at FROM nexura_service_workspaces WHERE workspace_id = $1 "
+                "FOR UPDATE",
+                workspace_id,
+            )
+            if row is None:
+                raise KeyError(workspace_id)
+            if row["deleted_at"] is not None:
+                existing = await conn.fetchrow(
+                    f"SELECT {_DELETION_COLUMNS} FROM nexura_workspace_deletions "
+                    "WHERE workspace_id = $1",
+                    workspace_id,
+                )
+                if existing is not None:
+                    return deletion_from_row(existing), False
+                return (
+                    WorkspaceDeletion(
+                        workspace_id=workspace_id,
+                        requested_by="",
+                        requested_at=row["deleted_at"],
+                    ),
+                    False,
+                )
+            await conn.execute(
+                "UPDATE nexura_service_workspaces SET deleted_at = $2 WHERE workspace_id = $1",
+                workspace_id,
+                at,
+            )
+            deletion = WorkspaceDeletion(
+                workspace_id=workspace_id, requested_by=requested_by, requested_at=at
+            )
+            await conn.execute(
+                f"INSERT INTO nexura_workspace_deletions ({_DELETION_COLUMNS}) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (workspace_id) DO NOTHING",
+                deletion.workspace_id,
+                deletion.requested_by,
+                deletion.requested_at,
+                deletion.status,
+                deletion.attempts,
+                deletion.last_error,
+                deletion.completed_at,
+            )
+            return deletion, True
+
+        result: tuple[WorkspaceDeletion, bool] = self.database.run(run)
+        return result
+
+    def get_workspace_deletion(self, workspace_id: str) -> WorkspaceDeletion | None:
+        async def run(conn: Any) -> Any:
+            return await conn.fetchrow(
+                f"SELECT {_DELETION_COLUMNS} FROM nexura_workspace_deletions "
+                "WHERE workspace_id = $1",
+                workspace_id,
+            )
+
+        row = self.database.run(run, autocommit=True)
+        return None if row is None else deletion_from_row(row)
+
+    def list_workspace_deletions(self, status: str | None) -> list[WorkspaceDeletion]:
+        async def run(conn: Any) -> Any:
+            return await conn.fetch(
+                f"SELECT {_DELETION_COLUMNS} FROM nexura_workspace_deletions "
+                "WHERE $1::text IS NULL OR status = $1 ORDER BY requested_at, workspace_id",
+                status,
+            )
+
+        return [deletion_from_row(row) for row in self.database.run(run, autocommit=True)]
+
+    def record_purge_attempt(
+        self, workspace_id: str, done: bool, error: str | None, at: float
+    ) -> WorkspaceDeletion | None:
+        async def run(conn: Any) -> Any:
+            await conn.execute(
+                "UPDATE nexura_workspace_deletions SET attempts = attempts + 1, "
+                "last_error = $2, status = CASE WHEN $3 THEN 'done' ELSE status END, "
+                "completed_at = CASE WHEN $3 THEN $4 ELSE completed_at END "
+                "WHERE workspace_id = $1 AND status <> 'done'",
+                workspace_id,
+                error,
+                done,
+                at,
+            )
+            return await conn.fetchrow(
+                f"SELECT {_DELETION_COLUMNS} FROM nexura_workspace_deletions "
+                "WHERE workspace_id = $1",
+                workspace_id,
+            )
+
+        row = self.database.run(run)
+        return None if row is None else deletion_from_row(row)
+
+    def delete_workspace_ownership(self, workspace_id: str) -> int:
+        async def run(conn: Any) -> Any:
+            return await conn.execute(
+                "DELETE FROM nexura_service_resource_ownership WHERE workspace_id = $1",
+                workspace_id,
+            )
+
+        status = self.database.run(run, autocommit=True)
+        return int(str(status).split()[-1])

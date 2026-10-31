@@ -18,6 +18,8 @@ import threading
 import time
 from typing import Any
 
+from nexura_runtime.store_purge import sqlite_purge
+
 #: Eval runs kept per workspace; saving one more deletes the oldest.
 MAX_RUNS_PER_WORKSPACE = 500
 
@@ -180,6 +182,13 @@ class StudioEvalStore:
         found = self.get_dataset(workspace_id, dataset_id)
         assert found is not None
         return found
+
+    def purge_workspace(self, workspace_id: str) -> int:
+        """Delete every row of ``workspace_id`` (workspace deletion, P46); harmless to repeat."""
+        with self._lock:
+            return sqlite_purge(
+                self._conn, ("studio_eval_runs", "studio_eval_datasets"), workspace_id
+            )
 
     def delete_dataset(self, workspace_id: str, dataset_id: str) -> bool:
         with self._lock, self._conn:

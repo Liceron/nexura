@@ -55,6 +55,7 @@ from nexura_runtime.service.triggers.store import (
     lease_expired_message,
     require_keep_run,
 )
+from nexura_runtime.store_purge import postgres_purge_tx
 
 _T = TypeVar("_T")
 
@@ -472,6 +473,21 @@ class PostgresTriggerStore:
             return rows
 
         return [self._webhook(row) for row in self._call(op)]
+
+    def purge_workspace(self, workspace_id: str) -> int:
+        """Delete the webhooks, receipts, schedules and trigger jobs of ``workspace_id``
+        (workspace deletion, P46) in one transaction; returns how many jobs."""
+        tables = (
+            "nexura_trigger_receipts",
+            "nexura_trigger_webhooks",
+            "nexura_trigger_schedules",
+            "nexura_trigger_jobs",
+        )
+
+        async def op(conn: Any) -> int:
+            return await postgres_purge_tx(conn, tables, workspace_id)
+
+        return self._call(op)
 
     def delete_webhook_config(self, endpoint_id: str) -> bool:
         async def op(conn: Any) -> str:

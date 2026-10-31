@@ -28,6 +28,7 @@ from typing import Any
 
 from nexura_postgres.migrations import MIGRATION_TIMEOUT, Migration, migrate_all, register
 from nexura_runtime.integrations.channels.models import ChannelType, OutboxReceipt
+from nexura_runtime.store_purge import postgres_purge
 from nexura_runtime.store_retention import (
     DEFAULT_PRUNE_LIMIT,
     MIN_DEDUP_RETENTION_SECONDS,
@@ -155,6 +156,11 @@ class PostgresChannelStore:
 
             counts[label] = self.database.run(run)
         return counts
+
+    def purge_workspace(self, workspace_id: str) -> int:
+        """Delete the outbox receipts of ``workspace_id`` (workspace deletion, P46). Dedup
+        keys carry no workspace and stay until retention expires them."""
+        return postgres_purge(self.database, ("channel_outbox",), workspace_id)
 
     def is_duplicate(self, key: str) -> bool:
         async def run(conn: Any) -> bool:

@@ -30,9 +30,11 @@ from typing import Any, Final, Literal
 
 logger = logging.getLogger("nexura.service.revocation")
 
-CancelReason = Literal["access_revoked", "publication_revoked"]
+CancelReason = Literal["access_revoked", "publication_revoked", "workspace_deleted"]
 ACCESS_REVOKED: Final[CancelReason] = "access_revoked"
 PUBLICATION_REVOKED: Final[CancelReason] = "publication_revoked"
+#: Runs cancelled because their workspace was deleted (P46, ``service.workspaces.deletion``).
+WORKSPACE_DELETED: Final[CancelReason] = "workspace_deleted"
 
 #: Statuses revocation stops; terminal and ``interrupted`` runs cannot continue anyway.
 REVOCABLE_STATUSES = frozenset({"running", "pending_approval", "waiting_for_input"})
@@ -40,6 +42,7 @@ REVOCABLE_STATUSES = frozenset({"running", "pending_approval", "waiting_for_inpu
 _MESSAGES: dict[str, str] = {
     ACCESS_REVOKED: "Access of the principal that started this run was revoked.",
     PUBLICATION_REVOKED: "The publication that started this run was revoked.",
+    WORKSPACE_DELETED: "The workspace of this run was deleted.",
 }
 
 
@@ -136,6 +139,7 @@ __all__ = [
     "ACCESS_REVOKED",
     "PUBLICATION_REVOKED",
     "REVOCABLE_STATUSES",
+    "WORKSPACE_DELETED",
     "CancelReason",
     "cancel_message",
     "cancel_revoked_runs",

@@ -8,7 +8,7 @@ The organisation models moved to the closed edition in EDITIONS_PLAN step 5.
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -23,6 +23,19 @@ class Workspace(BaseModel):
     owner_id: str
     created_at: float = Field(default_factory=time.time)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class WorkspaceDeletion(BaseModel):
+    """The deletion record of a retired workspace (P46): its content purge, ``purging`` until a
+    final pass after the workflow lease TTL found nothing left, then ``done``."""
+
+    workspace_id: str
+    requested_by: str
+    requested_at: float = Field(default_factory=time.time)
+    status: Literal["purging", "done"] = "purging"
+    attempts: int = 0
+    last_error: str | None = None
+    completed_at: float | None = None
 
 
 class WorkspaceMember(BaseModel):

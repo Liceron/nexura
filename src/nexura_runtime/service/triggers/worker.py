@@ -22,6 +22,7 @@ from fastapi import HTTPException
 from nexura_runtime.service.triggers.manager import TriggerManager
 from nexura_runtime.service.triggers.models import DurableTriggerJob
 from nexura_runtime.service.triggers.store import DEFAULT_LEASE_SECONDS, DEFAULT_MAX_ATTEMPTS
+from nexura_runtime.service.workspaces.deletion import maybe_sweep_workspace_deletions
 from nexura_runtime.workflow import WorkflowSpec, _LeaseBusyError
 
 logger = logging.getLogger("nexura_runtime.triggers.worker")
@@ -655,6 +656,13 @@ class TriggerWorker:
                     raise
                 except Exception:
                     logger.exception("Trigger worker %s iteration failed", self.worker_id)
+                try:
+                    # P46: unfinished workspace purges (at most once a minute per app).
+                    await maybe_sweep_workspace_deletions(self.app_state)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("Workspace deletion sweep failed")
                 with contextlib.suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(stop.wait(), timeout=self.poll_interval)
         finally:

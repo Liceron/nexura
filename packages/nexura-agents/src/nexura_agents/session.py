@@ -511,6 +511,16 @@ class MemorySessionStore:
         async with self._lock:
             return sorted(self._sessions)
 
+    async def purge(self, session_ids: list[str]) -> int:
+        """Delete sessions and their tombstones for good (workspace deletion): a recreated
+        session id starts again at revision 1. Returns how many sessions existed."""
+        async with self._lock:
+            removed = 0
+            for session_id in session_ids:
+                removed += self._sessions.pop(session_id, None) is not None
+                self._deleted.pop(session_id, None)
+            return removed
+
     async def close(self) -> None:
         """No-op for in-memory store."""
         pass
@@ -723,6 +733,26 @@ class SQLiteSessionStore:
     async def delete(self, session_id: str) -> bool:
         """Delete a session. Returns ``True`` if it existed."""
         return await asyncio.to_thread(self._delete_sync, session_id)
+
+    def _purge_sync(self, session_ids: list[str]) -> int:
+        removed = 0
+        with self._lock:
+            conn = self._ensure_open()
+            with conn:
+                for session_id in session_ids:
+                    removed += conn.execute(
+                        "DELETE FROM nexura_sessions WHERE session_id = ?", (session_id,)
+                    ).rowcount
+                    conn.execute(
+                        "DELETE FROM nexura_session_tombstones WHERE session_id = ?",
+                        (session_id,),
+                    )
+        return removed
+
+    async def purge(self, session_ids: list[str]) -> int:
+        """Delete sessions and their tombstones for good (workspace deletion): a recreated
+        session id starts again at revision 1. Returns how many sessions existed."""
+        return await asyncio.to_thread(self._purge_sync, list(session_ids))
 
     async def list_sessions(self) -> list[str]:
         """Return all stored session ids, sorted."""

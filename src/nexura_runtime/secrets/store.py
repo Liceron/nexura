@@ -23,6 +23,7 @@ from nexura_runtime.secrets.errors import (
     SecretNotFoundError,
 )
 from nexura_runtime.secrets.keys import MasterKeyProvider, load_aesgcm
+from nexura_runtime.store_purge import sqlite_purge
 
 
 @dataclass(frozen=True)
@@ -101,6 +102,16 @@ class EncryptedSecretStore:
             return self._mem
         assert self._path is not None
         return sqlite3.connect(self._path, check_same_thread=False, timeout=10.0)
+
+    def purge_workspace(self, workspace_id: str) -> int:
+        """Delete every row of ``workspace_id`` (workspace deletion, P46); harmless to repeat."""
+        with self._lock:
+            conn = self._conn()
+            try:
+                return sqlite_purge(conn, ("nexura_secrets",), workspace_id)
+            finally:
+                if self._mem is None:
+                    conn.close()
 
     def _run(self, sql: str, args: tuple[object, ...] = ()) -> list[tuple[Any, ...]]:
         with self._lock:

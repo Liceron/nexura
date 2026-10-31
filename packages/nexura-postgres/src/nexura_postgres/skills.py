@@ -43,6 +43,7 @@ from nexura_runtime.skills_store import (
     version_view,
     versions_view,
 )
+from nexura_runtime.store_purge import postgres_purge
 
 COMPONENT = "skills"
 MIGRATIONS: tuple[Migration, ...] = (
@@ -280,6 +281,14 @@ class PostgresSkillStore(SkillStore):
         for name, data in zip(wanted, stored, strict=True):
             add_for_run(library, _parse(data), name, label)
         return library
+
+    def purge_workspace(self, workspace_id: str) -> int:
+        """Delete every row of ``workspace_id`` (workspace deletion, P46); harmless to repeat."""
+        return postgres_purge(
+            self.database,
+            ("nexura_service_skill_counters", "nexura_service_skills"),
+            workspace_id,
+        )
 
     def close(self) -> None:
         """Nothing to release: the shared ``Database`` belongs to the app."""

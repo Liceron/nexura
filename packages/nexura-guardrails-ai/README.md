@@ -1,6 +1,6 @@
 # nexura-guardrails-ai
 
-Bidirectional bridge for Nexura 0.8.0 and Guardrails AI `>=0.11,<0.12`.
+Bidirectional bridge for Nexura 0.9.0 and Guardrails AI `>=0.11,<0.12`.
 Apache-2.0. Source-only until a release is published.
 
 Install from this workspace with `uv sync`, or build its wheel with

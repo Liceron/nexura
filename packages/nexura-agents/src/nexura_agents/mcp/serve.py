@@ -120,7 +120,7 @@ class AgentMCPServer:
         tools: Sequence[Tool] = (),
         deps: Any = None,
         runner: Any = None,
-        version: str = "0.8.0",
+        version: str = "0.9.0",
         list_ttl_ms: int = 60_000,
         instructions: str | None = None,
     ) -> None:

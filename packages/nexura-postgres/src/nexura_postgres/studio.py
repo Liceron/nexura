@@ -58,6 +58,7 @@ from nexura_agents.errors import (
 
 from nexura_postgres.blobs import PostgresBlobBinding
 from nexura_postgres.migrations import MIGRATION_TIMEOUT, Migration, migrate_all, register
+from nexura_runtime.blobs.payloads import MARKER_PREFIX, blob_keys_of
 from nexura_runtime.studio.builtin_modules import get_default_workflow_spec
 from nexura_runtime.studio.store import (
     DEFAULT_WORKFLOW_ID,
@@ -858,6 +859,55 @@ class PostgresStudioStore(StudioStore):
     # -------------------------------------------------------------------------
     # Close
     # -------------------------------------------------------------------------
+
+    # -------------------------------------------------------------------------
+    # Workspace deletion (P46)
+    # -------------------------------------------------------------------------
+
+    def _journal_run_ids_sync(self, workspace_id: str) -> list[str]:
+        if _has_nul(workspace_id):
+            return []
+
+        async def fetch(conn: Any) -> Any:
+            return await conn.fetch(
+                "SELECT run_id FROM nexura_studio_runs WHERE journal_workspace = $1",
+                workspace_id,
+            )
+
+        return sorted(str(row["run_id"]) for row in self._run1(fetch))
+
+    def _run_blob_keys_sync(self, run_ids: Sequence[str]) -> list[str]:
+        ids = [r for r in dict.fromkeys(run_ids) if not _has_nul(r)]
+        if not ids:
+            return []
+
+        async def fetch(conn: Any) -> Any:
+            return await conn.fetch(
+                "SELECT data_json FROM nexura_studio_run_events "
+                "WHERE run_id = ANY($1::text[]) AND left(data_json, $2) = $3",
+                ids,
+                len(MARKER_PREFIX),
+                MARKER_PREFIX,
+            )
+
+        return sorted(blob_keys_of(row["data_json"] for row in self._run1(fetch)))
+
+    def _purge_runs_sync(self, run_ids: Sequence[str]) -> int:
+        ids = [r for r in dict.fromkeys(run_ids) if not _has_nul(r)]
+        if not ids:
+            return 0
+
+        async def purge(conn: Any) -> int:
+            await conn.execute(
+                "DELETE FROM nexura_studio_run_events WHERE run_id = ANY($1::text[])", ids
+            )
+            status = await conn.execute(
+                "DELETE FROM nexura_studio_runs WHERE run_id = ANY($1::text[])", ids
+            )
+            return int(str(status).split()[-1])
+
+        removed: int = self._run(purge)
+        return removed
 
     def _close_connection(self) -> None:
         # The shared Database belongs to the app (ServiceStores); only this store is closed.

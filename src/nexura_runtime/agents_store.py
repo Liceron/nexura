@@ -119,6 +119,20 @@ class AgentStore:
         conn.execute("PRAGMA busy_timeout=10000")
         return conn
 
+    def purge_workspace(self, workspace_id: str) -> int:
+        """Delete every row of ``workspace_id`` (workspace deletion, P46); harmless to repeat."""
+        with self._lock, closing(self._connect()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                removed = conn.execute(
+                    "DELETE FROM nexura_service_agents WHERE workspace_id=?", (workspace_id,)
+                ).rowcount
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+        return removed
+
     @staticmethod
     def _record(row: tuple[Any, ...]) -> dict[str, Any]:
         workspace_id, agent_id, _, spec, revision, created_at, updated_at, c_by, u_by = row

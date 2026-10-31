@@ -88,6 +88,7 @@ from nexura_runtime.knowledge.hybrid import (
     extract_query_terms,
     fuse_rankings,
 )
+from nexura_runtime.store_purge import postgres_purge
 
 COMPONENT = "knowledge"
 #: ``hk_chunks`` names the extension's schema in its column type, whatever the search path is
@@ -405,6 +406,15 @@ class PostgresHybridKnowledgeIndex(KnowledgeIndexBase):
             "FROM unnest($3::text[], $4::int[], $5::text[]) AS v(document_id, chunk_index, "
             "embedding) WHERE c.workspace_id = $1 AND c.collection_id = $2 "
             "AND c.document_id = v.document_id AND c.chunk_index = v.chunk_index"
+        )
+
+    def purge_workspace(self, workspace_id: str) -> int:
+        """Delete every document, chunk, embedding lineage and collection version of
+        ``workspace_id`` (workspace deletion, P46); returns how many documents."""
+        return postgres_purge(
+            self.database,
+            ("hk_chunks", "hk_lineage", "hk_collection_versions", "hk_documents"),
+            workspace_id,
         )
 
     # -- helpers --------------------------------------------------------------------------------

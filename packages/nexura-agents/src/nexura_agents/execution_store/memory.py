@@ -64,6 +64,14 @@ class MemoryExecutionStore(_Store):
                     keys.add(key)
             self._runs[execution_id] = copy.deepcopy(tx.snapshot)
 
+    async def purge_workspace(self, workspace_id: str) -> int:
+        """Forget every run of ``workspace_id``; returns how many (workspace deletion)."""
+        with self._lock:
+            doomed = [key for key in self._runs if key.workspace_id == workspace_id]
+            for key in doomed:
+                del self._runs[key]
+            return len(doomed)
+
     async def list_recoverable(self, workspace_id: str | None = None) -> list[ExecutionRun]:
         """Return expired/free running runs according to the memory store clock."""
         with self._lock:

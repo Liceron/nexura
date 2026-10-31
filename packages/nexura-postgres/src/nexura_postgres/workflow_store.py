@@ -446,6 +446,43 @@ class PostgresWorkflowStore:
         checkpoint.revision = 1
         return True
 
+    async def purge_runs(self, run_ids: list[str], *, workspace_id: str) -> int:
+        """Delete the checkpoints and history of ``run_ids``, their child runs and every run
+        of ``workspace_id`` (workspace deletion, P46) in one transaction; returns how many
+        runs were removed."""
+        ids = [rid for rid in dict.fromkeys(run_ids) if "\x00" not in rid]
+        pool = await self._get_pool()
+        async with pool.acquire() as conn, conn.transaction():
+            roots = set(ids) | {
+                str(row["workflow_run_id"])
+                for row in await conn.fetch(
+                    "SELECT workflow_run_id FROM nexura_workflow_checkpoints "
+                    "WHERE workspace_id = $1",
+                    workspace_id,
+                )
+            }
+            if not roots:
+                await conn.execute(
+                    "DELETE FROM nexura_workflow_checkpoint_history WHERE workspace_id = $1",
+                    workspace_id,
+                )
+                return 0
+            match = (
+                "workflow_run_id = ANY($1::text[]) OR EXISTS (SELECT 1 FROM unnest($2::text[]) "
+                "AS p(prefix) WHERE left(workflow_run_id, length(p.prefix)) = p.prefix)"
+            )
+            args = (sorted(roots), [f"{root}/" for root in sorted(roots)])
+            await conn.execute(
+                f"DELETE FROM nexura_workflow_checkpoint_history WHERE {match} "
+                "OR workspace_id = $3",
+                *args,
+                workspace_id,
+            )
+            status = await conn.execute(
+                f"DELETE FROM nexura_workflow_checkpoints WHERE {match}", *args
+            )
+            return int(str(status).split()[-1])
+
     async def history(self, workflow_run_id: str) -> list[WorkflowCheckpoint]:
         """Every checkpoint saved for the run, oldest first."""
         pool = await self._get_pool()

@@ -21,6 +21,7 @@ from nexura_runtime.evaluation.models import (
     EvaluationSummary,
     StoredTrace,
 )
+from nexura_runtime.store_purge import sqlite_purge
 from nexura_runtime.store_retention import DEFAULT_PRUNE_LIMIT, prune_cutoff, sqlite_prune_traces
 
 logger = logging.getLogger(__name__)
@@ -95,6 +96,13 @@ class SqliteEvaluationStore:
                 self._connection = sqlite3.connect(self.db_path, check_same_thread=False)
                 self._connection.row_factory = sqlite3.Row
             return self._connection
+
+    def purge_workspace(self, workspace_id: str) -> int:
+        """Delete every row of ``workspace_id`` (workspace deletion, P46); harmless to repeat."""
+        with self._lock:
+            return sqlite_purge(
+                self._conn, ("eval_traces", "eval_runs", "eval_datasets"), workspace_id
+            )
 
     def _init_db(self) -> None:
         with self._lock, self._conn:

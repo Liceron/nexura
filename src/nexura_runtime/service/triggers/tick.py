@@ -95,9 +95,14 @@ async def run_trigger_tick(
         counts = await worker.run_pass(max(0.001, budget - (time.monotonic() - started)))
     finally:
         await asyncio.to_thread(store.release_lease, TICK_LEASE, holder)
+    # P46: purge passes of deleted workspaces still purging (keys only when there are any).
+    from nexura_runtime.service.workspaces.deletion import sweep_workspace_deletions
+
+    deletions = await sweep_workspace_deletions(app_state)
     return {
         "status": "ok",
         **counts,
+        **deletions,
         "elapsed_seconds": round(time.monotonic() - started, 3),
         "budget_seconds": budget,
     }

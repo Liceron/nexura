@@ -105,6 +105,14 @@ class CredentialModelCache:
     def __len__(self) -> int:
         return len(self._models)
 
+    def forget_workspace(self, workspace_id: str) -> int:
+        """Drop every model built for ``workspace_id`` (workspace deletion); returns how many."""
+        with self._lock:
+            doomed = [key for key in self._models if key[0] == workspace_id]
+            for key in doomed:
+                del self._models[key]
+            return len(doomed)
+
     def get_or_build(
         self,
         key: tuple[str, str, str, str, str],

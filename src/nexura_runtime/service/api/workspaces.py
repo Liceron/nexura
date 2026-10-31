@@ -9,9 +9,12 @@ in EDITIONS_PLAN step 7.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, Request, status
+from fastapi import APIRouter, Body, HTTPException, Query, Request, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from nexura_runtime.service.api.auth_providers import caller_is_operator
@@ -24,10 +27,15 @@ from nexura_runtime.service.auth.models import Principal, WorkspaceRole
 from nexura_runtime.service.auth.permissions import check_permission
 from nexura_runtime.service.workspaces.membership import remembered_member
 from nexura_runtime.service.workspaces.models import WorkspaceMember
-from nexura_runtime.service.workspaces.repository import WorkspaceExistsError, WorkspaceRepository
+from nexura_runtime.service.workspaces.repository import (
+    WorkspaceDeletedError,
+    WorkspaceExistsError,
+    WorkspaceRepository,
+)
 from nexura_runtime.service.workspaces.scoping import ResourceScopeEnforcer
 
 router = APIRouter(prefix="/workspaces", tags=["workspaces"])
+logger = logging.getLogger("nexura.service.workspaces")
 
 
 class CreateWorkspaceRequest(BaseModel):
@@ -180,6 +188,14 @@ async def create_workspace(request: Request, payload: CreateWorkspaceRequest) ->
             owner_id=owner_id,
             metadata=meta,
         )
+    except WorkspaceDeletedError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "WORKSPACE_ID_RETIRED",
+                "message": "This identifier belonged to a deleted workspace; choose another.",
+            },
+        ) from exc
     except WorkspaceExistsError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -272,6 +288,137 @@ async def update_workspace_policy(
         "created_at": ws.created_at,
         "require_promotion_approval": payload.require_promotion_approval,
     }
+
+
+class DeleteWorkspaceRequest(BaseModel):
+    """Confirmation of a workspace deletion: the workspace id, repeated."""
+
+    confirm: str = Field(default="", max_length=256, description="The workspace id, repeated")
+
+
+def _not_found(workspace_id: str) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail={"code": "WORKSPACE_NOT_FOUND", "message": f"Workspace '{workspace_id}' not found."},
+    )
+
+
+def _deletion_operator(request: Request) -> bool:
+    """True for a platform operator (``caller_is_operator``) or a caller an edition's
+    ``operators`` hook accepts (the hosted edition: its operator admin API key)."""
+    from nexura_runtime.service.workspaces.deletion import deletion_hooks
+
+    if caller_is_operator(request):
+        return True
+    for check in deletion_hooks(request.app.state).operators:
+        try:
+            if check(request) is True:
+                return True
+        except Exception:
+            logger.exception("workspace deletion operator check failed")
+    return False
+
+
+@router.delete("/{workspace_id}", status_code=status.HTTP_202_ACCEPTED)
+async def delete_workspace(
+    request: Request,
+    workspace_id: str,
+    payload: DeleteWorkspaceRequest | None = Body(default=None),  # noqa: B008
+) -> JSONResponse:
+    """Delete a workspace for good (P46, ``nexura_runtime.service.workspaces.deletion``).
+
+    Allowed for an admin member of the workspace (a person, not an API key) and for a platform
+    operator, who need not be a member. The request authenticates against the caller's own
+    workspace (``X-Workspace-ID`` or the credential's), never the one being deleted. The body
+    must repeat the id: ``{"confirm": "<workspace_id>"}`` (else 400 ``CONFIRMATION_REQUIRED``).
+    ``default``, operator workspaces and workspaces an edition protects answer 409
+    ``WORKSPACE_PROTECTED``.
+
+    Access ends in the request: the id is retired (it can never be created again), members,
+    API keys, publications, webhooks, schedules and trigger jobs go and every live run is
+    cancelled. The content is purged right after, in the background, and again by the trigger
+    tick until a pass after the workflow lease TTL marks it done. Answers 202
+    ``{"workspace_id", "status": "purging"}``. An already deleted workspace answers 404, except
+    to an operator, who gets 202 with its current status (``purging`` or ``deleted``) and, while
+    it is still purging, starts another purge pass.
+    """
+    from nexura_runtime.service.workspaces.deletion import (
+        deletion_hooks,
+        end_workspace_access,
+        protection_reason,
+        start_background_purge,
+    )
+
+    state = request.app.state
+    repo: WorkspaceRepository = _get_scope_enforcer(request).workspace_repo
+    principal: Principal = getattr(
+        request.state, "principal", Principal(principal_id="local-owner", profile="local-owner")
+    )
+    operator = _deletion_operator(request)
+    if await asyncio.to_thread(repo.is_workspace_deleted, workspace_id):
+        if not operator:
+            raise _not_found(workspace_id)
+        deletion = await asyncio.to_thread(repo.get_workspace_deletion, workspace_id)
+        purging = deletion is not None and deletion.status == "purging"
+        if purging:
+            start_background_purge(state, workspace_id)
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content={"workspace_id": workspace_id, "status": "purging" if purging else "deleted"},
+        )
+    if not operator:
+        member = (
+            None
+            if principal.metadata.get("auth_kind") == "api_key"
+            else await asyncio.to_thread(repo.get_member, workspace_id, principal.principal_id)
+        )
+        if member is None or member.role != "admin":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "PERMISSION_DENIED",
+                    "message": "Deleting a workspace needs an admin of it or a platform operator.",
+                },
+            )
+    if await asyncio.to_thread(repo.get_workspace, workspace_id) is None:
+        raise _not_found(workspace_id)
+    reason = protection_reason(state, workspace_id)
+    if reason is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "WORKSPACE_PROTECTED", "message": reason},
+        )
+    if payload is None or payload.confirm != workspace_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "CONFIRMATION_REQUIRED",
+                "message": 'Repeat the workspace id to confirm: {"confirm": "<workspace_id>"}.',
+            },
+        )
+    actor = principal.principal_id
+    try:
+        deletion, created = await asyncio.to_thread(repo.retire_workspace, workspace_id, actor)
+    except KeyError as exc:
+        raise _not_found(workspace_id) from exc
+    if not created:  # deleted by a concurrent request
+        raise _not_found(workspace_id)
+    summary = await end_workspace_access(state, workspace_id, actor)
+    for hook in deletion_hooks(state).audit:
+        await hook(state, workspace_id, actor, deletion)
+    logger.warning(
+        "workspace %s deleted by %s (operator=%s): %s",
+        workspace_id,
+        actor,
+        operator,
+        {k: v for k, v in summary.items() if k != "cancelled_run_ids"}
+        | {"cancelled_runs": len(summary.get("cancelled_run_ids", []))},
+    )
+    start_background_purge(state, workspace_id)
+    return JSONResponse(
+        status_code=status.HTTP_202_ACCEPTED,
+        content={"workspace_id": workspace_id, "status": "purging"},
+    )
 
 
 # Mount scoped sub-resources into the workspace route matrix

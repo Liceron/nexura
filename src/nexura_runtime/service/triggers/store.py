@@ -20,6 +20,7 @@ from nexura_runtime.service.triggers.models import (
     WebhookReceipt,
 )
 from nexura_runtime.service.triggers.secretbox import SecretBox
+from nexura_runtime.store_purge import sqlite_purge
 
 DEFAULT_LEASE_SECONDS = 300.0
 DEFAULT_MAX_ATTEMPTS = 3
@@ -247,6 +248,22 @@ class MemoryTriggerStore:
                 return False
             del self._leases[name]
             return True
+
+    def purge_workspace(self, workspace_id: str) -> int:
+        """Delete the webhooks, receipts, schedules and trigger jobs of ``workspace_id``
+        (workspace deletion, P46); returns how many jobs. A worker running one of the jobs
+        finds it gone and its completion changes nothing."""
+        with self._lock:
+            for key in [k for k, r in self._receipts.items() if r.workspace_id == workspace_id]:
+                del self._receipts[key]
+            for wid in [k for k, w in self._webhooks.items() if w.workspace_id == workspace_id]:
+                del self._webhooks[wid]
+            for sid in [k for k, c in self._schedules.items() if c.workspace_id == workspace_id]:
+                del self._schedules[sid]
+            jobs = [k for k, j in self._jobs.items() if j.workspace_id == workspace_id]
+            for job_id in jobs:
+                del self._jobs[job_id]
+            return len(jobs)
 
     def save_webhook_config(self, config: WebhookConfig) -> None:
         with self._lock:
@@ -613,6 +630,17 @@ class SqliteTriggerStore:
                     "UPDATE webhook_configs SET secret = ? WHERE endpoint_id = ?",
                     (self._secrets.encrypt(row["secret"]), row["endpoint_id"]),
                 )
+
+    def purge_workspace(self, workspace_id: str) -> int:
+        """Delete the webhooks, receipts, schedules and trigger jobs of ``workspace_id``
+        (workspace deletion, P46); returns how many jobs. A worker running one of the jobs
+        finds it gone and its completion changes nothing."""
+        with self._lock:
+            return sqlite_purge(
+                self._conn,
+                ("webhook_receipts", "webhook_configs", "schedule_configs", "durable_trigger_jobs"),
+                workspace_id,
+            )
 
     def save_webhook_config(self, config: WebhookConfig) -> None:
         with self._lock, self._conn:

@@ -1110,6 +1110,29 @@ async def list_integration_registrations(request: Request) -> dict[str, Any]:
     return {"registrations": await _registration_rows(request, caller_ws)}
 
 
+def unregister_integration_tools(state: Any, workspace_id: str, module_ids: list[str]) -> None:
+    """Remove the integration tools ``module_ids`` of ``workspace_id`` from this instance's
+    module registry (and their versioned-registry entries)."""
+    app_registry = getattr(state, "registry", None)
+    v_reg = getattr(app_registry, "versioned_registry", None)
+    for mod_id in module_ids:
+        module = app_registry.unregister(mod_id) if app_registry is not None else None
+        manifest = getattr(module, "manifest", None)
+        if v_reg is not None and manifest is not None and hasattr(v_reg, "unregister"):
+            try:
+                entry = v_reg.get_entry(mod_id, manifest.version)
+            except Exception:
+                entry = None
+            target = getattr(entry, "target", None)
+            # A tool registered again keeps its first module object in the versioned
+            # registry: remove that entry too when it is this workspace's integration tool
+            # (an entry of another app or workspace in a shared registry is left alone).
+            if target is module or (
+                target is not None and getattr(target, _WORKSPACE_TAG_ATTR, None) == workspace_id
+            ):
+                v_reg.unregister(mod_id, manifest.version, target=target)
+
+
 @router.delete("/registrations")
 async def delete_integration_registrations(
     request: Request,
@@ -1161,24 +1184,7 @@ async def delete_integration_registrations(
                 "message": "No such tool registration in this workspace.",
             },
         )
-    app_registry = getattr(request.app.state, "registry", None)
-    v_reg = getattr(app_registry, "versioned_registry", None)
-    for mod_id in deleted:
-        module = app_registry.unregister(mod_id) if app_registry is not None else None
-        manifest = getattr(module, "manifest", None)
-        if v_reg is not None and manifest is not None and hasattr(v_reg, "unregister"):
-            try:
-                entry = v_reg.get_entry(mod_id, manifest.version)
-            except Exception:
-                entry = None
-            target = getattr(entry, "target", None)
-            # A tool registered again keeps its first module object in the versioned
-            # registry: remove that entry too when it is this workspace's integration tool
-            # (an entry of another app or workspace in a shared registry is left alone).
-            if target is module or (
-                target is not None and getattr(target, _WORKSPACE_TAG_ATTR, None) == caller_ws
-            ):
-                v_reg.unregister(mod_id, manifest.version, target=target)
+    unregister_integration_tools(request.app.state, caller_ws, deleted)
     logger.info(
         "Integration tools %s removed from workspace %s by %s",
         ", ".join(deleted),

@@ -180,6 +180,11 @@ async def test_workspaces_client_coverage() -> None:
     assert calls[-1].url.path == "/api/v1/workspaces/ws-test"
     assert json.loads(calls[-1].content)["require_promotion_approval"] is True
 
+    await client.workspaces.delete("ws-test")
+    assert calls[-1].method == "DELETE"
+    assert calls[-1].url.path == "/api/v1/workspaces/ws-test"
+    assert json.loads(calls[-1].content) == {"confirm": "ws-test"}
+
 
 @pytest.mark.asyncio
 async def test_sessions_and_knowledge_coverage() -> None:

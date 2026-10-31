@@ -15,6 +15,7 @@ from nexura_runtime.integrations.channels.models import (
     ChannelType,
     OutboxReceipt,
 )
+from nexura_runtime.store_purge import sqlite_purge
 from nexura_runtime.store_retention import (
     DEFAULT_PRUNE_LIMIT,
     MIN_DEDUP_RETENTION_SECONDS,
@@ -73,6 +74,15 @@ class MemoryChannelStore:
         self._lock = threading.Lock()
         self._dedup: dict[str, float] = {}
         self._receipts: dict[str, OutboxReceipt] = {}
+
+    def purge_workspace(self, workspace_id: str) -> int:
+        """Delete the outbox receipts of ``workspace_id`` (workspace deletion, P46). Dedup
+        keys carry no workspace and stay until retention expires them."""
+        with self._lock:
+            doomed = [k for k, r in self._receipts.items() if r.workspace_id == workspace_id]
+            for key in doomed:
+                del self._receipts[key]
+            return len(doomed)
 
     def is_duplicate(self, key: str) -> bool:
         with self._lock:
@@ -264,6 +274,12 @@ class SqliteChannelStore:
             return sqlite_prune_channels(
                 self._conn, cutoff, limit, dry_run=dry_run, dedup=dedup, outbox=outbox
             )
+
+    def purge_workspace(self, workspace_id: str) -> int:
+        """Delete the outbox receipts of ``workspace_id`` (workspace deletion, P46). Dedup
+        keys carry no workspace and stay until retention expires them."""
+        with self._lock:
+            return sqlite_purge(self._conn, ("channel_outbox",), workspace_id)
 
     def is_duplicate(self, key: str) -> bool:
         with self._lock:

@@ -157,6 +157,10 @@ test('Workspaces client coverage', async () => {
     assert.equal(calls.at(-1).options.method, 'PATCH');
     assert.match(calls.at(-1).url, /\/api\/v1\/workspaces\/ws-new$/);
 
+    await client.workspaces.delete('ws-new');
+    assert.equal(calls.at(-1).options.method, 'DELETE');
+    assert.deepEqual(JSON.parse(calls.at(-1).options.body), { confirm: 'ws-new' });
+    assert.match(calls.at(-1).url, /\/api\/v1\/workspaces\/ws-new$/);
   } finally {
     globalThis.fetch = original;
   }

@@ -464,6 +464,15 @@ class WorkspacesClient:
             json_data={"require_promotion_approval": require_promotion_approval},
         )
 
+    async def delete(self, workspace_id: str) -> dict[str, Any]:
+        """Delete a workspace for good (admin of it, or a platform operator); the id is
+        repeated as the confirmation. Answers ``{"workspace_id", "status": "purging"}``."""
+        return await self._root._request(
+            "DELETE",
+            f"/workspaces/{_safe_quote(workspace_id)}",
+            json_data={"confirm": workspace_id},
+        )
+
 
 class SessionsClient:
     """Client for chat sessions and LLM turn interactions."""
@@ -1505,6 +1514,7 @@ class NexuraClient:
         ("POST", "/api/v1/workspaces"): ("workspaces", "create"),
         ("GET", "/api/v1/workspaces/{workspace_id}"): ("workspaces", "get"),
         ("PATCH", "/api/v1/workspaces/{workspace_id}"): ("workspaces", "update_policy"),
+        ("DELETE", "/api/v1/workspaces/{workspace_id}"): ("workspaces", "delete"),
         # Sessions & Chat
         ("GET", "/api/v1/sessions"): ("sessions", "list"),
         ("POST", "/api/v1/sessions"): ("sessions", "create"),

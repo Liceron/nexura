@@ -38,6 +38,7 @@ from nexura_runtime.agents_store import (
     agent_summary,
     new_agent_id,
 )
+from nexura_runtime.store_purge import postgres_purge
 
 COMPONENT = "agents"
 MIGRATIONS: tuple[Migration, ...] = (
@@ -273,6 +274,10 @@ class PostgresAgentStore(AgentStore):
                 raise AgentNotFoundError(f"Agent '{agent_id}' not found.")
 
         self.database.run(run)
+
+    def purge_workspace(self, workspace_id: str) -> int:
+        """Delete every row of ``workspace_id`` (workspace deletion, P46); harmless to repeat."""
+        return postgres_purge(self.database, ("nexura_service_agents",), workspace_id)
 
     def close(self) -> None:
         """Nothing to release: the shared ``Database`` belongs to the app."""

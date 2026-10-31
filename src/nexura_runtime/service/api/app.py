@@ -120,6 +120,7 @@ from nexura_runtime.service.workflow_state import (
     open_workflow_state_store,
     resolve_workflow_state_url,
 )
+from nexura_runtime.service.workspaces.deletion import WorkspaceDeletionHooks
 from nexura_runtime.service.workspaces.repository import (
     WorkspaceRepository,
     ensure_private_file,
@@ -725,6 +726,11 @@ def create_api_app(
         revocations = list(getattr(app.state, "run_revocation_tasks", ()))
         if revocations:
             await asyncio.wait(revocations, timeout=_shutdown_grace(10.0))
+        # 0c. A workspace purge pass still running (P46) gets the same grace; the trigger tick
+        # repeats an unfinished one.
+        purges = list(getattr(app.state, "workspace_purge_tasks", ()))
+        if purges:
+            await asyncio.wait(purges, timeout=_shutdown_grace(10.0))
         # 1. Shutdown phase: cancel and reap owned active run tasks
         active_tasks: dict[str, asyncio.Task[Any]] = getattr(app.state, "active_run_tasks", {})
         running_task_items = list(active_tasks.items())
@@ -927,6 +933,8 @@ def create_api_app(
         DeliveryTokenStore(effective_store.db_path) if remote_operator else None
     )
     app.state.active_run_tasks = {}
+    # P46: what an edition adds to workspace deletion (protection, access, purge, audit).
+    app.state.workspace_deletion_hooks = WorkspaceDeletionHooks()
     app.state.trigger_store = app_trigger_store
     app.state.trigger_manager = app_trigger_manager
     app.state.channel_store = app_channel_store

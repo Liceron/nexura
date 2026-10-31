@@ -1391,7 +1391,7 @@ Args:
 
 ### `AgentMCPServer`
 
-class `AgentMCPServer(name: 'str', *, agents: 'Sequence[Agent | Team]' = (), tools: 'Sequence[Tool]' = (), deps: 'Any' = None, runner: 'Any' = None, version: 'str' = '0.8.0', list_ttl_ms: 'int' = 60000, instructions: 'str | None' = None) -> 'None'`
+class `AgentMCPServer(name: 'str', *, agents: 'Sequence[Agent | Team]' = (), tools: 'Sequence[Tool]' = (), deps: 'Any' = None, runner: 'Any' = None, version: 'str' = '0.9.0', list_ttl_ms: 'int' = 60000, instructions: 'str | None' = None) -> 'None'`
 
 ~~~text
 Expose agents and tools as an MCP server.
@@ -1701,6 +1701,8 @@ is not needed.
   Return a copy of the stored snapshot, or ``None`` if the session is unknown.
 - `list_sessions(self) -> 'list[str]'`
   Return all stored session ids, sorted.
+- `purge(self, session_ids: 'list[str]') -> 'int'`
+  Delete sessions and their tombstones for good (workspace deletion): a recreated
 - `save(self, session_id: 'str', messages: 'list[Message]', expected_revision: 'int', state: 'dict[str, Any] | None' = None) -> 'SessionSnapshot'`
   Store messages if ``expected_revision`` matches, else raise ``SessionConflictError``.
 
@@ -1726,6 +1728,8 @@ optimistic locking.
   Asynchronously retrieve session snapshot without blocking the event loop.
 - `list_sessions(self) -> 'list[str]'`
   Return all stored session ids, sorted.
+- `purge(self, session_ids: 'list[str]') -> 'int'`
+  Delete sessions and their tombstones for good (workspace deletion): a recreated
 - `save(self, session_id: 'str', messages: 'list[Message]', expected_revision: 'int', state: 'dict[str, Any] | None' = None) -> 'SessionSnapshot'`
   Asynchronously save session snapshot using CAS without blocking the event loop.
 - `updated_at(self, session_ids: 'list[str]') -> 'dict[str, float]'`
@@ -2859,6 +2863,8 @@ backend is ephemeral and cannot coordinate processes or survive a restart.
   No schema initialization is needed for memory storage.
 - `list_recoverable(self, workspace_id: 'str | None' = None) -> 'list[ExecutionRun]'`
   Return expired/free running runs according to the memory store clock.
+- `purge_workspace(self, workspace_id: 'str') -> 'int'`
+  Forget every run of ``workspace_id``; returns how many (workspace deletion).
 
 ### `SQLiteExecutionStore`
 
@@ -4109,6 +4115,8 @@ Its execution journal (leases, intents, effects) is a ``MemoryExecutionStore``, 
   Ids of top-level runs whose latest checkpoint is ``running``, oldest update first.
 - `open_execution_store(self) -> 'ExecutionStore'`
   The execution journal kept next to these checkpoints (created on first use).
+- `purge_runs(self, run_ids: 'Sequence[str]', *, workspace_id: 'str') -> 'int'`
+  Delete the checkpoints and history of ``run_ids``, their child runs and every run
 - `run_identities(self, run_ids: 'list[str]') -> 'dict[str, dict[str, Any]]'`
   Read a page's checkpoint identities under one store lock.
 - `save(self, checkpoint: 'WorkflowCheckpoint') -> 'None'`
@@ -4143,6 +4151,8 @@ same database file, opened on first use with its own connection.
   Ids of top-level runs whose latest checkpoint is ``running``, oldest update first.
 - `open_execution_store(self) -> 'ExecutionStore'`
   The execution journal in the same database file (created on first use).
+- `purge_runs(self, run_ids: 'Sequence[str]', *, workspace_id: 'str') -> 'int'`
+  Delete the checkpoints and history of ``run_ids``, their child runs and every run
 - `run_identities(self, run_ids: 'list[str]') -> 'dict[str, dict[str, Any]]'`
   Read a page's active and starting checkpoint identities in one query.
 - `save(self, checkpoint: 'WorkflowCheckpoint') -> 'None'`

@@ -246,6 +246,24 @@ class SkillStore:
         conn.execute("PRAGMA busy_timeout=10000")
         return conn
 
+    def purge_workspace(self, workspace_id: str) -> int:
+        """Delete every row of ``workspace_id`` (workspace deletion, P46); harmless to repeat."""
+        with self._lock, closing(self._connect()) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                conn.execute(
+                    "DELETE FROM nexura_service_skill_counters WHERE workspace_id=?",
+                    (workspace_id,),
+                )
+                removed = conn.execute(
+                    "DELETE FROM nexura_service_skills WHERE workspace_id=?", (workspace_id,)
+                ).rowcount
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+        return removed
+
     def _load(self, conn: sqlite3.Connection, workspace_id: str, name: str) -> SkillLibrary | None:
         row = conn.execute(
             "SELECT data FROM nexura_service_skills WHERE workspace_id=? AND name=?",

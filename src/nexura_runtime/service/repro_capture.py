@@ -32,6 +32,8 @@ from typing import Any
 
 from nexura_agents.repro import ReproRecorder, export_repro_bundle
 
+from nexura_runtime.store_purge import sqlite_purge
+
 __all__ = [
     "CAPTURE_ENV",
     "FailedRunCapture",
@@ -134,6 +136,19 @@ class FailedRunCapture:
                     "(run_id, workspace_id, created_at, bundle_json) VALUES (?, ?, ?, ?)",
                     (run_id, workspace_id, time.time(), json.dumps(data, ensure_ascii=False)),
                 )
+        finally:
+            conn.close()
+
+    def purge_workspace(self, workspace_id: str) -> int:
+        """Delete every row of ``workspace_id`` (workspace deletion, P46); harmless to repeat."""
+        doomed = [rid for rid, (ws, _) in self._memory.items() if ws == workspace_id]
+        for rid in doomed:
+            del self._memory[rid]
+        if self.db_path is None:
+            return len(doomed)
+        conn = _connect(self.db_path)
+        try:
+            return len(doomed) + sqlite_purge(conn, (TABLE,), workspace_id)
         finally:
             conn.close()
 

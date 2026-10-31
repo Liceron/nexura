@@ -27,6 +27,7 @@ import json
 import logging
 import threading
 from collections import OrderedDict
+from collections.abc import Iterable
 from typing import Any
 
 from nexura_runtime.blobs.base import (
@@ -93,6 +94,16 @@ def parse_marker_with_store(stored: Any) -> tuple[BlobRef, str, str | None] | No
     except BlobStoreError:
         return None
     return ref, preview, store
+
+
+def blob_keys_of(values: Iterable[Any]) -> set[str]:
+    """The blob keys referenced by the well-formed markers among ``values``."""
+    keys: set[str] = set()
+    for value in values:
+        parsed = parse_marker_with_store(value)
+        if parsed is not None:
+            keys.add(parsed[0].key)
+    return keys
 
 
 def parse_marker(stored: Any) -> tuple[BlobRef, str] | None:

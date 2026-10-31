@@ -246,6 +246,25 @@ class PostgresSessionStore:
 
         return bool(await self._arun(run))
 
+    async def purge(self, session_ids: list[str]) -> int:
+        """Delete sessions and their tombstones for good (workspace deletion): a recreated
+        session id starts again at revision 1. Returns how many sessions existed."""
+        self._check_open()
+        ids = [sid for sid in dict.fromkeys(session_ids) if _storable(sid)]
+        if not ids:
+            return 0
+
+        async def run(conn: Any) -> int:
+            status = await conn.execute(
+                "DELETE FROM nexura_sessions WHERE session_id = ANY($1::text[])", ids
+            )
+            await conn.execute(
+                "DELETE FROM nexura_session_tombstones WHERE session_id = ANY($1::text[])", ids
+            )
+            return int(str(status).split()[-1])
+
+        return int(await self._arun(run))
+
     async def list_sessions(self) -> list[str]:
         """All stored session ids, sorted (Python string order, as the SQLite store)."""
 

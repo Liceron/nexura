@@ -23,7 +23,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NoReturn, Protocol, runtime_checkable
@@ -1921,6 +1921,23 @@ class MemoryWorkflowStore:
                 return None
             return copy.deepcopy(cp)
 
+    async def purge_runs(self, run_ids: Sequence[str], *, workspace_id: str) -> int:
+        """Delete the checkpoints and history of ``run_ids``, their child runs and every run
+        of ``workspace_id`` (workspace deletion, P46); returns how many runs were removed."""
+        async with self._lock:
+            roots = set(run_ids) | {
+                rid for rid, cp in self._checkpoints.items() if cp.workspace_id == workspace_id
+            }
+            doomed = {
+                rid
+                for rid in set(self._checkpoints) | set(self._history)
+                if rid in roots or any(rid.startswith(f"{root}/") for root in roots)
+            }
+            for rid in doomed:
+                self._checkpoints.pop(rid, None)
+                self._history.pop(rid, None)
+            return len(doomed)
+
     async def run_identities(self, run_ids: list[str]) -> dict[str, dict[str, Any]]:
         """Read a page's checkpoint identities under one store lock."""
         async with self._lock:
@@ -2242,6 +2259,40 @@ class SQLiteWorkflowStore:
             ids.sort(key=_child_sort_key)
             children = [self._read_checkpoint(conn, run_id) for run_id in ids]
         return [cp for cp in children if cp is not None]
+
+    def _purge_runs_sync(self, run_ids: Sequence[str], workspace_id: str) -> int:
+        removed = 0
+        with self._lock:
+            conn = self._ensure_open()
+            roots = set(run_ids) | {
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT workflow_run_id FROM nexura_workflow_checkpoints "
+                    "WHERE workspace_id = ?",
+                    (workspace_id,),
+                ).fetchall()
+            }
+            with conn:
+                for root in sorted(roots):
+                    escaped = root.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                    # LIKE ignores ASCII case: the exact prefix check keeps other runs.
+                    match = (
+                        "workflow_run_id = ? OR (workflow_run_id LIKE ? ESCAPE '\\' "
+                        "AND substr(workflow_run_id, 1, ?) = ?)"
+                    )
+                    args = (root, f"{escaped}/%", len(root) + 1, f"{root}/")
+                    conn.execute(
+                        f"DELETE FROM nexura_workflow_checkpoint_history WHERE {match}", args
+                    )
+                    removed += conn.execute(
+                        f"DELETE FROM nexura_workflow_checkpoints WHERE {match}", args
+                    ).rowcount
+        return removed
+
+    async def purge_runs(self, run_ids: Sequence[str], *, workspace_id: str) -> int:
+        """Delete the checkpoints and history of ``run_ids``, their child runs and every run
+        of ``workspace_id`` (workspace deletion, P46); returns how many runs were removed."""
+        return await asyncio.to_thread(self._purge_runs_sync, list(run_ids), workspace_id)
 
     def _history_sync(self, workflow_run_id: str) -> list[WorkflowCheckpoint]:
         with self._lock:

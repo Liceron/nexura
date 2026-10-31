@@ -977,6 +977,16 @@ class HybridKnowledgeIndex(KnowledgeIndexBase):
             document=self._row_to_doc(fresh), deduplicated=True, metadata_updated=True
         )
 
+    def purge_workspace(self, workspace_id: str) -> int:
+        """Delete every document, chunk, keyword entry and embedding lineage of
+        ``workspace_id`` (workspace deletion, P46); returns how many documents."""
+        from nexura_runtime.store_purge import sqlite_purge
+
+        with self._lock:
+            return sqlite_purge(
+                self._conn, ("hk_fts", "hk_chunks", "hk_lineage", "hk_documents"), workspace_id
+            )
+
     def _purge(self, document_id: str) -> None:
         self._conn.execute("DELETE FROM hk_fts WHERE document_id = ?", (document_id,))
         self._conn.execute("DELETE FROM hk_chunks WHERE document_id = ?", (document_id,))
