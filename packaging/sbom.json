@@ -14,7 +14,7 @@
       },
       {
         "name": "nexura:lock-sha256",
-        "value": "25701377f06c6f2530c0cef662f2e2d0b97c8854e9aa0ba2bbcbcbfb673b7b21"
+        "value": "2cfe84b1abf2645bf93afb671e93bb2d59b7d2df78ca8cc1175a24b3fd9e9f3c"
       },
       {
         "name": "nexura:generator",
@@ -102,10 +102,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:pypi/certifi@2026.7.22",
+      "bom-ref": "pkg:pypi/certifi@2026.10.23",
       "name": "certifi",
-      "version": "2026.7.22",
-      "purl": "pkg:pypi/certifi@2026.7.22"
+      "version": "2026.10.23",
+      "purl": "pkg:pypi/certifi@2026.10.23"
     },
     {
       "type": "library",
@@ -711,10 +711,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:pypi/pyasn1@0.6.4",
+      "bom-ref": "pkg:pypi/pyasn1@0.6.5",
       "name": "pyasn1",
-      "version": "0.6.4",
-      "purl": "pkg:pypi/pyasn1@0.6.4"
+      "version": "0.6.5",
+      "purl": "pkg:pypi/pyasn1@0.6.5"
     },
     {
       "type": "library",
@@ -795,10 +795,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:pypi/pypdf@6.21.1",
+      "bom-ref": "pkg:pypi/pypdf@6.21.4",
       "name": "pypdf",
-      "version": "6.21.1",
-      "purl": "pkg:pypi/pypdf@6.21.1"
+      "version": "6.21.4",
+      "purl": "pkg:pypi/pypdf@6.21.4"
     },
     {
       "type": "library",
@@ -1160,7 +1160,7 @@
       ]
     },
     {
-      "ref": "pkg:pypi/certifi@2026.7.22",
+      "ref": "pkg:pypi/certifi@2026.10.23",
       "dependsOn": []
     },
     {
@@ -1362,7 +1362,7 @@
     {
       "ref": "pkg:pypi/httpcore@1.0.9",
       "dependsOn": [
-        "pkg:pypi/certifi@2026.7.22",
+        "pkg:pypi/certifi@2026.10.23",
         "pkg:pypi/h11@0.16.0"
       ]
     },
@@ -1385,7 +1385,7 @@
       "ref": "pkg:pypi/httpx@0.28.1",
       "dependsOn": [
         "pkg:pypi/anyio@4.15.1",
-        "pkg:pypi/certifi@2026.7.22",
+        "pkg:pypi/certifi@2026.10.23",
         "pkg:pypi/h2@4.4.1",
         "pkg:pypi/httpcore@1.0.9",
         "pkg:pypi/idna@3.20"
@@ -1632,7 +1632,7 @@
         "pkg:pypi/packaging@26.3",
         "pkg:pypi/pydantic-monty@1.1.0",
         "pkg:pypi/pydantic@2.14.1",
-        "pkg:pypi/pypdf@6.21.1",
+        "pkg:pypi/pypdf@6.21.4",
         "pkg:pypi/regex@2026.9.29",
         "pkg:pypi/uvicorn@0.54.0"
       ]
@@ -1795,11 +1795,11 @@
     {
       "ref": "pkg:pypi/pyasn1-modules@0.4.2",
       "dependsOn": [
-        "pkg:pypi/pyasn1@0.6.4"
+        "pkg:pypi/pyasn1@0.6.5"
       ]
     },
     {
-      "ref": "pkg:pypi/pyasn1@0.6.4",
+      "ref": "pkg:pypi/pyasn1@0.6.5",
       "dependsOn": []
     },
     {
@@ -1862,7 +1862,7 @@
       "dependsOn": []
     },
     {
-      "ref": "pkg:pypi/pypdf@6.21.1",
+      "ref": "pkg:pypi/pypdf@6.21.4",
       "dependsOn": []
     },
     {
@@ -1916,7 +1916,7 @@
     {
       "ref": "pkg:pypi/requests@2.34.2",
       "dependsOn": [
-        "pkg:pypi/certifi@2026.7.22",
+        "pkg:pypi/certifi@2026.10.23",
         "pkg:pypi/charset-normalizer@3.5.2",
         "pkg:pypi/idna@3.20",
         "pkg:pypi/urllib3@2.8.0"

@@ -39,13 +39,13 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@v10.3.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           python-version: "3.12"
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: "24"
       - name: Check that every package has the same version (and the tag's version)
@@ -99,7 +99,7 @@ jobs:
           npm ci --no-audit --no-fund
           npm test
           npm pack --dry-run
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: python-dist
           path: stage/
@@ -115,31 +115,31 @@ jobs:
     env:
       REPOSITORY_URL: ${{ (github.event_name == 'workflow_dispatch' && inputs.repository == 'testpypi') && 'https://test.pypi.org/legacy/' || 'https://upload.pypi.org/legacy/' }}
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: python-dist
           path: stage
       # pypi-publish v1.14.2 or later accepts the Metadata-Version 2.5 that hatchling writes.
       - name: Upload nexura-agents, nexura-vertex and nexura-guardrails
-        uses: pypa/gh-action-pypi-publish@v1.14.2
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           packages-dir: stage/1/
           repository-url: ${{ env.REPOSITORY_URL }}
           skip-existing: true
       - name: Upload nexura-runtime
-        uses: pypa/gh-action-pypi-publish@v1.14.2
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           packages-dir: stage/2/
           repository-url: ${{ env.REPOSITORY_URL }}
           skip-existing: true
       - name: Upload nexura-postgres, nexura-qdrant, nexura-vectorstores, nexura-guardrails-ai, nexura-sandbox and nexura-connectors
-        uses: pypa/gh-action-pypi-publish@v1.14.2
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           packages-dir: stage/3/
           repository-url: ${{ env.REPOSITORY_URL }}
           skip-existing: true
       - name: Upload nexura-studio
-        uses: pypa/gh-action-pypi-publish@v1.14.2
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           packages-dir: stage/4/
           repository-url: ${{ env.REPOSITORY_URL }}
@@ -158,10 +158,10 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           # npm trusted publishing needs npm 11.5.1 or later (Node 24 ships npm 11).
           node-version: "24"
