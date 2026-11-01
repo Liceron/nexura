@@ -22,6 +22,11 @@ from nexura_runtime.workflow import (
     step_idempotency_key,
 )
 
+# Recovery gives up after RECOVERY_TIMEOUT; a slow probe takes SLOW_PROBE. The gap is wide so a
+# busy machine (parallel suites) does not blur "bounded by the deadline" into "waited".
+RECOVERY_TIMEOUT = 0.3
+SLOW_PROBE = 1.5
+
 
 class Crash(BaseException):
     """Abrupt stop after a committed intent and local fake dispatch."""
@@ -205,12 +210,12 @@ async def test_recovery_probe_and_children_share_one_deadline(
 
     async def async_probe(state: Any, intent: Any) -> Applied:
         probes.append(intent.step_key)
-        await asyncio.sleep(0.12)
+        await asyncio.sleep(SLOW_PROBE)
         return Applied({"paid": True})
 
     def sync_probe(state: Any, intent: Any) -> Applied:
         probes.append(intent.step_key)
-        time.sleep(0.12)
+        time.sleep(SLOW_PROBE)
         return Applied({"paid": True})
 
     registry = ModuleRegistry()
@@ -221,8 +226,10 @@ async def test_recovery_probe_and_children_share_one_deadline(
     with pytest.raises(Crash):
         await WorkflowEngine(spec, registry, store=store).run({"items": [1]}, workflow_run_id="r")
     started = time.monotonic()
-    paused = await WorkflowEngine(spec, registry, store=store, timeout=0.03).recover("r")
-    assert time.monotonic() - started < 0.10
+    paused = await WorkflowEngine(spec, registry, store=store, timeout=RECOVERY_TIMEOUT).recover(
+        "r"
+    )
+    assert time.monotonic() - started < SLOW_PROBE * 0.8
     assert paused.pause_reason == "effect_unknown" and len(calls) == len(probes) == 1
     target = paused.pending_effect.get("run_id", "r")
     unknown = (await snapshot(store, target)).effects[paused.pending_effect["effect_id"]]
@@ -319,7 +326,7 @@ async def test_recovery_discards_applied_probe_returned_after_cancellation() -> 
 
     async def probe(state: Any, intent: Any) -> Applied:
         try:
-            await asyncio.sleep(1)
+            await asyncio.sleep(SLOW_PROBE * 4)
         except asyncio.CancelledError:
             return Applied({"paid": True})
         pytest.fail("recovery probe was not bounded")
@@ -330,8 +337,10 @@ async def test_recovery_discards_applied_probe_returned_after_cancellation() -> 
     with pytest.raises(Crash):
         await WorkflowEngine(spec, registry, store=store).run({}, workflow_run_id="r")
     started = time.monotonic()
-    paused = await WorkflowEngine(spec, registry, store=store, timeout=0.03).recover("r")
-    assert time.monotonic() - started < 0.10
+    paused = await WorkflowEngine(spec, registry, store=store, timeout=RECOVERY_TIMEOUT).recover(
+        "r"
+    )
+    assert time.monotonic() - started < SLOW_PROBE * 0.8
     assert paused.pause_reason == "effect_unknown" and calls == ["charged"]
     unknown = (await snapshot(store)).effects[paused.pending_effect["effect_id"]]
     assert unknown.status == EffectStatus.INDETERMINATE

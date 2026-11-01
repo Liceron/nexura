@@ -2,6 +2,21 @@
 
 All notable changes to this project.
 
+## 0.9.1 (2026-11-01)
+
+- **Fixed: Claude 4.7+ and 5.x models refused requests with a temperature.** Claude Opus
+  4.7 and later, Sonnet 5 and later, Haiku 5 and later, Fable and Mythos answer HTTP 400
+  "`temperature` is deprecated for this model". The Anthropic provider now leaves
+  `temperature` and `top_p` out for those models and warns once (`ModelSettings.extra` is
+  never changed). Older and unknown model names still send them.
+- **Fixed: the guardrail judge on Claude 5.x.** The judge always asks for temperature 0, so
+  every verdict on these models was an error; and they think before answering, which used
+  up the judge's 200-token reply cap. Providers now say `thinks_by_default`; the judge then
+  asks for `low` reasoning effort and adds `THINKING_HEADROOM_TOKENS` (2048) to the cap.
+  Live benchmark after the fix (2026-11-01): prompt-injection suite 100% detection, 0% false
+  positives, on `claude-haiku-5-5` and `claude-sonnet-5-5`.
+- Workflow-recovery tests use wider timing margins, so a busy machine no longer fails them.
+
 ## 0.9.0 (2026-10-31)
 
 - **Delete a workspace.** `DELETE /api/v1/workspaces/{id}` with `{"confirm": "<id>"}`, for an

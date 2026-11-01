@@ -127,6 +127,36 @@ def supports_effort(model: str) -> bool:
     return floor is None or (major, minor) >= floor
 
 
+def supports_sampling(model: str) -> bool:
+    """False for models that refuse ``temperature`` and ``top_p`` (HTTP 400, "deprecated for
+    this model"): Claude Opus 4.7 and later, Sonnet 5 and later, Haiku 5 and later, and every
+    Fable and Mythos model. Sonnet 5.5 and Haiku 5.5 accept only the default values, so the
+    parameters are left out there too. Older and unknown names keep sending them."""
+    match = _OUTPUT_FORMAT_MODEL.search(model.lower())
+    if match is None:
+        return True
+    family, major, minor = match.group(1), int(match.group(2)), int(match.group(3) or 0)
+    floor = {"opus": (4, 7), "sonnet": (5, 0), "haiku": (5, 0)}.get(family)
+    return floor is not None and (major, minor) < floor
+
+
+def thinks_by_default(model: str) -> bool:
+    """True for models that think before answering when a request does not turn thinking off:
+    Claude Opus 5 and later, Sonnet 5 and later, Haiku 5.5 and later, and every Fable and
+    Mythos model. Their thinking counts against ``max_tokens``, so a caller with a tight
+    output cap (the guardrail judge) needs headroom for it."""
+    match = _OUTPUT_FORMAT_MODEL.search(model.lower())
+    if match is None:
+        return False
+    family, major, minor = match.group(1), int(match.group(2)), int(match.group(3) or 0)
+    floor = {"opus": (5, 0), "sonnet": (5, 0), "haiku": (5, 5)}.get(family)
+    return floor is None or (major, minor) >= floor
+
+
+#: Sampling parameters the provider sets itself (``ModelSettings.extra`` is never touched).
+_SAMPLING_KEYS = ("temperature", "top_p")
+
+
 # Anthropic effort levels; Nexura's "minimal" is sent as the lowest one.
 _EFFORT_LEVELS = frozenset({"low", "medium", "high", "xhigh", "max"})
 _EFFORT_ALIASES = {"minimal": "low"}
@@ -238,6 +268,11 @@ class AnthropicNativeProvider(BaseProvider):
             )
             return None
         return level
+
+    @property
+    def thinks_by_default(self) -> bool:
+        """See the module-level :func:`thinks_by_default`."""
+        return thinks_by_default(self.model)
 
     @property
     def response_schema_with_tools(self) -> bool:
@@ -408,6 +443,18 @@ class AnthropicNativeProvider(BaseProvider):
         if request.stop_sequences:
             payload["stop_sequences"] = request.stop_sequences
         apply_anthropic_settings(payload, request)
+        if not supports_sampling(self.model):
+            extra = getattr(request, "extra", None) or {}
+            dropped = [k for k in _SAMPLING_KEYS if k in payload and k not in extra]
+            for key in dropped:
+                del payload[key]
+            if dropped:
+                warnings.warn(
+                    f"Anthropic model '{self.model}' does not accept {', '.join(dropped)}; "
+                    "not sent (use reasoning_effort to steer it).",
+                    RuntimeWarning,
+                    stacklevel=3,
+                )
         return payload
 
     async def _generate_internal(

@@ -284,6 +284,48 @@ async def test_native_schema_is_passed_when_the_model_supports_it() -> None:
     assert schema["properties"]["categories"]["items"]["enum"] == list(CATS)
 
 
+@pytest.mark.parametrize(
+    "model_id, thinks",
+    [("claude-haiku-5-5", True), ("claude-opus-5-5", True), ("claude-haiku-4-5", False)],
+)
+async def test_a_thinking_judge_model_gets_headroom_and_low_effort(
+    model_id: str, thinks: bool
+) -> None:
+    """Live 2026-11-01: Claude Haiku 5.5 thinks first; with only max_output_tokens the verdict
+    was cut off (finish "length") and every such call became a malformed-verdict error."""
+    import httpx
+    from nexura_agents.providers.anthropic import AnthropicNativeProvider
+    from nexura_guardrails.judge import THINKING_HEADROOM_TOKENS
+
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "m",
+                "type": "message",
+                "role": "assistant",
+                "model": model_id,
+                "content": [{"type": "text", "text": ALLOW}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    model = AnthropicNativeProvider(model_id, api_key="k", transport=httpx.MockTransport(handler))
+    check = judge(model)
+    verdict = await evaluate(check, "hello")
+    assert verdict.decision == "allow", verdict
+    body = bodies[0]
+    extra = THINKING_HEADROOM_TOKENS if thinks else 0
+    assert body["max_tokens"] == check.max_output_tokens + extra
+    assert body.get("output_config", {}).get("effort") == ("low" if thinks else None)
+    # Claude 4.7+ refuse temperature; older models still get the deterministic 0.
+    assert ("temperature" in body) is (not thinks)
+
+
 # --------------------------------------------------------------------------- injection
 
 

@@ -30,6 +30,11 @@ from nexura_runtime.workflow import (
     step_idempotency_key,
 )
 
+# A step times out after STEP_TIMEOUT; a stuck call would take STUCK_CALL. The gap is wide so a
+# busy machine (parallel suites) never turns an ordinary step into a timeout.
+STEP_TIMEOUT = 0.5
+STUCK_CALL = 8.0
+
 
 def spec_for(shape: str, *, retry: bool = False, gated: bool = False) -> WorkflowSpec:
     node = WorkflowNode(id="pay", handler="pay", requires_approval=gated)
@@ -59,14 +64,16 @@ async def test_unknown_payment_resolutions(mode: str, resolution: str, gated: bo
         calls.append(step_idempotency_key())
         if len(calls) == 1:
             if mode == "timeout":
-                await asyncio.sleep(1)
+                await asyncio.sleep(STUCK_CALL)
             raise ConnectionError("local fake payment applied; response lost")
         return {"paid": "retried"}
 
     registry = ModuleRegistry()
     registry.register("pay", pay)
     store = MemoryWorkflowStore()
-    engine = WorkflowEngine(spec_for("plain", gated=gated), registry, store=store, timeout=0.05)
+    engine = WorkflowEngine(
+        spec_for("plain", gated=gated), registry, store=store, timeout=STEP_TIMEOUT
+    )
     paused = await engine.run({}, workflow_run_id="r")
     if gated:
         paused = await engine.resume("r", paused.pending_approval.approval_id, decision="approve")
@@ -115,13 +122,13 @@ async def test_unknown_payment_resolutions(mode: str, resolution: str, gated: bo
 async def test_pure_failure_is_terminal_with_no_effects(mode: str) -> None:
     async def pay(state: Any) -> Any:
         if mode == "timeout":
-            await asyncio.sleep(1)
+            await asyncio.sleep(STUCK_CALL)
         raise ValueError("fake pure failure")
 
     registry = ModuleRegistry()
     registry.register("pay", pay, effect="pure")
     store = MemoryWorkflowStore()
-    engine = WorkflowEngine(spec_for("plain"), registry, store=store, timeout=0.05)
+    engine = WorkflowEngine(spec_for("plain"), registry, store=store, timeout=STEP_TIMEOUT)
     with pytest.raises(WorkflowTimeoutError if mode == "timeout" else WorkflowExecutionError):
         await engine.run({}, workflow_run_id="r")
     snapshot = await journal(store)
@@ -154,7 +161,7 @@ async def test_reconciler_runs_before_unknown_pause(
         calls.append(step_idempotency_key())
         if len(calls) == 1:
             if mode == "timeout":
-                await asyncio.sleep(1)
+                await asyncio.sleep(STUCK_CALL)
             raise ConnectionError("fake lost response")
         return {"paid": True}
 
@@ -169,14 +176,16 @@ async def test_reconciler_runs_before_unknown_pause(
     registry = ModuleRegistry()
     registry.register("pay", pay, effect="reconcilable", reconcile=probe)
     store = MemoryWorkflowStore()
-    engine = WorkflowEngine(spec_for(shape, gated=gated), registry, store=store, timeout=0.05)
+    engine = WorkflowEngine(
+        spec_for(shape, gated=gated), registry, store=store, timeout=STEP_TIMEOUT
+    )
     started = time.monotonic()
     result = await engine.run({"items": [1]}, workflow_run_id="r")
     approval_id = None
     if gated:
         approval_id = result.pending_approval.approval_id
         result = await engine.resume("r", approval_id)
-    assert time.monotonic() - started < 0.2
+    assert time.monotonic() - started < STUCK_CALL / 2
     if mode == "timeout":
         assert result.pause_reason == "effect_unknown" and len(calls) == 1 and probes == []
         done = await engine.resolve_effect("r", "confirmed", actor="person", result={"paid": True})

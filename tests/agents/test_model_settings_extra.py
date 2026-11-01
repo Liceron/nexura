@@ -165,6 +165,38 @@ async def test_anthropic_thinking_and_top_p_and_warning() -> None:
     assert "seed" not in seen[0]
 
 
+@pytest.mark.parametrize(
+    "model, sent",
+    [
+        ("claude-haiku-5-5", False),
+        ("claude-sonnet-5-5", False),
+        ("claude-sonnet-5", False),
+        ("claude-opus-5-5", False),
+        ("claude-opus-4-7", False),
+        ("claude-fable-5-1", False),
+        ("claude-opus-4-6", True),
+        ("claude-sonnet-4-6", True),
+        ("claude-haiku-4-5", True),
+        ("my-gateway-model", True),
+    ],
+)
+async def test_anthropic_sampling_is_left_out_where_the_model_refuses_it(
+    model: str, sent: bool
+) -> None:
+    """Live 2026-11-01: Claude 4.7+ and 5.x answer 400 "`temperature` is deprecated for this
+    model"; the guardrail judge's temperature 0 made every verdict an error."""
+    seen, transport = capture(ANTHROPIC_REPLY)
+    settings = ModelSettings(temperature=0.0, top_p=0.9)
+    provider = AnthropicNativeProvider(model, api_key="k", transport=transport)
+    if sent:
+        await run(provider, settings)
+        assert seen[0]["temperature"] == 0.0 and seen[0]["top_p"] == 0.9
+    else:
+        with pytest.warns(RuntimeWarning, match="does not accept temperature, top_p"):
+            await run(provider, settings)
+        assert "temperature" not in seen[0] and "top_p" not in seen[0]
+
+
 async def test_anthropic_thinking_budget_must_be_below_max_tokens() -> None:
     _, transport = capture(ANTHROPIC_REPLY)
     settings = ModelSettings(thinking_budget_tokens=5000, max_tokens=4000)

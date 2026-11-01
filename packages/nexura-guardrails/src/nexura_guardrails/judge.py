@@ -77,6 +77,7 @@ __all__ = [
     "DEFAULT_CONTEXT_TOKENS",
     "HARD_ERRORS",
     "PROMPT_VERSION",
+    "THINKING_HEADROOM_TOKENS",
     "JudgeCheck",
     "MalformedVerdictError",
     "estimate_tokens",
@@ -93,6 +94,9 @@ DEFAULT_CONTEXT_TOKENS = 4096
 """Default judge context window in tokens (Ollama's default ``num_ctx``)."""
 TEMPLATE_RESERVE_TOKENS = 256
 """Tokens kept free for the model's chat template and special tokens."""
+THINKING_HEADROOM_TOKENS = 2048
+"""Extra ``max_tokens`` for a judge model that thinks before answering
+(``model.thinks_by_default``, Claude 5.x): its thinking counts against the cap."""
 HARD_ERRORS = frozenset({"ContentTooLong"})
 """Error types that ``on_error`` never softens (``evidence["hard"]`` is True)."""
 CONTRADICTION_SCORE = 0.5
@@ -553,12 +557,16 @@ class JudgeCheck:
             from nexura_agents.providers.types import GenerationRequest
 
             capabilities = getattr(model, "capabilities", None)
+            # A model that thinks before answering (Claude 5.x) spends its thinking from
+            # max_tokens: ask for little of it and leave room, or the verdict is cut off.
+            thinks = getattr(model, "thinks_by_default", False) is True
             request = GenerationRequest(
                 messages=messages,
                 schema=schema if getattr(capabilities, "can_structured_output", False) else None,
                 timeout=self.timeout,
-                max_tokens=self.max_output_tokens,
+                max_tokens=self.max_output_tokens + (THINKING_HEADROOM_TOKENS if thinks else 0),
                 temperature=0.0,
+                reasoning_effort="low" if thinks else None,
             )
             return await admission.generate(model, request)
         extra: dict[str, Any] = {}

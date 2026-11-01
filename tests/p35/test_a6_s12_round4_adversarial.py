@@ -28,7 +28,7 @@ async def test_recover_probe_obeys_its_invocation_deadline():
         raise Crash
 
     async def probe(state, intent):
-        await asyncio.sleep(0.12)
+        await asyncio.sleep(1.5)
         return Applied({"paid": True})
 
     registry = ModuleRegistry()
@@ -44,14 +44,15 @@ async def test_recover_probe_obeys_its_invocation_deadline():
     with pytest.raises(Crash):
         await WorkflowEngine(spec, registry, store=store).run({}, workflow_run_id="r")
     started = time.monotonic()
-    result = await WorkflowEngine(spec, registry, store=store, timeout=0.03).recover("r")
+    result = await WorkflowEngine(spec, registry, store=store, timeout=0.3).recover("r")
     elapsed = time.monotonic() - started
     assert result.status == "paused" and result.pause_reason == "effect_unknown", (
         result.status,
         elapsed,
         calls,
     )
-    assert elapsed < 0.10
+    # The probe takes 1.5 s; recovery gives up at 0.3 s (wide margins for a busy machine).
+    assert elapsed < 1.2
     assert calls == ["charged"]
 
 

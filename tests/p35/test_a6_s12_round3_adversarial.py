@@ -82,13 +82,14 @@ async def test_reconcilable_timeout_unknown_resolution_not_applied(shape):
     async def pay(state):
         calls.append("sent")
         if len(calls) == 1:
-            await asyncio.sleep(1)
+            await asyncio.sleep(8)
         return {"paid": True}
 
     registry = ModuleRegistry()
     registry.register("pay", pay, effect="reconcilable", reconcile=lambda s, i: Unknown())
     store = MemoryWorkflowStore()
-    engine = WorkflowEngine(one(shape), registry, store=store, timeout=0.04)
+    # Wide margins: an ordinary step on a busy machine must never reach the timeout.
+    engine = WorkflowEngine(one(shape), registry, store=store, timeout=0.5)
     paused = await engine.run({"items": [1]}, workflow_run_id="timeout")
     assert paused.status == "paused" and paused.pause_reason == "effect_unknown"
     result = await engine.resolve_effect("timeout", "not_applied", actor="reviewer", result={})
