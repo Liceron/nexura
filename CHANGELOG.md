@@ -2,6 +2,25 @@
 
 All notable changes to this project.
 
+## 0.9.2 (2026-11-02)
+
+- **Fixed: projects created by `nexura-runtime init` could not be installed.** The project
+  template pinned `nexura-agents`, `nexura-runtime` and `nexura-studio` to `<0.5`, a bound
+  written in 0.4; since 0.5.0 no release satisfied it ("No solution found"). The upper bound is
+  now the next major version (`<1` for 0.x). A test checks that every Nexura dependency of a
+  generated project accepts the version that created it. Projects made with 0.5.0-0.9.1: change
+  `<0.5` to `<1` in their `pyproject.toml`.
+- **Triggers:** an optional `app.state.trigger_run_admission(workspace_id)` hook runs before each
+  scheduled or webhook-triggered run; it returns `None` to start the run or a reason to fail the
+  job without starting one (editions use it for plan limits).
+- **Model examples:** project `.env` examples and the suggested models for a workspace's own
+  Gemini key use `gemini-3.8-flash` (`gemini-2.5-flash` is limited to accounts that used it
+  before); the Anthropic example is `claude-sonnet-5-5`. The README notes that the Studio web
+  app is the separate `nexura-studio` package.
+- **Security:** every GitHub Action is pinned to a full commit SHA; certifi 2026.10.23 (removes
+  the compromised emSign ECC Root CA - G3), pyasn1 0.6.5 and pypdf 6.21.4 (denial-of-service
+  fixes) in the lock file.
+
 ## 0.9.1 (2026-11-01)
 
 - **Fixed: Claude 4.7+ and 5.x models refused requests with a temperature.** Claude Opus
