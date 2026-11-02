@@ -158,6 +158,33 @@ async def test_interval_schedule_creates_completed_run(app, client) -> None:
     assert await worker.run_once(now=T0 + 61) == []
 
 
+async def test_an_edition_can_refuse_or_admit_each_triggered_run(app, client) -> None:
+    """``app.state.trigger_run_admission`` (the hosted plans count triggered runs)."""
+    wf = await _create_workflow(client, _spec())
+    await _schedule(client, wf["workflow_id"])
+    _align_schedule(app, T0 + 60)
+    asked: list[str] = []
+
+    async def refuse(workspace_id: str) -> str | None:
+        asked.append(workspace_id)
+        return "Monthly run limit reached."
+
+    app.state.trigger_run_admission = refuse
+    worker = TriggerWorker(app.state)
+    [out] = await worker.run_once(now=T0 + 60)
+    assert out.status == "failed" and out.run_id is None
+    assert out.error == "Monthly run limit reached." and asked == ["default"]
+    assert app.state.trigger_store.get_job(out.job_id).status == "failed"
+
+    async def admit(workspace_id: str) -> str | None:
+        asked.append(workspace_id)
+        return None
+
+    app.state.trigger_run_admission = admit
+    [ok] = await worker.run_once(now=T0 + 120)
+    assert ok.status == "completed" and ok.run_id and asked == ["default", "default"]
+
+
 async def test_signed_webhook_delivery_runs_with_payload(app, client) -> None:
     wf = await _create_workflow(client, _spec())
     await _register_webhook(client, wf["workflow_id"])

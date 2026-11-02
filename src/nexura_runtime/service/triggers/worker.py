@@ -511,6 +511,15 @@ class TriggerWorker:
         if not isinstance(initial_state, dict):
             raise _JobRefused("Job payload must be a JSON object.")
 
+        # An edition may admit or refuse each triggered run (the hosted plans count them):
+        # ``app.state.trigger_run_admission(workspace_id)`` returns ``None`` to start the run
+        # (and records it), or a reason to fail the job without starting anything.
+        admission = getattr(state, "trigger_run_admission", None)
+        if admission is not None:
+            refusal = await admission(job.workspace_id)
+            if refusal is not None:
+                raise _JobRefused(str(refusal))
+
         spec = WorkflowSpec.from_dict(wf["spec"])
         snapshot = await start_workflow_run(
             state,
