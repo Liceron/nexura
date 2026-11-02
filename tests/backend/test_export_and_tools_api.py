@@ -228,7 +228,7 @@ async def test_export_and_download_security(test_app, tmp_path: Path) -> None:
                     "config": {
                         "api_key": "raw_sensitive_token_super_secret_123",
                         "password": "my_db_password_456",
-                        "database_path": "/home/ubuntu/projects/Nexura V2/db.sqlite3",
+                        "database_path": "/home/user/projects/legacy-app/db.sqlite3",
                     },
                     "transitions": {},
                 }
@@ -276,7 +276,7 @@ async def test_export_and_download_security(test_app, tmp_path: Path) -> None:
         assert node_cfg["password"] == {"ref": "PASSWORD"}
 
         # Verify host database and parent workspace path scrubbed
-        assert "/home/ubuntu/projects/Nexura V2" not in json.dumps(wf_json_data)
+        assert "/home/user/projects/legacy-app" not in json.dumps(wf_json_data)
         assert node_cfg["database_path"] == "workflow.sqlite3"
 
         # Verify README.md contains credential reference instructions

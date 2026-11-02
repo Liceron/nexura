@@ -182,7 +182,7 @@ runtime/image provenance is recorded in the repair report.
 
 ## Upstream reference and provenance
 
-- **Nexura V2** (`/home/ubuntu/projects/Nexura V2/src/nexura-sdk`): read-only reference, no code
+- **Nexura V2** (Liceron's earlier, private SDK): read-only reference, no code
   copied. No copied-file provenance entry exists for it in this repository. Zero Langflow, zero
   `lfx` and zero parent-workspace dependencies. If V2-derived code is ever added, its notice
   ("MIT License, Copyright (c) 2024 Langflow") must travel with that code.

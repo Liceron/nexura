@@ -205,7 +205,7 @@ async def async_main() -> None:
                 terminal_nodes=["lookup"],
                 metadata={
                     "api_key": "sk-secret-token-do-not-leak",
-                    "host_source_path": "/home/ubuntu/projects/nexura-standalone-sdk/secret_data",
+                    "host_source_path": "/home/user/projects/acme-app/secret_data",
                 },
             )
             exporter = WorkflowExporter()
@@ -218,7 +218,7 @@ async def async_main() -> None:
             # Verify secret scrubbing
             wf_json = (bundle_dir / "workflow.json").read_text(encoding="utf-8")
             assert "sk-secret-token-do-not-leak" not in wf_json
-            assert "/home/ubuntu/projects/nexura-standalone-sdk" not in wf_json
+            assert "/home/user/projects/acme-app" not in wf_json
             parsed_meta = json.loads(wf_json).get("metadata", {})
             assert parsed_meta.get("api_key") == {"ref": "API_KEY"}
             print("    Credentials and local paths scrubbed successfully.")

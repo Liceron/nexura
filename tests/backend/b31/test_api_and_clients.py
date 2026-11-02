@@ -240,7 +240,7 @@ async def test_bundle_installs_and_runs_in_external_directory(test_setup: dict[s
         terminal_nodes=["lookup"],
         metadata={
             "api_key": "sk-secret-live-never-export-12345",
-            "host_log_dir": "/home/ubuntu/projects/nexura-standalone-sdk/logs",
+            "host_log_dir": "/home/user/projects/acme-app/logs",
         },
     )
 
@@ -261,7 +261,7 @@ async def test_bundle_installs_and_runs_in_external_directory(test_setup: dict[s
     wf_parsed = json.loads(wf_json_text)
     assert wf_parsed["metadata"]["api_key"] == {"ref": "API_KEY"}
     assert wf_parsed["metadata"]["host_log_dir"] == "logs"
-    assert "/home/ubuntu/projects/nexura-standalone-sdk" not in wf_json_text
+    assert "/home/user/projects/acme-app" not in wf_json_text
 
     # Execute standalone run.py in the external directory using subprocess
     res = subprocess.run(

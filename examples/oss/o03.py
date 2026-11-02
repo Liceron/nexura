@@ -45,7 +45,7 @@ def main() -> None:
                     config={
                         "api_key": "super_secret_production_key_never_leak_999",
                         "password": "db_auth_password_do_not_publish",
-                        "database_path": "/home/ubuntu/projects/Nexura V2/live_db.sqlite3",
+                        "database_path": "/home/user/projects/legacy-app/live_db.sqlite3",
                         "token_limit": 4096,
                         "max_tokens": 1024,
                         "idempotency_key": "payout_idem_001",

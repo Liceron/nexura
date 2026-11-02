@@ -75,7 +75,7 @@ class TestExportIntegrityAndHashing:
                     "handler": "synthetic_order_lookup",
                     "config": {
                         "api_key": "raw_sensitive_secret_value",
-                        "database_path": "/home/ubuntu/projects/Nexura V2/db.sqlite3",
+                        "database_path": "/home/user/projects/legacy-app/db.sqlite3",
                     },
                     "transitions": {},
                 }
