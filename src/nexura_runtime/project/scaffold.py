@@ -159,6 +159,13 @@ def _title(package: str) -> str:
     return " ".join(part.capitalize() for part in package.split("_") if part)
 
 
+def nexura_upper_bound(version: str) -> str:
+    """The exclusive upper bound new projects pin Nexura to: the next major version (``1``
+    for every 0.x release). A fixed bound once broke every new project: ``<0.5`` written in
+    0.4 could not be satisfied by any later release."""
+    return str(int(version.split(".", 1)[0]) + 1)
+
+
 def template_values(template: str, package: str, **extra: str) -> dict[str, str]:
     values = {
         "package": package,
@@ -168,6 +175,7 @@ def template_values(template: str, package: str, **extra: str) -> dict[str, str]
         "template": template,
         "description": TEMPLATES[template].summary if template in TEMPLATES else "",
         "nexura_version": __version__,
+        "nexura_upper": nexura_upper_bound(__version__),
     }
     values.update(extra)
     return values

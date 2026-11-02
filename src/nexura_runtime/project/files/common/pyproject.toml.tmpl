@@ -7,9 +7,10 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     # Installed from PyPI. To try unreleased Nexura changes, add
     # `--find-links /path/to/nexura/dist` (wheels built with `uv build --all-packages`).
-    "nexura-agents>={{nexura_version}},<0.5",
-    "nexura-runtime[studio]>={{nexura_version}},<0.5",
-    "nexura-studio>={{nexura_version}},<0.5",
+    # The upper bound is the next major version, so later releases keep installing.
+    "nexura-agents>={{nexura_version}},<{{nexura_upper}}",
+    "nexura-runtime[studio]>={{nexura_version}},<{{nexura_upper}}",
+    "nexura-studio>={{nexura_version}},<{{nexura_upper}}",
 ]
 
 [project.optional-dependencies]

@@ -19,7 +19,8 @@ Agents and workflow steps can share a budget that reserves estimated cost before
 **Alpha (0.4).** `nexura-runtime` and its add-ons need Python 3.12; `nexura-agents`, `nexura-guardrails` and `nexura-vertex` run on Python 3.11-3.13. Install from PyPI and npm:
 
 ```bash
-pip install "nexura-runtime[studio]"   # platform + REST service and Studio
+pip install "nexura-runtime[studio]"   # platform + REST service
+pip install nexura-studio                # + the Studio web app (nexura-studio command)
 pip install nexura-agents                # or only the standalone agent SDK
 ```
 

@@ -89,6 +89,17 @@ def test_template_project_runs_its_own_offline_tests(
     pyproject = tomllib.loads(text)
     deps = pyproject["project"]["dependencies"]
     assert any(d.startswith("nexura-runtime") for d in deps)
+    # Every Nexura dependency must accept the version that created the project (0.5-0.9.1
+    # wrote "<0.5", which no release satisfies, so new projects could not install).
+    from packaging.requirements import Requirement
+
+    import nexura_runtime
+
+    for dep in deps:
+        req = Requirement(dep)
+        if req.name.startswith("nexura-"):
+            assert req.specifier.contains(nexura_runtime.__version__), dep
+            assert req.specifier.contains("0.99.0") and not req.specifier.contains("1.0.0"), dep
     # PyPI first; local wheels stay optional.
     assert "not on PyPI yet" not in text and "--find-links" in text
     assert pyproject["tool"]["nexura"] == {
@@ -221,6 +232,7 @@ def test_every_template_file_is_used_and_has_no_stray_placeholders() -> None:
         "template",
         "description",
         "nexura_version",
+        "nexura_upper",
         "port",
     }
     import re

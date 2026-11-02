@@ -44,8 +44,8 @@ CREDENTIAL_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 SUGGESTED_MODELS: dict[str, tuple[str, ...]] = {
     "openai": ("gpt-4.1-mini", "gpt-4.1", "gpt-4o-mini"),
     "anthropic": ("claude-haiku-5-5", "claude-sonnet-5-5"),
-    "gemini": ("gemini-3.5-flash-lite", "gemini-2.5-flash"),
-    "google": ("gemini-3.5-flash-lite", "gemini-2.5-flash"),
+    "gemini": ("gemini-3.5-flash-lite", "gemini-3.8-flash"),
+    "google": ("gemini-3.5-flash-lite", "gemini-3.8-flash"),
     "sarvam": ("sarvam-m",),
 }
 MODEL_PROVIDERS = frozenset(SUGGESTED_MODELS)
