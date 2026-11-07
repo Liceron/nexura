@@ -12,7 +12,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from nexura_agents import ScopedFilesystem, Skill, SkillLibrary
+from nexura_agents import ScopedFilesystem, Skill, SkillLibrary, _skill_directory
 from nexura_agents.errors import SDKValidationError
 from nexura_agents.skills import MAX_SKILL_BYTES, SkillError
 
@@ -151,7 +151,10 @@ def test_fstat_reparse_point_is_rejected(tmp_path: Path, monkeypatch: pytest.Mon
             st_mode=info.st_mode, st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT
         )
 
-    monkeypatch.setattr(os, "fstat", reparse)
+    # Only the skill loader sees the fake: pytest itself calls os.fstat during the test.
+    fake_os = SimpleNamespace(**{n: getattr(os, n) for n in dir(os) if not n.startswith("__")})
+    fake_os.fstat = reparse
+    monkeypatch.setattr(_skill_directory, "os", fake_os)
     with pytest.raises(SkillError, match="reparse"):
         SkillLibrary.from_directory(root.parent)
 

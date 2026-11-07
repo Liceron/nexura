@@ -14,7 +14,7 @@
       },
       {
         "name": "nexura:lock-sha256",
-        "value": "6e3dd9aa4d15425e84d2a358e430c05b9ee311d0a42ac9b088fc1d01fc1a3ad5"
+        "value": "28de096a2192e230fb628370d74e920c256e9df852e843c7c588f2eaaec8b930"
       },
       {
         "name": "nexura:generator",
@@ -179,10 +179,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:pypi/filelock@3.32.7",
+      "bom-ref": "pkg:pypi/filelock@4.2.9",
       "name": "filelock",
-      "version": "3.32.7",
-      "purl": "pkg:pypi/filelock@3.32.7"
+      "version": "4.2.9",
+      "purl": "pkg:pypi/filelock@4.2.9"
     },
     {
       "type": "library",
@@ -1217,7 +1217,7 @@
       "dependsOn": []
     },
     {
-      "ref": "pkg:pypi/filelock@3.32.7",
+      "ref": "pkg:pypi/filelock@4.2.9",
       "dependsOn": []
     },
     {
@@ -1395,7 +1395,7 @@
       "ref": "pkg:pypi/huggingface-hub@1.33.0",
       "dependsOn": [
         "pkg:pypi/click@8.5.0",
-        "pkg:pypi/filelock@3.32.7",
+        "pkg:pypi/filelock@4.2.9",
         "pkg:pypi/fsspec@2026.9.0",
         "pkg:pypi/hf-xet@1.7.0",
         "pkg:pypi/httpx@0.28.1",
@@ -1528,7 +1528,7 @@
         "pkg:pypi/boto3@1.43.114",
         "pkg:pypi/click@8.5.0",
         "pkg:pypi/fastuuid@0.14.0",
-        "pkg:pypi/filelock@3.32.7",
+        "pkg:pypi/filelock@4.2.9",
         "pkg:pypi/httpx@0.28.1",
         "pkg:pypi/huggingface-hub@1.33.0",
         "pkg:pypi/importlib-metadata@8.9.0",

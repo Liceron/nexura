@@ -6,13 +6,13 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "nexura-agents",
     "nexura-runtime",
-    "pydantic-ai==2.57.0",
+    "pydantic-ai==2.59.0",
     "langgraph==1.2.16",
     "langchain-core==1.6.12",
     "langchain==1.4.6",
     "pytest>=8.0.0",
     "pytest-asyncio>=0.24.0",
-    "pydantic-ai-harness==0.57.0",
+    "pydantic-ai-harness==0.59.0",
 ]
 
 [project.urls]
