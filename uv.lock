@@ -1190,7 +1190,7 @@ wheels = [
 
 [[package]]
 name = "nexura-agents"
-version = "0.9.2"
+version = "0.9.3"
 source = { editable = "packages/nexura-agents" }
 dependencies = [
     { name = "httpx" },
@@ -1222,7 +1222,7 @@ provides-extras = ["litellm", "otel", "signing"]
 
 [[package]]
 name = "nexura-connectors"
-version = "0.9.2"
+version = "0.9.3"
 source = { editable = "packages/nexura-connectors" }
 dependencies = [
     { name = "httpcore" },
@@ -1250,7 +1250,7 @@ provides-extras = ["postgres"]
 
 [[package]]
 name = "nexura-guardrails"
-version = "0.9.2"
+version = "0.9.3"
 source = { editable = "packages/nexura-guardrails" }
 dependencies = [
     { name = "nexura-agents" },
@@ -1274,7 +1274,7 @@ provides-extras = ["judge", "ollama", "yaml"]
 
 [[package]]
 name = "nexura-guardrails-ai"
-version = "0.9.2"
+version = "0.9.3"
 source = { editable = "packages/nexura-guardrails-ai" }
 dependencies = [
     { name = "guardrails-ai" },
@@ -1291,7 +1291,7 @@ requires-dist = [
 
 [[package]]
 name = "nexura-postgres"
-version = "0.9.2"
+version = "0.9.3"
 source = { editable = "packages/nexura-postgres" }
 dependencies = [
     { name = "asyncpg" },
@@ -1308,7 +1308,7 @@ requires-dist = [
 
 [[package]]
 name = "nexura-qdrant"
-version = "0.9.2"
+version = "0.9.3"
 source = { editable = "packages/nexura-qdrant" }
 dependencies = [
     { name = "nexura-agents" },
@@ -1325,7 +1325,7 @@ requires-dist = [
 
 [[package]]
 name = "nexura-runtime"
-version = "0.9.2"
+version = "0.9.3"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
@@ -1417,7 +1417,7 @@ dev = [
 
 [[package]]
 name = "nexura-sandbox"
-version = "0.9.2"
+version = "0.9.3"
 source = { editable = "packages/nexura-sandbox" }
 dependencies = [
     { name = "nexura-runtime" },
@@ -1437,7 +1437,7 @@ provides-extras = ["wasi"]
 
 [[package]]
 name = "nexura-studio"
-version = "0.9.2"
+version = "0.9.3"
 source = { editable = "packages/nexura-studio" }
 dependencies = [
     { name = "fastapi" },
@@ -1458,7 +1458,7 @@ requires-dist = [
 
 [[package]]
 name = "nexura-vectorstores"
-version = "0.9.2"
+version = "0.9.3"
 source = { editable = "packages/nexura-vectorstores" }
 dependencies = [
     { name = "httpx" },
@@ -1475,7 +1475,7 @@ requires-dist = [
 
 [[package]]
 name = "nexura-vertex"
-version = "0.9.2"
+version = "0.9.3"
 source = { editable = "packages/nexura-vertex" }
 dependencies = [
     { name = "google-auth", extra = ["requests"] },

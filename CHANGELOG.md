@@ -2,7 +2,7 @@
 
 All notable changes to this project.
 
-## Unreleased
+## 0.9.3 (2026-11-07)
 
 - **Guardrails AI checks for saved agents:** new `guardrails_ai` preset with `validators` (`profanity_free`, `secrets_present`) checks the user's message, the answer and tool results with Guardrails AI validators that run on the server (no model call, no network). The server needs `nexura-guardrails-ai` and the validator packages; `GET /guardrails/presets` lists which are installed, and saving names the missing package. `NEXURA_GUARDRAILS_AI_PRELOAD=1` imports them when the service starts.
 - **`nexura-guardrails-ai`:** `GuardrailsAICheck(evidence_reasons=False)` keeps validator failure messages out of the evidence; `guardrails_ai(..., tool_output=True, categories=..., evidence_reasons=..., network=...)` also checks tool results.

@@ -25,7 +25,7 @@ from __future__ import annotations
 import importlib
 from typing import TYPE_CHECKING, Any
 
-__version__ = "0.9.2"
+__version__ = "0.9.3"
 
 _EXPORTS: dict[str, str] = {
     # Verdicts and taxonomy
