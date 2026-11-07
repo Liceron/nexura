@@ -1123,12 +1123,19 @@ export interface AgentSpec {
 }
 
 /** A guardrail preset name a saved agent may use. */
-export type GuardrailPresetName = "pii_block" | "pii_redact" | "injection_fast" | "safety_local" | "judge";
+export type GuardrailPresetName =
+  | "pii_block"
+  | "pii_redact"
+  | "injection_fast"
+  | "safety_local"
+  | "judge"
+  | "guardrails_ai";
 
 /**
  * One preset of a saved agent with the options it takes: `kinds` (PII presets), `threshold`
  * (`injection_fast`), `model` (`safety_local`: an Ollama guard tag; `judge`: a chat model name)
- * and `policy` (`judge`, required).
+ * `policy` (`judge`, required) and `validators` (`guardrails_ai`, required: `profanity_free`,
+ * `secrets_present`).
  */
 export interface GuardrailPresetRef {
   preset: GuardrailPresetName;
@@ -1136,6 +1143,7 @@ export interface GuardrailPresetRef {
   threshold?: number | null;
   model?: string | null;
   policy?: string | null;
+  validators?: string[] | null;
 }
 
 export interface AgentGuardrailsSpec {
@@ -1158,6 +1166,8 @@ export interface GuardrailPresetInfo {
   models?: string[];
   max_policy_chars?: number;
   capacity_note?: string;
+  /** `guardrails_ai`: the validators this server offers and whether each is installed. */
+  validators?: { name: string; description: string; available: boolean }[];
 }
 
 /**

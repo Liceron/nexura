@@ -38,13 +38,23 @@ MAX_TURNS_CAP = 20
 MAX_TOOL_CALLS_CAP = 50
 MAX_TIMEOUT_SECONDS = 300.0
 #: Guardrail presets a saved agent may name (P39 G6); built by ``nexura-guardrails``.
-GUARDRAIL_PRESETS = ("pii_block", "pii_redact", "injection_fast", "safety_local", "judge")
+GUARDRAIL_PRESETS = (
+    "pii_block",
+    "pii_redact",
+    "injection_fast",
+    "safety_local",
+    "judge",
+    "guardrails_ai",
+)
 #: Presets that check the agent's answer (so its streamed text too).
-OUTPUT_PRESETS = ("pii_redact", "safety_local", "judge")
+OUTPUT_PRESETS = ("pii_redact", "safety_local", "judge", "guardrails_ai")
 #: Presets of a new agent in Studio: zero cost, no network.
 DEFAULT_GUARDRAIL_PRESETS = ("pii_redact", "injection_fast")
 MAX_GUARDRAIL_PRESETS = len(GUARDRAIL_PRESETS)
 MAX_JUDGE_POLICY_CHARS = 4_000
+#: Guardrails AI validators the ``guardrails_ai`` preset may name. Each runs on the server
+#: without a model call or network; the server needs their packages installed.
+GUARDRAILS_AI_VALIDATORS = ("profanity_free", "secrets_present")
 #: ``kinds`` a PII preset may name (``nexura_agents.guardrails_builtin.PII_KINDS``).
 PII_KINDS = PII_KINDS_BUILTIN
 
@@ -104,16 +114,20 @@ class GuardrailPresetRef(BaseModel):
     ``model``: for ``safety_local`` a local guard model tag served by Ollama on the server's
     machine (default ``llama-guard3:1b``); for ``judge`` a name from the server's chat-model
     allowlist (default: the agent's own model). ``policy`` (``judge``, required): the
-    policy text the judge applies. No URLs, files or code: the server builds the checks.
+    policy text the judge applies. ``validators`` (``guardrails_ai``, required): names from
+    ``GUARDRAILS_AI_VALIDATORS``. No URLs, files or code: the server builds the checks.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    preset: Literal["pii_block", "pii_redact", "injection_fast", "safety_local", "judge"]
+    preset: Literal[
+        "pii_block", "pii_redact", "injection_fast", "safety_local", "judge", "guardrails_ai"
+    ]
     kinds: list[str] | None = Field(default=None, max_length=len(PII_KINDS))
     threshold: float | None = Field(default=None, ge=0.05, le=5.0)
     model: str | None = Field(default=None, min_length=1, max_length=128)
     policy: str | None = Field(default=None, max_length=MAX_JUDGE_POLICY_CHARS)
+    validators: list[str] | None = Field(default=None, max_length=len(GUARDRAILS_AI_VALIDATORS))
 
     @model_validator(mode="after")
     def _options_fit(self) -> GuardrailPresetRef:
@@ -123,9 +137,12 @@ class GuardrailPresetRef(BaseModel):
             "injection_fast": {"threshold"},
             "safety_local": {"model"},
             "judge": {"model", "policy"},
+            "guardrails_ai": {"validators"},
         }[self.preset]
         given = {
-            k for k in ("kinds", "threshold", "model", "policy") if getattr(self, k) is not None
+            k
+            for k in ("kinds", "threshold", "model", "policy", "validators")
+            if getattr(self, k) is not None
         }
         extra = sorted(given - takes)
         if extra:
@@ -145,6 +162,19 @@ class GuardrailPresetRef(BaseModel):
             raise ValueError("model must not contain control characters.")
         if self.preset == "judge" and not (self.policy or "").strip():
             raise ValueError("the judge preset needs policy text.")
+        if self.preset == "guardrails_ai":
+            if not self.validators:
+                raise ValueError(
+                    "the guardrails_ai preset needs validators; use "
+                    f"{list(GUARDRAILS_AI_VALIDATORS)}."
+                )
+            unknown = sorted(set(self.validators) - set(GUARDRAILS_AI_VALIDATORS))
+            if unknown:
+                raise ValueError(
+                    f"unknown Guardrails AI validators {unknown}; use "
+                    f"{list(GUARDRAILS_AI_VALIDATORS)}."
+                )
+            _unique(self.validators, "Guardrails AI validator")
         return self
 
 
@@ -382,6 +412,7 @@ __all__ = [
     "MAX_TOOL_CALLS_CAP",
     "MAX_TURNS_CAP",
     "DEFAULT_GUARDRAIL_PRESETS",
+    "GUARDRAILS_AI_VALIDATORS",
     "GUARDRAIL_PRESETS",
     "MAX_JUDGE_POLICY_CHARS",
     "PII_KINDS",

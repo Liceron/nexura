@@ -49,6 +49,7 @@ from nexura_runtime.service.api.evaluations import router as evaluations_router
 from nexura_runtime.service.api.guardrails import (
     check_guardrail_lock,
     install_guardrail_policy,
+    preload_guardrails_ai,
     resolve_guardrail_policy,
 )
 from nexura_runtime.service.api.guardrails import router as guardrails_router
@@ -863,6 +864,8 @@ def create_api_app(
     if app_guardrail_policy is not None:
         install_guardrail_policy(app_guardrail_policy)
     app.state.guardrail_policy = app_guardrail_policy
+    # Guardrails AI validators take seconds to import; warm them when the operator asks.
+    preload_guardrails_ai()
     app.state.repro_capture = (
         FailedRunCapture(effective_store.db_path)
         if capture_failed_runs_enabled(capture_failed_runs)

@@ -11060,6 +11060,13 @@ Guard preserves its configured on-fail actions: only its successfully corrected
 string output can become a rewrite; EXCEPTION always blocks. Reasks are disabled
 (`num_reasks=0`); the bridge never invokes an LLM to repair validation.
 
+`guardrails_ai(*validators)` checks the agent's input and answer; `tool_output=True` adds tool
+results, `categories=` maps validators to Nexura categories, `network=` states where the
+validators run (default `"model"`, the conservative choice) and `evidence_reasons=False` drops
+validator failure messages from the evidence (`GuardrailsAICheck` takes the same option). The
+service's `guardrails_ai` preset for saved agents uses it with `evidence_reasons=False`; see
+[Agents in Studio](agents-in-studio.md#guardrails).
+
 Passes allow. Validation failures block, including Guardrails' `ValidationError`
 from EXCEPTION actions. Unexpected exceptions and timeouts return `error` (fail
 closed); explicit `on_error="allow"` or `"review"` changes that outcome. Validator
@@ -18913,15 +18920,26 @@ is code, a URL or a file):
 | `injection_fast` | prompt-injection pre-filter on the user's message and tool results (regex) | `threshold` (0.05-5) | none |
 | `safety_local` | the injection pre-filter, then a local safety model through Ollama on the server's machine (`http://localhost:11434`) | `model`: a guard tag the server knows (default `llama-guard3:1b`) | local model |
 | `judge` | an LLM judge applies `policy` to the user's message and the answer | `policy` (required, 4,000 characters), `model`: a chat model name (default: the agent's own) | one billed model call per check |
+| `guardrails_ai` | [Guardrails AI](guardrails-package.md#guardrails-ai) validators on the user's message, the answer (also streamed) and tool results; a failure blocks | `validators` (required): `profanity_free` (English profanity, a small local model), `secrets_present` (API keys and passwords, detect-secrets) | local |
 
 Tool-stage checks are added to every tool of the agent, so they apply in the Playground and in
 workflow agent nodes alike. `stream_guard` is `auto` (default), `hold`, `chunked` or
 `passthrough` (see the [guardrails package guide](guardrails-package.md)); `passthrough` is
-refused with `pii_redact`, `safety_local` or `judge`, whose checks must see the answer before it
+refused with `pii_redact`, `safety_local`, `judge` or `guardrails_ai`, whose checks must see the
+answer before it
 is shown, and when the operator's policy checks this agent's answers. When the agent is
 saved the server refuses a judge on the offline fake model or on a name outside the chat-model
 allowlist, a `safety_local` model it cannot identify, options a preset does not take, and presets
-when `nexura-guardrails` is not installed (`field_errors` under `guardrails.presets.<n>`). Studio
+when `nexura-guardrails` is not installed (`field_errors` under `guardrails.presets.<n>`). A
+`guardrails_ai` validator needs `nexura-guardrails-ai` and its package on the server (`pip install
+nexura-guardrails-ai guardrails-ai-profanity-free guardrails-ai-secrets-present`); the presets list
+(`GET /guardrails/presets`) says which are installed. Validators that need torch, model downloads or
+Guardrails' remote inference are not offered. The run's evidence keeps validator names and
+statuses, not their failure messages (`secrets_present` would echo the secret it found).
+`NEXURA_GUARDRAILS_AI_PRELOAD=1` imports the installed validators in the background when the
+service starts; otherwise the first run that uses them waits a few seconds for the import. When a
+guardrail blocks the message or the answer, chat returns `422 GUARDRAIL_BLOCKED` (the stream sends
+`chat_failed` with that code); a blocked tool result reaches the model as a refusal instead. Studio
 starts new agents with `pii_redact` and `injection_fast` (no model, no cost); existing agents
 keep `guardrails: null` until someone switches a preset on. The operator's
 [service policy](studio-and-service.md#guardrail-policy) applies on top of the presets and

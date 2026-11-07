@@ -31,6 +31,13 @@ Guard preserves its configured on-fail actions: only its successfully corrected
 string output can become a rewrite; EXCEPTION always blocks. Reasks are disabled
 (`num_reasks=0`); the bridge never invokes an LLM to repair validation.
 
+`guardrails_ai(*validators)` checks the agent's input and answer; `tool_output=True` adds tool
+results, `categories=` maps validators to Nexura categories, `network=` states where the
+validators run (default `"model"`, the conservative choice) and `evidence_reasons=False` drops
+validator failure messages from the evidence (`GuardrailsAICheck` takes the same option). The
+service's `guardrails_ai` preset for saved agents uses it with `evidence_reasons=False`; see
+[Agents in Studio](agents-in-studio.md#guardrails).
+
 Passes allow. Validation failures block, including Guardrails' `ValidationError`
 from EXCEPTION actions. Unexpected exceptions and timeouts return `error` (fail
 closed); explicit `on_error="allow"` or `"review"` changes that outcome. Validator

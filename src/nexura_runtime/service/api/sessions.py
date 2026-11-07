@@ -1064,6 +1064,8 @@ async def chat_in_session(
             status_code=(
                 status.HTTP_504_GATEWAY_TIMEOUT
                 if code == "TIMEOUT"
+                else status.HTTP_422_UNPROCESSABLE_ENTITY
+                if code == "GUARDRAIL_BLOCKED"
                 else status.HTTP_502_BAD_GATEWAY
             ),
             detail={"code": code, "message": message},
@@ -1101,6 +1103,11 @@ _SAFE_FAILURES: dict[str, tuple[str, str]] = {
     "MaxTurnsExceededError": (
         "AGENT_TURN_LIMIT",
         "The agent reached its turn limit without a final answer.",
+    ),
+    # A guardrail stopped the message or the answer: the content, not the provider.
+    "GuardrailTripwireTriggered": (
+        "GUARDRAIL_BLOCKED",
+        "A guardrail of this agent blocked the message or its answer.",
     ),
 }
 _GENERIC_FAILURE = ("MODEL_PROVIDER_ERROR", "The model provider returned an error.")

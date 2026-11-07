@@ -26,10 +26,11 @@ export const MAX_DESCRIPTION_CHARS = 500;
 export const MAX_OUTPUT_SCHEMA_CHARS = 16_000;
 /** Presets a new agent starts with (zero cost, no network; P39 G6 design section 10). */
 export const DEFAULT_GUARDRAIL_PRESETS: GuardrailPresetName[] = ['pii_redact', 'injection_fast'];
+/** Presets this form offers; others (`guardrails_ai`) are kept unchanged on save but not shown. */
 export const GUARDRAIL_PRESET_NAMES: GuardrailPresetName[] = ['pii_block', 'pii_redact', 'injection_fast', 'safety_local', 'judge'];
 export const STREAM_GUARDS = ['auto', 'hold', 'chunked', 'passthrough'] as const;
 /** Presets that check the answer: its streamed text cannot be passed through unchecked. */
-export const OUTPUT_PRESETS: GuardrailPresetName[] = ['pii_redact', 'safety_local', 'judge'];
+export const OUTPUT_PRESETS: GuardrailPresetName[] = ['pii_redact', 'safety_local', 'judge', 'guardrails_ai'];
 export type StreamGuardChoice = (typeof STREAM_GUARDS)[number];
 export const MAX_JUDGE_POLICY_CHARS = 4_000;
 

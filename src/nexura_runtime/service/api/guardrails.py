@@ -13,14 +13,23 @@ uses it, and no code in the process can drop it. It is operator-owned like
 ``GET /api/v1/guardrails/policy`` shows a summary (no secrets).
 
 **Presets.** A saved agent's ``guardrails`` field names presets (``pii_block``,
-``pii_redact``, ``injection_fast``, ``safety_local``, ``judge``); the service builds them with
-``nexura_guardrails.presets``. ``GET /api/v1/guardrails/presets`` lists them with what each
-needs and costs.
+``pii_redact``, ``injection_fast``, ``safety_local``, ``judge``, ``guardrails_ai``); the
+service builds them with ``nexura_guardrails.presets`` (``guardrails_ai`` with the
+``nexura-guardrails-ai`` bridge and the validator packages installed on the server).
+``GET /api/v1/guardrails/presets`` lists them with what each needs and costs.
+
+``NEXURA_GUARDRAILS_AI_PRELOAD=1`` imports the installed Guardrails AI validators in a
+background thread when the service starts, so the first run that uses them does not wait
+seconds for the import.
 """
 
 from __future__ import annotations
 
+import importlib
+import importlib.util
+import logging
 import os
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -31,6 +40,7 @@ from nexura_agents.stream_guard import StreamGuardMode
 from nexura_runtime.agents_spec import (
     DEFAULT_GUARDRAIL_PRESETS,
     GUARDRAIL_PRESETS,
+    GUARDRAILS_AI_VALIDATORS,
     MAX_JUDGE_POLICY_CHARS,
     AgentGuardrails,
     AgentSpecError,
@@ -45,7 +55,9 @@ __all__ = [
     "caller_is_admin",
     "check_agent_guardrails",
     "check_guardrail_lock",
+    "guardrails_ai_available",
     "install_guardrail_policy",
+    "preload_guardrails_ai",
     "preset_catalog",
     "resolve_guardrail_policy",
     "router",
@@ -54,6 +66,88 @@ __all__ = [
 GUARDRAIL_POLICY_ENV = "NEXURA_GUARDRAIL_POLICY"
 DEFAULT_SAFETY_MODEL = "llama-guard3:1b"
 _INSTALL_HINT = 'pip install "nexura-guardrails[yaml]"'
+GUARDRAILS_AI_PRELOAD_ENV = "NEXURA_GUARDRAILS_AI_PRELOAD"
+_log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _GuardrailsAIValidator:
+    module: str
+    cls: str
+    package: str
+    categories: tuple[str, ...]
+    description: str
+
+
+#: How the server builds each name in ``GUARDRAILS_AI_VALIDATORS``: rule-based or small local
+#: models only, no model call and no network. Validators that need torch, model downloads or
+#: Guardrails' remote inference are not offered.
+_GUARDRAILS_AI: dict[str, _GuardrailsAIValidator] = {
+    "profanity_free": _GuardrailsAIValidator(
+        "guardrails_ai.profanity_free",
+        "ProfanityFree",
+        "guardrails-ai-profanity-free",
+        ("harassment",),
+        "Profanity in English (a small local model, alt-profanity-check).",
+    ),
+    "secrets_present": _GuardrailsAIValidator(
+        "guardrails_ai.secrets_present",
+        "SecretsPresent",
+        "guardrails-ai-secrets-present",
+        ("privacy",),
+        "API keys, passwords and other secrets (detect-secrets).",
+    ),
+}
+assert set(_GUARDRAILS_AI) == set(GUARDRAILS_AI_VALIDATORS)
+_GUARDRAILS_AI_BRIDGE = "nexura_guardrails_ai"
+
+
+def _installed(module: str) -> bool:
+    try:
+        return importlib.util.find_spec(module) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def guardrails_ai_available() -> dict[str, bool]:
+    """Which Guardrails AI validators this server can build (without importing them)."""
+    bridge = _installed(_GUARDRAILS_AI_BRIDGE)
+    return {name: bridge and _installed(v.module) for name, v in _GUARDRAILS_AI.items()}
+
+
+def _guardrails_ai_hint(names: list[str] | None = None) -> str:
+    chosen = names or list(_GUARDRAILS_AI)
+    return "pip install nexura-guardrails-ai " + " ".join(_GUARDRAILS_AI[n].package for n in chosen)
+
+
+def _import_guardrails_ai() -> None:
+    importlib.import_module(_GUARDRAILS_AI_BRIDGE)
+    for name, ok in guardrails_ai_available().items():
+        if ok:
+            importlib.import_module(_GUARDRAILS_AI[name].module)
+
+
+def preload_guardrails_ai(env: Any = None) -> threading.Thread | None:
+    """Import the installed Guardrails AI validators in a background thread when
+    ``NEXURA_GUARDRAILS_AI_PRELOAD`` is on (they take seconds to import)."""
+    value = (os.environ if env is None else env).get(GUARDRAILS_AI_PRELOAD_ENV, "")
+    if value.strip().lower() not in ("1", "true", "on", "yes"):
+        return None
+    if not any(guardrails_ai_available().values()):
+        _log.warning(
+            "%s is on but no Guardrails AI validator is installed.", GUARDRAILS_AI_PRELOAD_ENV
+        )
+        return None
+
+    def run() -> None:
+        try:
+            _import_guardrails_ai()
+        except Exception:  # pragma: no cover - logged; the first run imports again
+            _log.exception("Preloading the Guardrails AI validators failed.")
+
+    thread = threading.Thread(target=run, name="nexura-guardrails-ai-preload", daemon=True)
+    thread.start()
+    return thread
 
 
 class GuardrailPolicyConfigError(ValueError):
@@ -205,7 +299,27 @@ def _preset_info() -> list[dict[str, Any]]:
             "to 1.9 KB of text per call; longer text is blocked (fail closed). Ollama judges "
             "can be given a larger context.",
         },
+        _guardrails_ai_info(),
     ]
+
+
+def _guardrails_ai_info() -> dict[str, Any]:
+    available = guardrails_ai_available()
+    return {
+        "name": "guardrails_ai",
+        "description": "Guardrails AI validators that run on this server: the user's message, "
+        "the answer (also streamed) and tool results.",
+        "stages": ["input", "output", "tool_output"],
+        "network": "none",
+        "cost": "local",
+        "options": ["validators"],
+        "requires": "nexura-guardrails-ai and the validator packages on the server ("
+        f"{_guardrails_ai_hint()}).",
+        "validators": [
+            {"name": name, "description": v.description, "available": available[name]}
+            for name, v in _GUARDRAILS_AI.items()
+        ],
+    }
 
 
 def _safety_models() -> list[str]:
@@ -301,6 +415,17 @@ def check_agent_guardrails(
                         f"{', '.join(_safety_models())}.",
                     }
                 )
+        elif ref.preset == "guardrails_ai":
+            available = guardrails_ai_available()
+            missing = [n for n in ref.validators or () if not available.get(n)]
+            if missing:
+                errors.append(
+                    {
+                        "field": where,
+                        "message": f"Guardrails AI validators {', '.join(missing)} are not "
+                        f"installed on this server: {_guardrails_ai_hint(missing)}.",
+                    }
+                )
         elif ref.preset == "judge":
             name = ref.model or agent_model
             refused = getattr(chat_models, "refused", None)
@@ -373,6 +498,8 @@ def build_agent_guardrails(
                     str(exc), code=code if isinstance(code, str) else "MODEL_UNAVAILABLE"
                 ) from None
             built.append(catalog.judge(ref.policy, model))
+        elif ref.preset == "guardrails_ai":
+            built.append(_guardrails_ai_preset(ref.validators or []))
         parts.names.append(ref.preset)
     assert set(parts.names) <= set(GUARDRAIL_PRESETS)
     combined = catalog.combine(*built)
@@ -381,6 +508,30 @@ def build_agent_guardrails(
     parts.tool_input = tuple(combined.tool_input_guardrails)
     parts.tool_output = tuple(combined.tool_output_guardrails)
     return parts
+
+
+def _guardrails_ai_preset(names: list[str]) -> Any:
+    """The ``guardrails_ai`` preset: the chosen validators in one check, blocking on input,
+    output and tool results. Evidence keeps validator names and statuses only (a failure
+    reason can echo the secret that was found)."""
+    from nexura_guardrails_ai import guardrails_ai
+
+    validators = []
+    for name in names:
+        spec = _GUARDRAILS_AI[name]
+        validators.append(getattr(importlib.import_module(spec.module), spec.cls)())
+    preset = guardrails_ai(
+        *validators,
+        on_fail="block",
+        tool_output=True,
+        categories={_GUARDRAILS_AI[n].cls: _GUARDRAILS_AI[n].categories for n in names},
+        evidence_reasons=False,
+        network="none",
+    )
+    for guard in preset.output_guardrails:
+        # Answers are checked before they are shown, as for pii_redact (P39 G6).
+        guard.nexura_no_passthrough = True  # type: ignore[attr-defined]
+    return preset
 
 
 # ------------------------------------------------------------------ routes

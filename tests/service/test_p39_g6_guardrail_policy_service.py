@@ -166,7 +166,14 @@ def test_presets_endpoint(tmp_path: Path) -> None:
     body = client.get(f"{API}/guardrails/presets").json()
     assert body["available"] is True and body["defaults"] == ["pii_redact", "injection_fast"]
     by_name = {p["name"]: p for p in body["presets"]}
-    assert set(by_name) == {"pii_block", "pii_redact", "injection_fast", "safety_local", "judge"}
+    assert set(by_name) == {
+        "pii_block",
+        "pii_redact",
+        "injection_fast",
+        "safety_local",
+        "judge",
+        "guardrails_ai",
+    }
     assert by_name["pii_redact"]["cost"] == "none"
     assert (
         by_name["safety_local"]["cost"] == "local"

@@ -58,7 +58,9 @@ export function AgentGuardrailsSection({ draft, setDraft, options, models, error
   const { t } = useI18n();
   const ids = useId();
   const infos = new Map((options?.presets ?? []).map((p) => [p.name, p]));
-  const names = options?.presets?.length ? options.presets.map((p) => p.name) : GUARDRAIL_PRESET_NAMES;
+  const names = options?.presets?.length
+    ? options.presets.map((p) => p.name).filter((n) => GUARDRAIL_PRESET_NAMES.includes(n))
+    : GUARDRAIL_PRESET_NAMES;
   // Only what the server says is enforced (locked for every run) gets the badge (M2).
   const view = options?.policy as PolicyViewWithMode | undefined;
   const policy = view?.enforced ? view.policy : null;

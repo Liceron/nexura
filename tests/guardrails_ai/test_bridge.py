@@ -161,6 +161,38 @@ async def test_categories_evidence_and_safe_rejection() -> None:
     assert "privacy" in rejection.rejection
 
 
+async def test_evidence_without_reasons_keeps_names_and_statuses() -> None:
+    check = GuardrailsAICheck([StringCheck(), Fixer()], evidence_reasons=False)
+    result = await evaluate(check, "bad secret-value")
+    assert result.decision == "block"
+    assert result.evidence["validators"] == [
+        {"name": "p45g/string", "status": "fail", "error_spans": []},
+        {"name": "p45g/fixer", "status": "fail", "error_spans": []},
+    ]
+    assert "secret-value" not in repr(result.info())
+
+
+async def test_preset_with_tool_results() -> None:
+    preset = guardrails_ai(StringCheck(), tool_output=True, network="none")
+    assert preset.network == "none" and set(preset.checks) == {"input", "output", "tool_output"}
+    assert len(preset.tool_output_guardrails) == 1 and not preset.tool_input_guardrails
+
+    @tool(output_guardrails=list(preset.tool_output_guardrails))
+    def lookup(q: str) -> str:
+        """A local fake lookup."""
+        return "bad result"
+
+    model = FakeModel(responses=[[ToolCall(id="1", name="lookup", arguments={"q": "x"})], "done"])
+    result = await Runner().run_async(
+        Agent(name="offline", instructions="Local fake model only.", model=model, tools=[lookup]),
+        "fine",
+    )
+    tool_text = " ".join(str(m.content) for m in result.messages if m.role == "tool")
+    assert "bad result" not in tool_text and "blocked" in tool_text
+    assert set(guardrails_ai(StringCheck()).checks) == {"input", "output"}
+    assert guardrails_ai(StringCheck()).network == "model"
+
+
 @pytest.mark.parametrize(
     "alias,category",
     [

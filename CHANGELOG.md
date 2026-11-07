@@ -2,6 +2,12 @@
 
 All notable changes to this project.
 
+## Unreleased
+
+- **Guardrails AI checks for saved agents:** new `guardrails_ai` preset with `validators` (`profanity_free`, `secrets_present`) checks the user's message, the answer and tool results with Guardrails AI validators that run on the server (no model call, no network). The server needs `nexura-guardrails-ai` and the validator packages; `GET /guardrails/presets` lists which are installed, and saving names the missing package. `NEXURA_GUARDRAILS_AI_PRELOAD=1` imports them when the service starts.
+- **`nexura-guardrails-ai`:** `GuardrailsAICheck(evidence_reasons=False)` keeps validator failure messages out of the evidence; `guardrails_ai(..., tool_output=True, categories=..., evidence_reasons=..., network=...)` also checks tool results.
+- **Fixed: a guardrail block in chat was reported as a provider error.** When a guardrail stopped the message or the answer, chat answered `502 MODEL_PROVIDER_ERROR` ("The model provider returned an error."). It now answers `422 GUARDRAIL_BLOCKED` (streamed: `chat_failed` with that code).
+
 ## 0.9.2 (2026-11-02)
 
 - **Fixed: projects created by `nexura-runtime init` could not be installed.** The project

@@ -21,7 +21,7 @@ from guardrails.validators import Validator  # type: ignore[import-untyped]
 from guardrails_ai.types import FailResult, PassResult  # type: ignore[import-untyped]
 from nexura_agents.contracts.errors import MissingDependencyError
 from nexura_agents.run_context import RunContext
-from nexura_guardrails.checks import as_guardrail
+from nexura_guardrails.checks import as_guardrail, as_tool_guardrail
 from nexura_guardrails.presets import Preset
 from nexura_guardrails.verdict import STAGES, CheckInput, Verdict, validate_categories
 
@@ -56,6 +56,8 @@ class GuardrailsAICheck:
     their own on-fail actions; only a completed string correction can become a rewrite.
     ``deterministic=True`` is a caller assertion that every wrapped validator is rule-based.
     Validator failure messages may contain content: only evidence receives them, truncated.
+    ``evidence_reasons=False`` keeps them out of the evidence too (names and statuses only):
+    some validators echo what they found, such as the secret ``SecretsPresent`` detected.
     """
 
     def __init__(
@@ -70,6 +72,7 @@ class GuardrailsAICheck:
         on_error: OnError = "block",
         timeout: float = 10.0,
         deterministic: bool = False,
+        evidence_reasons: bool = True,
     ) -> None:
         if on_fail not in ("block", "fix") or on_error not in ("block", "allow", "review"):
             raise ValueError("on_fail must be block/fix; on_error must be block/allow/review")
@@ -83,6 +86,7 @@ class GuardrailsAICheck:
             raise ValueError("stages must be a nonempty selection of Nexura stages")
         self.on_fail, self.on_error, self.timeout = on_fail, on_error, timeout
         self.deterministic = deterministic
+        self.evidence_reasons = evidence_reasons
         self._default_categories = validate_categories((category,))
         self._categories = {_key(k): v for k, v in HUB_CATEGORIES.items()}
         for key, ids in (categories or {}).items():
@@ -240,6 +244,8 @@ class GuardrailsAICheck:
                 latency_ms=(time.perf_counter() - started) * 1000,
                 **common,
             )
+        if not self.evidence_reasons:
+            entries = [{k: v for k, v in e.items() if k != "failure_reason"} for e in entries]
         failures = [e for e in entries if e["status"] == "fail"]
         cats = tuple(dict.fromkeys(c for e in failures for c in self._cats(e["name"])))
         rewrite = (
@@ -294,13 +300,37 @@ def from_hub(name: str, **kwargs: Any) -> Validator:
     return cls(**kwargs)
 
 
-def guardrails_ai(*validators: Validator, on_fail: OnFail = "block") -> Preset:
-    """Input and output guardrails; network profile is conservatively 'model'."""
-    check = GuardrailsAICheck(validators, on_fail=on_fail)
+def guardrails_ai(
+    *validators: Validator,
+    on_fail: OnFail = "block",
+    tool_output: bool = False,
+    categories: Mapping[str, Iterable[str]] | None = None,
+    evidence_reasons: bool = True,
+    network: Literal["none", "local", "model"] = "model",
+) -> Preset:
+    """Input and output guardrails, and tool results with ``tool_output=True``.
+
+    The network profile is conservatively ``"model"``; pass ``"none"`` or ``"local"`` only
+    when you know every validator runs on this machine.
+    """
+    stages = ("input", "output", "tool_output") if tool_output else ("input", "output")
+    check = GuardrailsAICheck(
+        validators,
+        stages=stages,
+        on_fail=on_fail,
+        categories=categories,
+        evidence_reasons=evidence_reasons,
+    )
+    checks: dict[str, Any] = {"input": check, "output": check}
+    tool_guards: tuple[Any, ...] = ()
+    if tool_output:
+        checks["tool_output"] = check
+        tool_guards = (as_tool_guardrail(check, stage="tool_output", name="guardrails_ai"),)
     return Preset(
         name="guardrails_ai",
-        network="model",
+        network=network,
         input_guardrails=(as_guardrail(check),),
         output_guardrails=(as_guardrail(check, stage="output"),),
-        checks=MappingProxyType({"input": check, "output": check}),
+        tool_output_guardrails=tool_guards,
+        checks=MappingProxyType(checks),
     )
