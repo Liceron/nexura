@@ -358,8 +358,8 @@ async def delete_workspace(
     if await asyncio.to_thread(repo.is_workspace_deleted, workspace_id):
         if not operator:
             raise _not_found(workspace_id)
-        deletion = await asyncio.to_thread(repo.get_workspace_deletion, workspace_id)
-        purging = deletion is not None and deletion.status == "purging"
+        existing = await asyncio.to_thread(repo.get_workspace_deletion, workspace_id)
+        purging = existing is not None and existing.status == "purging"
         if purging:
             start_background_purge(state, workspace_id)
         return JSONResponse(

@@ -345,6 +345,8 @@ async def purge_workspace(state: Any, workspace_id: str) -> dict[str, int]:
 
     async def workflows() -> int:
         removed = 0
+        if store is None:
+            return removed
         for workflow_id in workflow_ids:
             removed += bool(await store.delete_workflow(workflow_id))
         return removed
@@ -399,7 +401,9 @@ async def run_workspace_purge(state: Any, workspace_id: str) -> WorkspaceDeletio
     returned unchanged."""
     repo = state.workspace_repo
     async with _purge_lock(state, workspace_id):
-        deletion = await asyncio.to_thread(repo.get_workspace_deletion, workspace_id)
+        deletion: WorkspaceDeletion | None = await asyncio.to_thread(
+            repo.get_workspace_deletion, workspace_id
+        )
         if deletion is None or deletion.status == "done":
             return deletion
         started = time.time()
@@ -410,7 +414,7 @@ async def run_workspace_purge(state: Any, workspace_id: str) -> WorkspaceDeletio
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"[:500]
         final = error is None and started >= deletion.requested_at + final_purge_delay(state)
-        updated = await asyncio.to_thread(
+        updated: WorkspaceDeletion | None = await asyncio.to_thread(
             repo.record_purge_attempt, workspace_id, done=final, error=error
         )
     if error is not None:
